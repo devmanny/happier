@@ -14,7 +14,7 @@ struct ChatItemView: View {
             if message.isThinking {
                 ThinkingRow(message: message)
             } else {
-                AgentBubble(text: message.text, date: message.createdAt, seq: message.seq, tail: tail, sessionId: sessionId)
+                AgentBubble(itemId: message.id, text: message.text, date: message.createdAt, seq: message.seq, tail: tail, sessionId: sessionId)
             }
         case .toolCall(let tool):
             ToolCallCard(tool: tool, sessionId: sessionId)
@@ -57,10 +57,9 @@ private struct UserBubble: View {
                         }
                     }
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 8)
+                    .bubblePadding(fromUser: true)
                     .background(Color.userBubble, in: BubbleShape(fromUser: true, tail: tail))
-                    .messageActions(text: message.text, date: message.createdAt, shape: BubbleShape(fromUser: true, tail: tail),
+                    .messageActions(text: message.text, date: message.createdAt, shape: BubbleShape(fromUser: true, tail: tail), selectionId: message.id,
                                     target: message.seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .user) })
                     .opacity(message.isPending ? 0.7 : 1)
                 }
@@ -76,6 +75,7 @@ private struct UserBubble: View {
 }
 
 private struct AgentBubble: View {
+    let itemId: String
     let text: String
     let date: Date
     let seq: Int?
@@ -91,10 +91,9 @@ private struct AgentBubble: View {
             if !content.isEmpty {
                 HStack {
                     MarkdownText(segments: content)
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 8)
+                        .bubblePadding(fromUser: false)
                         .background(Color.agentBubble, in: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
-                        .messageActions(text: text, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty),
+                        .messageActions(text: text, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty), selectionId: itemId,
                                         target: seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .assistant) })
                     Spacer(minLength: 40)
                 }
@@ -214,8 +213,10 @@ private struct MessageActionsModifier: ViewModifier {
     let text: String
     let date: Date
     let shape: BubbleShape
+    let selectionId: String?
     let target: MessageTarget?
     @Environment(HappierStore.self) private var store
+    @Environment(\.beginMessageSelection) private var beginSelection
 
     func body(content: Content) -> some View {
         let pinned = target.map { store.pins.isPinned(sessionId: $0.sessionId, seq: $0.seq) } ?? false
@@ -237,6 +238,9 @@ private struct MessageActionsModifier: ViewModifier {
             .contextMenu {
                 Section(date.formatted(date: .abbreviated, time: .shortened)) {
                     Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text) }
+                    if let selectionId, let beginSelection {
+                        Button("Select", systemImage: "checkmark.circle") { beginSelection(selectionId) }
+                    }
                     if let target {
                         Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
                             store.togglePin(sessionId: target.sessionId, seq: target.seq, role: target.role)
@@ -261,8 +265,8 @@ private struct MessageActionsModifier: ViewModifier {
 
 extension View {
     /// Long-press "pop" with the message's date/time and its actions.
-    func messageActions(text: String, date: Date, shape: BubbleShape, target: MessageTarget? = nil) -> some View {
-        modifier(MessageActionsModifier(text: text, date: date, shape: shape, target: target))
+    func messageActions(text: String, date: Date, shape: BubbleShape, selectionId: String? = nil, target: MessageTarget? = nil) -> some View {
+        modifier(MessageActionsModifier(text: text, date: date, shape: shape, selectionId: selectionId, target: target))
     }
 }
 
@@ -275,4 +279,9 @@ enum MessageClipboard {
         NSPasteboard.general.setString(text, forType: .string)
         #endif
     }
+}
+
+extension EnvironmentValues {
+    /// Enters message selection with the given transcript item preselected (set by the chat).
+    @Entry var beginMessageSelection: ((String) -> Void)? = nil
 }

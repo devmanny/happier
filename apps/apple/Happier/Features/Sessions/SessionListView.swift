@@ -55,7 +55,7 @@ struct SessionListView: View {
         }
         .navigationTitle("Sessions")
         .searchable(text: $query, prompt: "Search")
-        .refreshable { await store.refreshSessions() }
+        .refreshable { await store.refreshSessions(userInitiated: true) }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 ConnectionDot(connection: store.connection)

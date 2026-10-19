@@ -4,12 +4,21 @@ import SwiftUI
 @main
 struct HappierApp: App {
     @State private var store = HappierStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(store)
                 .task { store.restore() }
+                .onChange(of: scenePhase) { _, phase in
+                    // iOS freezes networking in the background; reconnect and resync on return.
+                    switch phase {
+                    case .active: store.appDidBecomeActive()
+                    case .background: store.appDidEnterBackground()
+                    default: break
+                    }
+                }
         }
         #if os(macOS)
         .defaultSize(width: 1080, height: 720)

@@ -23,8 +23,7 @@ struct PendingBubble: View {
                 Spacer(minLength: 56)
                 Text(message.text)
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 8)
+                    .bubblePadding(fromUser: true)
                     .background(Color.userBubble.opacity(message.state == .discarded ? 0.35 : 0.55),
                                 in: BubbleShape(fromUser: true, tail: true))
                     .onTapGesture { showActions = true }

@@ -13,6 +13,7 @@ struct NewSessionView: View {
     @State private var starting = false
     @State private var error: String?
     @State private var folderToApprove: String?
+    @State private var showBrowser = false
     @FocusState private var messageFocused: Bool
 
     private var machine: Machine? { store.machines.first { $0.id == machineId } }
@@ -57,22 +58,22 @@ struct NewSessionView: View {
                 }
 
                 Section {
-                    TextField("Folder path", text: $directory)
-                        .font(.body.monospaced())
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
-                    ForEach(recentDirectories.prefix(6), id: \.self) { path in
-                        choiceRow(selected: path == directory) { directory = path } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text((path as NSString).lastPathComponent)
-                                Text(displayPath(path)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
-                            }
-                        }
+                    if !directory.isEmpty, !recentDirectories.prefix(6).contains(directory) {
+                        choiceRow(selected: true) {} label: { folderLabel(directory) }
                     }
+                    ForEach(recentDirectories.prefix(6), id: \.self) { path in
+                        choiceRow(selected: path == directory) { directory = path } label: { folderLabel(path) }
+                    }
+                    Button {
+                        showBrowser = true
+                    } label: {
+                        Label("Browse Folders…", systemImage: "folder.badge.gearshape")
+                    }
+                    .disabled(machine?.active != true)
                 } header: {
                     Text("Folder")
+                } footer: {
+                    if machine?.active == false { Text("Turn on this machine to browse its folders.") }
                 }
 
                 Section("Agent") {
@@ -129,6 +130,14 @@ struct NewSessionView: View {
                 if let used = agents.first { agentId = used }
             }
             .interactiveDismissDisabled(starting)
+            .sheet(isPresented: $showBrowser) {
+                if let machine {
+                    FolderBrowserView(machine: machine, recents: recentDirectories) { path in directory = path }
+                        #if os(macOS)
+                        .frame(minWidth: 460, minHeight: 560)
+                        #endif
+                }
+            }
         }
     }
 
@@ -146,6 +155,13 @@ struct NewSessionView: View {
             case .needsDirectoryApproval(let folder): folderToApprove = folder
             case .failed(let message): error = message
             }
+        }
+    }
+
+    private func folderLabel(_ path: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text((path as NSString).lastPathComponent)
+            Text(displayPath(path)).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
         }
     }
 

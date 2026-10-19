@@ -54,7 +54,7 @@ struct SecretKeyView: View {
         } catch is SecretKeyFormat.InvalidKey {
             error = "That doesn't look like a valid secret key."
         } catch {
-            self.error = String(describing: error)
+            self.error = UserFacingError.message(for: error)
         }
     }
 }

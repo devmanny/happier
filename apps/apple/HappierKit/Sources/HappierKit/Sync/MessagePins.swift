@@ -29,7 +29,7 @@ public struct MessagePins: Sendable {
         if let index = list.firstIndex(where: { $0.seq == seq }) {
             list.remove(at: index)
         } else {
-            list.append(Pin(seq: seq, role: role, pinnedAtMs: Date.now.timeIntervalSince1970 * 1000))
+            list.append(Pin(seq: seq, role: role, pinnedAtMs: ServerClock.nowMs()))
             list.sort { ($0.seq, $0.pinnedAtMs) < ($1.seq, $1.pinnedAtMs) }
         }
         sessions[sessionId] = list.isEmpty ? nil : list

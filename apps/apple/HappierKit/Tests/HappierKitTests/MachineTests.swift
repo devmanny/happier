@@ -35,3 +35,20 @@ import Testing
         #expect(Machine.recentDirectories(machineId: "m1", sessions: sessions) == ["/p/one", "/p/two"])
     }
 }
+
+/// The daemon validates spawn timestamps with `z.number().int()` (`sessionRunnerRespawnDescriptor.ts`);
+/// a fractional value made it fail with "Could not persist accepted spawn custody".
+@Suite struct SpawnRequestTests {
+    @Test func spawnParamsUseWholeMilliseconds() {
+        let params = SpawnRequest.params(directory: "/p", agentId: "claude", permissionMode: .yolo,
+                                         nonce: "n", approveNewDirectory: false, now: 1_792_390_564_181.535)
+        #expect(params["permissionModeUpdatedAt"] == 1_792_390_564_181)
+        #expect(params["permissionMode"] == "yolo" && params["spawnNonce"] == "n")
+        #expect(params["backendTarget"] == ["kind": "builtInAgent", "agentId": "claude"])
+    }
+
+    @Test func serverClockIsWholeMilliseconds() {
+        let now = ServerClock.nowMs()
+        #expect(now == now.rounded(.down))
+    }
+}

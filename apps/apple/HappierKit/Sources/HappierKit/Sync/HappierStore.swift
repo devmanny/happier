@@ -139,7 +139,9 @@ public final class HappierStore {
         sessions.values.filter(\.isUserFacing).sorted { $0.sortDate > $1.sortDate }
     }
 
-    public func refreshSessions() async {
+    /// Reloads the session list. Background refreshes (sync loop, reconnects) only log failures;
+    /// a user-initiated refresh (pull to refresh) shows them.
+    public func refreshSessions(userInitiated: Bool = false) async {
         guard let api else { return }
         isLoadingSessions = true
         defer { isLoadingSessions = false }
@@ -163,8 +165,26 @@ public final class HappierStore {
                 transcripts[id]?.apply(agentState: session.agentState)
             }
         } catch {
-            report(error)
+            if userInitiated { report(error) } else { logBackground(error, "session list refresh") }
         }
+    }
+
+    // MARK: - App lifecycle
+
+    /// iOS freezes networking while the app is in the background: close the socket cleanly so
+    /// nothing is left half-open, and reconnect + resync as soon as the app is back.
+    public func appDidEnterBackground() {
+        guard phase == .ready else { return }
+        syncTask?.cancel()
+        syncTask = nil
+        let socket = self.socket
+        Task { await socket?.disconnect() }
+        connection = .offline
+    }
+
+    public func appDidBecomeActive() {
+        guard phase == .ready, syncTask == nil else { return }
+        syncTask = Task { await runSync() }
     }
 
     // MARK: - Realtime
@@ -229,7 +249,7 @@ public final class HappierStore {
             }
         case "update-session":
             guard let id = body["id"]?.stringValue else { return }
-            do { try sessions[id]?.apply(update: body) } catch { report(error) }
+            do { try sessions[id]?.apply(update: body) } catch { logBackground(error, "session update") }
             if body["agentState"] != nil, let state = sessions[id]?.agentState, transcripts[id] != nil {
                 transcripts[id]?.apply(agentState: state)
             }
@@ -289,7 +309,7 @@ public final class HappierStore {
                 hasOlderMessages[id] = page.hasMore
                 loadedTranscripts.insert(id)
             } catch {
-                transcriptErrors[id] = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                transcriptErrors[id] = UserFacingError.message(for: error)
                 log.error("open failed: \(String(describing: error), privacy: .public)")
             }
         }
@@ -307,7 +327,7 @@ public final class HappierStore {
             let page = try await api.messages(sessionId: id, beforeSeq: minSeq)
             await apply(page.rows, to: id)
             hasOlderMessages[id] = page.hasMore
-        } catch { report(error) }
+        } catch { logBackground(error, "older messages") }
     }
 
     private func catchUp(_ id: String) async {
@@ -319,7 +339,7 @@ public final class HappierStore {
                 guard page.hasMore, let next = page.nextAfterSeq, next > after else { break }
                 after = next
             }
-        } catch { report(error) }
+        } catch { logBackground(error, "transcript catch-up") }
     }
 
     /// Decrypts and parses rows off the main actor, then applies them in one transcript update.
@@ -468,6 +488,36 @@ public final class HappierStore {
         } catch { report(error) }
     }
 
+    // MARK: - Machine folders (`daemon.filesystem.*`, `createDirectory`)
+
+    /// Browsable starting points on the machine (home, volumes, or the CLI's allowed roots).
+    public func folderRoots(on machineId: String) async throws -> [RemoteFolder] {
+        let response = try await machineRPC(machineId, method: "daemon.filesystem.listRoots", params: [:])
+        guard response["ok"]?.boolValue == true else {
+            throw RemoteFolder.ListingError(message: response["error"]?.stringValue ?? String(localized: "This machine can't list its folders."))
+        }
+        return (response["roots"]?.arrayValue ?? []).compactMap { root in
+            guard let path = root["path"]?.stringValue else { return nil }
+            return RemoteFolder(name: root["label"]?.stringValue ?? path, path: path)
+        }
+    }
+
+    public func folders(in path: String, on machineId: String) async throws -> (folders: [RemoteFolder], truncated: Bool) {
+        try RemoteFolder.listing(from: try await machineRPC(machineId, method: "daemon.filesystem.listDirectory",
+                                                            params: ["path": .string(path), "includeFiles": false]))
+    }
+
+    /// Creates `name` inside `parent`; the daemon's filesystem access policy decides what's allowed.
+    public func createFolder(named name: String, in parent: String, on machineId: String) async throws -> RemoteFolder {
+        let platform = machines.first { $0.id == machineId }?.platform
+        let path = RemoteFolder.join(parent, name, platform: platform)
+        let response = try await machineRPC(machineId, method: "createDirectory", params: ["path": .string(path)])
+        guard response["success"]?.boolValue == true else {
+            throw RemoteFolder.ListingError(message: response["error"]?.stringValue ?? String(localized: "The folder couldn't be created."))
+        }
+        return RemoteFolder(name: name, path: path)
+    }
+
     public enum SpawnOutcome: Equatable, Sendable {
         case created(sessionId: String)
         /// The folder doesn't exist; ask, then retry with `approveNewDirectory: true`.
@@ -480,12 +530,8 @@ public final class HappierStore {
     public func createSession(machineId: String, directory: String, agentId: String, permissionMode: PermissionMode,
                               firstMessage: String, approveNewDirectory: Bool = false) async -> SpawnOutcome {
         let nonce = UUID().uuidString.lowercased()
-        let now = Date.now.timeIntervalSince1970 * 1000
-        let params: JSONValue = [
-            "type": "spawn-in-directory", "directory": .string(directory), "approvedNewDirectoryCreation": .bool(approveNewDirectory),
-            "backendTarget": ["kind": "builtInAgent", "agentId": .string(agentId)], "spawnNonce": .string(nonce),
-            "permissionMode": .string(permissionMode.rawValue), "permissionModeUpdatedAt": .number(now),
-        ]
+        let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode,
+                                         nonce: nonce, approveNewDirectory: approveNewDirectory)
         do {
             var result: JSONValue
             do {
@@ -522,7 +568,7 @@ public final class HappierStore {
             openRequest = sessionId
             return .created(sessionId: sessionId)
         } catch {
-            return .failed((error as? LocalizedError)?.errorDescription ?? String(describing: error))
+            return .failed(UserFacingError.message(for: error))
         }
     }
 
@@ -729,7 +775,7 @@ public final class HappierStore {
         do {
             for _ in 0..<6 {
                 guard let session = sessions[sessionId] else { return }
-                let next = edit(session.metadata, Date.now.timeIntervalSince1970 * 1000)
+                let next = edit(session.metadata, ServerClock.nowMs())
                 if next == session.metadata { return }
                 let ack = try await socket.emitWithAck("update-metadata", [
                     "sid": .string(sessionId),
@@ -771,12 +817,20 @@ public final class HappierStore {
         return result
     }
 
+    /// Failure of something the user asked for: logged and shown as a readable alert.
     private func report(_ error: Error) {
-        if error is CancellationError || (error as? URLError)?.code == .cancelled {
+        if UserFacingError.isSilent(error) {
             log.notice("operation cancelled")
             return
         }
         log.error("\(String(describing: error), privacy: .public)")
-        lastError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        lastError = UserFacingError.message(for: error)
+    }
+
+    /// Failure of automatic sync work: logged only; the sync loop retries and the connection
+    /// indicator shows the state.
+    private func logBackground(_ error: Error, _ context: StaticString) {
+        if UserFacingError.isSilent(error) { return }
+        log.error("\(context, privacy: .public) failed: \(String(describing: error), privacy: .public)")
     }
 }

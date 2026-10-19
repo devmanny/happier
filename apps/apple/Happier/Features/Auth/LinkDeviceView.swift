@@ -77,7 +77,7 @@ struct LinkDeviceView: View {
             dismiss()
         } catch is CancellationError {
         } catch {
-            self.error = String(describing: error)
+            self.error = UserFacingError.message(for: error)
         }
     }
 }

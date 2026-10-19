@@ -39,24 +39,57 @@ struct AgentBadge: View {
     }
 }
 
-/// Rounded bubble with the iMessage tail on the last bubble of a run.
+/// iMessage bubble: generous continuous corners and, on the last bubble of a run, the curved tail
+/// that sweeps out of the bottom corner. Every bubble reserves `tailWidth` on its tail side so a
+/// run's bubbles stay aligned whether or not they carry the tail.
 struct BubbleShape: Shape {
+    static let tailWidth: CGFloat = 8
+
     var fromUser: Bool
     var tail: Bool
 
     func path(in rect: CGRect) -> Path {
-        let body = Path(roundedRect: rect, cornerRadius: 18, style: .continuous)
-        guard tail else { return body }
-        var t = Path()
-        let x = rect.maxX, y = rect.maxY
-        t.move(to: CGPoint(x: x - 10, y: y - 16))
-        t.addCurve(to: CGPoint(x: x + 5, y: y), control1: CGPoint(x: x - 8, y: y - 5), control2: CGPoint(x: x - 1, y: y - 0.5))
-        t.addCurve(to: CGPoint(x: x - 16, y: y - 5), control1: CGPoint(x: x - 5, y: y + 1.5), control2: CGPoint(x: x - 11, y: y - 1.5))
-        t.closeSubpath()
+        var path = Self.sentBubble(width: rect.width, height: rect.height, tail: tail)
         if !fromUser {
-            t = t.applying(CGAffineTransform(translationX: rect.minX + rect.maxX, y: 0).scaledBy(x: -1, y: 1))
+            path = path.applying(CGAffineTransform(translationX: rect.width, y: 0).scaledBy(x: -1, y: 1))
         }
-        return body.union(t)
+        return path.applying(CGAffineTransform(translationX: rect.minX, y: rect.minY))
+    }
+
+    /// Bubble with its tail on the right, in a `width`×`height` box (tail flush with the right edge).
+    private static func sentBubble(width w: CGFloat, height h: CGFloat, tail: Bool) -> Path {
+        let r = min(18, h / 2)
+        let k: CGFloat = 0.47  // control-point factor for continuous-looking corners
+        let right = w - tailWidth
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: right - r, y: 0))
+        p.addCurve(to: CGPoint(x: right, y: r), control1: CGPoint(x: right - r * k, y: 0), control2: CGPoint(x: right, y: r * k))
+        if tail {
+            // The tail sweeps out of the bottom-right corner to a point, then curls back into the bottom edge.
+            p.addLine(to: CGPoint(x: right, y: h - 17))
+            p.addCurve(to: CGPoint(x: w, y: h), control1: CGPoint(x: right, y: h - 4), control2: CGPoint(x: w - 2.5, y: h - 0.5))
+            p.addCurve(to: CGPoint(x: right - 9, y: h - 4.5), control1: CGPoint(x: w - 6, y: h + 1), control2: CGPoint(x: right - 4, y: h - 1.5))
+            p.addCurve(to: CGPoint(x: right - 19, y: h), control1: CGPoint(x: right - 12.5, y: h - 0.8), control2: CGPoint(x: right - 16, y: h))
+        } else {
+            p.addLine(to: CGPoint(x: right, y: h - r))
+            p.addCurve(to: CGPoint(x: right - r, y: h), control1: CGPoint(x: right, y: h - r * k), control2: CGPoint(x: right - r * k, y: h))
+        }
+        p.addLine(to: CGPoint(x: r, y: h))
+        p.addCurve(to: CGPoint(x: 0, y: h - r), control1: CGPoint(x: r * k, y: h), control2: CGPoint(x: 0, y: h - r * k))
+        p.addLine(to: CGPoint(x: 0, y: r))
+        p.addCurve(to: CGPoint(x: r, y: 0), control1: CGPoint(x: 0, y: r * k), control2: CGPoint(x: r * k, y: 0))
+        p.closeSubpath()
+        return p
+    }
+}
+
+extension View {
+    /// iMessage text insets inside a `BubbleShape`, including the space reserved for the tail.
+    func bubblePadding(fromUser: Bool) -> some View {
+        padding(.vertical, 8)
+            .padding(.leading, 13 + (fromUser ? 0 : BubbleShape.tailWidth))
+            .padding(.trailing, 13 + (fromUser ? BubbleShape.tailWidth : 0))
     }
 }
 
