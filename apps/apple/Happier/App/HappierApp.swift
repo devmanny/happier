@@ -3,14 +3,23 @@ import SwiftUI
 
 @main
 struct HappierApp: App {
-    @State private var store = HappierStore()
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor private var delegate: AppDelegate
+    #else
+    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
+    #endif
     @Environment(\.scenePhase) private var scenePhase
+
+    private var store: HappierStore { delegate.store }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(store)
                 .task { store.restore() }
+                .task(id: store.phase == .ready) {
+                    if store.phase == .ready { await delegate.enablePushNotifications() }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     // iOS freezes networking in the background; reconnect and resync on return.
                     switch phase {
@@ -72,7 +81,7 @@ struct MainView: View {
             if id != restoredSessionId { restoredSessionId = nil }
         }
         .onChange(of: store.hasLoadedSessions, initial: true) { _, _ in restoreLastSession() }
-        .onChange(of: store.openRequest) { _, id in
+        .onChange(of: store.openRequest, initial: true) { _, id in
             guard let id else { return }
             selection = id
             store.openRequest = nil

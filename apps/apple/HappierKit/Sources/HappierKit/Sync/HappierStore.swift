@@ -59,6 +59,8 @@ public final class HappierStore {
     @ObservationIgnored private var loadedTranscripts: Set<String> = []
     @ObservationIgnored private var pendingFetches: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingFetchDirty: Set<String> = []
+    @ObservationIgnored private var pushDevice: PushDevice?
+    @ObservationIgnored private var pendingPushTap: PushTap?
     @ObservationIgnored private let credentialStore = CredentialStore()
     @ObservationIgnored private let log = Logger(subsystem: "dev.happier.apple", category: "sync")
 
@@ -93,6 +95,10 @@ public final class HappierStore {
     }
 
     public func signOut() {
+        if let api, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
+            UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+            Task { try? await api.deletePushToken(token) }
+        }
         credentialStore.delete(server: server)
         syncTask?.cancel()
         let socket = self.socket
@@ -127,6 +133,7 @@ public final class HappierStore {
             keys = nil
         }
         api = HappierAPI(server: server, token: credentials.token)
+        Task { await registerPushToken() }
         pins = MessagePins(scope: "\(server.host() ?? server.absoluteString)/\(credentials.accountId ?? "account")")
         phase = .ready
         syncTask?.cancel()
@@ -161,6 +168,7 @@ public final class HappierStore {
             undecryptableSessionCount = failures
             sessions = next
             hasLoadedSessions = true
+            Task { await handlePendingPushTap() }
             for (id, session) in next where transcripts[id] != nil {
                 transcripts[id]?.apply(agentState: session.agentState)
             }
@@ -818,6 +826,73 @@ public final class HappierStore {
     }
 
     /// Failure of something the user asked for: logged and shown as a readable alert.
+    // MARK: - Push notifications
+
+    /// This device as an APNs endpoint (from `didRegisterForRemoteNotificationsWithDeviceToken`).
+    public struct PushDevice: Sendable {
+        public let deviceToken: Data
+        public let development: Bool
+        public let bundleId: String
+        /// Expo project whose APNs credentials deliver to this bundle id.
+        public let expoProjectId: String
+
+        public init(deviceToken: Data, development: Bool, bundleId: String, expoProjectId: String) {
+            self.deviceToken = deviceToken
+            self.development = development
+            self.bundleId = bundleId
+            self.expoProjectId = expoProjectId
+        }
+    }
+
+    private static let pushTokenKey = "happier.expoPushToken"
+    private static let installationIdKey = "happier.installationId"
+
+    public func setPushDevice(_ device: PushDevice) {
+        pushDevice = device
+        Task { await registerPushToken() }
+    }
+
+    /// Exchanges the APNs token for an Expo token and registers it with the account (idempotent upsert).
+    private func registerPushToken() async {
+        guard let device = pushDevice, let api else { return }
+        let defaults = UserDefaults.standard
+        let installationId = defaults.string(forKey: Self.installationIdKey).flatMap(UUID.init(uuidString:)) ?? {
+            let id = UUID()
+            defaults.set(id.uuidString, forKey: Self.installationIdKey)
+            return id
+        }()
+        do {
+            let expo = HTTPClient(baseURL: URL(string: "https://exp.host")!)
+            let response = try await expo.post("/--/api/v2/push/getExpoPushToken", PushNotifications.expoTokenRequest(
+                deviceToken: device.deviceToken, installationId: installationId, development: device.development,
+                bundleId: device.bundleId, projectId: device.expoProjectId))
+            guard let token = PushNotifications.expoToken(from: response) else {
+                throw HTTPClient.ServerError(status: 200, path: "getExpoPushToken", body: response)
+            }
+            try await api.registerPushToken(token, clientServerUrl: server)
+            defaults.set(token, forKey: Self.pushTokenKey)
+            log.notice("push token registered (\(device.development ? "sandbox" : "production", privacy: .public))")
+        } catch {
+            logBackground(error, "push registration")
+        }
+    }
+
+    /// Opens the notified session, answering a permission request first when an action button was used.
+    public func handle(_ tap: PushTap) async {
+        pendingPushTap = tap
+        await handlePendingPushTap()
+    }
+
+    private func handlePendingPushTap() async {
+        guard hasLoadedSessions, let tap = pendingPushTap else { return }
+        pendingPushTap = nil
+        guard let sessionId = tap.sessionId, sessions[sessionId] != nil else { return }
+        if let permission = tap.permission {
+            await reply(permission.allow ? .allow : .deny(reason: nil), to: (permission.requestId, permission.tool), in: sessionId)
+        }
+        openRequest = sessionId
+    }
+
     private func report(_ error: Error) {
         if UserFacingError.isSilent(error) {
             log.notice("operation cancelled")

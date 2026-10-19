@@ -106,4 +106,16 @@ public struct HappierAPI: Sendable {
     public func delete(sessionId: String) async throws {
         _ = try await http.delete("/v1/sessions/\(sessionId)")
     }
+
+    // MARK: Push (`pushRoutes.ts`)
+
+    /// `clientServerUrl` tells the CLI which server a tapped notification belongs to.
+    public func registerPushToken(_ token: String, clientServerUrl: URL) async throws {
+        _ = try await http.post("/v1/push-tokens", ["token": .string(token), "clientServerUrl": .string(clientServerUrl.absoluteString)])
+    }
+
+    public func deletePushToken(_ token: String) async throws {
+        // `appending(path:)` percent-encodes the brackets of `ExponentPushToken[…]`.
+        _ = try await http.delete("/v1/push-tokens/\(token)")
+    }
 }

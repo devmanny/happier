@@ -36,12 +36,15 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # Expo project whose APNs credentials deliver this bundle id (see README, Push notifications).
+        HappierExpoProjectId: $(HAPPIER_EXPO_PROJECT_ID)
         CFBundleURLTypes:
           - CFBundleURLName: com.devmanny.happier
             CFBundleURLSchemes: [happier]
     entitlements:
       path: Happier/Resources/Happier.entitlements
       properties:
+        aps-environment: development
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.device.camera: true
@@ -54,4 +57,7 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_PREVIEWS: true
         ENABLE_HARDENED_RUNTIME: true
+        # macOS spells the push entitlement differently, so it gets its own file.
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: Happier/Resources/Happier-macOS.entitlements
+        HAPPIER_EXPO_PROJECT_ID: ""
         TARGETED_DEVICE_FAMILY: "1,2"
