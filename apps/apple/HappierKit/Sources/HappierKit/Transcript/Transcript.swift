@@ -60,7 +60,7 @@ public struct Transcript: Sendable {
         pendingRequests = Self.pendingRequests(from: agentState)
         builder.applyPermissions(agentState: agentState, pending: pendingRequests)
         for p in pending where !builder.seenLocalIds.contains(p.localId) {
-            builder.items.append(.userText(UserText(id: "pending:\(p.localId)", text: p.text, createdAt: p.createdAt, localId: p.localId, isPending: true, attachments: p.attachments)))
+            builder.items.append(.userText(UserText(id: UserText.stableId(localId: p.localId), text: p.text, createdAt: p.createdAt, localId: p.localId, isPending: true, attachments: p.attachments)))
         }
         items = builder.items
     }
@@ -104,7 +104,8 @@ private struct Builder {
             let itemId = "\(row.id):\(index)"
             switch block {
             case .userText(let text, let attachments):
-                var user = UserText(id: itemId, text: text, createdAt: row.createdAt, localId: row.localId, isPending: false, attachments: attachments)
+                var user = UserText(id: row.localId.map(UserText.stableId) ?? itemId, text: text, createdAt: row.createdAt,
+                                    localId: row.localId, isPending: false, attachments: attachments)
                 user.seq = row.seq
                 items.append(.userText(user))
             case .text(let text, let thinking):

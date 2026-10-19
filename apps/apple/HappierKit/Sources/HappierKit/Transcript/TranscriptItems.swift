@@ -55,6 +55,18 @@ public struct UserText: Equatable, Sendable {
     public var isPending: Bool
     /// File names from `meta.happier` `attachments.v1`.
     public var attachments: [String] = []
+
+    public init(id: String, text: String, createdAt: Date, localId: String?, isPending: Bool, attachments: [String] = []) {
+        self.id = id
+        self.text = text
+        self.createdAt = createdAt
+        self.localId = localId
+        self.isPending = isPending
+        self.attachments = attachments
+    }
+
+    /// One identity per sent message across optimistic, queued and committed states.
+    public static func stableId(localId: String) -> String { "local:\(localId)" }
 }
 
 public struct AgentText: Equatable, Sendable {

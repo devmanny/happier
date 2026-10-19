@@ -124,3 +124,18 @@ import Testing
         #expect(!user.isPending)
     }
 }
+
+/// A sent message keeps one identity from optimistic bubble to committed row, so the UI updates
+/// it in place instead of removing one bubble and inserting another.
+@Suite struct UserMessageIdentityTests {
+    @Test func pendingAndCommittedShareTheSameId() {
+        var t = Transcript()
+        t.addPending(localId: "L1", text: "hola")
+        let pendingId = t.items.first?.id
+        t.apply([TranscriptMessage(id: "server-row", seq: 3, localId: "L1", createdAt: .now,
+                                   record: ["role": "user", "content": ["type": "text", "text": "hola"]])])
+        #expect(t.items.count == 1)
+        #expect(t.items.first?.id == pendingId)
+        #expect(pendingId == UserText.stableId(localId: "L1"))
+    }
+}

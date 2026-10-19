@@ -13,15 +13,17 @@ struct ChatView: View {
     private var session: Session? { store.sessions[sessionId] }
     private var queue: [PendingMessage] { store.pendingQueues[sessionId] ?? [] }
 
-    /// Transcript items minus optimistic bubbles the server queue now owns (same localId).
+    /// Transcript items plus server-queued messages, in one list. A sent message keeps the same id
+    /// (`UserText.stableId`) whether it's optimistic, queued or committed, so SwiftUI updates it in
+    /// place instead of removing one bubble and inserting another.
     private var items: [ChatItem] {
-        let all = store.transcripts[sessionId]?.items ?? []
-        let queued = Set(queue.map(\.localId))
-        guard !queued.isEmpty else { return all }
-        return all.filter { item in
-            if case .userText(let message) = item, message.isPending, let localId = message.localId { return !queued.contains(localId) }
-            return true
+        var all = store.transcripts[sessionId]?.items ?? []
+        let present = Set(all.compactMap { item -> String? in if case .userText(let user) = item { user.localId } else { nil } })
+        for message in queue where !present.contains(message.localId) {
+            all.append(.userText(UserText(id: UserText.stableId(localId: message.localId), text: message.text,
+                                          createdAt: message.createdAt, localId: message.localId, isPending: true)))
         }
+        return all
     }
 
     var body: some View {
@@ -71,10 +73,6 @@ struct ChatView: View {
                                 .padding(.top, 2)
                         }
                     }
-                    ForEach(queue) { message in
-                        PendingBubble(message: message, sessionId: sessionId, working: working)
-                            .padding(.top, 8)
-                    }
                     // The running turn's work line already shows progress; the dots cover the gap before it appears.
                     if working, !(rows.last.map { if case .work(_, _, true) = $0 { true } else { false } } ?? false) {
                         HStack {
@@ -91,13 +89,18 @@ struct ChatView: View {
                 .scrollTargetLayout()
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .animation(.smooth(duration: 0.3), value: items.count)
-                .animation(.smooth(duration: 0.3), value: queue.map(\.localId))
-                .animation(.smooth(duration: 0.3), value: working)
+                // Pin the content to the viewport width: before lazy rows are measured, a wide row
+                // (e.g. a code block) could widen the stack and shift it left, eating the margin.
+                .containerRelativeFrame(.horizontal)
             }
             .scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .onChange(of: items.isEmpty) { _, isEmpty in
+                // First load: land on the concrete bottom anchor so the lazy stack renders the
+                // latest messages instead of an estimated (blank) region.
+                if !isEmpty { scrollToBottom(animated: false) }
+            }
             .onChange(of: items.last?.id) { _, _ in
                 // Your own message just landed (optimistic bubble): follow it to the bottom.
                 if case .userText(let message)? = items.last, message.isPending { scrollToBottom() }
@@ -176,6 +179,10 @@ struct ChatView: View {
     @ViewBuilder
     private func rowContent(_ row: ChatRow, previous: ChatRow?, next: ChatRow?, working: Bool) -> some View {
         switch row {
+        case .item(.userText(let user)) where user.isPending && queue.contains { $0.localId == user.localId }:
+            if let queued = queue.first(where: { $0.localId == user.localId }) {
+                PendingBubble(message: queued, sessionId: sessionId, working: working)
+            }
         case .item(let item):
             ChatItemView(item: item, sessionId: sessionId, tail: Side(row) != next.map(Side.init) || working && next == nil)
         case .work(let steps, _, let inProgress):
@@ -207,10 +214,14 @@ struct ChatView: View {
     /// Scrolls to a concrete view at the end of the transcript, after the new bubble has been laid
     /// out. Scrolling to an *edge* while a LazyVStack is still growing can land on an unrealized
     /// region and leave the viewport blank until the user scrolls; a concrete id forces it to render.
-    private func scrollToBottom() {
+    private func scrollToBottom(animated: Bool = true) {
         Task { @MainActor in
             await Task.yield()
-            withAnimation(.smooth(duration: 0.3)) { scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom) }
+            if animated {
+                withAnimation(.smooth(duration: 0.3)) { scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom) }
+            } else {
+                scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
+            }
         }
     }
 
