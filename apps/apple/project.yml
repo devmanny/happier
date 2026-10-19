@@ -1,0 +1,56 @@
+name: Happier
+options:
+  bundleIdPrefix: com.devmanny
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: DPF7ZLTLN2
+packages:
+  HappierKit:
+    path: HappierKit
+targets:
+  Happier:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Happier
+    dependencies:
+      - package: HappierKit
+    info:
+      path: Happier/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSCameraUsageDescription: Happier uses the camera to scan the pairing QR code shown by the Happier CLI or another device.
+        NSMicrophoneUsageDescription: Happier uses the microphone to dictate messages to your agents.
+        NSSpeechRecognitionUsageDescription: Happier turns your voice into text so you can dictate messages to your agents.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmanny.happier
+            CFBundleURLSchemes: [happier]
+    entitlements:
+      path: Happier/Resources/Happier.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.camera: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier
+        PRODUCT_NAME: Happier
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: true
+        TARGETED_DEVICE_FAMILY: "1,2"
