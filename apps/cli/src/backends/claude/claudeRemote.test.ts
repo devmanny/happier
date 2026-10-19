@@ -445,6 +445,26 @@ describe('claudeRemote', () => {
     expect(onEffectiveModel).toHaveBeenCalledWith({ modelId: 'claude-opus-4-6', reasoningEffort: 'medium' });
   });
 
+  it('relaunches with the session mode model after it supersedes a launch-time --model', async () => {
+    mockQuery.mockReturnValue(messageStream(resultMessage()));
+
+    const { claudeRemote } = await import('./claudeRemote');
+
+    await claudeRemote(
+      createBaseOptions({
+        claudeArgs: ['--model', 'claude-opus-5-5'],
+        nextMessage: async () => ({
+          message: 'hello',
+          mode: defaultMode({ model: 'claude-fable-5-1' }),
+        }),
+      }),
+    );
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const call = mockQuery.mock.calls[0]?.[0] as (QueryCall & { options?: { model?: string } }) | undefined;
+    expect(call?.options?.model).toBe('claude-fable-5-1');
+  });
+
   it('injects --effort high for Opus 4.7 because xhigh is the model default', async () => {
     mockQuery.mockReturnValue(messageStream(resultMessage()));
 

@@ -25,10 +25,16 @@ describe('parseClaudeSdkFlagOverridesFromArgs', () => {
       strictMcpConfig: true,
       appendSystemPrompt: 'append me',
       customSystemPrompt: 'system me',
-      model: 'model-a',
       fallbackModel: 'model-b',
       effort: 'medium',
     });
+  });
+
+  it('does not report --model: the model is Happier session state seeded by the arg partition', () => {
+    const parsed = parseClaudeSdkFlagOverridesFromArgs(['--model', 'model-a', '--effort', 'low']);
+
+    expect('model' in parsed).toBe(false);
+    expect(parsed.effort).toBe('low');
   });
 
   it('ignores invalid max-turns values', () => {

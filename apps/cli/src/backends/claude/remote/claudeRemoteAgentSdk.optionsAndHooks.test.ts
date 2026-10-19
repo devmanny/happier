@@ -2630,7 +2630,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
         expect((await runOnce({ permissionMode: 'acceptEdits' }))?.permissionMode).toBe('acceptEdits');
     });
 
-    it('prefers CLI model overrides over mode.model', async () => {
+    it('uses the session mode model over a launch-time --model while keeping other CLI overrides', async () => {
         let capturedOptions: any = null;
 
         const createQuery = vi.fn((_params: any) => {
@@ -2673,7 +2673,7 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             createQuery,
         } as any);
 
-        expect(capturedOptions?.model).toBe('cli-model');
+        expect(capturedOptions?.model).toBe('mode-model');
         expect(capturedOptions?.fallbackModel).toBe('cli-fallback');
     });
 

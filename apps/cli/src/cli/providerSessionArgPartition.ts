@@ -246,15 +246,18 @@ export function partitionProviderSessionArgs(options: ProviderSessionArgPartitio
       i += 1;
       continue;
     }
-    if (arg === '--model') {
-      const raw = readRequiredValue(args, i, '--model (expected: model id)');
+    if (arg === '--model' || arg.startsWith('--model=')) {
+      // Both forms seed Happier session model state; providers read the current model from the
+      // session mode, so the forwarded copy only serves native local passthrough.
+      const inline = arg !== '--model';
+      const raw = inline ? arg.slice('--model='.length) : readRequiredValue(args, i, '--model (expected: model id)');
       const normalized = raw.trim();
       if (!normalized) fail('Invalid --model value: empty');
       modelId = normalized;
       if (options.forwardModelFlag) {
-        providerArgs.push(arg, normalized);
+        providerArgs.push('--model', normalized);
       }
-      i += 1;
+      if (!inline) i += 1;
       continue;
     }
     if (arg === '--model-updated-at') {

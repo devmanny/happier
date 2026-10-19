@@ -188,7 +188,7 @@ export function resolveClaudeTerminalCliOptions(params: Readonly<{
     const extraArgs: string[] = [];
     const argOverrides = parseClaudeSdkFlagOverridesFromArgs([...(params.claudeArgs ?? [])]);
 
-    const effectiveModel = normalizeString(argOverrides.model) || normalizeString(params.mode.model);
+    const effectiveModel = normalizeString(params.mode.model);
     const effectiveFallbackModel = normalizeString(argOverrides.fallbackModel) || normalizeString(params.mode.fallbackModel);
     const customSystemPrompt = normalizeString(argOverrides.customSystemPrompt) || normalizeString(params.mode.customSystemPrompt);
     const modeAppendSystemPrompt = normalizeString(argOverrides.appendSystemPrompt) || normalizeString(params.mode.appendSystemPrompt);
