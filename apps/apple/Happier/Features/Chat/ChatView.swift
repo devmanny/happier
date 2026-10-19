@@ -87,12 +87,12 @@ struct ChatView: View {
                         .id(Self.bottomAnchor)
                 }
                 .scrollTargetLayout()
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                // Pin the content to the viewport width: before lazy rows are measured, a wide row
-                // (e.g. a code block) could widen the stack and shift it left, eating the margin.
-                .containerRelativeFrame(.horizontal)
             }
+            // Margins, not padding: the initial bottom positioning aligns the scroll target layout's
+            // frame with the viewport, so padding around it became a horizontal offset that ate the
+            // left margin until the first scroll.
+            .contentMargins(.horizontal, 14, for: .scrollContent)
+            .contentMargins(.vertical, 10, for: .scrollContent)
             .scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
