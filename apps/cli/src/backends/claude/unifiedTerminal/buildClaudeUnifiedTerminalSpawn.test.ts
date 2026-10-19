@@ -1077,6 +1077,7 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
         message: 'queued through TerminalInputInjectionV1',
         mode: {
           permissionMode: 'default',
+          model: 'sonnet',
           claudeRemoteSettingSourcesV2: ['project'],
           claudeRemoteStrictMcpServerConfig: true,
           claudeRemoteDisableTodos: true,
@@ -1137,7 +1138,7 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
     expect(launchArgs[pluginIndex + 1]).toBe('/tmp/hook-plugin');
   });
 
-  it('honors mode model and prompt options while letting raw Claude args take precedence once', async () => {
+  it('launches the session mode model while letting other raw Claude args take precedence once', async () => {
     const spawn = await buildClaudeUnifiedTerminalSpawn({
       path: '/workspace/project',
       systemPromptText: 'base system',
@@ -1173,8 +1174,9 @@ async function readOverlayFromArgs(args: readonly string[], hookSettingsPath: st
     expect(launchArgs.filter((arg) => arg === '--model')).toHaveLength(1);
     expect(launchArgs.slice(launchArgs.indexOf('--model'), launchArgs.indexOf('--model') + 2)).toEqual([
       '--model',
-      'raw-opus',
+      'mode-sonnet',
     ]);
+    expect(launchArgs).not.toContain('raw-opus');
     expect(launchArgs.filter((arg) => arg === '--fallback-model')).toHaveLength(1);
     expect(launchArgs.slice(launchArgs.indexOf('--fallback-model'), launchArgs.indexOf('--fallback-model') + 2)).toEqual([
       '--fallback-model',

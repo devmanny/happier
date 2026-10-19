@@ -535,12 +535,7 @@ export async function claudeRemoteAgentSdk(opts: {
 
     const resolveDesiredRuntimeSettingsSnapshot = (resolvedMode: EnhancedMode): RuntimeSettingsSnapshot => {
         const permissionMode = resolveClaudeSdkPermissionModeFromEnhancedMode(resolvedMode);
-        const model =
-            typeof argOverrides.model === 'string'
-                ? argOverrides.model
-                : typeof resolvedMode.model === 'string'
-                    ? resolvedMode.model
-                    : null;
+        const model = typeof resolvedMode.model === 'string' ? resolvedMode.model : null;
 
         const maxThinkingTokens =
             typeof resolvedMode.claudeRemoteMaxThinkingTokens === 'number' || resolvedMode.claudeRemoteMaxThinkingTokens === null
@@ -640,7 +635,7 @@ export async function claudeRemoteAgentSdk(opts: {
     const createSyntheticUuid = () => `happier_synth_${process.pid}_${++syntheticUuidCounter}`;
 
     const resolvePreferredModelId = (): string | null => {
-        const candidate = argOverrides.model ?? mode.model;
+        const candidate = mode.model;
         return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null;
     };
 
@@ -713,7 +708,7 @@ export async function claudeRemoteAgentSdk(opts: {
             typeof opts.resumeSessionAt === 'string' && opts.resumeSessionAt.trim().length > 0
                 ? opts.resumeSessionAt.trim()
                 : null;
-        const effortModelId = argOverrides.model ?? mode.model;
+        const effortModelId = mode.model;
         const effortSupportedLevels = resolveModeEffortLevelsForModel(mode, effortModelId);
         const resolvedEffort = resolveClaudeEffortForModel({
             modelId: effortModelId,
@@ -769,7 +764,7 @@ export async function claudeRemoteAgentSdk(opts: {
             permissionMode: mappedPermissionMode === 'default' ? null : mappedPermissionMode,
             allowDangerouslySkipPermissions: true,
             ...(resolvedEffort ? { effort: resolvedEffort } : {}),
-            model: argOverrides.model ?? mode.model,
+            model: mode.model,
             fallbackModel: argOverrides.fallbackModel ?? mode.fallbackModel,
             maxTurns: argOverrides.maxTurns,
             systemPrompt: buildSystemPrompt(),

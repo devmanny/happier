@@ -53,6 +53,17 @@ describe('partitionProviderSessionArgs', () => {
     expect(result.providerArgs).toEqual(['--model', 'opus', '--fallback-model', 'sonnet', 'fix this']);
   });
 
+  it('consumes the inline --model=<id> form as session model state too', () => {
+    const result = partitionProviderSessionArgs({
+      args: ['claude', '--model=opus', 'fix this'],
+      providerSubcommand: 'claude',
+      forwardModelFlag: true,
+    });
+
+    expect(result.modelId).toBe('opus');
+    expect(result.providerArgs).toEqual(['--model', 'opus', 'fix this']);
+  });
+
   it('maps --yolo to provider args when a provider supplies an alias', () => {
     const result = partitionProviderSessionArgs({
       args: ['claude', '--yolo', 'fix this'],

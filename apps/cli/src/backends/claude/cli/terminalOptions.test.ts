@@ -90,6 +90,26 @@ describe('resolveClaudeTerminalCliOptions', () => {
         }).ultracodeEnabled).toBe(false);
     });
 
+    it('launches the session mode model, not a superseded launch-time --model in claudeArgs', () => {
+        const resolved = resolveClaudeTerminalCliOptions({
+            mode: makeMode({ model: 'claude-fable-5-1' }),
+            claudeArgs: ['--model', 'claude-opus-5-5'],
+        });
+
+        expect(resolved.extraArgs.filter((arg) => arg === '--model')).toHaveLength(1);
+        expect(resolved.extraArgs[resolved.extraArgs.indexOf('--model') + 1]).toBe('claude-fable-5-1');
+    });
+
+    it('does not re-pin a launch-time --model after the session model was reset to default', () => {
+        const resolved = resolveClaudeTerminalCliOptions({
+            mode: makeMode({ model: undefined }),
+            claudeArgs: ['--model', 'claude-opus-5-5'],
+        });
+
+        expect(resolved.extraArgs).not.toContain('--model');
+        expect(resolved.extraArgs).not.toContain('claude-opus-5-5');
+    });
+
     it('keeps a [1m]-suffixed model id unmutated while still resolving effort', () => {
         const resolved = resolveClaudeTerminalCliOptions({
             mode: makeMode({ model: 'claude-sonnet-4-6[1m]', reasoningEffort: 'low' }),

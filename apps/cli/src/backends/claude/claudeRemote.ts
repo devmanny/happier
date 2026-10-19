@@ -243,9 +243,9 @@ export async function claudeRemote(opts: {
             ? ['--mcp-config', opts.happierMcpConfigJson.trim()]
             : null;
     const effortArgs = buildClaudeEffortArgs({
-        modelId: argOverrides.model ?? initial.mode.model,
+        modelId: initial.mode.model,
         effort: argOverrides.effort ?? initial.mode.reasoningEffort,
-        supportedLevels: resolveModeEffortLevelsForModel(initial.mode, argOverrides.model ?? initial.mode.model),
+        supportedLevels: resolveModeEffortLevelsForModel(initial.mode, initial.mode.model),
     });
     const rawExtraArgs = [
         ...(opts.hookPluginDir ? ['--plugin-dir', opts.hookPluginDir] : []),
@@ -282,7 +282,7 @@ export async function claudeRemote(opts: {
         continue: shouldContinue || undefined,
         resume: startFrom ?? undefined,
         permissionMode: resolveClaudeSdkPermissionModeFromEnhancedMode(initial.mode),
-        model: argOverrides.model ?? initial.mode.model,
+        model: initial.mode.model,
         fallbackModel: argOverrides.fallbackModel ?? initial.mode.fallbackModel,
         maxTurns: argOverrides.maxTurns,
         customSystemPrompt: customSystemPrompt || undefined,
