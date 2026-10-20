@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { boundExpoPushMessage } from './boundExpoPushMessage'
+import { parseApnsPushToken, sendApnsNotifications, type ApnsCredentials, type ApnsTransport } from './apnsPush'
 import { logger } from '@/ui/logger'
 import { Expo, ExpoPushMessage } from 'expo-server-sdk'
 import { withServerUrlInPushData } from './pushNotificationData'
@@ -24,6 +25,12 @@ export interface PushToken {
     createdAt: number
     updatedAt: number
 }
+
+/** Direct APNs delivery for native Apple clients' `apns:` tokens (see `apnsPush.ts`). */
+export type ApnsDelivery = Readonly<{
+    credentials: () => ApnsCredentials | null
+    transport?: ApnsTransport
+}>
 
 interface AccountActivityBadgeSnapshotResponse {
     badgeCount: number
@@ -96,13 +103,15 @@ export class PushNotificationClient {
     private readonly token: string
     private readonly baseUrl: string
     private readonly expo: Expo
+    private readonly apns: ApnsDelivery | undefined
     private pushTokenFetchFailureCooldownUntilMs = 0
     private didLogPushTokenFetchCooldown = false
 
-    constructor(token: string, baseUrl: string = 'https://api.happier.dev') {
+    constructor(token: string, baseUrl: string = 'https://api.happier.dev', apns?: ApnsDelivery) {
         this.token = token
         this.baseUrl = baseUrl
         this.expo = new Expo()
+        this.apns = apns
     }
 
     /**
@@ -418,10 +427,15 @@ export class PushNotificationClient {
                 }
             })
 
+            // Native Apple tokens go straight to APNs; Expo rejects requests that mix projects.
+            const isApns = (message: ExpoPushMessage) => typeof message.to === 'string' && parseApnsPushToken(message.to) !== null
+            const apnsInvalidTokens = await this.sendApnsMessages(messages.filter(isApns))
+            const expoMessages = messages.filter((message) => !isApns(message))
+
             // Send notifications
-            if (debugPush) logger.debug(`[PUSH] Sending ${messages.length} push notifications...`)
-            const sendResult = await this.sendPushNotifications(messages)
-            await this.deletePushTokens(sendResult.invalidTokens)
+            if (debugPush) logger.debug(`[PUSH] Sending ${expoMessages.length} push notifications...`)
+            const sendResult = await this.sendPushNotifications(expoMessages)
+            await this.deletePushTokens([...sendResult.invalidTokens, ...apnsInvalidTokens])
             if (sendResult.invalidCredentials) {
                 throw new Error('Expo push failed: InvalidCredentials. Check the app\'s FCM V1 or APNs credentials in Expo.')
             }
@@ -430,6 +444,40 @@ export class PushNotificationClient {
             logger.debug('[PUSH] Error sending to all devices:', serializeAxiosErrorForLog(error))
             throw error
         }
+    }
+
+    private async sendApnsMessages(messages: ReadonlyArray<ExpoPushMessage>): Promise<ReadonlyArray<string>> {
+        if (messages.length === 0) return []
+        const credentials = this.apns?.credentials() ?? null
+        if (!credentials) {
+            logger.debug(`[PUSH] Skipping ${messages.length} APNs token(s): no APNs key configured on this machine`)
+            return []
+        }
+        const invalidTokens: string[] = []
+        for (const message of messages) {
+            let bounded: ExpoPushMessage
+            try {
+                bounded = boundExpoPushMessage(message)
+            } catch {
+                logger.infoFile('[PUSH] Notification exceeds outbound payload budget; routing data was preserved')
+                continue
+            }
+            const result = await sendApnsNotifications({
+                tokens: [message.to as string],
+                message: {
+                    title: bounded.title ?? '',
+                    body: bounded.body ?? '',
+                    subtitle: bounded.subtitle,
+                    badge: bounded.badge,
+                    categoryId: bounded.categoryId,
+                    data: bounded.data,
+                },
+                credentials,
+                transport: this.apns?.transport,
+            })
+            invalidTokens.push(...result.invalidTokens)
+        }
+        return invalidTokens
     }
 
     sendToAllDevices(title: string, body: string, data?: Record<string, any>): void {
