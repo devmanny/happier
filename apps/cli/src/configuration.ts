@@ -25,6 +25,7 @@ import {
 } from '@happier-dev/protocol'
 import packageJson from '../package.json'
 import type { PublicReleaseRingId } from '@happier-dev/release-runtime/releaseRings'
+import { TRANSFER_CHUNK_HARD_MAX_BYTES } from '@/machines/transfer/transferChunkSizeLimit'
 
 export const DEFAULT_MCP_TOOL_CALL_TIMEOUT_MS = 100_000_000;
 export const DEFAULT_EXECUTION_RUN_WAIT_MCP_TIMEOUT_GRACE_MS = 60_000;
@@ -486,9 +487,10 @@ class Configuration {
       min: 1, max: 10_000_000, default: 2_500_000,
     });
 
-    // Default: 256KB. Defensive min: 1KB; max: 5MB.
+    // Default: 256KB. Defensive min: 1KB; max: the transfer receiver's hard chunk ceiling, so an
+    // advertised chunk size is always one every chunk decryptor accepts.
     this.filesTransferChunkBytes = resolveIntEnvWithBounds('HAPPIER_FILES_TRANSFER_CHUNK_BYTES', {
-      min: 1024, max: 5_000_000, default: 256_000,
+      min: 1024, max: TRANSFER_CHUNK_HARD_MAX_BYTES, default: 256_000,
     });
 
     // Default: 10 minutes. Defensive min: 1s; max: 60 minutes.
