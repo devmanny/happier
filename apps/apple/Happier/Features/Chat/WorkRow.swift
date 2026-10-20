@@ -22,7 +22,7 @@ struct WorkRow: View {
             } label: {
                 HStack(spacing: 6) {
                     if inProgress {
-                        ProgressView().controlSize(.mini)
+                        HappierSpinner(size: HappierSpinner.mini)
                     } else {
                         Image(systemName: "checkmark.circle")
                             .font(.caption)

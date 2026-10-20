@@ -477,7 +477,7 @@ private struct StaleRunnerBubble: View {
         Button(action: onUpdate) {
             HStack(spacing: 6) {
                 if updating {
-                    ProgressView().controlSize(.mini)
+                    HappierSpinner(size: HappierSpinner.mini, color: .orange)
                     Text("Updating to the new CLI…")
                 } else {
                     Image(systemName: "arrow.triangle.2.circlepath")

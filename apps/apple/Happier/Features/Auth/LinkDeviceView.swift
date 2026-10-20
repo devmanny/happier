@@ -31,7 +31,7 @@ struct LinkDeviceView: View {
                         .padding(20)
                         .transition(.opacity)
                 } else if error == nil {
-                    ProgressView()
+                    HappierSpinner(size: 36, color: .gray)
                 }
             }
             .frame(width: 260, height: 260)

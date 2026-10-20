@@ -36,7 +36,7 @@ struct ToolCallCard: View {
                     }
                     Spacer(minLength: 4)
                     switch tool.state {
-                    case .running: ProgressView().controlSize(.mini)
+                    case .running: HappierSpinner(size: HappierSpinner.mini)
                     case .error: Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(.red)
                     case .completed: EmptyView()
                     }
@@ -150,7 +150,7 @@ struct ToolGroupRow: View {
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                     Spacer(minLength: 4)
                     if running {
-                        ProgressView().controlSize(.mini)
+                        HappierSpinner(size: HappierSpinner.mini)
                     } else if failed {
                         Image(systemName: "xmark").font(.caption2.weight(.bold)).foregroundStyle(.red)
                     }

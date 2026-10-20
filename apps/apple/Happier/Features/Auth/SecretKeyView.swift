@@ -34,7 +34,7 @@ struct SecretKeyView: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                if working { ProgressView() } else {
+                if working { HappierSpinner() } else {
                     Button("Sign In") { Task { await signIn() } }
                         .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }

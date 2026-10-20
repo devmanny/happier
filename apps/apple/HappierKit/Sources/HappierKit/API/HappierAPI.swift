@@ -107,6 +107,18 @@ public struct HappierAPI: Sendable {
         _ = try await http.delete("/v1/sessions/\(sessionId)")
     }
 
+    // MARK: Session organization (`sessionOrganizationApi.ts`)
+
+    /// Pins only: folders, tags and labels are left out of the snapshot.
+    public func sessionOrganizationPins() async throws -> JSONValue {
+        try await http.get("/v2/session-organization",
+                           query: ["includeFolders": "false", "includeTags": "false", "includeLabels": "false"])
+    }
+
+    public func setSessionPin(_ sessionId: String, pinned: Bool) async throws {
+        _ = try await http.put("/v2/session-organization/pins/\(sessionId)", ["pinned": .bool(pinned)])
+    }
+
     // MARK: Push (`pushRoutes.ts`)
 
     /// `clientServerUrl` tells the CLI which server a tapped notification belongs to.

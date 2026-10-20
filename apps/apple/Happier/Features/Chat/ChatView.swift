@@ -38,7 +38,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     if store.hasOlderMessages[sessionId] == true {
-                        ProgressView()
+                        HappierSpinner()
                             .padding()
                             .task { await store.loadOlder(sessionId) }
                     }
@@ -133,6 +133,26 @@ struct ChatView: View {
                     scrollToBottom()
                 }
             }
+            // Scrolled up into the history: a button back to the newest message.
+            .overlay(alignment: .bottom) {
+                if let geometry = lastGeometry, ChatScroll.showsJumpToLatest(geometry) {
+                    Button {
+                        pinnedToEnd = true
+                        scrollToBottom()
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .padding(.bottom, 10)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    .accessibilityLabel(Text("Jump to latest"))
+                }
+            }
+            .animation(.smooth(duration: 0.2), value: lastGeometry.map(ChatScroll.showsJumpToLatest) ?? false)
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if let selected {
@@ -190,7 +210,7 @@ struct ChatView: View {
                             .buttonStyle(.borderedProminent)
                     }
                 } else if store.loadingTranscripts.contains(sessionId) {
-                    ProgressView()
+                    HappierSpinner(size: HappierSpinner.hero)
                 }
             }
         }

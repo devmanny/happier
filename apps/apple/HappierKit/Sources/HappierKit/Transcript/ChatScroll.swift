@@ -42,6 +42,12 @@ public enum ChatScroll {
         return pinned && !settling && abs(geometry.distanceFromEnd) > 1
     }
 
+    /// The "jump to latest" button: shown once the reader is clearly above the end (a third of a
+    /// screen), not for a small nudge.
+    public static func showsJumpToLatest(_ geometry: Geometry) -> Bool {
+        !geometry.fitsOnScreen && geometry.distanceFromEnd < -240
+    }
+
     public static func isPinned(afterUserScrollTo geometry: Geometry) -> Bool {
         geometry.isAtEnd
     }

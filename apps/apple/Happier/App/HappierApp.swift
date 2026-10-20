@@ -42,7 +42,7 @@ struct RootView: View {
         Group {
             switch store.phase {
             case .launching:
-                ProgressView()
+                HappierSpinner(size: HappierSpinner.hero)
             case .signedOut:
                 WelcomeView()
             case .ready:

@@ -37,7 +37,7 @@ struct NewSessionView: View {
                 Section("Machine") {
                     if store.machines.isEmpty {
                         HStack {
-                            ProgressView()
+                            HappierSpinner()
                             Text("Loading machines…").foregroundStyle(.secondary)
                         }
                     }
@@ -108,7 +108,7 @@ struct NewSessionView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     if starting {
-                        ProgressView()
+                        HappierSpinner()
                     } else {
                         Button("Start") { start(approve: false) }
                             .disabled(machineId == nil || directory.trimmingCharacters(in: .whitespaces).isEmpty || machine?.active != true)

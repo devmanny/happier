@@ -30,6 +30,10 @@ public struct HTTPClient: Sendable {
         try await send("POST", path, query: [:], body: body)
     }
 
+    public func put(_ path: String, _ body: JSONValue) async throws -> JSONValue {
+        try await send("PUT", path, query: [:], body: body)
+    }
+
     public func patch(_ path: String, _ body: JSONValue) async throws -> JSONValue {
         try await send("PATCH", path, query: [:], body: body)
     }

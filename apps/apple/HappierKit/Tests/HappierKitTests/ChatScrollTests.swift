@@ -41,4 +41,11 @@ import Testing
         #expect(ChatScroll.isPinned(afterUserScrollTo: g(offset: 1200, content: 2026)))
         #expect(!ChatScroll.isPinned(afterUserScrollTo: g(offset: 600, content: 2026)))
     }
+
+    @Test func theJumpToLatestButtonAppearsOnceYouHaveScrolledWellAboveTheEnd() {
+        #expect(!ChatScroll.showsJumpToLatest(g(offset: 1221, content: 2026)))   // at the end
+        #expect(!ChatScroll.showsJumpToLatest(g(offset: 1100, content: 2026)))   // a nudge up
+        #expect(ChatScroll.showsJumpToLatest(g(offset: 800, content: 2026)))     // reading history
+        #expect(!ChatScroll.showsJumpToLatest(g(offset: -288, content: 517, top: 288)))  // fits on screen
+    }
 }

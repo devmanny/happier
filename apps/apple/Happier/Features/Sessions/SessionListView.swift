@@ -7,14 +7,24 @@ struct SessionListView: View {
     @Binding var selection: String?
     @State private var query = ""
     @State private var showAccount = false
+    @State private var showRelay = false
     @State private var showNewSession = false
 
     private var sessions: [Session] {
         let all = store.sessionList
         guard !query.isEmpty else { return all }
-        return all.filter {
+        let matches = all.filter {
             $0.title.localizedCaseInsensitiveContains(query) || ($0.displayPath ?? "").localizedCaseInsensitiveContains(query)
         }
+        return SessionPins.pinnedFirst(matches, pinned: store.pinnedSessionIds, id: \.id)
+    }
+
+    /// Pinned conversations lead the list (each as a top-level row); the rest nest children under
+    /// the session that started them.
+    private var tree: [SessionTreeNode<Session>] {
+        let pinned = Set(store.pinnedSessionIds)
+        let roots = SessionTree.build(sessions, parent: { pinned.contains($0.id) ? nil : $0.parentSessionId }, date: \.sortDate)
+        return SessionPins.pinnedFirst(roots, pinned: store.pinnedSessionIds, id: \.id)
     }
 
     private func row(_ session: Session) -> some View {
@@ -29,6 +39,13 @@ struct SessionListView: View {
                 .tint(.indigo)
             }
             .swipeActions(edge: .leading) {
+                let pinned = store.isPinned(session.id)
+                Button {
+                    Task { await store.setPinned(session.id, !pinned) }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash.fill" : "pin.fill")
+                }
+                .tint(.orange)
                 if session.active {
                     Button {
                         store.requestStop(session.id)
@@ -39,6 +56,10 @@ struct SessionListView: View {
                 }
             }
             .contextMenu {
+                let pinned = store.isPinned(session.id)
+                Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
+                    Task { await store.setPinned(session.id, !pinned) }
+                }
                 if session.active {
                     Button("Stop Session", systemImage: "stop.circle", role: .destructive) { store.requestStop(session.id) }
                 }
@@ -55,7 +76,7 @@ struct SessionListView: View {
             }
             if query.isEmpty {
                 // Sessions started from inside another session nest under it.
-                OutlineGroup(SessionTree.build(sessions, parent: \.parentSessionId, date: \.sortDate), children: \.children) { node in
+                OutlineGroup(tree, children: \.children) { node in
                     row(node.item)
                 }
             } else {
@@ -66,7 +87,7 @@ struct SessionListView: View {
         .overlay {
             if sessions.isEmpty {
                 if store.isLoadingSessions {
-                    ProgressView()
+                    HappierSpinner(size: HappierSpinner.hero)
                 } else if !query.isEmpty {
                     ContentUnavailableView.search(text: query)
                 } else {
@@ -80,7 +101,14 @@ struct SessionListView: View {
         .refreshable { await store.refreshSessions(userInitiated: true) }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                ConnectionDot(connection: store.connection)
+                Button {
+                    showRelay = true
+                } label: {
+                    ConnectionDot(connection: store.connection)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityHint(Text("Shows the relay you're connected to"))
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Account", systemImage: "person.crop.circle") { showAccount = true }
@@ -98,6 +126,13 @@ struct SessionListView: View {
         .sheet(isPresented: $showAccount) {
             NavigationStack { AccountView() }
         }
+        .sheet(isPresented: $showRelay) {
+            NavigationStack { RelaySheet() }
+                .presentationDetents([.medium, .large])
+                #if os(macOS)
+                .frame(minWidth: 420, minHeight: 440)
+                #endif
+        }
     }
 }
 
@@ -113,7 +148,13 @@ struct SessionRow: View {
                     .frame(width: 10, height: 10)
                 SessionAvatar(session: session)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if store.isPinned(session.id) {
+                            Image(systemName: "pin.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .accessibilityLabel(Text("Pinned"))
+                        }
                         Text(session.title)
                             .font(.headline)
                             .lineLimit(1)
@@ -147,7 +188,15 @@ private struct StatusLine: View {
         case .actionRequired:
             line("Waiting for your answer", icon: "questionmark.bubble.fill", color: .orange)
         case .working:
-            line("Working…", icon: "ellipsis", color: .userBubble, effect: true)
+            // The app's loading mark, in the working blue.
+            Label {
+                Text("Working…")
+            } icon: {
+                HappierSpinner(size: HappierSpinner.mini, color: .userBubble)
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(Color.userBubble)
+            .lineLimit(1)
         case .failed:
             line("Turn failed", icon: "exclamationmark.triangle.fill", color: .red)
         case .idle, .offline:
@@ -159,12 +208,11 @@ private struct StatusLine: View {
         }
     }
 
-    private func line(_ text: LocalizedStringKey, icon: String, color: Color, effect: Bool = false) -> some View {
+    private func line(_ text: LocalizedStringKey, icon: String, color: Color) -> some View {
         Label {
             Text(text)
         } icon: {
             Image(systemName: icon)
-                .symbolEffect(.variableColor.iterative, isActive: effect)
         }
         .font(.subheadline.weight(.medium))
         .foregroundStyle(color)

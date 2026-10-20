@@ -27,7 +27,7 @@ struct FolderBrowserView: View {
                 }
                 Section("Locations") {
                     if roots.isEmpty, rootsError == nil {
-                        ProgressView().frame(maxWidth: .infinity)
+                        HappierSpinner().frame(maxWidth: .infinity)
                     }
                     if let rootsError {
                         Text(rootsError).foregroundStyle(.red)
@@ -103,7 +103,7 @@ private struct FolderListView: View {
         }
         .overlay {
             if loading {
-                ProgressView()
+                HappierSpinner(size: HappierSpinner.hero)
             } else if let error {
                 ContentUnavailableView {
                     Label("Can't Open Folder", systemImage: "folder.badge.questionmark")

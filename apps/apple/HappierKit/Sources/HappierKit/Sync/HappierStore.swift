@@ -74,7 +74,10 @@ public final class HappierStore {
     }
 
     public init(server: URL? = nil) {
-        self.server = server ?? UserDefaults.standard.url(forKey: "happier.server") ?? Self.defaultServer
+        let current = server ?? UserDefaults.standard.url(forKey: "happier.server") ?? Self.defaultServer
+        let saved = (UserDefaults.standard.stringArray(forKey: Self.knownServersKey) ?? []).compactMap(URL.init(string:))
+        self.server = current
+        knownServers = RelayList.adding(current, to: saved)
     }
 
     // MARK: - Account
@@ -92,6 +95,7 @@ public final class HappierStore {
         self.server = server
         UserDefaults.standard.set(server, forKey: "happier.server")
         try credentialStore.save(credentials, server: server)
+        rememberServer(server)
         activate(credentials)
     }
 
@@ -101,6 +105,55 @@ public final class HappierStore {
             Task { try? await api.deletePushToken(token) }
         }
         credentialStore.delete(server: server)
+        disconnectAccount()
+    }
+
+    // MARK: - Relays
+
+    private static let knownServersKey = "happier.knownServers"
+    /// Relays this device has used; each keeps its own credentials in the Keychain.
+    public private(set) var knownServers: [URL]
+
+    private func rememberServer(_ url: URL) {
+        knownServers = RelayList.adding(url, to: knownServers)
+        UserDefaults.standard.set(knownServers.map(\.absoluteString), forKey: Self.knownServersKey)
+    }
+
+    /// Whether this device holds a sign-in for `url`.
+    public func hasCredentials(for url: URL) -> Bool {
+        (try? credentialStore.load(server: url)) != nil
+    }
+
+    /// Moves to another relay without signing out of this one: its saved sign-in is used when
+    /// there is one, otherwise the sign-in screen opens on that relay.
+    public func switchServer(to url: URL) {
+        guard RelayList.canonical(url) != RelayList.canonical(server) else { return }
+        let saved = try? credentialStore.load(server: url)
+        if phase == .ready { disconnectAccount() }
+        server = url
+        UserDefaults.standard.set(url, forKey: "happier.server")
+        rememberServer(url)
+        if let saved { activate(saved) } else { phase = .signedOut }
+    }
+
+    public struct RelayStatus: Sendable {
+        public let responseTime: Duration?
+        public let build: String?
+    }
+
+    /// Reachability (round trip to `/health`) and build of a relay, from its public routes.
+    public nonisolated static func relayStatus(_ url: URL) async -> RelayStatus {
+        let http = HTTPClient(baseURL: url)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let healthy = (try? await http.get("/health")) != nil
+        let elapsed = start.duration(to: clock.now)
+        let version = try? await http.get("/v1/version")
+        return RelayStatus(responseTime: healthy ? elapsed : nil, build: version.flatMap(RelayList.build(fromVersion:)))
+    }
+
+    /// Drops the live connection and in-memory state of the current account (credentials stay).
+    private func disconnectAccount() {
         syncTask?.cancel()
         let socket = self.socket
         Task { await socket?.disconnect() }
@@ -114,6 +167,7 @@ public final class HappierStore {
         pendingQueues = [:]
         draftSeeds = [:]
         openRequest = nil
+        pinnedSessionIds = []
         machines = []
         openSessionIds = []
         loadTasks.values.forEach { $0.cancel() }
@@ -169,6 +223,7 @@ public final class HappierStore {
             undecryptableSessionCount = failures
             sessions = next
             hasLoadedSessions = true
+            Task { await refreshPinnedSessions() }
             Task { await handlePendingPushTap() }
             for (id, session) in next where transcripts[id] != nil {
                 transcripts[id]?.apply(agentState: session.agentState)
@@ -806,6 +861,35 @@ public final class HappierStore {
         public let sessionId: String
         public let thenArchive: Bool
         public var id: String { sessionId }
+    }
+
+    // MARK: - Pinned conversations
+
+    /// Pinned session ids in pin order (shared with the official app through the account).
+    public private(set) var pinnedSessionIds: [String] = []
+
+    private func refreshPinnedSessions() async {
+        guard let api else { return }
+        do {
+            pinnedSessionIds = SessionPins.orderedIds(fromSnapshot: try await api.sessionOrganizationPins())
+        } catch {
+            logBackground(error, "pinned sessions")
+        }
+    }
+
+    public func isPinned(_ sessionId: String) -> Bool { pinnedSessionIds.contains(sessionId) }
+
+    /// Pins or unpins right away; reverts if the server refuses.
+    public func setPinned(_ sessionId: String, _ pinned: Bool) async {
+        guard let api, isPinned(sessionId) != pinned else { return }
+        let previous = pinnedSessionIds
+        if pinned { pinnedSessionIds.append(sessionId) } else { pinnedSessionIds.removeAll { $0 == sessionId } }
+        do {
+            try await api.setSessionPin(sessionId, pinned: pinned)
+        } catch {
+            pinnedSessionIds = previous
+            report(error)
+        }
     }
 
     // MARK: - Runner on an older CLI

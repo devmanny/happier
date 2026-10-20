@@ -12,6 +12,10 @@ struct WelcomeView: View {
         var id: Self { self }
     }
 
+    private var signedInRelays: [URL] {
+        store.knownServers.filter { RelayList.canonical($0) != RelayList.canonical(store.server) && store.hasCredentials(for: $0) }
+    }
+
     /// nil while the typed address is invalid; never silently replaced by another server.
     private var server: URL? { ServerAddress.normalize(serverText) }
 
@@ -82,6 +86,17 @@ struct WelcomeView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
+
+                // Relays this device is still signed in to (after switching to a new one).
+                ForEach(signedInRelays, id: \.absoluteString) { url in
+                    Button {
+                        store.switchServer(to: url)
+                    } label: {
+                        Label("Back to \(url.host() ?? url.absoluteString)", systemImage: "arrow.uturn.backward")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                }
             }
             .frame(maxWidth: 380)
         }
