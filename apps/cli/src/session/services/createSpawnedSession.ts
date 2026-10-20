@@ -138,6 +138,11 @@ export type CreateSpawnedSessionParams = Readonly<{
   connectedServiceChildLaunch?: ConnectedServiceChildLaunchContext;
   /** Resolve an already-submitted launch attempt without sending another spawn. */
   resumeOnly?: boolean;
+  /**
+   * The session that asked for this one (`session.spawn_new` from inside a session).
+   * Recorded as `spawnedBySessionV1` so clients can nest the child under it.
+   */
+  parentSessionId?: string;
   /** In-daemon transport for an ingress that must not self-call over HTTP. */
   directTransport?: DirectSpawnedSessionTransport;
   /** Tracked-operation cooperative cancellation; never kills a spawned process. */
@@ -255,6 +260,12 @@ function readNonBlankString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+/** Lineage for a child started from inside another session (not a fork: forks are clones). */
+function spawnedBySessionMetadata(parentSessionId: unknown): Record<string, unknown> {
+  const id = readNonBlankString(parentSessionId);
+  return id ? { spawnedBySessionV1: { v: 1, parentSessionId: id, createdAtMs: Date.now() } } : {};
+}
+
 /** Non-blank check that preserves the producer's exact bytes (messages, codes). */
 function readNonBlankExactString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
@@ -351,6 +362,7 @@ async function createReplaySeededSpawnedSession(args: Readonly<{
       flavor: replaySeededCreation.agentId,
       ...replaySeededCreation.metadata,
       ...connectedServiceChildLaunch.metadata,
+      ...spawnedBySessionMetadata(params.parentSessionId),
     },
     agentState: null,
   });
@@ -699,7 +711,8 @@ export async function createSpawnedSession(
 
   const normalizedTitle = typeof params.title === 'string' ? params.title.trim() : '';
   const normalizedTag = typeof params.tag === 'string' ? params.tag.trim() : '';
-  if (normalizedTitle || normalizedTag) {
+  const parentSessionId = readNonBlankString(params.parentSessionId);
+  if (normalizedTitle || normalizedTag || parentSessionId) {
     await updateSessionMetadataWithRetry({
       token: params.credentials.token,
       credentials: params.credentials,
@@ -708,6 +721,7 @@ export async function createSpawnedSession(
       updater: (metadata) => ({
         ...metadata,
         ...(normalizedTag ? { tag: normalizedTag } : {}),
+        ...(metadata.spawnedBySessionV1 === undefined ? spawnedBySessionMetadata(parentSessionId) : {}),
         ...(normalizedTitle
           ? {
               summary: {

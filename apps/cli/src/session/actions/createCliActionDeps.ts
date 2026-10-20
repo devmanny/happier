@@ -1568,6 +1568,7 @@ export function createCliActionDeps(params: Readonly<{
       try {
         created = await createSpawnedSession({
           ...normalized.createParams,
+          parentSessionId: params.sessionId,
           ...(typeof approvedNewDirectoryCreation === 'boolean' ? { approvedNewDirectoryCreation } : {}),
           ...(pendingFirstInput ? { pendingFirstInput } : {}),
           ...(resume ? { resume } : {}),
