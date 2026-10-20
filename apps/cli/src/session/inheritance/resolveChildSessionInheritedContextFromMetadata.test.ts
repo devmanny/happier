@@ -94,6 +94,28 @@ describe('resolveChildSessionInheritedContextFromMetadata', () => {
     expect('profileId' in inherited.metadata).toBe(false);
   });
 
+  it('inherits whole-millisecond timestamps even when a client stored fractional ones', () => {
+    // The spawn request schema requires integer timestamps; older native clients wrote fractions.
+    const inherited = resolveChildSessionInheritedContextFromMetadata({
+      metadata: {
+        permissionMode: 'yolo',
+        permissionModeUpdatedAt: 1792400000123.456,
+        modelOverrideV1: { v: 1, updatedAt: 1792400000200.9, modelId: 'gpt-test' },
+        sessionModeOverrideV1: { v: 1, updatedAt: 1792400000300.5, modeId: 'plan' },
+        connectedServices: { v: 1, bindingsByServiceId: {} },
+        connectedServicesUpdatedAt: 1792400000400.25,
+      },
+      providerId: 'codex',
+      fields: CHILD_SESSION_INHERITANCE_FIELD_SETS.fork,
+    });
+
+    expect(inherited.spawn.permissionModeUpdatedAt).toBe(1792400000123);
+    expect(inherited.metadata.permissionModeUpdatedAt).toBe(1792400000123);
+    expect(inherited.spawn.modelUpdatedAt).toBe(1792400000200);
+    expect(inherited.spawn.agentModeUpdatedAt).toBe(1792400000300);
+    expect(inherited.spawn.connectedServicesUpdatedAt).toBe(1792400000400);
+  });
+
   it('inherits session-agent spawn mcpSelectionV1 and standalone profileId from metadata with sources', () => {
     const inherited = resolveChildSessionInheritedContextFromMetadata({
       metadata: {
