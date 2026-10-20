@@ -664,13 +664,21 @@ public final class HappierStore {
     }
 
     /// Default `attachmentsUploadsMaxFileBytes` of the official client (25 MiB).
-    public static let maxAttachmentBytes = 25 * 1024 * 1024
+    /// Matches the daemon's `HAPPIER_FILES_UPLOAD_MAX_FILE_BYTES` on the machines this app talks to
+    /// (raised from its 50 MB default to 500 MB on the Mac mini's service).
+    public nonisolated static let maxAttachmentBytes = 500 * 1024 * 1024
+
+    /// Splits picked or dropped files into ones that can be uploaded and the names of those over the limit.
+    public nonisolated static func screenAttachments(_ drafts: [AttachmentDraft]) -> (accepted: [AttachmentDraft], tooLarge: [String]) {
+        (drafts.filter { $0.data.count <= maxAttachmentBytes }, drafts.filter { $0.data.count > maxAttachmentBytes }.map(\.name))
+    }
 
     /// Uploads one file to the session's machine through the daemon's bulk-transfer RPCs
     /// (`daemonSessionAttachments.ts`); the daemon applies its default attachment location.
     private func upload(_ draft: AttachmentDraft, to sessionId: String, messageLocalId: String) async throws -> UploadedAttachment {
         guard draft.data.count <= Self.maxAttachmentBytes else {
-            throw RPCError(message: "\(draft.name) is larger than 25 MB.", code: "attachment_too_large")
+            let limit = ByteCountFormatter.string(fromByteCount: Int64(Self.maxAttachmentBytes), countStyle: .file)
+            throw RPCError(message: "\(draft.name) is larger than \(limit).", code: "attachment_too_large")
         }
         let initResponse = try await sessionRPC(sessionId, method: "daemon.bulkTransfer.upload.init", params: [
             "t": "session_attachment_upload_v1",
@@ -745,12 +753,87 @@ public final class HappierStore {
         } catch { report(error) }
     }
 
+    /// A stop the user has to confirm, optionally followed by archiving.
+    public struct StopRequest: Identifiable, Equatable, Sendable {
+        public let sessionId: String
+        public let thenArchive: Bool
+        public var id: String { sessionId }
+    }
+
+    /// Set when a stop needs confirmation; the UI asks and calls `confirmStop`.
+    public var stopRequest: StopRequest?
+
+    /// Archives an idle session; a running one is stopped first, after confirmation
+    /// (`executeArchiveAction` in `sessionActionExecution.ts`).
     public func archive(_ sessionId: String) async {
         guard let api else { return }
+        if sessions[sessionId]?.active == true {
+            stopRequest = StopRequest(sessionId: sessionId, thenArchive: true)
+            return
+        }
         do {
             try await api.archive(sessionId: sessionId)
             sessions[sessionId]?.archivedAt = .now
+        } catch let error as HTTPClient.ServerError where error.status == 409 {
+            // The server can know the session is active before this client does.
+            stopRequest = StopRequest(sessionId: sessionId, thenArchive: true)
         } catch { report(error) }
+    }
+
+    public func requestStop(_ sessionId: String) {
+        stopRequest = StopRequest(sessionId: sessionId, thenArchive: false)
+    }
+
+    public func confirmStop(_ request: StopRequest) async {
+        guard await stop(request.sessionId), request.thenArchive, let api else { return }
+        // Archive succeeds once the server sees the session inactive (`sessionStopArchiveFlow.ts`).
+        let deadline = ContinuousClock.now + .seconds(75)
+        while true {
+            do {
+                try await api.archive(sessionId: request.sessionId)
+                sessions[request.sessionId]?.archivedAt = .now
+                return
+            } catch let error as HTTPClient.ServerError where error.status == 409 && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(200))
+            } catch {
+                report(error)
+                return
+            }
+        }
+    }
+
+    /// Stops the session's process: through its daemon, else by asking the runner to exit.
+    private func stop(_ sessionId: String) async -> Bool {
+        var outcome = SessionStop.Outcome.fallback
+        if let machineId = sessions[sessionId]?.machineId {
+            do {
+                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)]))
+            } catch is RPCError {
+                outcome = .fallback
+            } catch {
+                report(error)
+                return false
+            }
+        }
+        if outcome == .fallback {
+            do {
+                outcome = SessionStop.runnerOutcome(try await sessionRPC(sessionId, method: "killSession", params: [:]))
+            } catch let error as RPCError where RPCErrorCodes.unavailable.contains(error.code ?? "") {
+                outcome = .failed(String(localized: "The session's machine isn't reachable right now. Try again when it's online."))
+            } catch {
+                report(error)
+                return false
+            }
+        }
+        switch outcome {
+        case .stopped, .requested:
+            return true
+        case .failed(let message):
+            lastError = message
+            return false
+        case .fallback:
+            return false
+        }
     }
 
     public func controls(for sessionId: String) -> SessionControls? {
@@ -833,44 +916,28 @@ public final class HappierStore {
         public let deviceToken: Data
         public let development: Bool
         public let bundleId: String
-        /// Expo project whose APNs credentials deliver to this bundle id.
-        public let expoProjectId: String
 
-        public init(deviceToken: Data, development: Bool, bundleId: String, expoProjectId: String) {
+        public init(deviceToken: Data, development: Bool, bundleId: String) {
             self.deviceToken = deviceToken
             self.development = development
             self.bundleId = bundleId
-            self.expoProjectId = expoProjectId
         }
     }
 
-    private static let pushTokenKey = "happier.expoPushToken"
-    private static let installationIdKey = "happier.installationId"
+    private static let pushTokenKey = "happier.pushToken"
 
     public func setPushDevice(_ device: PushDevice) {
         pushDevice = device
         Task { await registerPushToken() }
     }
 
-    /// Exchanges the APNs token for an Expo token and registers it with the account (idempotent upsert).
+    /// Registers this device's APNs token with the account (idempotent upsert).
     private func registerPushToken() async {
         guard let device = pushDevice, let api else { return }
-        let defaults = UserDefaults.standard
-        let installationId = defaults.string(forKey: Self.installationIdKey).flatMap(UUID.init(uuidString:)) ?? {
-            let id = UUID()
-            defaults.set(id.uuidString, forKey: Self.installationIdKey)
-            return id
-        }()
+        let token = PushNotifications.apnsToken(deviceToken: device.deviceToken, development: device.development, bundleId: device.bundleId)
         do {
-            let expo = HTTPClient(baseURL: URL(string: "https://exp.host")!)
-            let response = try await expo.post("/--/api/v2/push/getExpoPushToken", PushNotifications.expoTokenRequest(
-                deviceToken: device.deviceToken, installationId: installationId, development: device.development,
-                bundleId: device.bundleId, projectId: device.expoProjectId))
-            guard let token = PushNotifications.expoToken(from: response) else {
-                throw HTTPClient.ServerError(status: 200, path: "getExpoPushToken", body: response)
-            }
             try await api.registerPushToken(token, clientServerUrl: server)
-            defaults.set(token, forKey: Self.pushTokenKey)
+            UserDefaults.standard.set(token, forKey: Self.pushTokenKey)
             log.notice("push token registered (\(device.development ? "sandbox" : "production", privacy: .public))")
         } catch {
             logBackground(error, "push registration")

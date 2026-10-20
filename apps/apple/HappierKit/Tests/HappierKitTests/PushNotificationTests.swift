@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import HappierKit
 
-/// Mirrors `expo-notifications` `getExpoPushTokenAsync` and the UI's `notificationRouting.ts`.
+/// Mirrors the CLI's `apnsPush.ts` token format and the UI's `notificationRouting.ts`.
 @Suite struct PushNotificationTests {
     private func profile(_ entitlements: String) -> Data {
         // A provisioning profile is a CMS envelope around an XML plist.
@@ -26,20 +26,15 @@ import Testing
         #expect(!PushNotifications.usesDevelopmentAPNs(provisioningProfile: nil))
     }
 
-    @Test func expoTokenRequestMatchesExpoNotifications() throws {
-        let installation = UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF")!
-        let body = PushNotifications.expoTokenRequest(
-            deviceToken: Data([0x0a, 0xff, 0x01]), installationId: installation, development: true,
-            bundleId: "com.devmanny.happier", projectId: "proj-1")
-        #expect(body == [
-            "type": "apns", "deviceId": "6f9619ff-8b86-d011-b42d-00c04fc964ff", "development": true,
-            "appId": "com.devmanny.happier", "deviceToken": "0aff01", "projectId": "proj-1",
-        ])
-        #expect(PushNotifications.expoToken(from: ["data": ["expoPushToken": "ExponentPushToken[abc]"]]) == "ExponentPushToken[abc]")
-        #expect(PushNotifications.expoToken(from: ["data": [:]]) == nil)
+    @Test func registersTheAPNsTokenForTheCLIToDeliverDirectly() {
+        // Parsed by `parseApnsPushToken` in `apps/cli/src/api/apnsPush.ts`.
+        #expect(PushNotifications.apnsToken(deviceToken: Data([0x0a, 0xff, 0x01]), development: true, bundleId: "com.devmanny.happier")
+            == "apns:sandbox:com.devmanny.happier:0aff01")
+        #expect(PushNotifications.apnsToken(deviceToken: Data([0xab]), development: false, bundleId: "com.devmanny.happier")
+            == "apns:production:com.devmanny.happier:ab")
     }
 
-    @Test func defaultTapOpensTheSessionFromExpoBody() {
+    @Test func defaultTapOpensTheSessionFromPushBody() {
         let userInfo: JSONValue = ["aps": ["alert": "hi"], "body": ["sessionId": "s1", "serverUrl": "https://h.example"]]
         let tap = PushNotifications.tap(userInfo: userInfo, action: PushNotifications.defaultAction)
         #expect(tap == PushTap(sessionId: "s1", permission: nil))

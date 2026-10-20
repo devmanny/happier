@@ -7,6 +7,8 @@ import SwiftUI
 struct Composer: View {
     let sessionId: String
     @Binding var text: String
+    /// Owned by the chat so files dropped anywhere on the conversation land here too.
+    @Binding var attachments: [AttachmentDraft]
     let working: Bool
     let onSend: ([AttachmentDraft]) -> Void
     let onStop: () -> Void
@@ -14,7 +16,6 @@ struct Composer: View {
     @Environment(HappierStore.self) private var store
     @State private var sheet: SheetKind?
     @State private var dictation = Dictation()
-    @State private var attachments: [AttachmentDraft] = []
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -29,14 +30,8 @@ struct Composer: View {
     private var controls: SessionControls? { store.controls(for: sessionId) }
     private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
 
-    /// Adds picked files, rejecting ones over the upload limit up front.
     private func add(_ drafts: [AttachmentDraft]) {
-        let tooLarge = drafts.filter { $0.data.count > HappierStore.maxAttachmentBytes }
-        if !tooLarge.isEmpty {
-            store.lastError = String(localized: "\(tooLarge.map(\.name).joined(separator: ", ")) is larger than 25 MB.")
-        }
-        let accepted = drafts.filter { $0.data.count <= HappierStore.maxAttachmentBytes }
-        withAnimation(.smooth) { attachments += accepted }
+        AttachmentLoader.add(drafts, to: $attachments, store: store)
     }
 
     private func send() {

@@ -12,9 +12,9 @@ enum AttachmentLoader {
         for (offset, item) in items.enumerated() {
             if let type = item.supportedContentTypes.first(where: { $0.conforms(to: .movie) }) {
                 // Videos arrive as a file (works for large and iCloud-backed assets).
+                // Mapped, not loaded: a long video is read chunk by chunk while it uploads.
                 guard let movie = try? await item.loadTransferable(type: PickedMovie.self),
-                      let data = try? Data(contentsOf: movie.url) else { continue }
-                try? FileManager.default.removeItem(at: movie.url)
+                      let data = try? Data(contentsOf: movie.url, options: .alwaysMapped) else { continue }
                 let ext = movie.url.pathExtension.isEmpty ? (type.preferredFilenameExtension ?? "mov") : movie.url.pathExtension
                 let mime = UTType(filenameExtension: ext)?.preferredMIMEType ?? type.preferredMIMEType ?? "video/quicktime"
                 drafts.append(AttachmentDraft(name: "video-\(stamp)-\(offset + 1).\(ext)", mimeType: mime, data: data))
@@ -23,6 +23,17 @@ enum AttachmentLoader {
             }
         }
         return drafts
+    }
+
+    /// Adds picked or dropped files, turning away ones over the upload limit up front.
+    @MainActor
+    static func add(_ drafts: [AttachmentDraft], to attachments: Binding<[AttachmentDraft]>, store: HappierStore) {
+        let screened = HappierStore.screenAttachments(drafts)
+        if !screened.tooLarge.isEmpty {
+            let limit = ByteCountFormatter.string(fromByteCount: Int64(HappierStore.maxAttachmentBytes), countStyle: .file)
+            store.lastError = String(localized: "\(screened.tooLarge.joined(separator: ", ")) is larger than \(limit).")
+        }
+        withAnimation(.smooth) { attachments.wrappedValue += screened.accepted }
     }
 
     private static var stamp: String {
@@ -39,7 +50,7 @@ enum AttachmentLoader {
     static func file(at url: URL) -> AttachmentDraft? {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
         let type = UTType(filenameExtension: url.pathExtension)
         return AttachmentDraft(name: url.lastPathComponent, mimeType: type?.preferredMIMEType, data: data)
     }
@@ -71,6 +82,24 @@ enum AttachmentLoader {
               let rep = NSBitmapImageRep(data: tiff) else { return nil }
         return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
         #endif
+    }
+}
+
+/// A file or image dragged onto the conversation: a screenshot thumbnail, a photo from another app,
+/// or a file from Finder/Files.
+struct DroppedAttachment: Transferable {
+    let draft: AttachmentDraft
+
+    static var transferRepresentation: some TransferRepresentation {
+        // Files keep their name and type (a screenshot arrives as "Screenshot ….png").
+        FileRepresentation(importedContentType: .item) { received in
+            guard let draft = AttachmentLoader.file(at: received.file) else { throw CocoaError(.fileReadUnknown) }
+            return DroppedAttachment(draft: draft)
+        }
+        // Image data without a file behind it.
+        DataRepresentation(importedContentType: .image) { data in
+            DroppedAttachment(draft: AttachmentLoader.photo(data))
+        }
     }
 }
 

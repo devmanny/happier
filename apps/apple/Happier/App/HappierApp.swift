@@ -92,6 +92,19 @@ struct MainView: View {
             selection = nil
             restoredSessionId = nil
         }
+        .confirmationDialog(
+            store.stopRequest?.thenArchive == true ? "Stop and archive this session?" : "Stop this session?",
+            isPresented: Binding(get: { store.stopRequest != nil }, set: { if !$0 { store.stopRequest = nil } }),
+            titleVisibility: .visible,
+            presenting: store.stopRequest
+        ) { request in
+            Button(request.thenArchive ? "Stop and Archive" : "Stop Session", role: .destructive) {
+                Task { await store.confirmStop(request) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The agent's process on the machine will be stopped.")
+        }
         .alert("Something went wrong", isPresented: Binding(
             get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })
         ) {

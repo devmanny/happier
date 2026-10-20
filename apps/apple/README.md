@@ -38,16 +38,19 @@ Each Swift module follows the TypeScript owner it mirrors; check that owner when
 
 ## Push notifications
 
-The CLI sends notifications through the Expo push service to tokens registered at
-`/v1/push-tokens`. The app converts its APNs token into an Expo token for its own Expo project,
-so pushes need:
+The CLI sends notifications to the tokens registered at `/v1/push-tokens`. This app registers
+`apns:<sandbox|production>:<bundle id>:<device token>`, which the CLI delivers directly through
+APNs (`apps/cli/src/api/apnsPush.ts`); Expo tokens from the React Native app still go through Expo.
 
-1. An Expo project (expo.dev) with an iOS APNs key (`.p8`) of the signing team for bundle id
-   `com.devmanny.happier` under Credentials. The same key also delivers to the Mac app.
-2. That project's id in `HAPPIER_EXPO_PROJECT_ID` in `project.yml`. With it empty, the app skips
-   registration.
+Each machine that runs sessions needs an APNs auth key of the signing team:
 
-Development-signed builds register as APNs sandbox tokens; Developer ID/App Store builds as production.
+```sh
+# ~/.happier/AuthKey.p8 is the key downloaded from developer.apple.com → Keys (APNs enabled)
+echo '{"keyId":"<KEY ID>","teamId":"DPF7ZLTLN2","keyPath":"AuthKey.p8"}' > ~/.happier/apns.json
+```
+
+Without it the CLI skips `apns:` tokens. Development-signed builds register sandbox tokens;
+Developer ID/App Store builds production ones.
 
 ## Current scope
 

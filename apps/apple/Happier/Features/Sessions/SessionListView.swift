@@ -17,6 +17,35 @@ struct SessionListView: View {
         }
     }
 
+    private func row(_ session: Session) -> some View {
+        SessionRow(session: session)
+            .tag(session.id)
+            .swipeActions(edge: .trailing) {
+                Button {
+                    Task { await store.archive(session.id) }
+                } label: {
+                    Label("Archive", systemImage: "archivebox")
+                }
+                .tint(.indigo)
+            }
+            .swipeActions(edge: .leading) {
+                if session.active {
+                    Button {
+                        store.requestStop(session.id)
+                    } label: {
+                        Label("Stop", systemImage: "stop.circle")
+                    }
+                    .tint(.red)
+                }
+            }
+            .contextMenu {
+                if session.active {
+                    Button("Stop Session", systemImage: "stop.circle", role: .destructive) { store.requestStop(session.id) }
+                }
+                Button("Archive", systemImage: "archivebox") { Task { await store.archive(session.id) } }
+            }
+    }
+
     var body: some View {
         List(selection: $selection) {
             if store.undecryptableSessionCount > 0 {
@@ -24,20 +53,13 @@ struct SessionListView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            ForEach(sessions) { session in
-                SessionRow(session: session)
-                    .tag(session.id)
-                    .swipeActions(edge: .trailing) {
-                        Button {
-                            Task { await store.archive(session.id) }
-                        } label: {
-                            Label("Archive", systemImage: "archivebox")
-                        }
-                        .tint(.indigo)
-                    }
-                    .contextMenu {
-                        Button("Archive", systemImage: "archivebox") { Task { await store.archive(session.id) } }
-                    }
+            if query.isEmpty {
+                // Sessions started from inside another session nest under it.
+                OutlineGroup(SessionTree.build(sessions, parent: \.parentSessionId, date: \.sortDate), children: \.children) { node in
+                    row(node.item)
+                }
+            } else {
+                ForEach(sessions) { session in row(session) }
             }
         }
         .listStyle(.plain)

@@ -141,6 +141,8 @@ public struct Session: Identifiable, Sendable, Equatable {
 
     public var path: String? { metadata["path"]?.stringValue }
     public var machineId: String? { metadata["machineId"]?.stringValue }
+    /// The session this one was started from (`spawnedBySessionV1`). Forks are clones, not children.
+    public var parentSessionId: String? { metadata["spawnedBySessionV1"]?["parentSessionId"]?.stringValue }
     public var host: String? { metadata["host"]?.stringValue }
     public var agentId: String? { Agent.id(fromFlavor: metadata["flavor"]?.stringValue) }
     public var isUserFacing: Bool { metadata["systemSessionV1"]?["hidden"]?.boolValue != true && archivedAt == nil }

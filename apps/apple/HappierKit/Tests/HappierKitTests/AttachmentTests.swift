@@ -59,4 +59,12 @@ import Testing
         #expect(user.text == "mira")
         #expect(user.attachments == ["a.png"])
     }
+
+    @Test func draftsOverTheUploadLimitAreTurnedAwayUpFront() {
+        let small = AttachmentDraft(name: "shot.png", mimeType: "image/png", data: Data(count: 10))
+        let large = AttachmentDraft(name: "movie.mov", mimeType: "video/quicktime", data: Data(count: HappierStore.maxAttachmentBytes + 1))
+        let screened = HappierStore.screenAttachments([small, large])
+        #expect(screened.accepted.map(\.name) == ["shot.png"])
+        #expect(screened.tooLarge == ["movie.mov"])
+    }
 }

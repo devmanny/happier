@@ -21,6 +21,17 @@ import Testing
         return .object(row)
     }
 
+    @Test func parentComesFromSpawnedBySessionNotFromForks() throws {
+        let child = try Session(row: e2eeRow(metadata: [
+            "path": "/a", "spawnedBySessionV1": ["v": 1, "parentSessionId": "p1", "createdAtMs": 1],
+        ]), keys: keys)
+        #expect(child.parentSessionId == "p1")
+        let fork = try Session(row: e2eeRow(metadata: [
+            "path": "/a", "forkV1": ["v": 1, "parentSessionId": "p1", "parentCutoffSeqInclusive": 3, "createdAtMs": 1, "strategy": "auto"],
+        ]), keys: keys)
+        #expect(fork.parentSessionId == nil)
+    }
+
     @Test func decryptsE2EESessionAndDerivesDisplayFields() throws {
         let session = try Session(row: e2eeRow(metadata: [
             "path": "/Users/manny/Projects/app", "homeDir": "/Users/manny", "flavor": "codex-acp", "machineId": "m1",
@@ -90,3 +101,4 @@ import Testing
         #expect(throws: (any Error).self) { try TranscriptMessage(row: ["id": "m", "seq": 6, "createdAt": 1, "content": ["t": "weird"]], session: session) }
     }
 }
+

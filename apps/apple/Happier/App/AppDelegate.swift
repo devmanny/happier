@@ -43,18 +43,14 @@ final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
     ]
 
     fileprivate func didRegister(deviceToken: Data) {
-        let projectId = Bundle.main.object(forInfoDictionaryKey: "HappierExpoProjectId") as? String ?? ""
-        guard !projectId.isEmpty, let bundleId = Bundle.main.bundleIdentifier else {
-            log.notice("push disabled: no Expo project id configured")
-            return
-        }
+        guard let bundleId = Bundle.main.bundleIdentifier else { return }
         #if os(iOS)
         let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
         #else
         let profileURL: URL? = Bundle.main.bundleURL.appending(path: "Contents/embedded.provisionprofile")
         #endif
         let development = PushNotifications.usesDevelopmentAPNs(provisioningProfile: profileURL.flatMap { try? Data(contentsOf: $0) })
-        store.setPushDevice(.init(deviceToken: deviceToken, development: development, bundleId: bundleId, expoProjectId: projectId))
+        store.setPushDevice(.init(deviceToken: deviceToken, development: development, bundleId: bundleId))
     }
 
     fileprivate func didFailToRegister(_ error: Error) {

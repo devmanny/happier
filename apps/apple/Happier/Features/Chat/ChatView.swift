@@ -5,7 +5,13 @@ struct ChatView: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store
     @State private var draft = ""
-    @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var attachments: [AttachmentDraft] = []
+    @State private var dropTargeted = false
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+    /// Follow the newest message until the user drags away from it (`ChatScroll`).
+    @State private var pinnedToEnd = true
+    @State private var followScheduled = false
+    @State private var lastGeometry: ChatScroll.Geometry?
     /// Selected transcript item ids; nil when not in selection mode.
     @State private var selected: Set<String>?
     @State private var choosingDestination = false
@@ -96,14 +102,36 @@ struct ChatView: View {
             .scrollPosition($scrollPosition)
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            .onChange(of: items.isEmpty) { _, isEmpty in
-                // First load: land on the concrete bottom anchor so the lazy stack renders the
-                // latest messages instead of an estimated (blank) region.
-                if !isEmpty { scrollToBottom(animated: false) }
+            .onChange(of: items.isEmpty, initial: true) { _, isEmpty in
+                // On open (including an already-loaded transcript) land on the concrete bottom
+                // anchor: it renders the latest messages instead of an estimated (blank) region and
+                // settles the horizontal offset on the content margin.
+                if !isEmpty {
+                    pinnedToEnd = true
+                    scrollToBottom(animated: false)
+                }
+            }
+            .onScrollGeometryChange(for: ChatScroll.Geometry.self, of: Self.chatGeometry) { _, new in
+                lastGeometry = new
+                // Rows measured at their real height, typing dots, a streamed reply or a taller
+                // composer moved the end: a pinned chat goes back to it.
+                guard ChatScroll.shouldFollow(pinned: pinnedToEnd, geometry: new), !followScheduled else { return }
+                followScheduled = true
+                scrollToBottom(animated: false)
+            }
+            .onScrollPhaseChange { old, new, context in
+                // Only the user's own drags pin or unpin; programmatic scrolls don't.
+                if new == .interacting { pinnedToEnd = false }
+                if new == .idle, old == .interacting || old == .decelerating {
+                    pinnedToEnd = ChatScroll.isPinned(afterUserScrollTo: Self.chatGeometry(context.geometry))
+                }
             }
             .onChange(of: items.last?.id) { _, _ in
                 // Your own message just landed (optimistic bubble): follow it to the bottom.
-                if case .userText(let message)? = items.last, message.isPending { scrollToBottom() }
+                if case .userText(let message)? = items.last, message.isPending {
+                    pinnedToEnd = true
+                    scrollToBottom()
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -129,10 +157,11 @@ struct ChatView: View {
                         }
                     }
                 } else {
-                Composer(sessionId: sessionId, text: $draft, working: working) { attachments in
+                Composer(sessionId: sessionId, text: $draft, attachments: $attachments, working: working) { attachments in
                     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty || !attachments.isEmpty else { return }
                     draft = ""
+                    pinnedToEnd = true
                     scrollToBottom()
                     Task { await store.send(text, attachments: attachments, to: sessionId) }
                 } onStop: {
@@ -163,6 +192,30 @@ struct ChatView: View {
                 } else if store.loadingTranscripts.contains(sessionId) {
                     ProgressView()
                 }
+            }
+        }
+        // Drop a screenshot thumbnail, a photo or a file anywhere on the conversation to attach it.
+        .dropDestination(for: DroppedAttachment.self) { items, _ in
+            AttachmentLoader.add(items.map(\.draft), to: $attachments, store: store)
+            return !items.isEmpty
+        } isTargeted: { targeted in
+            withAnimation(.smooth(duration: 0.2)) { dropTargeted = targeted }
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(Color.userBubble, style: StrokeStyle(lineWidth: 2.5, dash: [10, 6]))
+                    .background(Color.userBubble.opacity(0.08), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .overlay {
+                        Label("Drop to attach", systemImage: "paperclip")
+                            .font(.headline)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .glassEffect()
+                    }
+                    .padding(10)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
         }
         .environment(\.beginMessageSelection) { id in withAnimation(.smooth) { selected = [id] } }
@@ -217,12 +270,21 @@ struct ChatView: View {
     private func scrollToBottom(animated: Bool = true) {
         Task { @MainActor in
             await Task.yield()
+            defer { followScheduled = false }
+            // A chat that fits on screen already rests on its end (bottom-anchored); an id-anchored
+            // scroll would push the last message under the composer.
+            if lastGeometry?.fitsOnScreen == true { return }
             if animated {
                 withAnimation(.smooth(duration: 0.3)) { scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom) }
             } else {
                 scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
             }
         }
+    }
+
+    private static func chatGeometry(_ g: ScrollGeometry) -> ChatScroll.Geometry {
+        ChatScroll.Geometry(offsetY: g.contentOffset.y, containerHeight: g.containerSize.height,
+                            contentHeight: g.contentSize.height, topInset: g.contentInsets.top)
     }
 
     private static let bottomAnchor = "chat-bottom"
@@ -265,6 +327,7 @@ struct ChatView: View {
                             ForEach(pinned, id: \.seq) { pin in
                                 if let item = items.first(where: { $0.seq == pin.seq }) {
                                     Button(item.previewText) {
+                                        pinnedToEnd = false
                                         withAnimation(.smooth) { scrollPosition.scrollTo(id: item.id, anchor: .center) }
                                     }
                                 }
@@ -273,6 +336,9 @@ struct ChatView: View {
                     }
                     Divider()
                     Button("Stop Agent", systemImage: "stop.circle") { Task { await store.abort(sessionId) } }
+                    if session.active {
+                        Button("Stop Session", systemImage: "power", role: .destructive) { store.requestStop(sessionId) }
+                    }
                     Button("Archive", systemImage: "archivebox") { Task { await store.archive(sessionId) } }
                 }
             } label: {

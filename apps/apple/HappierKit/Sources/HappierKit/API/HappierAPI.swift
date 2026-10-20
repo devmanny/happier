@@ -115,7 +115,7 @@ public struct HappierAPI: Sendable {
     }
 
     public func deletePushToken(_ token: String) async throws {
-        // `appending(path:)` percent-encodes the brackets of `ExponentPushToken[…]`.
+        // `appending(path:)` percent-encodes whatever the token needs (`ExponentPushToken[…]`, `apns:…`).
         _ = try await http.delete("/v1/push-tokens/\(token)")
     }
 }

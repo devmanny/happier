@@ -12,9 +12,8 @@ public struct PushTap: Equatable, Sendable {
     public let permission: Permission?
 }
 
-/// Push via the Expo push service, which is how the CLI notifies devices
-/// (`apps/cli/src/api/pushNotifications.ts`): the APNs device token is exchanged for an Expo
-/// token (`expo-notifications` `getExpoPushTokenAsync`) and registered at `POST /v1/push-tokens`.
+/// Push notifications sent by the CLI (`apps/cli/src/api/pushNotifications.ts`). The app registers
+/// its APNs token at `POST /v1/push-tokens`; the CLI delivers to it directly through APNs.
 public enum PushNotifications {
     /// `PUSH_NOTIFICATION_CATEGORY_IDS` / `PUSH_NOTIFICATION_ACTION_IDS` (`@happier-dev/protocol`).
     public enum Category {
@@ -31,9 +30,7 @@ public enum PushNotifications {
     /// `UNNotificationDefaultActionIdentifier` (kept here so parsing stays platform-free).
     public static let defaultAction = "com.apple.UNNotificationDefaultActionIdentifier"
 
-    public static let expoTokenURL = URL(string: "https://exp.host/--/api/v2/push/getExpoPushToken")!
-
-    /// Development-signed builds talk to the APNs sandbox; Expo must be told so it routes there.
+    /// Development-signed builds talk to the APNs sandbox; the CLI must send there.
     public static func usesDevelopmentAPNs(provisioningProfile: Data?) -> Bool {
         guard let profile = provisioningProfile,
               let start = profile.range(of: Data("<?xml".utf8)),
@@ -45,23 +42,14 @@ public enum PushNotifications {
         return environment as? String == "development"
     }
 
-    public static func expoTokenRequest(deviceToken: Data, installationId: UUID, development: Bool,
-                                        bundleId: String, projectId: String) -> JSONValue {
-        [
-            "type": "apns",
-            "deviceId": .string(installationId.uuidString.lowercased()),
-            "development": .bool(development),
-            "appId": .string(bundleId),
-            "deviceToken": .string(deviceToken.map { String(format: "%02x", $0) }.joined()),
-            "projectId": .string(projectId),
-        ]
+    /// The token registered at `/v1/push-tokens`: everything the CLI needs to call APNs directly
+    /// (`parseApnsPushToken` in `apps/cli/src/api/apnsPush.ts`).
+    public static func apnsToken(deviceToken: Data, development: Bool, bundleId: String) -> String {
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        return "apns:\(development ? "sandbox" : "production"):\(bundleId):\(hex)"
     }
 
-    public static func expoToken(from response: JSONValue) -> String? {
-        response["data"]?["expoPushToken"]?.stringValue
-    }
-
-    /// `parseNotificationTap` in `notificationRouting.ts`. Expo delivers the push `data` under `body`.
+    /// `parseNotificationTap` in `notificationRouting.ts`. The push `data` travels under `body`.
     public static func tap(userInfo: JSONValue, action: String) -> PushTap? {
         let allow: Bool?
         switch action {
