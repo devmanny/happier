@@ -16,6 +16,7 @@ import { ApiSessionClient } from './session/sessionClient';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
+import { readApnsCredentials } from './apnsPush';
 import { configuration } from '@/configuration';
 import { assertSessionEncryptionModeAllowedByEffectiveClientRequirement } from '@/settings/accountSettings/resolveEffectiveClientEncryptionRequirement';
 import { Credentials } from '@/persistence';
@@ -395,7 +396,9 @@ export class ApiClient {
   private constructor(credential: Credentials) {
     this.credential = credential
     this.connectedServiceCredentialApi = createConnectedServiceCredentialApi(credential);
-    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl())
+    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl(), {
+      credentials: () => readApnsCredentials(configuration.happyHomeDir),
+    })
   }
 
   private invalidateConnectedServiceProfileListCache(serviceId?: ConnectedServiceId): void {
