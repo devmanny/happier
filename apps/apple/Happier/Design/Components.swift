@@ -1,41 +1,29 @@
 import HappierKit
 import SwiftUI
 
-/// Gradient avatar (same image choice as the official app) with the agent logo as a badge.
+/// The agent's logo on a neutral disc: near black in dark mode, near white in light mode.
 struct SessionAvatar: View {
     let session: Session
     var size: CGFloat = 52
 
     var body: some View {
-        let index = AvatarHash.gradientIndex(session.avatarId) + 1
-        Image(String(format: "Gradients/%02d", index))
-            .resizable()
-            .scaledToFill()
-            .frame(width: size, height: size)
-            .clipShape(Circle())
-            .overlay(alignment: .bottomTrailing) {
-                if let agent = session.agentId {
-                    AgentBadge(agentId: agent, size: size * 0.42)
-                        .offset(x: size * 0.04, y: size * 0.04)
-                }
+        ZStack {
+            Circle().fill(Color.avatarBackground)
+            if let agent = session.agentId {
+                Image("Agents/\(agent)")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.primary)
+                    .frame(width: size * 0.5, height: size * 0.5)
+            } else {
+                Image(systemName: "sparkle")
+                    .font(.system(size: size * 0.4))
+                    .foregroundStyle(.secondary)
             }
-            .accessibilityHidden(true)
-    }
-}
-
-struct AgentBadge: View {
-    let agentId: String
-    var size: CGFloat = 20
-
-    var body: some View {
-        Image("Agents/\(agentId)")
-            .resizable()
-            .scaledToFit()
-            .foregroundStyle(.primary)
-            .padding(size * 0.2)
-            .frame(width: size, height: size)
-            .background(.background, in: Circle())
-            .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
+        }
+        .frame(width: size, height: size)
+        .overlay(Circle().strokeBorder(.separator.opacity(0.6), lineWidth: 0.5))
+        .accessibilityHidden(true)
     }
 }
 
@@ -126,6 +114,15 @@ struct TypingIndicator: View {
 
 extension Color {
     static let userBubble = Color(red: 0, green: 122 / 255, blue: 1)
+    #if os(macOS)
+    static let avatarBackground = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.12, alpha: 1) : NSColor(white: 0.95, alpha: 1)
+    })
+    #else
+    static let avatarBackground = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark ? UIColor(white: 0.12, alpha: 1) : UIColor(white: 0.95, alpha: 1)
+    })
+    #endif
     #if os(macOS)
     static let agentBubble = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
     #else

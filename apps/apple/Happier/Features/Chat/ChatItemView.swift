@@ -28,6 +28,7 @@ private struct UserBubble: View {
     let message: UserText
     let tail: Bool
     let sessionId: String
+    @Environment(HappierStore.self) private var store
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
@@ -65,10 +66,24 @@ private struct UserBubble: View {
                 }
             }
             if message.isPending {
-                Text(message.attachments.isEmpty ? "Queued" : "Sending…")
+                if let progress = message.localId.flatMap({ store.uploadProgress[$0] }) {
+                    // Attachments still uploading to the computer.
+                    HStack(spacing: 6) {
+                        ProgressView(value: progress.fraction)
+                            .frame(width: 80)
+                            .tint(Color.userBubble)
+                        Text("Uploading \(progress.fraction, format: .percent.precision(.fractionLength(0)))")
+                            .monospacedDigit()
+                    }
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 6)
+                } else {
+                    Text(message.attachments.isEmpty ? "Queued" : "Sending…")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 6)
+                }
             }
         }
     }

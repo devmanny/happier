@@ -97,3 +97,35 @@ public struct AttachmentMessage: Sendable {
         self.meta = meta
     }
 }
+
+/// Bytes sent so far for one message's attachments, as a 0…1 fraction for the sending bubble.
+public struct UploadProgress: Equatable, Sendable {
+    public let totalBytes: Int
+    public private(set) var sentBytes = 0
+
+    public init(totalBytes: Int) {
+        self.totalBytes = totalBytes
+    }
+
+    public mutating func add(_ bytes: Int) {
+        sentBytes = min(totalBytes, sentBytes + bytes)
+    }
+
+    public var fraction: Double {
+        totalBytes > 0 ? Double(sentBytes) / Double(totalBytes) : 1
+    }
+
+    /// Bytes-weighted progress of several uploads (one session can send more than one message).
+    public static func combinedFraction(_ uploads: [UploadProgress]) -> Double {
+        let total = uploads.reduce(0) { $0 + $1.totalBytes }
+        return total > 0 ? Double(uploads.reduce(0) { $0 + $1.sentBytes }) / Double(total) : 1
+    }
+}
+
+/// Lets the app keep attachment uploads running while it is in the background.
+@MainActor
+public protocol UploadObserver: AnyObject {
+    func uploadDidStart(localId: String, sessionTitle: String, fileCount: Int)
+    func uploadDidProgress(localId: String, fraction: Double)
+    func uploadDidFinish(localId: String, success: Bool)
+}

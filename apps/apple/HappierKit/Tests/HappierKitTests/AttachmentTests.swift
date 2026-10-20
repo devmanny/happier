@@ -67,4 +67,24 @@ import Testing
         #expect(screened.accepted.map(\.name) == ["shot.png"])
         #expect(screened.tooLarge == ["movie.mov"])
     }
+
+    @Test func uploadProgressCountsBytesAcrossAllAttachments() {
+        var progress = UploadProgress(totalBytes: 1000)
+        #expect(progress.fraction == 0)
+        progress.add(250)
+        progress.add(250)
+        #expect(progress.fraction == 0.5)
+        progress.add(900)  // never past done
+        #expect(progress.fraction == 1)
+        #expect(UploadProgress(totalBytes: 0).fraction == 1)
+    }
+
+    @Test func combinedProgressWeighsUploadsByTheirSize() {
+        var big = UploadProgress(totalBytes: 900)
+        big.add(450)
+        var small = UploadProgress(totalBytes: 100)
+        small.add(100)
+        #expect(UploadProgress.combinedFraction([big, small]) == 0.55)
+        #expect(UploadProgress.combinedFraction([]) == 1)
+    }
 }

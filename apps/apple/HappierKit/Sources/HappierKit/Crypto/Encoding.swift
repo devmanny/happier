@@ -73,15 +73,3 @@ public enum SecretKeyFormat {
         return bytes
     }
 }
-
-/// Session avatar selection, identical to `avatarHash.ts` + `AvatarGradient.tsx`.
-public enum AvatarHash {
-    public static func positiveInt(_ value: String) -> Int {
-        var hash: Int32 = 0
-        for unit in value.utf16 { hash = (hash &<< 5) &- hash &+ Int32(unit) }
-        return Int(hash.magnitude)
-    }
-
-    /// Index into the 100 bundled gradients (`Gradients/01` … `Gradients/100`).
-    public static func gradientIndex(_ id: String) -> Int { positiveInt(id) % 100 }
-}

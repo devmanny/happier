@@ -163,12 +163,6 @@ public struct Session: Identifiable, Sendable, Equatable {
         return path
     }
 
-    /// Seed for the gradient avatar (`sessionUtils.ts:503-517`).
-    public var avatarId: String {
-        if let machineId, let path { return "\(id):\(machineId):\(path)" }
-        return id
-    }
-
     public var sortDate: Date { meaningfulActivityAt ?? updatedAt }
 
     private var isTurnTerminal: Bool { ["completed", "cancelled", "failed"].contains(latestTurnStatus ?? "") }

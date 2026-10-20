@@ -43,6 +43,12 @@ struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let stale = store.staleRunner(for: sessionId) {
+                StaleRunnerBubble(updating: store.restartingRunners.contains(sessionId)) {
+                    Task { await store.restartStaleRunner(stale.sessionId) }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if let suggestions = slashSuggestions, !suggestions.isEmpty {
                 SlashSuggestions(commands: suggestions) { insert($0) }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -53,6 +59,7 @@ struct Composer: View {
         .padding(.top, 6)
         .padding(.bottom, 8)
         .animation(.smooth(duration: 0.2), value: slashSuggestions?.count)
+        .animation(.smooth(duration: 0.25), value: store.staleRunner(for: sessionId) == nil)
         .sheet(item: $sheet) { kind in
             ModelSheet(sessionId: sessionId)
             .presentationDetents([.medium, .large])
@@ -457,5 +464,33 @@ private extension SessionControls {
     var displayEffort: String? {
         guard let model = effortModel, !model.effortLevels.isEmpty else { return nil }
         return effort ?? model.defaultEffort
+    }
+}
+
+/// Shown only while the session's runner is on an older CLI than its daemon; tapping restarts it on
+/// the current CLI (the conversation is kept) and the bubble goes away once it has been replaced.
+private struct StaleRunnerBubble: View {
+    let updating: Bool
+    let onUpdate: () -> Void
+
+    var body: some View {
+        Button(action: onUpdate) {
+            HStack(spacing: 6) {
+                if updating {
+                    ProgressView().controlSize(.mini)
+                    Text("Updating to the new CLI…")
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Text("Older CLI · Update")
+                }
+            }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.orange)
+        }
+        // Amber glass: a gentle heads-up, not an error.
+        .buttonStyle(.glass(.regular.tint(.orange.opacity(0.22))))
+        .controlSize(.small)
+        .disabled(updating)
+        .accessibilityHint(Text("Restarts this session on the CLI the computer now runs. The conversation is kept."))
     }
 }

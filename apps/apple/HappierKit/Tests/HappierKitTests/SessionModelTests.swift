@@ -40,7 +40,6 @@ import Testing
         #expect(session.title == "Fix login")
         #expect(session.displayPath == "~/Projects/app")
         #expect(session.agentId == "codex")
-        #expect(session.avatarId == "s1:m1:/Users/manny/Projects/app")
         #expect(session.metadataVersion == 3)
         #expect(session.cipher != nil)
     }

@@ -27,6 +27,7 @@ struct PendingBubble: View {
                     .background(Color.userBubble.opacity(message.state == .discarded ? 0.35 : 0.55),
                                 in: BubbleShape(fromUser: true, tail: true))
                     .onTapGesture { showActions = true }
+                    .contextMenu { actions }
                     .accessibilityAddTraits(.isButton)
                     .accessibilityHint("Shows actions for this queued message")
             }

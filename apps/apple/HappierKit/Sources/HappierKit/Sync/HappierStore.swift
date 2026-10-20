@@ -60,6 +60,7 @@ public final class HappierStore {
     @ObservationIgnored private var pendingFetches: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingFetchDirty: Set<String> = []
     @ObservationIgnored private var pushDevice: PushDevice?
+    @ObservationIgnored private var inBackground = false
     @ObservationIgnored private var pendingPushTap: PushTap?
     @ObservationIgnored private let credentialStore = CredentialStore()
     @ObservationIgnored private let log = Logger(subsystem: "dev.happier.apple", category: "sync")
@@ -183,6 +184,14 @@ public final class HappierStore {
     /// nothing is left half-open, and reconnect + resync as soon as the app is back.
     public func appDidEnterBackground() {
         guard phase == .ready else { return }
+        inBackground = true
+        // Uploads in flight keep the socket (and the app, through a background task) alive; the
+        // connection is closed once they finish.
+        guard uploadProgress.isEmpty else { return }
+        suspendForBackground()
+    }
+
+    private func suspendForBackground() {
         syncTask?.cancel()
         syncTask = nil
         let socket = self.socket
@@ -191,6 +200,7 @@ public final class HappierStore {
     }
 
     public func appDidBecomeActive() {
+        inBackground = false
         guard phase == .ready, syncTask == nil else { return }
         syncTask = Task { await runSync() }
     }
@@ -211,7 +221,10 @@ public final class HappierStore {
                 connection = .online
                 backoff = .seconds(1)
                 await refreshSessions()
-                for id in openSessionIds { await catchUp(id) }
+                for id in openSessionIds {
+                    await catchUp(id)
+                    refreshRunnerStatus(id)
+                }
                 for await event in socket.events { await handle(event) }
             } catch let error as SocketIOClient.ConnectError where error.message == "invalid-token" {
                 log.error("token rejected; signing out")
@@ -233,7 +246,10 @@ public final class HappierStore {
             await handleUpdate(payload["body"] ?? .null)
         case "ephemeral":
             if payload["type"]?.stringValue == "activity", let id = payload["id"]?.stringValue {
+                let wasThinking = sessions[id]?.thinking == true
                 sessions[id]?.apply(activity: payload)
+                // A runner can only be restarted between turns; re-check when a turn ends.
+                if wasThinking, sessions[id]?.thinking == false, openSessionIds.contains(id) { refreshRunnerStatus(id) }
             }
         default:
             break
@@ -284,6 +300,7 @@ public final class HappierStore {
     /// view that SwiftUI recreates or dismisses mid-flight cannot leave the transcript half-loaded.
     public func open(_ id: String) {
         openSessionIds.insert(id)
+        refreshRunnerStatus(id)
         guard loadTasks[id] == nil else { return }
         loadTasks[id] = Task {
             await load(id)
@@ -392,10 +409,30 @@ public final class HappierStore {
         let localId = UUID().uuidString.lowercased()
         if transcripts[id] == nil { transcripts[id] = Transcript() }
         transcripts[id]?.addPending(localId: localId, text: text, attachments: attachments.map(\.name))
+        var succeeded = false
+        if !attachments.isEmpty {
+            uploadProgress[localId] = UploadProgress(totalBytes: attachments.reduce(0) { $0 + $1.data.count })
+            uploadSessionIds[localId] = id
+            uploadObserver?.uploadDidStart(localId: localId, sessionTitle: sessions[id]?.title ?? "", fileCount: attachments.count)
+        }
+        defer {
+            if uploadProgress.removeValue(forKey: localId) != nil {
+                uploadSessionIds[localId] = nil
+                cancelledUploads.remove(localId)
+                uploadObserver?.uploadDidFinish(localId: localId, success: succeeded)
+                if inBackground, uploadProgress.isEmpty { suspendForBackground() }
+            }
+        }
         do {
             var uploaded: [UploadedAttachment] = []
             for draft in attachments {
-                uploaded.append(try await upload(draft, to: id, messageLocalId: localId))
+                uploaded.append(try await upload(draft, to: id, messageLocalId: localId) { [weak self] bytes in
+                    guard let self else { return }
+                    uploadProgress[localId]?.add(bytes)
+                    if let fraction = uploadProgress[localId]?.fraction {
+                        uploadObserver?.uploadDidProgress(localId: localId, fraction: fraction)
+                    }
+                })
             }
             guard let session = sessions[id] else { return }
             var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
@@ -411,7 +448,11 @@ public final class HappierStore {
             let content: JSONValue = session.isPlain ? ["t": "plain", "v": record] : .string(try session.encodeDocument(record))
             let action = SendDecision.action(for: text, session: session)
             try await api.enqueueUserMessage(sessionId: id, localId: localId, content: content, action: action)
+            succeeded = true
             log.notice("send: \(action.rawValue, privacy: .public)")
+            // Don't depend on the `pending-changed` push alone: a queued message needs its server row
+            // (with the queue actions) even when that event is missed.
+            refreshPending(id)
         } catch {
             transcripts[id]?.removePending(localId: localId)
             report(error)
@@ -462,7 +503,10 @@ public final class HappierStore {
     }
 
     /// Machine-scoped RPC (`apiSocket.ts:410-443`): params/result use the machine's content key.
-    public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
+    /// `authorizingSession` names the session a session-scoped call acts on (stop, runner restart);
+    /// the server refuses those without it.
+    public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30),
+                           authorizingSession: String? = nil) async throws -> JSONValue {
         guard let socket, connection == .online, let api else { throw RPCError(message: "Not connected", code: nil) }
         let machine: Machine
         if let cached = machines.first(where: { $0.id == machineId }) {
@@ -470,12 +514,13 @@ public final class HappierStore {
         } else {
             guard let row = try await api.machine(id: machineId) else { throw RPCError(message: "Machine not found", code: nil) }
             machine = try Machine(row: row, keys: keys)
+            // Keep it: every machine RPC needs its key, and refetching made quick calls fragile.
+            if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
         }
         let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
-        let ack = try await socket.emitWithAck("rpc-call", [
-            "method": .string("\(machineId):\(method)"), "params": encoded,
-            "timeoutMs": .number(Double(timeout.components.seconds * 1000)),
-        ], timeout: timeout + .seconds(5))
+        let ack = try await socket.emitWithAck("rpc-call", MachineRPCCall.payload(
+            machineId: machineId, method: method, params: encoded, timeoutMs: Int(timeout.components.seconds * 1000),
+            authorizingSession: authorizingSession), timeout: timeout + .seconds(5))
         guard let response = ack.first, response["ok"]?.boolValue == true else {
             throw RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.", code: ack.first?["errorCode"]?.stringValue)
         }
@@ -675,7 +720,8 @@ public final class HappierStore {
 
     /// Uploads one file to the session's machine through the daemon's bulk-transfer RPCs
     /// (`daemonSessionAttachments.ts`); the daemon applies its default attachment location.
-    private func upload(_ draft: AttachmentDraft, to sessionId: String, messageLocalId: String) async throws -> UploadedAttachment {
+    private func upload(_ draft: AttachmentDraft, to sessionId: String, messageLocalId: String,
+                        progress: (Int) -> Void) async throws -> UploadedAttachment {
         guard draft.data.count <= Self.maxAttachmentBytes else {
             let limit = ByteCountFormatter.string(fromByteCount: Int64(Self.maxAttachmentBytes), countStyle: .file)
             throw RPCError(message: "\(draft.name) is larger than \(limit).", code: "attachment_too_large")
@@ -694,6 +740,7 @@ public final class HappierStore {
             var index = 0
             var offset = 0
             while offset < draft.data.count {
+                if cancelledUploads.contains(messageLocalId) { throw CancellationError() }
                 let end = min(offset + chunkSize, draft.data.count)
                 let chunk = try TransferChunk.encrypt(draft.data.subdata(in: offset..<end), uploadId: uploadId, index: index,
                                                       recipientPublicKeyBase64: recipient)
@@ -702,6 +749,7 @@ public final class HappierStore {
                     "payloadBase64": .string(chunk.payloadBase64),
                     "encryptedDataKeyEnvelopeBase64": .string(chunk.encryptedDataKeyEnvelopeBase64),
                 ])
+                progress(end - offset)
                 index += 1
                 offset = end
             }
@@ -760,6 +808,88 @@ public final class HappierStore {
         public var id: String { sessionId }
     }
 
+    // MARK: - Runner on an older CLI
+
+    /// Runner restarts in flight, and the runner pid each restart replaces (hidden once replaced).
+    public private(set) var restartingRunners: Set<String> = []
+    /// Attachment upload progress per message being sent (keyed by the message's localId).
+    public private(set) var uploadProgress: [String: UploadProgress] = [:]
+    /// The session each in-flight upload belongs to.
+    private var uploadSessionIds: [String: String] = [:]
+    @ObservationIgnored private var cancelledUploads: Set<String> = []
+    /// Platform hook for keeping uploads alive in the background (iOS continued-processing tasks).
+    @ObservationIgnored public weak var uploadObserver: (any UploadObserver)?
+
+    /// Combined progress of a session's in-flight uploads, for the session list.
+    public func uploadFraction(inSession sessionId: String) -> Double? {
+        let uploads = uploadSessionIds.filter { $0.value == sessionId }.compactMap { uploadProgress[$0.key] }
+        guard !uploads.isEmpty else { return nil }
+        return UploadProgress.combinedFraction(uploads)
+    }
+
+    /// Stops an upload before its next chunk (the system's background-task UI was cancelled).
+    public func cancelUpload(_ localId: String) {
+        guard uploadProgress[localId] != nil else { return }
+        cancelledUploads.insert(localId)
+    }
+    /// The daemon's runner status per open session (`daemon.sessionRunner.status.get`).
+    private var runnerStates: [String: JSONValue] = [:]
+    @ObservationIgnored private var runnerStatusTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var replacedRunnerPids: [String: Int] = [:]
+
+    /// The "older CLI" notice for a session, unless that runner is already being replaced.
+    public func staleRunner(for sessionId: String) -> StaleRunner? {
+        guard let session = sessions[sessionId], let state = runnerStates[sessionId],
+              let stale = SessionRunner.staleRunner(sessionId: sessionId, machineId: session.machineId, state: state),
+              replacedRunnerPids[sessionId] != stale.expectedRunnerPid
+        else { return nil }
+        return stale
+    }
+
+    /// Asks the session's daemon which CLI its runner is on: when the session opens, when the socket
+    /// reconnects and when a turn ends (restart eligibility changes between turns). The request is
+    /// owned by the store so a view that SwiftUI recreates or dismisses cannot cancel it; without a
+    /// connection it is skipped and the reconnect asks again.
+    private func refreshRunnerStatus(_ sessionId: String) {
+        guard connection == .online, runnerStatusTasks[sessionId] == nil else { return }
+        runnerStatusTasks[sessionId] = Task {
+            await fetchRunnerStatus(sessionId)
+            runnerStatusTasks[sessionId] = nil
+        }
+    }
+
+    private func fetchRunnerStatus(_ sessionId: String) async {
+        guard let machineId = sessions[sessionId]?.machineId else { return }
+        do {
+            runnerStates[sessionId] = try await machineRPC(machineId, method: SessionRunner.statusMethod,
+                                                           params: ["sessionId": .string(sessionId)])
+        } catch {
+            // Older daemons don't expose the status; there is simply no notice.
+            logBackground(error, "runner status")
+        }
+    }
+
+    /// Restarts the session's runner on the daemon's current CLI; the conversation is kept.
+    public func restartStaleRunner(_ sessionId: String) async {
+        guard let stale = staleRunner(for: sessionId), !restartingRunners.contains(sessionId) else { return }
+        restartingRunners.insert(sessionId)
+        defer { restartingRunners.remove(sessionId) }
+        do {
+            let result = try await machineRPC(stale.machineId, method: SessionRunner.restartMethod,
+                                              params: SessionRunner.restartRequest(stale), timeout: .seconds(90),
+                                              authorizingSession: sessionId)
+            switch SessionRunner.outcome(result) {
+            case .restarted:
+                replacedRunnerPids[sessionId] = stale.expectedRunnerPid
+                await fetchRunnerStatus(sessionId)
+            case .busy:
+                lastError = String(localized: "The session is busy. Update it when the current turn finishes.")
+            case .failed:
+                lastError = String(localized: "Happier couldn't restart this session on the new CLI. The session is still available.")
+            }
+        } catch { report(error) }
+    }
+
     /// Set when a stop needs confirmation; the UI asks and calls `confirmStop`.
     public var stopRequest: StopRequest?
 
@@ -807,7 +937,8 @@ public final class HappierStore {
         var outcome = SessionStop.Outcome.fallback
         if let machineId = sessions[sessionId]?.machineId {
             do {
-                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)]))
+                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)],
+                                                                         authorizingSession: sessionId))
             } catch is RPCError {
                 outcome = .fallback
             } catch {

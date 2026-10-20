@@ -1,11 +1,27 @@
 import Foundation
 
-/// Splits agent text into prose, fenced code and `<options>` reply suggestions, following
-/// `parseMarkdownBlock.ts`. Tapping an option sends its text as a user message.
+/// A GFM table; cells keep their inline Markdown.
+public struct MarkdownTable: Equatable, Sendable {
+    public enum Alignment: Equatable, Sendable { case `default`, leading, center, trailing }
+
+    public let headers: [String]
+    public let rows: [[String]]
+    public let alignments: [Alignment]
+
+    public init(headers: [String], rows: [[String]], alignments: [Alignment]) {
+        self.headers = headers
+        self.rows = rows
+        self.alignments = alignments
+    }
+}
+
+/// Splits agent text into prose, fenced code, GFM tables and `<options>` reply suggestions,
+/// following `parseMarkdownBlock.ts`. Tapping an option sends its text as a user message.
 public enum MarkdownSegments {
     public enum Segment: Equatable, Sendable {
         case prose(String)
         case code(String)
+        case table(MarkdownTable)
         case options([String])
     }
 
@@ -38,6 +54,13 @@ public enum MarkdownSegments {
                 continue
             }
 
+            if trimmed.contains("|"), let (table, next) = table(in: lines, from: index - 1) {
+                flushProse()
+                segments.append(.table(table))
+                index = next
+                continue
+            }
+
             let wrapped = trimmed.hasPrefix("<options>")
             let first = option(in: line)
             if wrapped || first != nil {
@@ -64,6 +87,57 @@ public enum MarkdownSegments {
         }
         flushProse()
         return segments
+    }
+
+    /// `parseTable`: consecutive lines with pipes whose second line is a `|---|` separator.
+    private static func table(in lines: [Substring], from start: Int) -> (MarkdownTable, Int)? {
+        var end = start
+        while end < lines.count, lines[end].contains("|") { end += 1 }
+        guard end - start >= 2 else { return nil }
+        let separator = lines[start + 1].trimmingCharacters(in: .whitespaces)
+        guard separator.contains("-"), separator.allSatisfy({ "|-:= \t".contains($0) }) else { return nil }
+        let headers = cells(lines[start])
+        guard !headers.isEmpty else { return nil }
+        let separatorCells = cells(lines[start + 1][...])
+        let alignments = headers.indices.map { column -> MarkdownTable.Alignment in
+            let cell = column < separatorCells.count ? separatorCells[column] : ""
+            switch (cell.hasPrefix(":"), cell.hasSuffix(":")) {
+            case (true, true): return .center
+            case (true, false): return .leading
+            case (false, true): return .trailing
+            case (false, false): return .default
+            }
+        }
+        let rows = lines[(start + 2)..<end]
+            .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("|") }
+            .map { line -> [String] in
+                var row = cells(line)
+                while row.count < headers.count { row.append("") }
+                return row
+            }
+        return (MarkdownTable(headers: headers, rows: rows, alignments: alignments), end)
+    }
+
+    /// GFM cells: `\|` is a literal pipe; leading/trailing pipe artifacts are dropped.
+    private static func cells(_ line: Substring) -> [String] {
+        var cells: [String] = []
+        var current = ""
+        var characters = line.trimmingCharacters(in: .whitespaces)[...]
+        while let character = characters.popFirst() {
+            if character == "\\", characters.first == "|" {
+                current.append("|")
+                characters.removeFirst()
+            } else if character == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        if cells.first == "" { cells.removeFirst() }
+        if cells.last == "" { cells.removeLast() }
+        return cells
     }
 
     private static func option(in line: Substring) -> String? {

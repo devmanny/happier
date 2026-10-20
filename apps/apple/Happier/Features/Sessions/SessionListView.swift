@@ -103,6 +103,7 @@ struct SessionListView: View {
 
 struct SessionRow: View {
     let session: Session
+    @Environment(HappierStore.self) private var store
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -117,9 +118,13 @@ struct SessionRow: View {
                             .font(.headline)
                             .lineLimit(1)
                         Spacer(minLength: 6)
-                        Text(ChatDate.listLabel(session.sortDate, now: context.date))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        if let fraction = store.uploadFraction(inSession: session.id) {
+                            UploadRing(fraction: fraction)
+                        } else {
+                            Text(ChatDate.listLabel(session.sortDate, now: context.date))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     StatusLine(session: session, now: context.date)
                 }
@@ -228,5 +233,27 @@ struct AccountView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
         }
+    }
+}
+
+/// The App Store download indicator: a progress ring around a small stop square.
+private struct UploadRing: View {
+    let fraction: Double
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(Color.userBubble.opacity(0.2), lineWidth: 2.5)
+            Circle()
+                .trim(from: 0, to: max(0.02, fraction))
+                .stroke(Color.userBubble, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.2), value: fraction)
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.userBubble)
+                .frame(width: 6, height: 6)
+        }
+        .frame(width: 20, height: 20)
+        .accessibilityElement()
+        .accessibilityLabel(Text("Uploading \(fraction, format: .percent.precision(.fractionLength(0)))"))
     }
 }

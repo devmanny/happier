@@ -12,6 +12,9 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
     let store = HappierStore()
+    #if os(iOS)
+    private var backgroundUploads: BackgroundUploads?
+    #endif
     private let log = Logger(subsystem: "dev.happier.apple", category: "push")
 
     /// Asks for notification permission (first time only) and registers with APNs on every launch.
@@ -87,6 +90,7 @@ final class AppDelegate: NSObject, UNUserNotificationCenterDelegate {
 extension AppDelegate: UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        backgroundUploads = BackgroundUploads(store: store)
         return true
     }
 

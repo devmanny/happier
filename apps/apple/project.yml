@@ -36,6 +36,8 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # iOS continued-processing tasks that keep attachment uploads running in the background.
+        BGTaskSchedulerPermittedIdentifiers: [com.devmanny.happier.upload.*]
         CFBundleURLTypes:
           - CFBundleURLName: com.devmanny.happier
             CFBundleURLSchemes: [happier]

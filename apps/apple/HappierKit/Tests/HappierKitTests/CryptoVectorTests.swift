@@ -117,13 +117,3 @@ private final class CountingRandom: @unchecked Sendable {
         #expect(throws: (any Error).self) { try SecretKeyFormat.parse("AAAQE-AYEAU") }
     }
 }
-
-@Suite struct AvatarHashTests {
-    @Test func matchesJavaStyleHashFromTypeScript() {
-        #expect(AvatarHash.positiveInt("abc") == 96354)
-        #expect(AvatarHash.positiveInt("cmf1x2y3z:machine-1:/Users/manny/Projects/app") == 938268652)
-        #expect(AvatarHash.positiveInt("ñandú 🚀 session") == 656097659)
-        #expect(AvatarHash.positiveInt("a-very-long-session-identifier-that-overflows-int32-many-times-0123456789") == 1340693120)
-        #expect(AvatarHash.gradientIndex("abc") == 54)
-    }
-}
