@@ -253,6 +253,10 @@ private struct MessageActionsModifier: ViewModifier {
             .contextMenu {
                 Section(date.formatted(date: .abbreviated, time: .shortened)) {
                     Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text) }
+                    let speaking = MessageSpeaker.shared.isSpeaking(text)
+                    Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
+                        MessageSpeaker.shared.toggle(text)
+                    }
                     if let selectionId, let beginSelection {
                         Button("Select", systemImage: "checkmark.circle") { beginSelection(selectionId) }
                     }
