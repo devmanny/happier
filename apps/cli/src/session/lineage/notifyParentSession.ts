@@ -1,6 +1,8 @@
 import { getSessionNotificationTitle } from '@/agent/runtime/readyNotificationContext';
 import { readCredentials, type Credentials } from '@/persistence';
 import { sendSessionMessage, type SendSessionMessageResult } from '@/session/services/sendSessionMessage';
+import { tryDecryptSessionMetadata } from '@/session/transport/encryption/sessionEncryptionContext';
+import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
 import { logger } from '@/ui/logger';
 
 import {
@@ -22,6 +24,8 @@ export type ParentSessionNoticeSession = Readonly<{
 export type ParentSessionNoticeDeps = Readonly<{
   readCredentials: () => Promise<Credentials | null>;
   sendSessionMessage: (params: Parameters<typeof sendSessionMessage>[0]) => Promise<SendSessionMessageResult>;
+  /** Decrypted metadata of another session, or null when it does not exist. */
+  readSessionMetadata: (sessionId: string, credentials: Credentials) => Promise<unknown>;
   log: (message: string, details: unknown) => void;
 }>;
 
@@ -49,6 +53,10 @@ const stateByChildSessionId = new Map<string, ChildNoticeState>();
 const defaultDeps: ParentSessionNoticeDeps = {
   readCredentials,
   sendSessionMessage,
+  readSessionMetadata: async (sessionId, credentials) => {
+    const rawSession = await fetchSessionById({ token: credentials.token, sessionId });
+    return rawSession ? tryDecryptSessionMetadata({ credentials, rawSession }) : null;
+  },
   log: (message, details) => logger.debug(message, details),
 };
 
@@ -151,6 +159,26 @@ async function deliverNoticeBestEffort(
 }
 
 /**
+ * The app can nest a session under one of its own children. Each would then report every
+ * finished turn to the other and wake it, forever. The child side breaks the cycle: a
+ * parent whose own effective parent is this session is not reported to. An unreadable
+ * parent is not evidence of a cycle, so the notice still goes out.
+ */
+async function isMutualNesting(
+  params: Readonly<{ childSessionId: string; parentSessionId: string }>,
+  deps: ParentSessionNoticeDeps,
+): Promise<boolean> {
+  try {
+    const credentials = await readCachedCredentials(deps);
+    if (!credentials) return false;
+    const parentMetadata = await deps.readSessionMetadata(params.parentSessionId, credentials);
+    return readEffectiveParentSessionId(parentMetadata) === params.childSessionId;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Report a lifecycle event to this session's direct parent, read from metadata at the
  * moment of the event (manual moves in the app change it live). Never blocks the child.
  */
@@ -167,6 +195,15 @@ export async function notifyParentSessionBestEffort(
   if (!parentSessionId || parentSessionId === childSessionId) return;
 
   if (!admitEvent(stateFor(childSessionId), params.event)) return;
+
+  if (await isMutualNesting({ childSessionId, parentSessionId }, deps)) {
+    deps.log(`${LOG_PREFIX} Skipping notice: mutual nesting (the parent reports to this session)`, {
+      childSessionId,
+      parentSessionId,
+      event: params.event.kind,
+    });
+    return;
+  }
 
   await deliverNoticeBestEffort({
     fromSessionId: childSessionId,

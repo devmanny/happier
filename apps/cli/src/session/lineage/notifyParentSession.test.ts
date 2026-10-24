@@ -32,6 +32,7 @@ function createDeps(overrides: Partial<ParentSessionNoticeDeps> = {}) {
   const deps: ParentSessionNoticeDeps = {
     readCredentials: async () => credentials,
     sendSessionMessage: sendSessionMessage as unknown as ParentSessionNoticeDeps['sendSessionMessage'],
+    readSessionMetadata: async () => ({}),
     log,
     ...overrides,
   };
@@ -171,6 +172,31 @@ describe('notifyParentSessionBestEffort', () => {
     }, deps);
 
     expect(sendSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses to report to a parent whose own effective parent is this session (mutual nesting loop)', async () => {
+    // The app can move a session under one of its own children. Both would then report
+    // every finished turn to each other forever; the child side breaks that cycle.
+    const sendSessionMessage = vi.fn(async () => ({ ok: true as const, sessionId: 'parent-1', localId: 'l', waited: false }));
+    const { deps, log } = createDeps({
+      sendSessionMessage: sendSessionMessage as unknown as ParentSessionNoticeDeps['sendSessionMessage'],
+      readSessionMetadata: async (sessionId) => sessionId === 'parent-1'
+        ? { listParentV1: { v: 1, updatedAt: 5, parentSessionId: 'child-1' } }
+        : null,
+    });
+
+    await notifyParentSessionBestEffort({ session: createChildSession(), event: { kind: 'turn_completed', assistantPreviewText: 'x' } }, deps);
+
+    expect(sendSessionMessage).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('mutual'), expect.objectContaining({ parentSessionId: 'parent-1' }));
+  });
+
+  it('still reports when the parent metadata cannot be read', async () => {
+    const { deps, sendSessionMessage } = createDeps({ readSessionMetadata: async () => { throw new Error('offline'); } });
+
+    await notifyParentSessionBestEffort({ session: createChildSession(), event: { kind: 'turn_completed', assistantPreviewText: 'x' } }, deps);
+
+    expect(sendSessionMessage).toHaveBeenCalledOnce();
   });
 
   it('lets a manual listParentV1 move override the spawning session as the effective parent', async () => {
