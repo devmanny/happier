@@ -43,11 +43,8 @@ export function createClaudeReadyHandler(params: Readonly<{
         // queue whose canonical pending rows are all blocked cannot advance the session, so the
         // completed turn must still notify rather than sit online/idle forever.
         if (params.getQueueSize() !== 0 && params.hasOnlyBlockedPendingWork?.() !== true) return;
-        if (!params.pushSender) {
-            params.session.sendSessionEvent({ type: 'ready' });
-            return;
-        }
         sendReadyWithPushNotification({
+            turnKey: context?.turnToken ?? null,
             session: params.session,
             pushSender: params.pushSender,
             waitingForCommandLabel: params.waitingForCommandLabel,

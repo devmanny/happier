@@ -1191,6 +1191,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             process,
             exit: (code) => process.exit(code),
             sessionExitReport: { sessionId: session.sessionId },
+            parentNoticeSession: session,
             onTerminationRequested: () => {
                 session.beginRuntimeTermination?.();
                 void currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
@@ -2251,6 +2252,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
             process,
             exit: (code) => process.exit(code),
             sessionExitReport: { sessionId: coordinator.artifacts.deferredSession.sessionId },
+            parentNoticeSession: coordinator.artifacts.deferredSession,
             onTerminationRequested: () => {
                 coordinator.artifacts.deferredSession.beginRuntimeTermination?.();
                 void currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
