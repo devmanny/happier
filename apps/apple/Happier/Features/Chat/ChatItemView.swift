@@ -1,0 +1,375 @@
+import HappierKit
+import QuickLook
+import SwiftUI
+
+struct ChatItemView: View {
+    let item: ChatItem
+    let sessionId: String
+    let tail: Bool
+
+    var body: some View {
+        switch item {
+        case .userText(let message):
+            UserBubble(message: message, tail: tail, sessionId: sessionId)
+        case .agentText(let message):
+            if message.isThinking {
+                ThinkingRow(message: message)
+            } else {
+                AgentBubble(itemId: message.id, text: message.text, date: message.createdAt, seq: message.seq, tail: tail, sessionId: sessionId)
+            }
+        case .toolCall(let tool):
+            ToolCallCard(tool: tool, sessionId: sessionId)
+        case .event(let event):
+            EventRow(event: event)
+        }
+    }
+}
+
+private struct UserBubble: View {
+    let message: UserText
+    let tail: Bool
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+    /// The attachment open in Quick Look.
+    @State private var lookingAt: URL?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 3) {
+            // Sent files carry where they live (and maybe a preview); a message still being sent
+            // only has this device's names and previews.
+            let files = message.files.isEmpty ? message.attachments.map { MessageAttachment(name: $0) } : message.files
+            let media = files.filter { $0.isImage || $0.isVideo || AttachmentPreviews.cached($0.name) != nil }
+            if !media.isEmpty {
+                // Up to three thumbnails a row, so many of them wrap instead of widening the
+                // message past the screen.
+                let size: CGFloat = media.count == 1 ? 180 : media.count == 2 ? 110 : 96
+                let lines = stride(from: 0, to: media.count, by: 3).map { Array(media[$0..<min($0 + 3, media.count)]) }
+                VStack(alignment: .trailing, spacing: 6) {
+                    ForEach(lines, id: \.first?.id) { line in
+                        HStack(spacing: 6) {
+                            Spacer(minLength: 56)
+                            ForEach(line) { file in
+                                MessageAttachmentTile(file: file, sessionId: sessionId, size: size) { lookingAt = $0 }
+                            }
+                        }
+                    }
+                }
+            }
+            let unpreviewed = files.filter { file in !media.contains { $0.id == file.id } }
+            if !message.text.isEmpty || !unpreviewed.isEmpty {
+                HStack {
+                    Spacer(minLength: 56)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if !message.text.isEmpty {
+                            // Your Markdown renders like the agent's, in the bubble's light-on-blue
+                            // palette (dark code blocks and tables, white links).
+                            MarkdownText(message.text)
+                                .environment(\.colorScheme, .dark)
+                                .tint(.white)
+                        }
+                        ForEach(unpreviewed) { file in
+                            MessageAttachmentChip(file: file, sessionId: sessionId) { lookingAt = $0 }
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .bubblePadding(fromUser: true)
+                    .background(Color.userBubble, in: BubbleShape(fromUser: true, tail: tail))
+                    .messageActions(text: message.text, date: message.createdAt, shape: BubbleShape(fromUser: true, tail: tail), selectionId: message.id,
+                                    target: message.seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .user) })
+                    .selectableMessage(id: message.id, markdown: message.text, fromUser: true, shape: BubbleShape(fromUser: true, tail: tail))
+                    .opacity(message.isPending ? 0.7 : 1)
+                }
+            }
+            if message.isPending {
+                if let localId = message.localId, let error = store.failedSends[localId] {
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Label("Not sent", systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                        Button("Retry", systemImage: "arrow.clockwise") {
+                            Task { await store.retrySend(localId, in: sessionId) }
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("retry-send-\(localId)")
+                    }
+                    .font(.caption)
+                    .padding(.leading, 56)
+                    .padding(.trailing, 6)
+                } else if let progress = message.localId.flatMap({ store.uploadProgress[$0] }) {
+                    // Attachments still uploading to the computer.
+                    HStack(spacing: 6) {
+                        ProgressView(value: progress.fraction)
+                            .frame(width: 80)
+                            .tint(Color.userBubble)
+                        Text("Uploading \(progress.fraction, format: .percent.precision(.fractionLength(0)))")
+                            .monospacedDigit()
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 6)
+                } else {
+                    Text(message.attachments.isEmpty ? "Queued" : "Sending…")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 6)
+                }
+            }
+        }
+        // The system viewer: zoom, play, share.
+        .quickLookPreview($lookingAt)
+    }
+}
+
+private struct AgentBubble: View {
+    let itemId: String
+    let text: String
+    let date: Date
+    let seq: Int?
+    let tail: Bool
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        let segments = MarkdownSegments.cached(text)
+        let content = segments.filter { if case .options = $0 { false } else { true } }
+        let options: [String] = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
+        VStack(alignment: .leading, spacing: 6) {
+            if !content.isEmpty {
+                HStack {
+                    MarkdownText(segments: content)
+                        .bubblePadding(fromUser: false)
+                        .background(Color.agentBubble, in: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
+                        .messageActions(text: text, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty), selectionId: itemId,
+                                        target: seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .assistant) })
+                        .selectableMessage(id: itemId, markdown: text, fromUser: false, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
+                    Spacer(minLength: 40)
+                }
+            }
+            if !options.isEmpty {
+                ReplyOptions(options: options) { option in
+                    Task { await store.send(option, to: sessionId) }
+                }
+            }
+        }
+    }
+}
+
+/// `<options>` reply suggestions: tap sends the text as your message; drag one into the composer
+/// (or pick "Edit before sending") to change it first; long-press also copies it.
+private struct ReplyOptions: View {
+    let options: [String]
+    let onSelect: (String) -> Void
+    @Environment(\.editInComposer) private var editInComposer
+    @Environment(\.replyDragStarted) private var replyDragStarted
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(options, id: \.self) { option in
+                Button {
+                    #if os(iOS)
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    #endif
+                    onSelect(option)
+                } label: {
+                    pill(option)
+                }
+                // Blue-on-glass, like the composer's pills, instead of a drawn border.
+                .buttonStyle(.glass)
+                .tint(Color.userBubble)
+                .onDrag {
+                    replyDragStarted?(option)
+                    return NSItemProvider(object: option as NSString)
+                } preview: {
+                    pill(option)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                .contextMenu {
+                    if let editInComposer {
+                        Button("Edit before Sending", systemImage: "pencil") { editInComposer(option) }
+                    }
+                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(option) }
+                }
+                .accessibilityHint("Sends this reply")
+            }
+        }
+        .padding(.leading, 4)
+    }
+
+    private func pill(_ option: String) -> some View {
+        Text(option)
+            .font(.callout.weight(.medium))
+            .multilineTextAlignment(.leading)
+            .foregroundStyle(Color.userBubble)
+    }
+}
+
+private struct ThinkingRow: View {
+    let message: AgentText
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // The same line as a tool call or a work summary: icon, caption, chevron.
+            Button {
+                withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain")
+                        .font(.caption2)
+                        .frame(width: 14)
+                    Text("Thought process")
+                        .font(.caption.weight(.medium))
+                    DisclosureChevron(expanded: expanded)
+                    Spacer(minLength: 4)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(expanded ? "Hides the thought process" : "Shows the thought process")
+            if expanded {
+                Text(message.text)
+                    .font(.footnote)
+                    .italic()
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.leading, 24)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.trailing, 40)
+    }
+}
+
+private struct EventRow: View {
+    let event: TranscriptEvent
+
+    var body: some View {
+        Text(label)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+    }
+
+    private var label: String {
+        switch event.kind {
+        case "switch":
+            event.data["mode"]?.stringValue == "local" ? String(localized: "Continued on the computer") : String(localized: "Continued remotely")
+        case "message":
+            event.data["message"]?.stringValue ?? ""
+        case "limit-reached":
+            String(localized: "Usage limit reached")
+        case "context-compaction":
+            String(localized: "Context compacted")
+        default:
+            event.kind.replacingOccurrences(of: "-", with: " ").capitalized
+        }
+    }
+}
+
+// MARK: - Message actions (long press)
+
+/// Identifies a committed transcript message for Pin / Fork / Restore.
+struct MessageTarget {
+    let sessionId: String
+    let seq: Int
+    let role: MessagePins.Role
+}
+
+private struct MessageActionsModifier: ViewModifier {
+    let text: String
+    let date: Date
+    let shape: BubbleShape
+    let selectionId: String?
+    let target: MessageTarget?
+    @Environment(HappierStore.self) private var store
+    @Environment(\.beginMessageSelection) private var beginSelection
+    @Environment(\.beginTextSelection) private var beginTextSelection
+
+    func body(content: Content) -> some View {
+        let pinned = target.map { store.pins.isPinned(sessionId: $0.sessionId, seq: $0.seq) } ?? false
+        content
+            #if os(iOS)
+            .contentShape(.contextMenuPreview, shape)
+            #endif
+            .overlay(alignment: target?.role == .user ? .topLeading : .topTrailing) {
+                if pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .padding(4)
+                        .background(.background, in: Circle())
+                        .offset(x: target?.role == .user ? -8 : 8, y: -8)
+                        .accessibilityLabel("Pinned")
+                }
+            }
+            .contextMenu {
+                Section(date.formatted(date: .abbreviated, time: .shortened)) {
+                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text) }
+                    let speaking = MessageSpeaker.shared.isSpeaking(text)
+                    Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
+                        MessageSpeaker.shared.toggle(text)
+                    }
+                    if let selectionId, let beginTextSelection {
+                        Button("Select Text", systemImage: "text.cursor") { beginTextSelection(selectionId) }
+                    }
+                    if let selectionId, let beginSelection {
+                        Button("Select", systemImage: "checkmark.circle") { beginSelection(selectionId) }
+                    }
+                    if let target {
+                        Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
+                            store.togglePin(sessionId: target.sessionId, seq: target.seq, role: target.role)
+                        }
+                        if target.seq > 0 {
+                            Button("Fork from Here", systemImage: "arrow.triangle.branch") {
+                                // A forked user message comes back as the new session's draft (seq >= 2).
+                                let restored = target.role == .user && target.seq >= 2 ? text : nil
+                                Task { await store.fork(target.sessionId, upToSeq: target.seq, restoring: restored) }
+                            }
+                        }
+                        if target.role == .user, store.sessions[target.sessionId]?.canRollback(toUserMessageSeq: target.seq) == true {
+                            Button("Restore to Here", systemImage: "arrow.uturn.backward", role: .destructive) {
+                                Task { await store.rollback(target.sessionId, toUserMessageSeq: target.seq, restoring: text) }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+}
+
+extension View {
+    /// Long-press "pop" with the message's date/time and its actions.
+    func messageActions(text: String, date: Date, shape: BubbleShape, selectionId: String? = nil, target: MessageTarget? = nil) -> some View {
+        modifier(MessageActionsModifier(text: text, date: date, shape: shape, selectionId: selectionId, target: target))
+    }
+}
+
+enum MessageClipboard {
+    static func copy(_ text: String) {
+        #if os(iOS)
+        UIPasteboard.general.string = text
+        #else
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #endif
+    }
+}
+
+extension EnvironmentValues {
+    /// Enters message selection with the given transcript item preselected (set by the chat).
+    @Entry var beginMessageSelection: ((String) -> Void)? = nil
+    /// Puts text in the composer to edit before sending (set by the chat).
+    @Entry var editInComposer: ((String) -> Void)? = nil
+    /// A reply suggestion started being dragged (set by the chat, so a drop anywhere on the
+    /// conversation lands it in the composer instead of attaching it as a file).
+    @Entry var replyDragStarted: ((String) -> Void)? = nil
+}

@@ -1,0 +1,71 @@
+name: Happier
+options:
+  bundleIdPrefix: com.devmanny
+  developmentLanguage: en
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: DPF7ZLTLN2
+packages:
+  HappierKit:
+    path: HappierKit
+targets:
+  Happier:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Happier
+    dependencies:
+      - package: HappierKit
+    info:
+      path: Happier/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        # Set per upload (TestFlight needs a new build number each time).
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # App Store Connect export compliance, as answered for every build so far (standard
+        # algorithms, no distribution in France) and recorded by Apple as non-exempt: No.
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSCameraUsageDescription: Happier uses the camera to attach photos to your messages and scan pairing QR codes.
+        NSMicrophoneUsageDescription: Happier uses the microphone to dictate messages to your agents.
+        NSSpeechRecognitionUsageDescription: Happier turns your voice into text so you can dictate messages to your agents.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        # iOS continued-processing tasks that keep attachment uploads running in the background.
+        BGTaskSchedulerPermittedIdentifiers: [com.devmanny.happier.upload.*]
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmanny.happier
+            CFBundleURLSchemes: [happier]
+    entitlements:
+      path: Happier/Resources/Happier.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.device.camera: true
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier
+        PRODUCT_NAME: Happier
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: true
+        ENABLE_HARDENED_RUNTIME: true
+        SWIFT_EMIT_LOC_STRINGS: true
+        LOCALIZATION_PREFERS_STRING_CATALOGS: true
+        # macOS spells the push entitlement differently, so it gets its own file.
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: Happier/Resources/Happier-macOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"

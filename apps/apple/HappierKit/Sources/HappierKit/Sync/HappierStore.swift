@@ -1,0 +1,2068 @@
+import CryptoKit
+import Foundation
+import Observation
+import os
+
+/// App-wide state: credentials, the session list, open transcripts and the realtime connection.
+///
+/// Sync model (simplest correct form of `docs/protocol.md` for a fresh client): connect the
+/// user-scoped socket, then snapshot the session list and catch up open transcripts with
+/// `afterSeq`; afterwards apply `update`/`ephemeral` events. Every reconnect repeats the snapshot,
+/// so missed events are recovered without the UI's `/v2/changes` machinery.
+@MainActor
+@Observable
+public final class HappierStore {
+    public enum Phase: Equatable { case launching, signedOut, ready }
+    public enum Connection: Equatable { case connecting, online, offline }
+
+    public struct RPCError: LocalizedError {
+        public let message: String
+        public let code: String?
+        public var errorDescription: String? { message }
+    }
+
+    public static let defaultServer = URL(string: "https://happier.nomada.cloud")!
+
+    public private(set) var phase: Phase = .launching
+    public private(set) var connection: Connection = .offline
+    public private(set) var server: URL
+    /// Observed per session: activity in one session doesn't redraw views showing another.
+    public let sessions = KeyedStore<Session>()
+    /// Archived sessions opened from the archive or a search; the list refresh (non-archived only)
+    /// keeps them so an open archived conversation doesn't vanish.
+    @ObservationIgnored private var openedArchivedIds: Set<String> = []
+    /// The list as last synced, on disk, and the change cursor it reflects.
+    @ObservationIgnored private var snapshots: SessionSnapshotStore?
+    @ObservationIgnored private var snapshotCursor: Int?
+    /// List syncs run one at a time; a request during one runs once more after it.
+    @ObservationIgnored private var sessionSync: (id: UUID, task: Task<Void, Never>)?
+    @ObservationIgnored private var sessionSyncRequested = false
+    @ObservationIgnored private var sessionSyncFull = false
+    @ObservationIgnored private var sessionSyncReportsErrors = false
+    /// Observed per session, like `sessions`.
+    public let transcripts = KeyedStore<Transcript>(isSame: { _, _ in false })
+    public private(set) var hasOlderMessages: [String: Bool] = [:]
+    public private(set) var isLoadingSessions = false
+    /// True once the session list has been fetched at least once since sign-in.
+    public private(set) var hasLoadedSessions = false
+    /// Transcripts whose first page is being fetched.
+    public private(set) var loadingTranscripts: Set<String> = []
+    /// Daemon machines of this account (refreshed when starting a new session).
+    public private(set) var machines: [Machine] = []
+    /// Device-local pinned messages for this server/account.
+    public private(set) var pins = MessagePins(scope: "signed-out")
+    /// Text to seed into a session's composer (restored by rollback or carried into a fork).
+    public var draftSeeds: [String: String] = [:]
+    /// A session the UI should navigate to (e.g. a freshly created fork).
+    public var openRequest: String?
+    /// Server pending queue per open session (queued, blocked and discarded rows).
+    public private(set) var pendingQueues: [String: [PendingMessage]] = [:]
+    /// Last first-page load failure per session (cleared on retry).
+    public private(set) var transcriptErrors: [String: String] = [:]
+    /// Sessions whose rows exist but cannot be decrypted with this device's keys.
+    public private(set) var undecryptableSessionCount = 0
+    public var lastError: String?
+
+    @ObservationIgnored private var credentials: Credentials?
+    @ObservationIgnored private var keys: AccountKeys?
+    @ObservationIgnored private var api: HappierAPI?
+    @ObservationIgnored private var socket: SocketIOClient?
+    @ObservationIgnored private var syncTask: Task<Void, Never>?
+    @ObservationIgnored private var openSessionIds: Set<String> = []
+    @ObservationIgnored private var loadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var pendingFetches: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var pendingFetchDirty: Set<String> = []
+    @ObservationIgnored private var pushDevice: PushDevice?
+    @ObservationIgnored private var inBackground = false
+    @ObservationIgnored private var pendingPushTap: PushTap?
+    @ObservationIgnored private let credentialStore = CredentialStore()
+    @ObservationIgnored private let log = Logger(subsystem: "dev.happier.apple", category: "sync")
+
+    private var sentFrom: String {
+        #if os(macOS)
+        "mac"
+        #else
+        "ios"
+        #endif
+    }
+
+    public init(server: URL? = nil) {
+        let current = server ?? UserDefaults.standard.url(forKey: "happier.server") ?? Self.defaultServer
+        let saved = (UserDefaults.standard.stringArray(forKey: Self.knownServersKey) ?? []).compactMap(URL.init(string:))
+        self.server = current
+        knownServers = RelayList.adding(current, to: saved)
+    }
+
+    // MARK: - Account
+
+    public func restore() {
+        // Already signed in by a notification action that woke the app before its window.
+        guard phase == .launching else { return }
+        do {
+            if let credentials = try credentialStore.load(server: server) { activate(credentials) } else { phase = .signedOut }
+        } catch {
+            log.error("credential load failed: \(String(describing: error), privacy: .public)")
+            phase = .signedOut
+        }
+    }
+
+    public func signIn(_ credentials: Credentials, server: URL) throws {
+        self.server = server
+        UserDefaults.standard.set(server, forKey: "happier.server")
+        try credentialStore.save(credentials, server: server)
+        rememberServer(server)
+        activate(credentials)
+    }
+
+    public func signOut() {
+        if let api, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
+            UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+            Task { try? await api.deletePushToken(token) }
+        }
+        credentialStore.delete(server: server)
+        let snapshots = self.snapshots
+        Task { await snapshots?.clear() }
+        disconnectAccount()
+    }
+
+    // MARK: - Relays
+
+    private static let knownServersKey = "happier.knownServers"
+    /// Relays this device has used; each keeps its own credentials in the Keychain.
+    public private(set) var knownServers: [URL]
+
+    private func rememberServer(_ url: URL) {
+        knownServers = RelayList.adding(url, to: knownServers)
+        UserDefaults.standard.set(knownServers.map(\.absoluteString), forKey: Self.knownServersKey)
+    }
+
+    /// Whether this device holds a sign-in for `url`.
+    public func hasCredentials(for url: URL) -> Bool {
+        (try? credentialStore.load(server: url)) != nil
+    }
+
+    /// Moves to another relay without signing out of this one: its saved sign-in is used when
+    /// there is one, otherwise the sign-in screen opens on that relay.
+    public func switchServer(to url: URL) {
+        guard RelayList.canonical(url) != RelayList.canonical(server) else { return }
+        let saved = try? credentialStore.load(server: url)
+        if phase == .ready { disconnectAccount() }
+        server = url
+        UserDefaults.standard.set(url, forKey: "happier.server")
+        rememberServer(url)
+        if let saved { activate(saved) } else { phase = .signedOut }
+    }
+
+    public struct RelayStatus: Sendable {
+        public let responseTime: Duration?
+        public let build: String?
+    }
+
+    /// Reachability (round trip to `/health`) and build of a relay, from its public routes.
+    public nonisolated static func relayStatus(_ url: URL) async -> RelayStatus {
+        let http = HTTPClient(baseURL: url)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let healthy = (try? await http.get("/health")) != nil
+        let elapsed = start.duration(to: clock.now)
+        let version = try? await http.get("/v1/version")
+        return RelayStatus(responseTime: healthy ? elapsed : nil, build: version.flatMap(RelayList.build(fromVersion:)))
+    }
+
+    /// Drops the live connection and in-memory state of the current account (credentials stay).
+    private func disconnectAccount() {
+        syncTask?.cancel()
+        let socket = self.socket
+        Task { await socket?.disconnect() }
+        credentials = nil
+        keys = nil
+        api = nil
+        self.socket = nil
+        outgoingSends.values.forEach { $0.isCancelled = true }
+        outgoingSends = [:]
+        failedSends = [:]
+        for localId in uploadProgress.keys { uploadObserver?.uploadDidFinish(localId: localId, success: false) }
+        uploadProgress = [:]
+        uploadSessionIds = [:]
+        sessions.removeAll()
+        transcripts.removeAll()
+        hasLoadedSessions = false
+        pendingQueues = [:]
+        draftSeeds = [:]
+        openRequest = nil
+        pinnedSessionIds = []
+        machines = []
+        openSessionIds = []
+        draftStates.values.forEach { $0.upload?.cancel() }
+        draftStates = [:]
+        pendingDraftsKey = nil
+        syncedDrafts.removeAll()
+        loadTasks.values.forEach { $0.cancel() }
+        loadTasks = [:]
+        fileIndexes = [:]
+        fileIndexListings = [:]
+        snapshots = nil
+        snapshotCursor = nil
+        sessionSync?.task.cancel()
+        sessionSync = nil
+        connection = .offline
+        phase = .signedOut
+    }
+
+    /// The 32-byte recovery secret, when this device holds it (for showing the backup key).
+    public var recoverySecret: Data? { keys?.masterSecret }
+    public var accountId: String? { credentials?.accountId }
+
+    private func activate(_ credentials: Credentials) {
+        self.credentials = credentials
+        do { keys = try credentials.accountKeys() } catch {
+            log.error("invalid key material: \(String(describing: error), privacy: .public)")
+            keys = nil
+        }
+        api = HappierAPI(server: server, token: credentials.token)
+        Task { await registerPushToken() }
+        let scope = "\(server.host() ?? server.absoluteString)/\(credentials.accountId ?? "account")"
+        pins = MessagePins(scope: scope)
+        pendingDraftsKey = "happier.pendingDrafts.\(scope)"
+        restorePendingDrafts()
+        snapshots = SessionSnapshotStore(directory: Self.cacheDirectory, scope: scope)
+        snapshotCursor = nil
+        phase = .ready
+        syncTask?.cancel()
+        syncTask = Task { await runSync() }
+    }
+
+    // MARK: - Session list
+
+    public var sessionList: [Session] {
+        let now = Date.now
+        return sessions.values.filter(\.isUserFacing)
+            .map { ($0, listDate($0, now: now)) }
+            .sorted { $0.1 > $1.1 }
+            .map(\.0)
+    }
+
+    /// Where the list puts a session: its last activity, held still while it works (`RestingDates`).
+    public func listDate(_ session: Session, now: Date = .now) -> Date {
+        restingDates.date(for: session, now: now)
+    }
+
+    @ObservationIgnored private var restingDates = RestingDates()
+
+    /// Brings the session list up to date: only the sessions changed since the last sync when the
+    /// account's change cursor allows it, otherwise (no snapshot yet, cursor gone, most of the
+    /// list changed, pull to refresh) the whole list. Background syncs only log failures; a
+    /// user-initiated one (pull to refresh) shows them.
+    public func refreshSessions(userInitiated: Bool = false) async {
+        sessionSyncRequested = true
+        if userInitiated {
+            sessionSyncFull = true
+            sessionSyncReportsErrors = true
+        }
+        if let running = sessionSync {
+            await running.task.value
+            return
+        }
+        let id = UUID()
+        let task = Task {
+            while sessionSyncRequested, !Task.isCancelled {
+                sessionSyncRequested = false
+                let full = sessionSyncFull
+                let reports = sessionSyncReportsErrors
+                sessionSyncFull = false
+                sessionSyncReportsErrors = false
+                await syncSessions(full: full, reportErrors: reports)
+            }
+            // No suspension since the last check: a request can't slip in between. A loop cancelled
+            // by a sign-out must not clear the next account's.
+            if sessionSync?.id == id { sessionSync = nil }
+        }
+        sessionSync = (id, task)
+        await task.value
+    }
+
+    private static var cacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Happier")
+    }
+
+    /// The list from the last launch, shown while the first sync runs.
+    private func showCachedSessions() async {
+        guard !hasLoadedSessions, let snapshots else { return }
+        let clock = ContinuousClock()
+        let started = clock.now
+        guard let snapshot = await snapshots.load() else { return }
+        let keys = self.keys
+        let decoded = await Task.detached(priority: .userInitiated) { Self.decodeSessions(snapshot.rows, keys: keys) }.value
+        guard !hasLoadedSessions, self.snapshots === snapshots else { return }
+        sessions.replaceAll(with: decoded.sessions)
+        undecryptableSessionCount = decoded.failures
+        snapshotCursor = snapshot.cursor
+        hasLoadedSessions = true
+        log.notice("sessions: \(decoded.sessions.count, privacy: .public) from cache in \(clock.now - started, privacy: .public)")
+        Task { await refreshPinnedSessions() }
+        Task { await handlePendingPushTap() }
+    }
+
+    private func syncSessions(full: Bool, reportErrors: Bool) async {
+        guard api != nil, snapshots != nil else { return }
+        isLoadingSessions = true
+        defer { isLoadingSessions = false }
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            if !full, let cursor = snapshotCursor, let changed = try await syncChangedSessions(since: cursor) {
+                log.notice("sessions: \(changed, privacy: .public) changed, synced in \(clock.now - started, privacy: .public)")
+            } else {
+                let count = try await syncAllSessions()
+                log.notice("sessions: full list of \(count, privacy: .public) in \(clock.now - started, privacy: .public)")
+            }
+        } catch {
+            if reportErrors { report(error) } else { logBackground(error, "session list sync") }
+        }
+    }
+
+    /// The whole list (`/v2/sessions`), saved with the cursor read just before it so the next sync
+    /// replays anything that changed while it downloaded.
+    private func syncAllSessions() async throws -> Int {
+        guard let api, let snapshots else { return 0 }
+        let cursor = try? await api.changesCursor()
+        let rows = try await api.listSessions()
+        let keys = self.keys
+        let decoded = await Task.detached(priority: .userInitiated) { Self.decodeSessions(rows, keys: keys) }.value
+        guard self.snapshots === snapshots else { return 0 }
+        if decoded.failures > 0 { log.notice("\(decoded.failures) sessions could not be decrypted") }
+        undecryptableSessionCount = decoded.failures
+        var next = decoded.sessions
+        for id in openedArchivedIds where next[id] == nil { next[id] = sessions[id] }
+        sessions.replaceAll(with: next)
+        hasLoadedSessions = true
+        snapshotCursor = cursor
+        didUpdateSessions(Set(next.keys))
+        await snapshots.save(SessionSnapshot(rows: rows, cursor: cursor))
+        return rows.count
+    }
+
+    /// Fetches only the sessions changed since `cursor`. Nil when that can't catch up (the cursor is
+    /// gone) or isn't worth it (most of the list changed: one list download beats that many).
+    private func syncChangedSessions(since cursor: Int) async throws -> Int? {
+        guard let api, let snapshots else { return nil }
+        let pageSize = 500 // `/v2/changes` maximum
+        var after = cursor
+        var ids: [String] = []
+        while true {
+            guard let response = try await api.changes(after: after, limit: pageSize) else { return nil }
+            let page = SessionChanges.page(response)
+            ids += page.sessionIds.filter { !ids.contains($0) }
+            if ids.count * 2 > max(sessions.count, 1) { return nil }
+            let next = page.nextCursor ?? after
+            guard page.count == pageSize, next > after else {
+                after = max(next, after)
+                break
+            }
+            after = next
+        }
+        guard !ids.isEmpty else {
+            snapshotCursor = after
+            return 0
+        }
+        // Up to four at a time, well inside the session-detail rate limit.
+        var changed: [String: JSONValue] = [:]
+        var removed = Set<String>()
+        for batch in stride(from: 0, to: ids.count, by: 4).map({ Array(ids[$0..<min($0 + 4, ids.count)]) }) {
+            try await withThrowingTaskGroup(of: (String, JSONValue?).self) { group in
+                for id in batch {
+                    group.addTask {
+                        do {
+                            return (id, try await api.session(id: id))
+                        } catch let error as HTTPClient.ServerError where error.status == 404 {
+                            return (id, nil)
+                        }
+                    }
+                }
+                for try await (id, row) in group {
+                    if let row { changed[id] = row } else { removed.insert(id) }
+                }
+            }
+        }
+        let keys = self.keys
+        let rows = Array(changed.values)
+        let decoded = await Task.detached(priority: .userInitiated) { Self.decodeSessions(rows, keys: keys) }.value
+        guard self.snapshots === snapshots else { return nil }
+        for id in removed where !openedArchivedIds.contains(id) {
+            sessions[id] = nil
+            transcripts[id] = nil
+        }
+        for (id, session) in decoded.sessions {
+            if session.archivedAt != nil, !openedArchivedIds.contains(id) {
+                sessions[id] = nil
+            } else {
+                sessions[id] = session
+            }
+        }
+        snapshotCursor = after
+        didUpdateSessions(Set(decoded.sessions.keys))
+        if let snapshot = await snapshots.load() {
+            await snapshots.save(snapshot.applying(changed: changed, removed: removed, cursor: after))
+        }
+        return ids.count
+    }
+
+    private func didUpdateSessions(_ ids: Set<String>) {
+        Task { await refreshPinnedSessions() }
+        Task { await handlePendingPushTap() }
+        for id in ids where transcripts[id] != nil {
+            if let state = sessions[id]?.agentState { transcripts[id]?.apply(agentState: state) }
+        }
+        // A conversation opened before its session was known (a cold start, a notification tap)
+        // loads as soon as it is.
+        for id in ids where openSessionIds.contains(id) && transcripts[id]?.isLoaded != true && transcriptErrors[id] == nil {
+            startLoading(id)
+        }
+    }
+
+    private nonisolated static func decodeSessions(_ rows: [JSONValue], keys: AccountKeys?) -> (sessions: [String: Session], failures: Int) {
+        var sessions: [String: Session] = [:]
+        var failures = 0
+        for row in rows {
+            if let session = try? Session(row: row, keys: keys) { sessions[session.id] = session } else { failures += 1 }
+        }
+        return (sessions, failures)
+    }
+
+    // MARK: - App lifecycle
+
+    /// iOS freezes networking while the app is in the background: close the socket cleanly so
+    /// nothing is left half-open, and reconnect + resync as soon as the app is back.
+    public func appDidEnterBackground() {
+        guard phase == .ready else { return }
+        inBackground = true
+        flushDrafts()
+        // Uploads in flight keep the socket (and the app, through a background task) alive; the
+        // connection is closed once they finish.
+        guard uploadProgress.isEmpty else { return }
+        suspendForBackground()
+    }
+
+    private func suspendForBackground() {
+        syncTask?.cancel()
+        syncTask = nil
+        let socket = self.socket
+        Task { await socket?.disconnect() }
+        connection = .offline
+    }
+
+    public func appDidBecomeActive() {
+        inBackground = false
+        guard phase == .ready, syncTask == nil else { return }
+        syncTask = Task { await runSync() }
+    }
+
+    // MARK: - Realtime
+
+    private func runSync() async {
+        var backoff: Duration = .seconds(1)
+        await showCachedSessions()
+        await refreshSessions()
+        while !Task.isCancelled, let token = credentials?.token {
+            connection = .connecting
+            let socket = SocketIOClient(
+                serverURL: server, path: "/v1/updates",
+                auth: ["token": .string(token), "clientType": "user-scoped", "clientPurpose": "sync"])
+            self.socket = socket
+            do {
+                try await socket.connect()
+                connection = .online
+                backoff = .seconds(1)
+                await refreshSessions()
+                for id in openSessionIds {
+                    startLoading(id)
+                    refreshRunnerStatus(id)
+                    await loadDraft(id)
+                }
+                // Text typed while offline, or before the app was closed, goes up now.
+                flushDrafts()
+                for await event in socket.events { await handle(event) }
+            } catch let error as SocketIOClient.ConnectError where error.message == "invalid-token" {
+                log.error("token rejected; signing out")
+                signOut()
+                return
+            } catch {
+                log.notice("socket failed: \(String(describing: error), privacy: .public)")
+            }
+            connection = .offline
+            try? await Task.sleep(for: backoff)
+            backoff = min(backoff * 2, .seconds(30))
+        }
+    }
+
+    private func handle(_ event: SocketIOClient.Event) async {
+        guard case .event(let name, let args) = event, let payload = args.first else { return }
+        switch name {
+        case "update":
+            await handleUpdate(payload["body"] ?? .null)
+        case "ephemeral":
+            if payload["type"]?.stringValue == "session-draft-updated" || payload["sessionDraft"]?.boolValue == true {
+                handleDraftHint(payload)
+            } else if payload["type"]?.stringValue == "activity", let id = payload["id"]?.stringValue {
+                let wasThinking = sessions[id]?.thinking == true
+                sessions[id]?.apply(activity: payload)
+                // A runner can only be restarted between turns; re-check when a turn ends.
+                if wasThinking, sessions[id]?.thinking == false, openSessionIds.contains(id) { refreshRunnerStatus(id) }
+            }
+        default:
+            break
+        }
+    }
+
+    private func handleUpdate(_ body: JSONValue) async {
+        switch body["t"]?.stringValue {
+        case "new-message", "message-updated":
+            guard let sid = body["sid"]?.stringValue, let session = sessions[sid], let row = body["message"] else { return }
+            do {
+                let message = try TranscriptMessage(row: row, session: session)
+                // One write: every reader of the session list redraws once per message, not twice.
+                var updated = session
+                updated.seq = max(session.seq, message.seq)
+                updated.meaningfulActivityAt = message.createdAt
+                sessions[sid] = updated
+                guard let transcript = transcripts[sid] else { return }
+                if case .after(let seq) = transcript.refresh, message.seq > seq + 1 { await catchUp(sid) }
+                applyTranscript([message], to: sid)
+                if openSessionIds.contains(sid) { markRead(sid) }
+            } catch {
+                log.error("message decode failed: \(String(describing: error), privacy: .public)")
+            }
+        case "update-session":
+            guard let id = body["id"]?.stringValue else { return }
+            do { try sessions[id]?.apply(update: body) } catch { logBackground(error, "session update") }
+            if body["agentState"] != nil, let state = sessions[id]?.agentState, transcripts[id] != nil {
+                transcripts[id]?.apply(agentState: state)
+            }
+        case "pending-changed":
+            guard let sid = body["sid"]?.stringValue ?? body["sessionId"]?.stringValue else { return }
+            sessions[sid]?.pendingVersion = body["pendingVersion"]?.intValue
+            sessions[sid]?.pendingCount = body["pendingCount"]?.intValue ?? 0
+            if openSessionIds.contains(sid) { refreshPending(sid) }
+        case "new-session":
+            if let session = try? Session(row: body, keys: keys) { sessions[session.id] = session }
+        case "delete-session":
+            if let sid = body["sid"]?.stringValue {
+                sessions[sid] = nil
+                transcripts[sid] = nil
+            }
+        default:
+            break
+        }
+    }
+
+    // MARK: - Transcript
+
+    /// Starts loading a transcript. The load is owned by the store, not by the calling view, so a
+    /// view that SwiftUI recreates or dismisses mid-flight cannot leave the transcript half-loaded.
+    public func open(_ id: String) {
+        openSessionIds.insert(id)
+        refreshRunnerStatus(id)
+        Task { await loadDraft(id) }
+        startLoading(id)
+    }
+
+    private func startLoading(_ id: String) {
+        guard loadTasks[id] == nil else { return }
+        loadTasks[id] = Task {
+            await load(id)
+            loadTasks[id] = nil
+        }
+    }
+
+    private func load(_ id: String) async {
+        guard let session = sessions[id], let api else {
+            // Loaded once the session arrives (`didUpdateSessions`).
+            log.notice("open: session not known yet")
+            return
+        }
+        if transcripts[id] == nil {
+            var transcript = Transcript()
+            transcript.apply(agentState: session.agentState)
+            transcripts[id] = transcript
+        }
+        if case .after = transcripts[id]?.refresh {
+            await catchUp(id)
+        } else {
+            loadingTranscripts.insert(id)
+            transcriptErrors[id] = nil
+            defer { loadingTranscripts.remove(id) }
+            do {
+                let clock = ContinuousClock()
+                let started = clock.now
+                let page = try await api.messages(sessionId: id)
+                let fetched = clock.now
+                await apply(page.rows, to: id)
+                log.notice("open: fetch=\(fetched - started, privacy: .public) decode+reduce=\(clock.now - fetched, privacy: .public) rows=\(page.rows.count, privacy: .public)")
+                hasOlderMessages[id] = page.hasMore
+                transcripts[id]?.markLoaded()
+            } catch {
+                transcriptErrors[id] = UserFacingError.message(for: error)
+                log.error("open failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        refreshPending(id)
+        markRead(id)
+    }
+
+    public func close(_ id: String) {
+        openSessionIds.remove(id)
+    }
+
+    public func loadOlder(_ id: String) async {
+        guard let api, let minSeq = transcripts[id]?.minSeq, hasOlderMessages[id] == true else { return }
+        do {
+            let page = try await api.messages(sessionId: id, beforeSeq: minSeq)
+            await apply(page.rows, to: id)
+            hasOlderMessages[id] = page.hasMore
+        } catch { logBackground(error, "older messages") }
+    }
+
+    private func catchUp(_ id: String) async {
+        guard let api, case .after(var after)? = transcripts[id]?.refresh else { return }
+        do {
+            while true {
+                let page = try await api.messages(sessionId: id, afterSeq: after)
+                await apply(page.rows, to: id)
+                guard page.hasMore, let next = page.nextAfterSeq, next > after else { break }
+                after = next
+            }
+        } catch { logBackground(error, "transcript catch-up") }
+    }
+
+    /// Decrypts and parses rows off the main actor, then applies them in one transcript update.
+    private func apply(_ rows: [JSONValue], to id: String) async {
+        guard let session = sessions[id] else { return }
+        let clock = ContinuousClock()
+        let started = clock.now
+        let (messages, failures) = await Task.detached(priority: .userInitiated) {
+            Self.decode(rows, session: session)
+        }.value
+        let decoded = clock.now
+        if failures > 0 { log.error("\(failures, privacy: .public) messages could not be decoded in a session") }
+        applyTranscript(messages, to: id)
+        if rows.count > 1 {
+            log.notice("apply: decode=\(decoded - started, privacy: .public) reduce=\(clock.now - decoded, privacy: .public) rows=\(rows.count, privacy: .public)")
+        }
+    }
+
+    /// Applying the canonical transcript also releases any failed local send it confirms. During
+    /// an in-flight request, the owner consumes that acknowledgement before finishing its attempt.
+    private func applyTranscript(_ messages: [TranscriptMessage], to id: String) {
+        transcripts[id]?.apply(messages)
+        for message in messages {
+            guard let localId = message.localId, let send = outgoingSends[localId],
+                  send.sessionId == id, send.acknowledge(message), !send.isSending else { continue }
+            outgoingSends[localId] = nil
+            failedSends[localId] = nil
+        }
+    }
+
+    private nonisolated static func decode(_ rows: [JSONValue], session: Session) -> ([TranscriptMessage], Int) {
+        var messages: [TranscriptMessage] = []
+        var failures = 0
+        for row in rows {
+            if let message = try? TranscriptMessage(row: row, session: session) { messages.append(message) } else { failures += 1 }
+        }
+        return (messages, failures)
+    }
+
+    private func markRead(_ id: String) {
+        guard let api else { return }
+        sessions[id]?.unreadSince = nil
+        Task { try? await api.setReadState(sessionId: id, read: true) }
+    }
+
+    /// Mark as read or unread from the list (swipe or long press).
+    public func setRead(_ id: String, _ read: Bool) async {
+        guard let api, sessions[id] != nil else { return }
+        let previous = sessions[id]?.unreadSince
+        sessions[id]?.unreadSince = read ? nil : .now
+        do {
+            try await api.setReadState(sessionId: id, read: read)
+        } catch {
+            sessions[id]?.unreadSince = previous
+            report(error)
+        }
+    }
+
+    // MARK: - Actions
+
+    // MARK: - Switching a session's agent
+
+    /// An agent (and model and effort) for a session's next message. A `modelId` of nil or
+    /// `"default"` keeps the agent's CLI settings.
+    public struct AgentSelection: Equatable, Sendable {
+        public let agentId: String
+        public let modelId: String?
+        public let effort: String?
+
+        public init(agentId: String, modelId: String? = nil, effort: String? = nil) {
+            self.agentId = agentId
+            self.modelId = modelId
+            self.effort = effort
+        }
+    }
+
+    /// Another agent picked for a session: its next message switches the session to it.
+    public var armedAgents: [String: AgentSelection] = [:]
+
+    /// Picking the session's own agent again, with nothing else chosen, cancels the switch.
+    public func armAgent(_ selection: AgentSelection?, for sessionId: String) {
+        if let selection, selection.agentId == sessions[sessionId]?.agentId,
+           selection.modelId == nil || selection.modelId == "default", selection.effort == nil {
+            armedAgents[sessionId] = nil
+        } else {
+            armedAgents[sessionId] = selection
+        }
+    }
+
+    /// Sends `text` as the first message of another agent in the session: the daemon stops the
+    /// current agent and continues the same conversation with the new one (`session.agentTransition`,
+    /// what the official app's agent picker does).
+    private func switchAgent(_ id: String, to selection: AgentSelection, text: String) async -> Bool {
+        guard let session = sessions[id], let machineId = session.machineId, let current = session.agentId else {
+            lastError = String(localized: "This session's machine or agent isn't known.")
+            return false
+        }
+        let localId = UUID().uuidString.lowercased()
+        if transcripts[id] == nil { transcripts[id] = Transcript() }
+        transcripts[id]?.addPending(localId: localId, text: text)
+        var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
+        meta["source"] = "ui"
+        meta["sentFrom"] = .string(sentFrom)
+        let params = AgentTransitionRequest.params(sessionId: id, currentAgentId: current, selection: selection,
+                                                   text: text, localId: localId, meta: meta)
+        let failure: String
+        do {
+            let result = try await machineRPC(machineId, method: "session.agentTransition", params: params, timeout: .seconds(180))
+            switch result["type"]?.stringValue {
+            case "accepted":
+                armedAgents[id] = nil
+                await refreshSessions()
+                refreshPending(id)
+                return true
+            case "rejected":
+                failure = String(localized: "The agent couldn't be switched (\(result["code"]?.stringValue ?? "rejected")). The session wasn't changed.")
+            case "partially_applied":
+                failure = String(localized: "The switch didn't finish (\(result["code"]?.stringValue ?? "partial")). Send again to retry.")
+            default:
+                failure = String(localized: "It isn't known whether the agent was switched. Check the session before sending again.")
+            }
+        } catch {
+            failure = UserFacingError.message(for: error)
+        }
+        transcripts[id]?.removePending(localId: localId)
+        lastError = failure
+        return false
+    }
+
+    /// Sends a message as typed in the conversation; false when it couldn't be (the error is reported).
+    @discardableResult
+    public func send(_ text: String, attachments: [AttachmentDraft] = [], to id: String) async -> Bool {
+        guard sessions[id] != nil, let api else {
+            log.error("send: unknown session or signed out")
+            return false
+        }
+        if let armed = armedAgents[id] {
+            guard attachments.isEmpty else {
+                lastError = String(localized: "Send the switch to the new agent as text first; attachments can follow.")
+                return false
+            }
+            return await switchAgent(id, to: armed, text: text)
+        }
+        let send = OutgoingSend(sessionId: id, text: text, attachments: attachments)
+        outgoingSends[send.localId] = send
+        if transcripts[id] == nil { transcripts[id] = Transcript() }
+        transcripts[id]?.addPending(localId: send.localId, text: text, attachments: attachments.map(\.name))
+        return await deliver(send, api: api)
+    }
+
+    /// Retries the original message and files, retaining its server deduplication identity.
+    @discardableResult
+    public func retrySend(_ localId: String, in id: String) async -> Bool {
+        guard let api, let send = outgoingSends[localId], send.sessionId == id,
+              failedSends[localId] != nil, !send.isSending else { return false }
+        send.isCancelled = false
+        return await deliver(send, api: api)
+    }
+
+    private func deliver(_ send: OutgoingSend, api: HappierAPI) async -> Bool {
+        let localId = send.localId
+        let id = send.sessionId
+        guard let session = sessions[id], !send.isSending else { return false }
+        send.isSending = true
+        failedSends[localId] = nil
+        var succeeded = false
+        if !send.attachments.isEmpty {
+            uploadProgress[localId] = UploadProgress(totalBytes: send.attachments.reduce(0) { $0 + $1.data.count })
+            uploadSessionIds[localId] = id
+            uploadObserver?.uploadDidStart(localId: localId, sessionTitle: session.title, fileCount: send.attachments.count)
+        }
+        defer {
+            send.isSending = false
+            if uploadProgress.removeValue(forKey: localId) != nil {
+                uploadSessionIds[localId] = nil
+                uploadObserver?.uploadDidFinish(localId: localId, success: succeeded)
+                if inBackground, uploadProgress.isEmpty { suspendForBackground() }
+            }
+        }
+        do {
+            try await unarchiveForDelivery(id, api: api)
+            try await send.deliver(context: { [self] in
+                guard let session = sessions[id] else { throw CancellationError() }
+                var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
+                meta["source"] = "ui"
+                meta["sentFrom"] = .string(sentFrom)
+                return (session, meta)
+            }, rpc: { [self] method, params in
+                // Logout/relay changes cancel the owner before any subsequent network request.
+                guard outgoingSends[localId] === send else { throw CancellationError() }
+                return try await sessionRPC(id, method: method, params: params)
+            }, enqueue: { localId, content, action in
+                try await api.enqueueUserMessage(sessionId: id, localId: localId, content: content, action: action)
+            }, progress: { [self] bytes in
+                uploadProgress[localId]?.add(bytes)
+                if let fraction = uploadProgress[localId]?.fraction {
+                    uploadObserver?.uploadDidProgress(localId: localId, fraction: fraction)
+                }
+            })
+            guard outgoingSends[localId] === send else { return false }
+            succeeded = true
+            outgoingSends[localId] = nil
+            refreshPending(id)
+            return true
+        } catch {
+            // An account switch must not resurrect old photos or errors in the next account.
+            guard outgoingSends[localId] === send else { return false }
+            failedSends[localId] = error is CancellationError
+                ? String(localized: "Upload interrupted. Your message and photos are saved here. Retry when you're ready.")
+                : UserFacingError.message(for: error)
+            return false
+        }
+    }
+
+    // MARK: - Message actions
+
+    public func togglePin(sessionId: String, seq: Int, role: MessagePins.Role) {
+        pins.toggle(sessionId: sessionId, seq: seq, role: role)
+    }
+
+    /// Rewinds the agent conversation to before this user message and puts its text back in the
+    /// composer (`session.rollback`, `TranscriptRollbackActionButton.tsx`).
+    public func rollback(_ sessionId: String, toUserMessageSeq seq: Int, restoring text: String) async {
+        do {
+            _ = try await sessionRPC(sessionId, method: "session.rollback", params: [
+                "v": 1, "target": ["type": "before_user_message", "userMessageSeq": .number(Double(seq))],
+            ], timeout: .seconds(60))
+            if !text.isEmpty { draftSeeds[sessionId] = text }
+        } catch { report(error) }
+    }
+
+    /// Forks the session up to (and including) this message on its machine (`session.fork` with
+    /// `strategy: "auto"`: native fork when the agent supports it, otherwise replay), then opens it.
+    public func fork(_ sessionId: String, upToSeq seq: Int, restoring text: String?) async {
+        guard let machineId = sessions[sessionId]?.machineId else {
+            lastError = String(localized: "This session isn't linked to a machine, so it can't be forked.")
+            return
+        }
+        do {
+            let result = try await machineRPC(machineId, method: "session.fork", params: [
+                "v": 1, "parentSessionId": .string(sessionId),
+                "forkPoint": ["type": "seq", "upToSeqInclusive": .number(Double(seq))], "strategy": "auto",
+            ], timeout: .seconds(180))
+            guard result["ok"]?.boolValue == true, let childId = result["childSessionId"]?.stringValue else {
+                throw RPCError(message: result["errorMessage"]?.stringValue ?? "The fork failed.", code: result["errorCode"]?.stringValue)
+            }
+            if let text, !text.isEmpty { draftSeeds[childId] = text }
+            for _ in 0..<15 where sessions[childId] == nil {
+                await refreshSessions()
+                if sessions[childId] == nil { try await Task.sleep(for: .seconds(2)) }
+            }
+            if sessions[childId] != nil { openRequest = childId } else {
+                lastError = String(localized: "The fork was created but hasn't appeared yet. It will show up in the list shortly.")
+            }
+        } catch { report(error) }
+    }
+
+    /// Machine-scoped RPC (`apiSocket.ts:410-443`): params/result use the machine's content key.
+    /// `authorizingSession` names the session a session-scoped call acts on (stop, runner restart);
+    /// the server refuses those without it.
+    public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30),
+                           authorizingSession: String? = nil) async throws -> JSONValue {
+        guard let socket, connection == .online, let api else { throw RPCError(message: "Not connected", code: nil) }
+        let machine: Machine
+        if let cached = machines.first(where: { $0.id == machineId }) {
+            machine = cached
+        } else {
+            guard let row = try await api.machine(id: machineId) else { throw RPCError(message: "Machine not found", code: nil) }
+            machine = try Machine(row: row, keys: keys)
+            // Keep it: every machine RPC needs its key, and refetching made quick calls fragile.
+            if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
+        }
+        let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
+        let ack = try await socket.emitWithAck("rpc-call", MachineRPCCall.payload(
+            machineId: machineId, method: method, params: encoded, timeoutMs: Int(timeout.components.seconds * 1000),
+            authorizingSession: authorizingSession), timeout: timeout + .seconds(5))
+        guard let response = ack.first, response["ok"]?.boolValue == true else {
+            throw RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.", code: ack.first?["errorCode"]?.stringValue)
+        }
+        var result = response["result"] ?? .null
+        if case .array(let items) = result, items.count == 1 { result = items[0] }
+        if let cipher = machine.cipher, let ciphertext = result.stringValue { result = try cipher.decryptBase64(ciphertext) }
+        return result
+    }
+
+    // MARK: - Machines and new sessions
+
+    public func refreshMachines() async {
+        guard let api else { return }
+        do {
+            let rows = try await api.machines()
+            machines = rows.compactMap { try? Machine(row: $0, keys: keys) }
+                .sorted { ($0.active ? 0 : 1, $0.name.lowercased()) < ($1.active ? 0 : 1, $1.name.lowercased()) }
+        } catch { report(error) }
+    }
+
+    // MARK: - Machine folders (`daemon.filesystem.*`, `createDirectory`)
+
+    /// Browsable starting points on the machine (home, volumes, or the CLI's allowed roots).
+    public func folderRoots(on machineId: String) async throws -> [RemoteFolder] {
+        let response = try await machineRPC(machineId, method: "daemon.filesystem.listRoots", params: [:])
+        guard response["ok"]?.boolValue == true else {
+            throw RemoteFolder.ListingError(message: response["error"]?.stringValue ?? String(localized: "This machine can't list its folders."))
+        }
+        return (response["roots"]?.arrayValue ?? []).compactMap { root in
+            guard let path = root["path"]?.stringValue else { return nil }
+            return RemoteFolder(name: root["label"]?.stringValue ?? path, path: path)
+        }
+    }
+
+    public func folders(in path: String, on machineId: String) async throws -> (folders: [RemoteFolder], truncated: Bool) {
+        try RemoteFolder.listing(from: try await machineRPC(machineId, method: "daemon.filesystem.listDirectory",
+                                                            params: ["path": .string(path), "includeFiles": false]))
+    }
+
+    /// Folders and files in `path`, for picking a file to mention.
+    public func entries(in path: String, on machineId: String) async throws -> [RemoteEntry] {
+        try RemoteFolder.entries(from: try await machineRPC(machineId, method: "daemon.filesystem.listDirectory",
+                                                            params: ["path": .string(path), "includeFiles": true]))
+    }
+
+    /// Files under `path` that git doesn't ignore, relative to it, as `rg` prints them.
+    private func ripgrepFiles(in path: String, on machineId: String, _ extra: [String] = []) async throws -> String {
+        let args = (["--files", "--follow"] + extra).map(JSONValue.string)
+        let response = try await machineRPC(machineId, method: "ripgrep", params: [
+            "args": .array(args), "cwd": .string(path),
+        ], timeout: .seconds(30))
+        guard response["success"]?.boolValue == true, let stdout = response["stdout"]?.stringValue else {
+            throw RemoteFolder.ListingError(message: response["error"]?.stringValue ?? String(localized: "This folder's files can't be listed."))
+        }
+        return stdout
+    }
+
+    /// Files and folders of a project folder to mention with `@`, best match first, as the official
+    /// composer finds them (`suggestionFile.ts`): from the folder's index, or by name on the machine
+    /// when the index has no match (a file added since, or a folder too big to list whole).
+    public func fileSuggestions(in path: String, on machineId: String, query: String, limit: Int) async throws -> [String] {
+        var index: [String] = []
+        var indexError: Error?
+        do { index = try await fileIndex(in: path, on: machineId) } catch { indexError = error }
+        let hits = FileMention.search(index, query: query, limit: limit)
+        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hits.isEmpty, !typed.isEmpty else {
+            if let indexError, typed.isEmpty { throw indexError }
+            return hits
+        }
+        do {
+            let found = try await ripgrepFiles(in: path, on: machineId, ["--hidden", "--iglob", FileMention.nameGlob(typed)])
+            return FileMention.search(FileMention.index(fromRipgrep: found), query: query, limit: limit)
+        } catch {
+            throw indexError ?? error
+        }
+    }
+
+    /// A folder's `@` index, listed once and reused for a few minutes. Every caller shares the one
+    /// listing in flight, and a caller that goes away (the `@` typed and deleted) doesn't cancel it;
+    /// a failed listing isn't kept, so the next keystroke tries again.
+    private func fileIndex(in path: String, on machineId: String) async throws -> [String] {
+        let key = "\(machineId)|\(path)"
+        if let hit = fileIndexes[key], Date.now.timeIntervalSince(hit.listedAt) < 300 { return hit.entries }
+        let listing = fileIndexListings[key] ?? Task {
+            FileMention.index(fromRipgrep: try await ripgrepFiles(in: path, on: machineId))
+        }
+        fileIndexListings[key] = listing
+        do {
+            let entries = try await listing.value
+            fileIndexes[key] = (entries, .now)
+            fileIndexListings[key] = nil
+            return entries
+        } catch {
+            fileIndexListings[key] = nil
+            log.error("file index: \(String(describing: error), privacy: .public)")
+            throw error
+        }
+    }
+
+    @ObservationIgnored private var fileIndexes: [String: (entries: [String], listedAt: Date)] = [:]
+    @ObservationIgnored private var fileIndexListings: [String: Task<[String], Error>] = [:]
+
+    /// Creates `name` inside `parent`; the daemon's filesystem access policy decides what's allowed.
+    public func createFolder(named name: String, in parent: String, on machineId: String) async throws -> RemoteFolder {
+        let platform = machines.first { $0.id == machineId }?.platform
+        let path = RemoteFolder.join(parent, name, platform: platform)
+        let response = try await machineRPC(machineId, method: "createDirectory", params: ["path": .string(path)])
+        guard response["success"]?.boolValue == true else {
+            throw RemoteFolder.ListingError(message: response["error"]?.stringValue ?? String(localized: "The folder couldn't be created."))
+        }
+        return RemoteFolder(name: name, path: path)
+    }
+
+    /// The agents a machine has installed (its daemon's `new-session` checklist), asked once and
+    /// reused for a few minutes; nil when the machine can't tell.
+    public func installedAgents(on machineId: String) async -> Set<String>? {
+        if let hit = installedAgentsByMachine[machineId], Date.now.timeIntervalSince(hit.at) < 300 { return hit.agents }
+        do {
+            let response = try await machineRPC(machineId, method: "capabilities.detect", params: ["checklistId": "new-session"],
+                                                timeout: .seconds(15))
+            guard let agents = Agent.installed(fromDetect: response) else { return nil }
+            installedAgentsByMachine[machineId] = (agents, .now)
+            return agents
+        } catch {
+            log.error("installed agents: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    @ObservationIgnored private var installedAgentsByMachine: [String: (agents: Set<String>, at: Date)] = [:]
+
+    public enum SpawnOutcome: Equatable, Sendable {
+        case created(sessionId: String)
+        /// The folder doesn't exist; ask, then retry with `approveNewDirectory: true`.
+        case needsDirectoryApproval(String)
+        case failed(String)
+    }
+
+    /// Starts an agent in a folder on a machine (`spawn-happy-session`, `spawnSessionPayload.ts`),
+    /// waits for the session to appear, sends the first message and opens it.
+    public func createSession(machineId: String, directory: String, agentId: String, permissionMode: PermissionMode,
+                              modelId: String? = nil, effort: String? = nil,
+                              firstMessage: String, approveNewDirectory: Bool = false) async -> SpawnOutcome {
+        let nonce = UUID().uuidString.lowercased()
+        let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode, modelId: modelId,
+                                         effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory)
+        do {
+            var result: JSONValue
+            do {
+                result = try await machineRPC(machineId, method: "spawn-happy-session.provider-safe.v1", params: params, timeout: .seconds(300))
+            } catch let error as RPCError where ["RPC_METHOD_NOT_AVAILABLE", "RPC_METHOD_NOT_FOUND"].contains(error.code ?? "") {
+                result = try await machineRPC(machineId, method: "spawn-happy-session", params: params, timeout: .seconds(300))
+            }
+            switch result["type"]?.stringValue {
+            case "requestToApproveDirectoryCreation":
+                return .needsDirectoryApproval(result["directory"]?.stringValue ?? directory)
+            case "error":
+                return .failed(result["errorMessage"]?.stringValue ?? String(localized: "The machine couldn't start the session."))
+            default:
+                break
+            }
+            var sessionId = result["sessionId"]?.stringValue
+            for _ in 0..<30 where sessionId == nil {
+                try await Task.sleep(for: .seconds(2))
+                let resolved = try await machineRPC(machineId, method: "daemon.spawnSession.resolve", params: ["spawnNonce": .string(nonce)])
+                switch resolved["status"]?.stringValue {
+                case "success": sessionId = resolved["sessionId"]?.stringValue
+                case "error": return .failed(resolved["errorMessage"]?.stringValue ?? String(localized: "The session failed to start."))
+                case "not_found", "unsupported": return .failed(String(localized: "The machine lost track of the new session."))
+                default: continue
+                }
+            }
+            guard let sessionId else { return .failed(String(localized: "The session is taking too long to start. It will appear in the list when ready.")) }
+            for _ in 0..<15 where sessions[sessionId] == nil {
+                await refreshSessions()
+                if sessions[sessionId] == nil { try await Task.sleep(for: .seconds(1)) }
+            }
+            let message = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !message.isEmpty, sessions[sessionId] != nil { await send(message, to: sessionId) }
+            openRequest = sessionId
+            return .created(sessionId: sessionId)
+        } catch {
+            return .failed(UserFacingError.message(for: error))
+        }
+    }
+
+    // MARK: - Pending queue
+
+    /// Refetches the queue; concurrent requests collapse into one follow-up fetch.
+    public func refreshPending(_ id: String) {
+        guard pendingFetches[id] == nil else {
+            pendingFetchDirty.insert(id)
+            return
+        }
+        pendingFetches[id] = Task {
+            repeat {
+                pendingFetchDirty.remove(id)
+                guard let api, let session = sessions[id] else { break }
+                do {
+                    let rows = try await api.pending(sessionId: id)
+                    let items = await Task.detached { PendingMessage.list(rows, session: session) }.value
+                    pendingQueues[id] = items
+                } catch {
+                    log.error("pending refresh failed: \(String(describing: error), privacy: .public)")
+                }
+            } while pendingFetchDirty.contains(id)
+            pendingFetches[id] = nil
+        }
+    }
+
+    public func steerPendingNow(_ localId: String, in id: String) async {
+        await pendingMutation(id, localId) { api in
+            try await self.unarchiveForDelivery(id, api: api)
+            try await api.setPendingAction(sessionId: id, localId: localId, action: .steerNow)
+        }
+    }
+
+    /// Stops the current turn and sends this message (server `interrupt_and_send` while busy).
+    public func sendPendingNow(_ localId: String, in id: String) async {
+        await pendingMutation(id, localId) { api in
+            try await self.unarchiveForDelivery(id, api: api)
+            try await api.setPendingAction(sessionId: id, localId: localId, action: .sendNow)
+        }
+    }
+
+    /// Puts a blocked or discarded message back in line.
+    public func requeuePending(_ localId: String, in id: String) async {
+        let discarded = pendingQueues[id]?.first { $0.localId == localId }?.state == .discarded
+        await pendingMutation(id, localId) { api in
+            try await self.unarchiveForDelivery(id, api: api)
+            if discarded {
+                try await api.restorePending(sessionId: id, localId: localId)
+            } else {
+                try await api.setPendingAction(sessionId: id, localId: localId, action: .enqueue)
+            }
+        }
+    }
+
+    /// Discarded rows must be restored before their action can change (`pendingMessageService` rejects them).
+    public func restoreAndSend(_ localId: String, action: PendingAction, in id: String) async {
+        await pendingMutation(id, localId) { api in
+            try await self.unarchiveForDelivery(id, api: api)
+            try await api.restorePending(sessionId: id, localId: localId)
+            try await api.setPendingAction(sessionId: id, localId: localId, action: action)
+        }
+    }
+
+    public func removePending(_ localId: String, in id: String) async {
+        await pendingMutation(id, localId) { api in
+            try await api.removePending(sessionId: id, localId: localId)
+        }
+    }
+
+    public func editPending(_ localId: String, text: String, in id: String) async {
+        guard let session = sessions[id], let record = pendingQueues[id]?.first(where: { $0.localId == localId })?.record else {
+            lastError = String(localized: "This message can't be edited.")
+            return
+        }
+        let edited = PendingMessage.editedRecord(record, text: text)
+        await pendingMutation(id, localId) { api in
+            let content: JSONValue = session.isPlain ? ["t": "plain", "v": edited] : .string(try session.encodeDocument(edited))
+            try await api.editPending(sessionId: id, localId: localId, content: content)
+        }
+    }
+
+    /// Sending to an archived conversation resumes it. The daemon won't start an archived session
+    /// for a queued message (`activatePendingInactiveSession.ts` rejects it as ineligible, and the
+    /// message just sits there), so it leaves the archive first, like the official Resume
+    /// (`runResumeSession`).
+    private func unarchiveForDelivery(_ id: String, api: HappierAPI) async throws {
+        guard sessions[id]?.archivedAt != nil else { return }
+        try await api.unarchive(sessionId: id)
+        sessions[id]?.archivedAt = nil
+        openedArchivedIds.remove(id)
+    }
+
+    private func pendingMutation(_ id: String, _ localId: String, _ work: (HappierAPI) async throws -> Void) async {
+        guard let api else { return }
+        do { try await work(api) } catch let error as HTTPClient.ServerError where error.status == 409 || error.status == 404 {
+            lastError = String(localized: "This pending message changed while the action was being applied. The list was refreshed.")
+        } catch { report(error) }
+        refreshPending(id)
+    }
+
+    /// Default `attachmentsUploadsMaxFileBytes` of the official client (25 MiB).
+    /// Matches the daemon's `HAPPIER_FILES_UPLOAD_MAX_FILE_BYTES` on the machines this app talks to
+    /// (raised from its 50 MB default to 500 MB on the Mac mini's service).
+    public nonisolated static let maxAttachmentBytes = 500 * 1024 * 1024
+
+    /// Splits picked or dropped files into ones that can be uploaded and the names of those over the limit.
+    public nonisolated static func screenAttachments(_ drafts: [AttachmentDraft]) -> (accepted: [AttachmentDraft], tooLarge: [String]) {
+        (drafts.filter { $0.data.count <= maxAttachmentBytes }, drafts.filter { $0.data.count > maxAttachmentBytes }.map(\.name))
+    }
+
+    // MARK: - Attachments from the machine
+
+    /// An attached file, downloaded from the session's machine once (`daemon.bulkTransfer.download.*`,
+    /// as the official client's file previews) and kept in Caches for later opens.
+    public func attachmentFile(_ file: MessageAttachment, in sessionId: String,
+                               progress: @escaping @MainActor (Double) -> Void = { _ in }) async throws -> URL {
+        guard let path = file.path else { throw RPCError(message: "This attachment has no file on the computer.", code: nil) }
+        let url = Self.attachmentCacheURL(for: file, sessionId: sessionId)
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        if let running = attachmentDownloads[url] { return try await running.value }
+        let task = Task { () throws -> URL in
+            try await download(path: path, sessionId: sessionId, to: url, progress: progress)
+            return url
+        }
+        attachmentDownloads[url] = task
+        defer { attachmentDownloads[url] = nil }
+        return try await task.value
+    }
+
+    @ObservationIgnored private var attachmentDownloads: [URL: Task<URL, Error>] = [:]
+
+    /// The attachment's preview: the one the sender included, else (images up to 16 MB, as the
+    /// official client) made from the downloaded file and kept on disk. Nil for files to open first.
+    public func attachmentThumbnail(_ file: MessageAttachment, in sessionId: String) async -> AttachmentThumbnail? {
+        if let thumbnail = file.thumbnail { return thumbnail }
+        guard file.isImage, (file.sizeBytes ?? 0) <= 16 * 1024 * 1024 else { return nil }
+        let cached = Self.attachmentCacheURL(for: file, sessionId: sessionId).appendingPathExtension("thumb.jpg")
+        if let data = try? Data(contentsOf: cached) { return await AttachmentThumbnail.make(data: data, mimeType: "image/jpeg") }
+        do {
+            let url = try await attachmentFile(file, in: sessionId)
+            guard let thumbnail = await AttachmentThumbnail.make(fileURL: url, mimeType: file.mimeType) else { return nil }
+            try? thumbnail.jpeg.write(to: cached)
+            return thumbnail
+        } catch {
+            log.error("attachment preview: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Where a downloaded attachment is kept: by content hash when known, else by session and path.
+    static func attachmentCacheURL(for file: MessageAttachment, sessionId: String) -> URL {
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Happier/Downloads")
+        let key = file.sha256 ?? Data(SHA256.hash(data: Data("\(sessionId)|\(file.path ?? file.name)".utf8))).map { String(format: "%02x", $0) }.joined()
+        let folder = directory.appending(path: String(key.prefix(32)))
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appending(path: file.name)
+    }
+
+    /// The chunked, encrypted download of one file into `destination`. Tries the session's own
+    /// route, then the machine's (for a session not running), with the path from its folder.
+    private func download(path: String, sessionId: String, to destination: URL, progress: @escaping @MainActor (Double) -> Void) async throws {
+        let recipient = try TransferRecipient()
+        let request: JSONValue = ["t": "session_file_download_v1", "path": .string(path), "asZip": false,
+                                  "recipientPublicKeyBase64": .string(recipient.publicKeyBase64)]
+        let call: (String, JSONValue) async throws -> JSONValue
+        let initResponse: JSONValue
+        if let response = try? await sessionRPC(sessionId, method: "daemon.bulkTransfer.download.init", params: request),
+           response["success"]?.boolValue == true {
+            call = { [unowned self] method, params in try await sessionRPC(sessionId, method: method, params: params) }
+            initResponse = response
+        } else {
+            guard let session = sessions[sessionId], let machineId = session.machineId else {
+                throw RPCError(message: "The computer for this session isn't known.", code: nil)
+            }
+            let absolute = path.hasPrefix("/") ? path : ((session.path ?? "") as NSString).appendingPathComponent(path)
+            var machineRequest = request
+            if case .object(var object) = machineRequest { object["path"] = .string(absolute); machineRequest = .object(object) }
+            call = { [unowned self] method, params in try await machineRPC(machineId, method: method, params: params) }
+            initResponse = try await call("daemon.bulkTransfer.download.init", machineRequest)
+        }
+        guard initResponse["success"]?.boolValue == true, let downloadId = initResponse["downloadId"]?.stringValue else {
+            throw RPCError(message: initResponse["error"]?.stringValue ?? "The computer couldn't send the file.", code: nil)
+        }
+        let total = max(initResponse["sizeBytes"]?.intValue ?? 0, 1)
+        let partial = destination.appendingPathExtension("part")
+        FileManager.default.createFile(atPath: partial.path, contents: nil)
+        do {
+            let handle = try FileHandle(forWritingTo: partial)
+            defer { try? handle.close() }
+            var index = 0
+            var received = 0
+            while true {
+                let chunk = try await call("daemon.bulkTransfer.download.chunk", ["downloadId": .string(downloadId), "index": .number(Double(index))])
+                guard chunk["success"]?.boolValue != false else {
+                    throw RPCError(message: chunk["error"]?.stringValue ?? "The download stopped.", code: nil)
+                }
+                let bytes: Data
+                if let payload = chunk["payloadBase64"]?.stringValue, let envelope = chunk["encryptedDataKeyEnvelopeBase64"]?.stringValue {
+                    bytes = try TransferChunk.decrypt(payloadBase64: payload, encryptedDataKeyEnvelopeBase64: envelope,
+                                                      transferId: downloadId, index: index, recipient: recipient)
+                } else if let plain = chunk["contentBase64"]?.stringValue, let data = Data(base64Encoded: plain) {
+                    bytes = data
+                } else {
+                    throw RPCError(message: "The computer sent an unreadable part of the file.", code: nil)
+                }
+                try handle.write(contentsOf: bytes)
+                received += bytes.count
+                progress(min(Double(received) / Double(total), 1))
+                if chunk["isLast"]?.boolValue == true { break }
+                index += 1
+            }
+            _ = try? await call("daemon.bulkTransfer.download.finalize", ["downloadId": .string(downloadId)])
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: partial, to: destination)
+        } catch {
+            _ = try? await call("daemon.bulkTransfer.download.abort", ["downloadId": .string(downloadId)])
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
+    }
+
+    public func reply(_ reply: PermissionReply, to request: (id: String, tool: String), in sessionId: String) async {
+        let agentId = sessions[sessionId]?.agentId
+        do {
+            _ = try await sessionRPC(sessionId, method: "permission", params: reply.payload(requestId: request.id, tool: request.tool, agentId: agentId))
+            if reply.abortsTurn(agentId: agentId) { await abort(sessionId) }
+        } catch { report(error) }
+    }
+
+    /// Answers an AskUserQuestion-style request (`structuredQuestionAnswersV1.ts`).
+    public func answer(_ answers: [String: [String]], to requestId: String, in sessionId: String) async {
+        let structured = sessions[sessionId]?.agentState["capabilities"]?["structuredQuestionAnswersV1Supported"]?.boolValue == true
+        do {
+            if structured {
+                let payload = JSONValue.object(answers.mapValues { .array($0.map(JSONValue.string)) })
+                _ = try await sessionRPC(sessionId, method: "session.structuredQuestion.respond.v1",
+                                         params: ["id": .string(requestId), "structuredAnswersV1": payload])
+            } else {
+                let payload = JSONValue.object(answers.mapValues { .string($0.joined(separator: ", ")) })
+                _ = try await sessionRPC(sessionId, method: "permission",
+                                         params: ["id": .string(requestId), "approved": true, "answers": payload])
+            }
+        } catch { report(error) }
+    }
+
+    public func abort(_ sessionId: String) async {
+        do {
+            _ = try await sessionRPC(sessionId, method: "abort", params: [
+                "reason": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+            ])
+        } catch let error as RPCError where error.code == "RPC_METHOD_NOT_AVAILABLE" {
+            // Session runtime is offline: nothing to abort.
+        } catch { report(error) }
+    }
+
+    /// Sets the session's goal or moves it along (`session.goal.set`): a new objective, or a
+    /// status (paused, active, complete). The runtime publishes the result in the session's work
+    /// state, which updates the composer's goal chip.
+    public func setGoal(_ sessionId: String, objective: String? = nil, status: SessionGoal.Status? = nil) async {
+        var params: [String: JSONValue] = [:]
+        if let objective { params["objective"] = .string(objective) }
+        if let status { params["status"] = .string(status.rawValue) }
+        await goalRPC(sessionId, method: "session.goal.set", params: .object(params))
+    }
+
+    public func clearGoal(_ sessionId: String) async {
+        await goalRPC(sessionId, method: "session.goal.clear", params: [:])
+    }
+
+    private func goalRPC(_ sessionId: String, method: String, params: JSONValue) async {
+        do {
+            let response = try await sessionRPC(sessionId, method: method, params: params)
+            if response["ok"]?.boolValue != true {
+                lastError = response["error"]?.stringValue ?? String(localized: "The agent couldn't update the goal.")
+            }
+        } catch { report(error) }
+    }
+
+    /// A stop the user has to confirm, optionally followed by archiving.
+    public struct StopRequest: Identifiable, Equatable, Sendable {
+        public let sessionId: String
+        public let thenArchive: Bool
+        public var id: String { sessionId }
+    }
+
+    // MARK: - Pinned conversations
+
+    /// Pinned session ids in pin order (shared with the official app through the account).
+    public private(set) var pinnedSessionIds: [String] = []
+
+    private func refreshPinnedSessions() async {
+        guard let api else { return }
+        do {
+            pinnedSessionIds = SessionPins.orderedIds(fromSnapshot: try await api.sessionOrganizationPins())
+        } catch {
+            logBackground(error, "pinned sessions")
+        }
+    }
+
+    public func isPinned(_ sessionId: String) -> Bool { pinnedSessionIds.contains(sessionId) }
+
+    /// Pins or unpins right away; reverts if the server refuses.
+    public func setPinned(_ sessionId: String, _ pinned: Bool) async {
+        guard let api, isPinned(sessionId) != pinned else { return }
+        let previous = pinnedSessionIds
+        if pinned { pinnedSessionIds.append(sessionId) } else { pinnedSessionIds.removeAll { $0 == sessionId } }
+        do {
+            try await api.setSessionPin(sessionId, pinned: pinned)
+        } catch {
+            pinnedSessionIds = previous
+            report(error)
+        }
+    }
+
+    // MARK: - Runner on an older CLI
+
+    /// Runner restarts in flight, and the runner pid each restart replaces (hidden once replaced).
+    public private(set) var restartingRunners: Set<String> = []
+    /// Attachment upload progress per message being sent (keyed by the message's localId).
+    public private(set) var uploadProgress: [String: UploadProgress] = [:]
+    /// The session each in-flight upload belongs to.
+    private var uploadSessionIds: [String: String] = [:]
+    /// Failed local messages remain in the transcript with their original files until retried.
+    public private(set) var failedSends: [String: String] = [:]
+    @ObservationIgnored private var outgoingSends: [String: OutgoingSend] = [:]
+    /// Platform hook for keeping uploads alive in the background (iOS continued-processing tasks).
+    @ObservationIgnored public weak var uploadObserver: (any UploadObserver)?
+
+    /// Combined progress of a session's in-flight uploads, for the session list.
+    public func uploadFraction(inSession sessionId: String) -> Double? {
+        let uploads = uploadSessionIds.filter { $0.value == sessionId }.compactMap { uploadProgress[$0.key] }
+        guard !uploads.isEmpty else { return nil }
+        return UploadProgress.combinedFraction(uploads)
+    }
+
+    /// Stops an upload before its next chunk (the system's background-task UI was cancelled).
+    public func cancelUpload(_ localId: String) {
+        guard uploadProgress[localId] != nil else { return }
+        outgoingSends[localId]?.isCancelled = true
+    }
+    /// The daemon's runner status per open session (`daemon.sessionRunner.status.get`).
+    private var runnerStates: [String: JSONValue] = [:]
+    @ObservationIgnored private var runnerStatusTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var replacedRunnerPids: [String: Int] = [:]
+
+    /// The "older CLI" notice for a session, unless that runner is already being replaced.
+    public func staleRunner(for sessionId: String) -> StaleRunner? {
+        guard let session = sessions[sessionId], let state = runnerStates[sessionId],
+              let stale = SessionRunner.staleRunner(sessionId: sessionId, machineId: session.machineId, state: state),
+              replacedRunnerPids[sessionId] != stale.expectedRunnerPid
+        else { return nil }
+        return stale
+    }
+
+    /// Asks the session's daemon which CLI its runner is on: when the session opens, when the socket
+    /// reconnects and when a turn ends (restart eligibility changes between turns). The request is
+    /// owned by the store so a view that SwiftUI recreates or dismisses cannot cancel it; without a
+    /// connection it is skipped and the reconnect asks again.
+    private func refreshRunnerStatus(_ sessionId: String) {
+        guard connection == .online, runnerStatusTasks[sessionId] == nil else { return }
+        runnerStatusTasks[sessionId] = Task {
+            await fetchRunnerStatus(sessionId)
+            runnerStatusTasks[sessionId] = nil
+        }
+    }
+
+    private func fetchRunnerStatus(_ sessionId: String) async {
+        guard let machineId = sessions[sessionId]?.machineId else { return }
+        do {
+            runnerStates[sessionId] = try await machineRPC(machineId, method: SessionRunner.statusMethod,
+                                                           params: ["sessionId": .string(sessionId)])
+        } catch {
+            // Older daemons don't expose the status; there is simply no notice.
+            logBackground(error, "runner status")
+        }
+    }
+
+    /// Restarts the session's runner on the daemon's current CLI; the conversation is kept.
+    public func restartStaleRunner(_ sessionId: String) async {
+        guard let stale = staleRunner(for: sessionId), !restartingRunners.contains(sessionId) else { return }
+        restartingRunners.insert(sessionId)
+        defer { restartingRunners.remove(sessionId) }
+        do {
+            let result = try await machineRPC(stale.machineId, method: SessionRunner.restartMethod,
+                                              params: SessionRunner.restartRequest(stale), timeout: .seconds(90),
+                                              authorizingSession: sessionId)
+            switch SessionRunner.outcome(result) {
+            case .restarted:
+                replacedRunnerPids[sessionId] = stale.expectedRunnerPid
+                await fetchRunnerStatus(sessionId)
+            case .busy:
+                lastError = String(localized: "The session is busy. Update it when the current turn finishes.")
+            case .failed:
+                lastError = String(localized: "Happier couldn't restart this session on the new CLI. The session is still available.")
+            }
+        } catch { report(error) }
+    }
+
+    /// Set when a stop needs confirmation; the UI asks and calls `confirmStop`.
+    public var stopRequest: StopRequest?
+
+    /// Archives an idle session; a running one is stopped first, after confirmation
+    /// (`executeArchiveAction` in `sessionActionExecution.ts`).
+    public func archive(_ sessionId: String) async {
+        guard let api else { return }
+        if sessions[sessionId]?.active == true {
+            stopRequest = StopRequest(sessionId: sessionId, thenArchive: true)
+            return
+        }
+        do {
+            try await api.archive(sessionId: sessionId)
+            sessions[sessionId]?.archivedAt = .now
+        } catch let error as HTTPClient.ServerError where error.status == 409 {
+            // The server can know the session is active before this client does.
+            stopRequest = StopRequest(sessionId: sessionId, thenArchive: true)
+        } catch { report(error) }
+    }
+
+    // MARK: - Renaming and nesting sessions by hand
+
+    /// Renames a session (its `summary`, as the official app's rename and the agent's own title
+    /// updates write it).
+    public func rename(_ sessionId: String, to title: String) async {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        await editMetadata(sessionId) { MetadataEdit.setTitle(name, in: $0, now: $1) }
+    }
+
+    /// Whether other sessions are nested under this one in the list.
+    public func hasNestedSessions(_ sessionId: String) -> Bool {
+        sessions.values.contains { $0.parentSessionId == sessionId && $0.isUserFacing }
+    }
+
+    /// Whether `sessionId` can go under `parentId` (not under itself or one of its own sessions).
+    public func canNest(_ sessionId: String, under parentId: String) -> Bool {
+        SessionTree.canNest(sessionId, under: parentId) { self.sessions[$0]?.parentSessionId }
+    }
+
+    /// Moves a session under another one in the list, or to the top level (nil). Only the list's
+    /// nesting changes; the sessions keep their folders and conversations.
+    public func nest(_ sessionId: String, under parentId: String?) async {
+        if let parentId, !canNest(sessionId, under: parentId) { return }
+        await editMetadata(sessionId) { MetadataEdit.setListParent(parentId, in: $0, now: $1) }
+    }
+
+    /// Starts a session to hold two others and nests both under it, in the place `target` had.
+    /// It runs the target's agent in the folder both share (the target's own when they share none
+    /// or are on different machines) and waits there for a first message.
+    public func groupUnderNewSession(_ dragged: String, _ target: String, title: String) async -> SpawnOutcome {
+        guard let targetSession = sessions[target], let machineId = targetSession.machineId, let targetPath = targetSession.path else {
+            return .failed(String(localized: "This session's machine or folder isn't known."))
+        }
+        var directory = targetPath
+        if let other = sessions[dragged], other.machineId == machineId, let otherPath = other.path,
+           let shared = SessionTree.sharedFolder(targetPath, otherPath) {
+            directory = shared
+        }
+        let outcome = await createSession(machineId: machineId, directory: directory, agentId: targetSession.agentId ?? "claude",
+                                          permissionMode: PermissionMode(stored: targetSession.permissionMode), firstMessage: "")
+        guard case .created(let parentId) = outcome else { return outcome }
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { await editMetadata(parentId) { MetadataEdit.setTitle(name, in: $0, now: $1) } }
+        if let grandparent = targetSession.parentSessionId { await nest(parentId, under: grandparent) }
+        await nest(target, under: parentId)
+        await nest(dragged, under: parentId)
+        return outcome
+    }
+
+    /// Whether a session was archived or deleted. One the list doesn't hold is asked for, so a
+    /// session too new to be listed yet isn't taken for a gone one; false when it can't be told.
+    public func isArchivedOrDeleted(_ sessionId: String) async -> Bool {
+        if let session = sessions[sessionId] { return session.archivedAt != nil }
+        guard hasLoadedSessions, let api else { return false }
+        do {
+            guard let row = try await api.session(id: sessionId) else { return true }
+            return (try? Session(row: row, keys: keys))?.archivedAt != nil
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// One page of archived sessions, decrypted but not added to the list: the archive is browsed
+    /// (or searched) on demand and let go afterwards.
+    public func archivedSessions(cursor: String?, limit: Int = 50) async throws -> (sessions: [Session], nextCursor: String?) {
+        guard let api else { return ([], nil) }
+        let page = try await api.archivedSessions(cursor: cursor, limit: limit)
+        let keys = self.keys
+        return (page.rows.compactMap { try? Session(row: $0, keys: keys) }, page.nextCursor)
+    }
+
+    /// Opens an archived conversation found in the archive or a search.
+    public func openArchived(_ session: Session) {
+        openedArchivedIds.insert(session.id)
+        if sessions[session.id] == nil { sessions[session.id] = session }
+        openRequest = session.id
+    }
+
+    public func unarchive(_ sessionId: String) async {
+        guard let api else { return }
+        do {
+            try await api.unarchive(sessionId: sessionId)
+            sessions[sessionId]?.archivedAt = nil
+            openedArchivedIds.remove(sessionId)
+            await refreshSessions()
+        } catch { report(error) }
+    }
+
+    // MARK: - Synced drafts
+
+    /// The draft text as last synced, by session: what this or another device saved. The composer
+    /// takes it up when you haven't typed over it.
+    public let syncedDrafts = KeyedStore<SyncedDraft>()
+
+    public struct SyncedDraft: Equatable, Sendable {
+        public let text: String
+        public let revision: Int?
+    }
+
+    /// Per-session sync bookkeeping: the revision and document the next write builds on, the text
+    /// waiting to go up, and the debounce.
+    private struct DraftState {
+        var revision: Int?
+        var document: JSONValue?
+        var syncedText = ""
+        var pending: String?
+        var upload: Task<Void, Never>?
+    }
+
+    @ObservationIgnored private var draftStates: [String: DraftState] = [:]
+    /// Where text not yet synced is kept on this device, so a closed app loses nothing.
+    @ObservationIgnored private var pendingDraftsKey: String?
+
+    private func restorePendingDrafts() {
+        guard let key = pendingDraftsKey, let saved = UserDefaults.standard.dictionary(forKey: key) as? [String: String] else { return }
+        for (sessionId, text) in saved {
+            var state = draftStates[sessionId] ?? DraftState()
+            state.pending = text
+            draftStates[sessionId] = state
+        }
+    }
+
+    private func savePendingDrafts() {
+        guard let key = pendingDraftsKey else { return }
+        let pending = draftStates.compactMapValues(\.pending)
+        if pending.isEmpty { UserDefaults.standard.removeObject(forKey: key) } else { UserDefaults.standard.set(pending, forKey: key) }
+    }
+
+    /// The latest text typed for a session on this device, synced or not.
+    public func localDraft(_ sessionId: String) -> String? {
+        guard let state = draftStates[sessionId] else { return nil }
+        return state.pending ?? state.syncedText
+    }
+
+    /// The composer changed: the draft goes up 2 seconds after typing stops (`useDraft.ts`), at
+    /// once when it becomes empty or stops being empty.
+    public func draftChanged(_ sessionId: String, text: String) {
+        var state = draftStates[sessionId] ?? DraftState()
+        guard text != (state.pending ?? state.syncedText) else { return }
+        let emptiness = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            != state.syncedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        state.pending = text
+        draftStates[sessionId] = state
+        savePendingDrafts()
+        state.upload?.cancel()
+        state.upload = Task { [weak self] in
+            if !emptiness { try? await Task.sleep(for: .seconds(2)) }
+            guard !Task.isCancelled else { return }
+            await self?.uploadDraft(sessionId)
+        }
+        draftStates[sessionId] = state
+    }
+
+    /// Sends every waiting draft now (the app is going to the background).
+    public func flushDrafts() {
+        for (id, state) in draftStates where state.pending != nil {
+            state.upload?.cancel()
+            draftStates[id]?.upload = Task { [weak self] in await self?.uploadDraft(id) }
+        }
+    }
+
+    /// Reads the session's synced draft (on opening it, or when another device changed it).
+    public func loadDraft(_ sessionId: String) async {
+        guard let api, let session = sessions[sessionId] else { return }
+        do {
+            let record = try await api.readSessionDraft(sessionId: sessionId)
+            var state = draftStates[sessionId] ?? DraftState()
+            if let known = state.revision, let record, record.revision <= known { return }
+            state.revision = record?.revision
+            state.document = record?.content.flatMap { openDraft($0, session: session) }
+            let text = state.document.map(SessionDraft.text(of:)) ?? ""
+            state.syncedText = text
+            draftStates[sessionId] = state
+            // Text typed (or sent away) here and not yet up wins: the echo of an earlier upload,
+            // arriving just after a message was sent, put the sent text back in the composer.
+            if state.pending == nil { syncedDrafts[sessionId] = SyncedDraft(text: text, revision: record?.revision) }
+        } catch {
+            log.error("draft read: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    private func openDraft(_ content: JSONValue, session: Session) -> JSONValue? {
+        guard let payload = try? TranscriptMessage.open(content, session: session) else { return nil }
+        return SessionDraft.document(fromPayload: payload, sessionId: session.id)
+    }
+
+    private func sealDraft(_ document: JSONValue, session: Session) throws -> JSONValue {
+        let payload = SessionDraft.payload(sessionId: session.id, document: document)
+        if session.isPlain { return ["t": "plain", "v": payload] }
+        guard let cipher = session.cipher else { throw RPCError(message: "No session key", code: nil) }
+        return ["t": "encrypted", "c": .string(try cipher.encryptBase64(payload))]
+    }
+
+    /// Writes the waiting text over the last known revision. When another device wrote first, it
+    /// builds on theirs (keeping their other fields) and tries once more; this device's text wins,
+    /// since it is the one being typed.
+    private func uploadDraft(_ sessionId: String) async {
+        guard let api, let session = sessions[sessionId], var state = draftStates[sessionId], let text = state.pending else { return }
+        for _ in 0..<2 {
+            let document = SessionDraft.withText(text, in: state.document ?? SessionDraft.document(text: text))
+            let meaningful = SessionDraft.isMeaningful(document)
+            // Nothing stored and nothing to store.
+            if !meaningful, state.document == nil {
+                var latest = draftStates[sessionId] ?? state
+                if latest.pending == text { latest.pending = nil }
+                latest.syncedText = text
+                draftStates[sessionId] = latest
+                savePendingDrafts()
+                return
+            }
+            do {
+                let content = meaningful ? try sealDraft(document, session: session) : nil
+                switch try await api.mutateSessionDraft(sessionId: sessionId, expectedRevision: state.revision, content: content) {
+                case .updated(let revision)?:
+                    var latest = draftStates[sessionId] ?? state
+                    latest.revision = revision
+                    latest.document = meaningful ? document : nil
+                    latest.syncedText = text
+                    if latest.pending == text { latest.pending = nil }
+                    draftStates[sessionId] = latest
+                    savePendingDrafts()
+                    // Text typed (or sent away) since this went up wins; a late echo mustn't bring it back.
+                    if latest.pending == nil { syncedDrafts[sessionId] = SyncedDraft(text: text, revision: revision) }
+                    return
+                case .conflict(let revision)?:
+                    let record = try await api.readSessionDraft(sessionId: sessionId)
+                    state.revision = record?.revision ?? revision
+                    state.document = record?.content.flatMap { openDraft($0, session: session) }
+                    draftStates[sessionId]?.revision = state.revision
+                    draftStates[sessionId]?.document = state.document
+                case nil:
+                    log.error("draft write: unexpected response")
+                    return
+                }
+            } catch {
+                log.error("draft write: \(String(describing: error), privacy: .public)")
+                return
+            }
+        }
+    }
+
+    /// Another device changed a draft (`session-draft-updated`): read it when it is newer.
+    private func handleDraftHint(_ payload: JSONValue) {
+        let address = payload["address"]
+        let sessionId = address?["sessionId"]?.stringValue
+            ?? address?.stringValue.flatMap { $0.hasPrefix("session/") ? String($0.dropFirst("session/".count)).removingPercentEncoding : nil }
+        guard let sessionId, sessions[sessionId] != nil else { return }
+        if let revision = payload["revision"]?.intValue, let known = draftStates[sessionId]?.revision, revision <= known { return }
+        Task { await loadDraft(sessionId) }
+    }
+
+    /// Commands the agent left running in the background, by session (newest first).
+    public private(set) var backgroundCommands: [String: [BackgroundCommand]] = [:]
+
+    public func refreshBackgroundCommands(_ sessionId: String) async {
+        guard let api, let session = sessions[sessionId] else { return }
+        do {
+            let records = try await api.systemRecords(sessionId: sessionId, namespace: "activity", kind: "background_task.v1")
+            let tasks = records.compactMap { record -> BackgroundCommand? in
+                guard let payload = try? TranscriptMessage.open(record["content"] ?? .null, session: session) else {
+                    log.error("background task record \(record["id"]?.stringValue ?? "?", privacy: .public) doesn't open")
+                    return nil
+                }
+                return BackgroundCommand(payload: payload)
+            }
+            backgroundCommands[sessionId] = tasks.sorted { $0.updatedAt > $1.updatedAt }
+        } catch {
+            log.error("background tasks: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Happier execution runs started from each session (delegations, reviews…), newest first.
+    public private(set) var delegatedRuns: [String: [DelegatedRun]] = [:]
+
+    /// Asks the session's runtime for its execution runs (`execution.run.list`). A session whose
+    /// runtime is offline or predates runs keeps what was last seen.
+    public func refreshDelegatedRuns(_ sessionId: String) async {
+        do {
+            let response = try await sessionRPC(sessionId, method: "execution.run.list", params: ["limit": 50])
+            delegatedRuns[sessionId] = DelegatedRun.list(response)
+        } catch let error as RPCError where error.code == "RPC_METHOD_NOT_AVAILABLE" {
+            log.notice("execution runs: runtime unavailable for \(sessionId, privacy: .public)")
+        } catch {
+            log.error("execution runs: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// A subagent's own thread: its latest messages, for reading what it did.
+    public func subagentThread(_ sessionId: String, subagentId: String) async throws -> Transcript {
+        guard let api, let session = sessions[sessionId] else { throw RPCError(message: "Not connected", code: nil) }
+        let page = try await api.messages(sessionId: sessionId, limit: 200, sidechainId: subagentId)
+        var thread = Transcript(sidechain: true)
+        thread.apply(page.rows.compactMap { try? TranscriptMessage(row: $0, session: session) })
+        return thread
+    }
+
+    /// Reads the latest message of each background subagent whose thread hasn't been seen (it may
+    /// have run while the app was closed), so the list knows which ones have finished.
+    public func refreshSubagentStatus(_ sessionId: String) async {
+        guard let api, let session = sessions[sessionId], let transcript = transcripts[sessionId] else { return }
+        for subagent in transcript.subagents where subagent.status == .running && subagent.lastActivityAt == nil {
+            guard let page = try? await api.messages(sessionId: sessionId, limit: 1, sidechainId: subagent.id) else { continue }
+            let rows = page.rows.compactMap { try? TranscriptMessage(row: $0, session: session) }
+            if !rows.isEmpty { applyTranscript(rows, to: sessionId) }
+        }
+    }
+
+    /// Usage limits left on the provider account each open session runs on.
+    public private(set) var providerUsage: [String: ProviderUsage] = [:]
+
+    /// Reads the provider usage the daemon published for the session; the newest snapshot wins
+    /// when it has several (`sync/domains/accountUsage/selectors.ts`).
+    public func refreshProviderUsage(_ sessionId: String) async {
+        guard let api, let session = sessions[sessionId] else { return }
+        var newest: ProviderUsage?
+        for recordId in ProviderUsage.recordIds(in: session.metadata) {
+            do {
+                guard let snapshot = try await api.providerAccountUsage(recordId: recordId, machineKey: keys?.content.secretKey),
+                      let usage = ProviderUsage(snapshot: snapshot) else {
+                    log.error("provider usage \(recordId, privacy: .public): unreadable snapshot")
+                    continue
+                }
+                if (usage.fetchedAt ?? .distantPast) >= (newest?.fetchedAt ?? .distantPast) { newest = usage }
+            } catch {
+                log.error("provider usage \(recordId, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+        if providerUsage[sessionId] != newest { providerUsage[sessionId] = newest }
+    }
+
+    public func requestStop(_ sessionId: String) {
+        stopRequest = StopRequest(sessionId: sessionId, thenArchive: false)
+    }
+
+    public func confirmStop(_ request: StopRequest) async {
+        guard await stop(request.sessionId), request.thenArchive, let api else { return }
+        // Archive succeeds once the server sees the session inactive (`sessionStopArchiveFlow.ts`).
+        let deadline = ContinuousClock.now + .seconds(75)
+        while true {
+            do {
+                try await api.archive(sessionId: request.sessionId)
+                sessions[request.sessionId]?.archivedAt = .now
+                return
+            } catch let error as HTTPClient.ServerError where error.status == 409 && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(200))
+            } catch {
+                report(error)
+                return
+            }
+        }
+    }
+
+    /// Stops the session's process: through its daemon, else by asking the runner to exit.
+    private func stop(_ sessionId: String) async -> Bool {
+        var outcome = SessionStop.Outcome.fallback
+        if let machineId = sessions[sessionId]?.machineId {
+            do {
+                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)],
+                                                                         authorizingSession: sessionId))
+            } catch is RPCError {
+                outcome = .fallback
+            } catch {
+                report(error)
+                return false
+            }
+        }
+        if outcome == .fallback {
+            do {
+                outcome = SessionStop.runnerOutcome(try await sessionRPC(sessionId, method: "killSession", params: [:]))
+            } catch let error as RPCError where RPCErrorCodes.unavailable.contains(error.code ?? "") {
+                outcome = .failed(String(localized: "The session's machine isn't reachable right now. Try again when it's online."))
+            } catch {
+                report(error)
+                return false
+            }
+        }
+        switch outcome {
+        case .stopped, .requested:
+            return true
+        case .failed(let message):
+            lastError = message
+            return false
+        case .fallback:
+            return false
+        }
+    }
+
+    public func controls(for sessionId: String) -> SessionControls? {
+        sessions[sessionId].map { SessionControls(metadata: $0.metadata, agentId: $0.agentId) }
+    }
+
+    public func setModel(_ modelId: String, in sessionId: String) async {
+        await editMetadata(sessionId) { MetadataEdit.setModel(modelId, in: $0, now: $1) }
+    }
+
+    public func setEffort(_ effort: String, in sessionId: String) async {
+        await editMetadata(sessionId) { MetadataEdit.setConfigOption("reasoning_effort", value: .string(effort), in: $0, now: $1) }
+    }
+
+    public func setUltracode(_ enabled: Bool, in sessionId: String) async {
+        await editMetadata(sessionId) { MetadataEdit.setConfigOption("ultracode", value: .string(enabled ? "true" : "false"), in: $0, now: $1) }
+    }
+
+    public func setPermissionMode(_ mode: PermissionMode, in sessionId: String) async {
+        await editMetadata(sessionId) { MetadataEdit.setPermissionMode(mode, in: $0, now: $1) }
+    }
+
+    /// Read-modify-write of the full session metadata with optimistic concurrency
+    /// (`update-metadata`, retried on version mismatch like `updateSessionMetadataWithRetry.ts`).
+    private func editMetadata(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async {
+        guard let socket, connection == .online else {
+            lastError = "Not connected. Try again when the connection is back."
+            return
+        }
+        do {
+            for _ in 0..<6 {
+                guard let session = sessions[sessionId] else { return }
+                let next = edit(session.metadata, ServerClock.nowMs())
+                if next == session.metadata { return }
+                let ack = try await socket.emitWithAck("update-metadata", [
+                    "sid": .string(sessionId),
+                    "expectedVersion": .number(Double(session.metadataVersion)),
+                    "metadata": .string(try session.encodeDocument(next)),
+                ])
+                guard let response = ack.first, let version = response["version"]?.intValue else {
+                    throw RPCError(message: "Invalid metadata update response", code: nil)
+                }
+                try sessions[sessionId]?.apply(update: ["metadata": ["value": response["metadata"] ?? .null, "version": .number(Double(version))]])
+                switch response["result"]?.stringValue {
+                case "success": return
+                case "version-mismatch": continue
+                default: throw RPCError(message: response["message"]?.stringValue ?? "Metadata update failed", code: response["result"]?.stringValue)
+                }
+            }
+            throw RPCError(message: "The session changed too often to save this setting. Try again.", code: "version-mismatch")
+        } catch { report(error) }
+    }
+
+    /// Session-scoped RPC through the server relay (`apiSocket.ts:334-405`).
+    public func sessionRPC(_ sessionId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
+        guard let socket, connection == .online else { throw RPCError(message: "Not connected", code: nil) }
+        guard let session = sessions[sessionId] else { throw RPCError(message: "Unknown session", code: nil) }
+        let encodedParams: JSONValue = session.isPlain ? params : .string(try session.encodeDocument(params))
+        let ack = try await socket.emitWithAck(
+            "rpc-call", ["method": .string("\(sessionId):\(method)"), "params": encodedParams], timeout: timeout)
+        guard let response = ack.first else { throw RPCError(message: "Empty RPC response", code: nil) }
+        guard response["ok"]?.boolValue == true else {
+            throw RPCError(message: response["error"]?.stringValue ?? "RPC failed", code: response["errorCode"]?.stringValue)
+        }
+        var result = response["result"] ?? .null
+        if !session.isPlain, let ciphertext = result.stringValue { result = try session.cipher!.decryptBase64(ciphertext) }
+        if result["ok"]?.boolValue == false || (result["error"]?.stringValue != nil && result["ok"] == nil) {
+            throw RPCError(
+                message: result["errorMessage"]?.stringValue ?? result["error"]?.stringValue ?? "RPC failed",
+                code: result["errorCode"]?.stringValue)
+        }
+        return result
+    }
+
+    /// Failure of something the user asked for: logged and shown as a readable alert.
+    // MARK: - Push notifications
+
+    /// This device as an APNs endpoint (from `didRegisterForRemoteNotificationsWithDeviceToken`).
+    public struct PushDevice: Sendable {
+        public let deviceToken: Data
+        public let development: Bool
+        public let bundleId: String
+
+        public init(deviceToken: Data, development: Bool, bundleId: String) {
+            self.deviceToken = deviceToken
+            self.development = development
+            self.bundleId = bundleId
+        }
+    }
+
+    private static let pushTokenKey = "happier.pushToken"
+
+    public func setPushDevice(_ device: PushDevice) {
+        pushDevice = device
+        Task { await registerPushToken() }
+    }
+
+    /// Registers this device's APNs token with the account (idempotent upsert).
+    private func registerPushToken() async {
+        guard let device = pushDevice, let api else { return }
+        let token = PushNotifications.apnsToken(deviceToken: device.deviceToken, development: device.development, bundleId: device.bundleId)
+        do {
+            try await api.registerPushToken(token, clientServerUrl: server)
+            UserDefaults.standard.set(token, forKey: Self.pushTokenKey)
+            log.notice("push token registered (\(device.development ? "sandbox" : "production", privacy: .public))")
+        } catch {
+            logBackground(error, "push registration")
+        }
+    }
+
+    /// Opens the notified session, answering a permission request first when an action button was
+    /// used. A reply typed in the notification is sent without opening anything; false if it failed.
+    @discardableResult
+    public func handle(_ tap: PushTap) async -> Bool {
+        if let text = tap.reply, let sessionId = tap.sessionId {
+            return await replyFromNotification(text, to: sessionId)
+        }
+        pendingPushTap = tap
+        await handlePendingPushTap()
+        return true
+    }
+
+    /// The app may have been woken in the background just for this: sign in from the saved
+    /// credentials and fetch the one session rather than wait for the whole list.
+    private func replyFromNotification(_ text: String, to sessionId: String) async -> Bool {
+        restore()
+        guard phase == .ready, let api else { return false }
+        if sessions[sessionId] == nil {
+            do {
+                guard let row = try await api.session(id: sessionId) else { return false }
+                sessions[sessionId] = try Session(row: row, keys: keys)
+            } catch {
+                log.error("reply: session fetch failed: \(String(describing: error), privacy: .public)")
+                return false
+            }
+        }
+        guard await send(text, to: sessionId) else { return false }
+        markRead(sessionId)
+        return true
+    }
+
+    private func handlePendingPushTap() async {
+        guard hasLoadedSessions, let tap = pendingPushTap else { return }
+        pendingPushTap = nil
+        guard let sessionId = tap.sessionId, sessions[sessionId] != nil else { return }
+        if let permission = tap.permission {
+            await reply(permission.allow ? .allow : .deny(reason: nil), to: (permission.requestId, permission.tool), in: sessionId)
+        }
+        openRequest = sessionId
+    }
+
+    private func report(_ error: Error) {
+        if UserFacingError.isSilent(error) {
+            log.notice("operation cancelled")
+            return
+        }
+        log.error("\(String(describing: error), privacy: .public)")
+        lastError = UserFacingError.message(for: error)
+    }
+
+    /// Failure of automatic sync work: logged only; the sync loop retries and the connection
+    /// indicator shows the state.
+    private func logBackground(_ error: Error, _ context: StaticString) {
+        if UserFacingError.isSilent(error) { return }
+        log.error("\(context, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+    }
+}
