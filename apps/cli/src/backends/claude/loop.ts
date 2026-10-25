@@ -66,8 +66,8 @@ export interface EnhancedMode {
     /**
      * The model `modelEffortLevels` was resolved for.
      *
-     * Call sites can override the model (e.g. `--model` inside `claudeArgs`), so tiers are only
-     * evidence when they belong to the model actually being launched.
+     * The tiers can lag a model change, so they are only evidence when they belong to the model
+     * actually being launched.
      */
     modelEffortLevelsModelId?: string | null;
 

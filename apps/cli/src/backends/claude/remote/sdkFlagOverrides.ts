@@ -1,9 +1,16 @@
+/**
+ * Claude CLI flags in `claudeArgs` that override the SDK/terminal launch options.
+ *
+ * `--model` is deliberately absent: the provider arg partition consumes it into Happier session
+ * model state (`mode.model`, which later metadata/message selections supersede by `updatedAt`).
+ * The copy it forwards into `claudeArgs` exists only for native local Claude passthrough, so a
+ * launch-time `--model` must never outrank the session's current model on a (re)launch.
+ */
 export type ClaudeSdkFlagOverrides = {
   maxTurns?: number;
   strictMcpConfig?: boolean;
   appendSystemPrompt?: string;
   customSystemPrompt?: string;
-  model?: string;
   fallbackModel?: string;
   effort?: string;
 };
@@ -14,7 +21,6 @@ export function parseClaudeSdkFlagOverridesFromArgs(args?: string[]): ClaudeSdkF
   let strictMcpConfig: boolean | undefined;
   let appendSystemPrompt: string | undefined;
   let customSystemPrompt: string | undefined;
-  let model: string | undefined;
   let fallbackModel: string | undefined;
   let effort: string | undefined;
 
@@ -75,17 +81,6 @@ export function parseClaudeSdkFlagOverridesFromArgs(args?: string[]): ClaudeSdkF
       continue;
     }
 
-    const inlineModel = inlineValue(arg, '--model');
-    if (arg === '--model' || inlineModel !== undefined) {
-      const next = nextValue(i);
-      const rawValue = inlineModel ?? next;
-      if (typeof rawValue === 'string') {
-        model = rawValue;
-        if (inlineModel === undefined) i++;
-      }
-      continue;
-    }
-
     const inlineFallbackModel = inlineValue(arg, '--fallback-model');
     if (arg === '--fallback-model' || inlineFallbackModel !== undefined) {
       const next = nextValue(i);
@@ -114,7 +109,6 @@ export function parseClaudeSdkFlagOverridesFromArgs(args?: string[]): ClaudeSdkF
     strictMcpConfig,
     appendSystemPrompt,
     customSystemPrompt,
-    model,
     fallbackModel,
     effort,
   };
