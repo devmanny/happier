@@ -6,6 +6,15 @@ import {
     CLAUDE_LOCAL_PERMISSION_BRIDGE_STOPPED_REASON,
 } from '@happier-dev/agents';
 import type { AgentState } from '@/api/types';
+
+const { notifyParentSessionInBackground } = vi.hoisted(() => ({
+    notifyParentSessionInBackground: vi.fn(),
+}));
+
+vi.mock('@/session/lineage/notifyParentSession', () => ({
+    notifyParentSessionInBackground,
+}));
+
 import { AgentStateRequestStore } from './agentStateRequestStore';
 
 class FakeSession {
@@ -302,5 +311,56 @@ describe('AgentStateRequestStore', () => {
         });
 
         expect(session.agentState.requests!.perm_generated).toBeUndefined();
+    });
+
+    it('tells the parent session it is blocked on a published request even without a push sender', () => {
+        notifyParentSessionInBackground.mockClear();
+        const session = new FakeSession();
+        const store = new AgentStateRequestStore({
+            session,
+            logPrefix: '[Test]',
+        });
+
+        store.publishRequest({
+            requestId: 'req-blocked',
+            toolName: 'Write',
+            toolInput: { file_path: '/tmp/out.txt', content: 'x' },
+            createdAt: 123,
+        });
+
+        expect(notifyParentSessionInBackground).toHaveBeenCalledOnce();
+        expect(notifyParentSessionInBackground).toHaveBeenCalledWith({
+            session,
+            event: {
+                kind: 'blocked',
+                requestKind: 'permission',
+                requestId: 'req-blocked',
+                toolName: 'Write',
+                toolDetails: 'File: /tmp/out.txt',
+            },
+        });
+    });
+
+    it('describes a pending question as a user_action block', () => {
+        notifyParentSessionInBackground.mockClear();
+        const session = new FakeSession();
+        const store = new AgentStateRequestStore({ session, logPrefix: '[Test]' });
+
+        store.publishRequest({
+            requestId: 'q-1',
+            toolName: 'AskUserQuestion',
+            toolInput: { questions: [{ question: 'Deploy now?', options: [{ label: 'Yes' }, { label: 'No' }] }] },
+            createdAt: 5,
+        });
+
+        expect(notifyParentSessionInBackground).toHaveBeenCalledWith({
+            session,
+            event: expect.objectContaining({
+                kind: 'blocked',
+                requestKind: 'user_action',
+                requestId: 'q-1',
+                toolDetails: expect.stringContaining('Deploy now?'),
+            }),
+        });
     });
 });

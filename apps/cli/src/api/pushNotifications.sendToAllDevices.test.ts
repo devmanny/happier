@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { generateKeyPairSync } from 'node:crypto';
+
 import axios from 'axios';
 
 import { logger } from '@/ui/logger';
 import { PushNotificationClient } from './pushNotifications';
 import { PUSH_NOTIFICATION_ANDROID_CHANNEL_IDS, PUSH_NOTIFICATION_CATEGORY_IDS } from '@happier-dev/protocol';
+
+const testApnsKeyPem = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  .privateKey.export({ type: 'pkcs8', format: 'pem' })
+  .toString();
 
 type MockExpoPushTicket = Readonly<{
   status: string;
@@ -181,6 +187,25 @@ describe('PushNotificationClient.sendToAllDevicesAsync', () => {
     expect(Array.isArray(chunk)).toBe(true);
     expect(chunk).toHaveLength(1);
     expect((chunk as any[])[0]).toMatchObject({ categoryId: PUSH_NOTIFICATION_CATEGORY_IDS.permissionRequestV1 });
+  });
+
+  it('marks session pushes that are not requests as repliable session messages, without a subtitle', async () => {
+    (axios as any).get.mockResolvedValue({
+      data: {
+        tokens: [{ id: '1', token: 'ExponentPushToken[a]' }],
+      },
+    });
+
+    const client = new PushNotificationClient('t', 'https://api.example.test');
+    await client.sendToAllDevicesAsync('Title', 'Body', { sessionId: 's_1' });
+    await client.sendToAllDevicesAsync('Title', 'Body', {});
+
+    const [sessionChunk] = sendPushNotificationsAsyncSpy.mock.calls.at(-2) ?? [];
+    // The native Apple app registers this category id with a text Reply action.
+    expect((sessionChunk as any[])[0].categoryId).toBe('happier.sessionMessage.v1');
+    expect((sessionChunk as any[])[0].subtitle).toBeUndefined();
+    const [accountChunk] = sendPushNotificationsAsyncSpy.mock.calls.at(-1) ?? [];
+    expect((accountChunk as any[])[0].categoryId).toBeUndefined();
   });
 
   it('sets iOS subtitle and Android channelId for permission request pushes', async () => {
@@ -398,5 +423,70 @@ describe('focused computer push token query', () => {
     vi.mocked(axios.get).mockResolvedValueOnce({ data: { tokens: [{ id: '1', token: 'ExponentPushToken[a]' }] } }).mockResolvedValueOnce({ data: { badgeCount: 0 } });
     await client.sendToAllDevicesAsync('Ready', 'Done', { sessionId: 's' }, { suppressIfComputerFocused: true });
     expect(sendPushNotificationsAsyncSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('native Apple (APNs) push tokens', () => {
+  it('still sends Expo notifications when the configured APNs key cannot sign', async () => {
+    sendPushNotificationsAsyncSpy.mockClear();
+    vi.mocked(axios.get).mockReset();
+    vi.mocked(axios.get)
+      .mockResolvedValueOnce({ data: { tokens: [
+        { id: '1', token: 'ExponentPushToken[rn]' },
+        { id: '2', token: 'apns:sandbox:com.devmanny.happier:0aff' },
+      ] } })
+      .mockResolvedValueOnce({ data: { badgeCount: 2 } });
+    const transport = vi.fn();
+    const client = new PushNotificationClient('t', 'https://api.example.test', {
+      credentials: () => ({ keyId: 'K', teamId: 'T', privateKeyPem: 'invalid-test-key' }),
+      transport,
+    });
+
+    await expect(client.sendToAllDevicesAsync('Ready', 'Done', { sessionId: 's' })).resolves.toBeUndefined();
+
+    expect(transport).not.toHaveBeenCalled();
+    expect(sendPushNotificationsAsyncSpy.mock.calls[0][0].map((message: any) => message.to)).toEqual(['ExponentPushToken[rn]']);
+  });
+
+  it('sends Expo tokens through Expo and apns tokens directly to APNs', async () => {
+    sendPushNotificationsAsyncSpy.mockClear();
+    vi.mocked(axios.get).mockReset();
+    vi.mocked(axios.get)
+      .mockResolvedValueOnce({ data: { tokens: [
+        { id: '1', token: 'ExponentPushToken[rn]' },
+        { id: '2', token: 'apns:sandbox:com.devmanny.happier:0aff', clientServerUrl: 'https://native.example.test/' },
+      ] } })
+      .mockResolvedValueOnce({ data: { badgeCount: 2 } });
+    const sent: Array<{ path: string; headers: Record<string, string>; body: string }> = [];
+    const client = new PushNotificationClient('t', 'https://api.example.test', {
+      credentials: () => ({ keyId: 'K', teamId: 'T', privateKeyPem: testApnsKeyPem }),
+      transport: async (request) => {
+        sent.push({ path: request.path, headers: request.headers, body: request.body });
+        return { status: 200, body: '' };
+      },
+    });
+
+    await client.sendToAllDevicesAsync('Fix login', 'Done', { sessionId: 's_1' });
+
+    expect(sendPushNotificationsAsyncSpy.mock.calls[0][0].map((message: any) => message.to)).toEqual(['ExponentPushToken[rn]']);
+    expect(sent.map((request) => request.path)).toEqual(['/3/device/0aff']);
+    expect(sent[0].headers['apns-collapse-id']).toBe('s_1');
+    expect(JSON.parse(sent[0].body)).toMatchObject({
+      aps: { alert: { title: 'Fix login', body: 'Done' }, badge: 2, category: PUSH_NOTIFICATION_CATEGORY_IDS.sessionMessageV1, 'thread-id': 's_1' },
+      body: { sessionId: 's_1', serverUrl: 'https://native.example.test' },
+    });
+  });
+
+  it('skips apns tokens when this machine has no APNs key', async () => {
+    sendPushNotificationsAsyncSpy.mockClear();
+    vi.mocked(axios.get).mockReset();
+    vi.mocked(axios.get)
+      .mockResolvedValueOnce({ data: { tokens: [{ id: '2', token: 'apns:sandbox:com.devmanny.happier:0aff' }] } })
+      .mockResolvedValueOnce({ data: { badgeCount: 0 } });
+    const transport = vi.fn();
+    const client = new PushNotificationClient('t', 'https://api.example.test', { credentials: () => null, transport });
+    await client.sendToAllDevicesAsync('Ready', 'Done', { sessionId: 's' });
+    expect(transport).not.toHaveBeenCalled();
+    expect(sendPushNotificationsAsyncSpy).not.toHaveBeenCalled();
   });
 });

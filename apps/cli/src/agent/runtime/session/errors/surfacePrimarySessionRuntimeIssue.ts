@@ -7,6 +7,8 @@ import type {
   SessionRuntimeIssueV1,
 } from '@happier-dev/protocol';
 
+import { notifyParentSessionInBackground } from '@/session/lineage/notifyParentSession';
+
 import {
   classifyPrimarySessionRuntimeIssue,
   type ClassifyPrimarySessionRuntimeIssueInput,
@@ -22,7 +24,28 @@ type PrimarySessionRuntimeIssueRecord = Readonly<{
 type RuntimeIssueSession = Readonly<{
   sendAgentMessage?: (provider: ACPProvider, body: ACPMessageData) => void;
   sessionTurnLifecycle?: SessionTurnLifecycle;
+  /** Present on the real session client; lets a spawned child report the failed turn to its parent. */
+  sessionId?: string;
+  getMetadataSnapshot?: (() => unknown) | null;
 }>;
+
+function hasSessionIdentity(
+  session: RuntimeIssueSession | null | undefined,
+): session is RuntimeIssueSession & { sessionId: string } {
+  return typeof session?.sessionId === 'string' && session.sessionId.length > 0;
+}
+
+function notifyParentOfFailedTurn(session: RuntimeIssueSession | null | undefined, issue: SessionRuntimeIssueV1): void {
+  if (!hasSessionIdentity(session)) return;
+  notifyParentSessionInBackground({
+    session,
+    event: {
+      kind: 'turn_failed',
+      message: issue.sanitizedPreview ?? null,
+      turnKey: issue.providerTurnId ?? null,
+    },
+  });
+}
 
 export type SurfacePrimarySessionRuntimeIssueInput = Omit<ClassifyPrimarySessionRuntimeIssueInput, 'cause'> & Readonly<{
   cause?: ClassifyPrimarySessionRuntimeIssueInput['cause'] | 'cancelled' | null;
@@ -96,6 +119,7 @@ export async function surfacePrimarySessionRuntimeIssue(
     latestTurnStatus: 'failed',
     lastRuntimeIssue: issue,
   } satisfies PrimarySessionRuntimeIssueRecord;
+  notifyParentOfFailedTurn(input.session, issue);
   if (input.session?.sessionTurnLifecycle) {
     await input.session.sessionTurnLifecycle.failTurn({
       provider: record.provider,

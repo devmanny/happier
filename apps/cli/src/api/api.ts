@@ -13,9 +13,11 @@ import type {
 } from '@/api/types'
 import { MachineRegistrationIdentitySchema } from '@/api/types'
 import { ApiSessionClient } from './session/sessionClient';
+import { startParentLinkWatcher } from '@/session/lineage/parentLinkWatcher';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
+import { readApnsCredentials } from './apnsPush';
 import { configuration } from '@/configuration';
 import { assertSessionEncryptionModeAllowedByEffectiveClientRequirement } from '@/settings/accountSettings/resolveEffectiveClientEncryptionRequirement';
 import { Credentials } from '@/persistence';
@@ -395,7 +397,9 @@ export class ApiClient {
   private constructor(credential: Credentials) {
     this.credential = credential
     this.connectedServiceCredentialApi = createConnectedServiceCredentialApi(credential);
-    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl())
+    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl(), {
+      credentials: () => readApnsCredentials(configuration.happyHomeDir),
+    })
   }
 
   private invalidateConnectedServiceProfileListCache(serviceId?: ConnectedServiceId): void {
@@ -770,9 +774,13 @@ export class ApiClient {
     session: Session,
     runtimeActivity?: import('./session/sessionClient').SessionRuntimeActivityClientConfig,
   ): ApiSessionClient {
-    return new ApiSessionClient(this.credential.token, session, runtimeActivity, {
+    const client = new ApiSessionClient(this.credential.token, session, runtimeActivity, {
       permissionRequestPushSender: this.pushClient,
     });
+    // Every runner session client watches its own nesting so a manual move in the app
+    // is announced to the new parent, the previous parent and the session itself.
+    startParentLinkWatcher(client);
+    return client;
   }
 
   machineSyncClient(

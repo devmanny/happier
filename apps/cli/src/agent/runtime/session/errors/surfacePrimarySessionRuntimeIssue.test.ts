@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from 'vitest';
 import type { SessionTurnMutationV1 } from '@/api/session/mutations/sessionMutationTypes';
 import type { SessionTurnLifecycle } from '@/agent/runtime/session/turn/types';
 import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
+
+const { notifyParentSessionInBackground } = vi.hoisted(() => ({
+  notifyParentSessionInBackground: vi.fn(),
+}));
+
+vi.mock('@/session/lineage/notifyParentSession', () => ({
+  notifyParentSessionInBackground,
+}));
+
 import * as runtimeIssueSurface from './surfacePrimarySessionRuntimeIssue';
 
 function createLifecycleStub(overrides: Partial<SessionTurnLifecycle>): SessionTurnLifecycle {
@@ -125,6 +134,36 @@ describe('surfacePrimarySessionRuntimeIssue', () => {
       sanitizedPreview: 'Pi provider reported provider session failure after prompt acceptance',
     });
     expect(failTurn).toHaveBeenCalledWith(expect.objectContaining({ issue }));
+  });
+
+  it('tells the parent session a turn failed, but not when the user cancelled', async () => {
+    notifyParentSessionInBackground.mockClear();
+    const session = {
+      sessionId: 'child-1',
+      getMetadataSnapshot: () => ({}),
+      sessionTurnLifecycle: createLifecycleStub({ failTurn: vi.fn(), cancelTurn: vi.fn() }),
+    };
+
+    await runtimeIssueSurface.surfacePrimarySessionRuntimeIssue({
+      provider: 'codex',
+      providerTurnId: 'turn_9',
+      occurredAt: 1,
+      cause: 'status_error',
+      error: new Error('Provider exploded'),
+      session,
+    });
+    expect(notifyParentSessionInBackground).toHaveBeenCalledWith({
+      session,
+      event: { kind: 'turn_failed', message: 'Provider reported an error', turnKey: 'turn_9' },
+    });
+
+    notifyParentSessionInBackground.mockClear();
+    await runtimeIssueSurface.surfacePrimarySessionRuntimeIssue({
+      provider: 'codex',
+      cause: 'cancelled',
+      session,
+    });
+    expect(notifyParentSessionInBackground).not.toHaveBeenCalled();
   });
 
   it('surfaces cancellation as cancelled primary turn state without a runtime issue', async () => {

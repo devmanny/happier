@@ -5225,6 +5225,11 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send a ping message to keep the connection alive
      */
+    /** Latest presence this client published (thinking = a turn is in progress). */
+    getSessionPresenceSnapshot(): SessionPresenceSnapshot {
+        return this.latestSessionPresence;
+    }
+
     keepAlive(thinking: boolean, mode: SessionAliveMode) {
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);

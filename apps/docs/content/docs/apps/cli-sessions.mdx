@@ -81,6 +81,27 @@ When in doubt, inspect the canonical schema and available options via the action
 happier session actions describe session.spawn_new --json
 ```
 
+### Child sessions report back to the session that spawned them
+
+When an agent inside a session creates another session with `session.spawn_new`, the new session records the spawning session as its parent. From then on the child reports back on its own, without the parent polling, whenever it:
+
+- finishes a turn and becomes idle,
+- blocks on a permission approval or on a question for the user,
+- fails a turn with an error, or
+- stops (user stop, process exit, crash).
+
+The report arrives in the parent as an ordinary user message so the parent agent wakes up and can react. It is clearly labelled as an automatic notice and carries the child's id and title, the event, a short excerpt of the child's last assistant message (or of the pending request), and the `happier session send <child-id> "..."` command to answer it.
+
+Each event is reported once; retries and reconnects do not repeat it. If the parent no longer exists or is archived, the child keeps running and only logs the failed delivery. A notice never resumes a parent the user stopped: it stays queued until the parent is resumed.
+
+**Which parent counts.** Moving a session by hand in the app ("Move into…" or dragging it under another session, "Move to top level") overrides the spawning session: the session reports to the one it was moved under, and stops reporting when moved to the top level. The parent is read at the moment of each event, so a move takes effect immediately for a running session.
+
+**Moves are announced too.** When a running session sees its direct parent change, it tells the new parent that it has a new direct child (title, id, folder, machine and whether it is working, idle or blocked), tells the previous parent that the session is no longer its direct child, and tells its own agent who its parent is now. The parent seen when the session starts is its baseline and is not announced.
+
+**Direct kin only.** Notices go one level only, in both directions: a session hears from its direct children and reports to its direct parent. A child that spawns its own children does not forward their events upward, and every notice reminds the agent to talk only to its direct parent and direct children, never to grandparents or grandchildren. This is guidance in the notice text, not a restriction on `happier session send`.
+
+If a session is moved under one of its own children, the two would otherwise wake each other forever. The child side breaks that loop: it does not report to a parent whose own parent is itself, and logs the skipped notice.
+
 ## List sessions
 
 ```bash

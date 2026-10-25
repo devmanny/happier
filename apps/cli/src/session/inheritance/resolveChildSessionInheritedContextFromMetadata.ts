@@ -283,6 +283,14 @@ function resolveInheritedConnectedServices(params: Readonly<{
     : null;
 }
 
+/**
+ * Inherited timestamps feed the spawn request, whose schema requires whole milliseconds.
+ * Some clients stored fractional values in session metadata; floor them at this boundary.
+ */
+function wholeMs<T extends number | undefined>(value: T): T {
+  return (typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : value) as T;
+}
+
 export function resolveChildSessionInheritedContextFromMetadata(params: Readonly<{
   metadata: Record<string, unknown> | null | undefined;
   providerId?: string | null;
@@ -298,9 +306,9 @@ export function resolveChildSessionInheritedContextFromMetadata(params: Readonly
     const permission = resolvePermissionIntentFromSessionMetadata(metadata);
     if (permission && isPermissionMode(permission.intent)) {
       spawn.permissionMode = permission.intent;
-      spawn.permissionModeUpdatedAt = permission.updatedAt;
+      spawn.permissionModeUpdatedAt = wholeMs(permission.updatedAt);
       metadataOverrides.permissionMode = permission.intent;
-      metadataOverrides.permissionModeUpdatedAt = permission.updatedAt;
+      metadataOverrides.permissionModeUpdatedAt = wholeMs(permission.updatedAt);
       sources.permissionMode = { kind: 'metadata', key: 'permissionMode' };
     }
   }
@@ -309,7 +317,7 @@ export function resolveChildSessionInheritedContextFromMetadata(params: Readonly
     const model = resolveMetadataStringOverrideV1(metadata, 'modelOverrideV1', 'modelId');
     if (model && model.value !== 'default') {
       spawn.modelId = model.value;
-      spawn.modelUpdatedAt = model.updatedAt;
+      spawn.modelUpdatedAt = wholeMs(model.updatedAt);
       sources.modelId = { kind: 'metadata', key: 'modelOverrideV1' };
     }
 
@@ -340,7 +348,7 @@ export function resolveChildSessionInheritedContextFromMetadata(params: Readonly
       metadataOverrides.sessionModeOverrideV1 = sessionModeOverrideRaw.data;
       if (isNonEmptyString(sessionModeOverrideRaw.data.modeId)) {
         spawn.agentModeId = sessionModeOverrideRaw.data.modeId;
-        spawn.agentModeUpdatedAt = sessionModeOverrideRaw.data.updatedAt;
+        spawn.agentModeUpdatedAt = wholeMs(sessionModeOverrideRaw.data.updatedAt);
         sources.agentModeId = { kind: 'metadata', key: 'sessionModeOverrideV1' };
       }
     }
@@ -355,7 +363,7 @@ export function resolveChildSessionInheritedContextFromMetadata(params: Readonly
       metadataOverrides.acpSessionModeOverrideV1 = acpModeOverrideRaw.data;
       if (!spawn.agentModeId && isNonEmptyString(acpModeOverrideRaw.data.modeId)) {
         spawn.agentModeId = acpModeOverrideRaw.data.modeId;
-        spawn.agentModeUpdatedAt = acpModeOverrideRaw.data.updatedAt;
+        spawn.agentModeUpdatedAt = wholeMs(acpModeOverrideRaw.data.updatedAt);
         sources.agentModeId = { kind: 'metadata', key: 'acpSessionModeOverrideV1' };
       }
     }
@@ -404,8 +412,8 @@ export function resolveChildSessionInheritedContextFromMetadata(params: Readonly
       sources.connectedServices = connectedServices.source;
 
       if (isFiniteNumber(metadata?.connectedServicesUpdatedAt)) {
-        spawn.connectedServicesUpdatedAt = metadata.connectedServicesUpdatedAt;
-        metadataOverrides.connectedServicesUpdatedAt = metadata.connectedServicesUpdatedAt;
+        spawn.connectedServicesUpdatedAt = wholeMs(metadata.connectedServicesUpdatedAt);
+        metadataOverrides.connectedServicesUpdatedAt = wholeMs(metadata.connectedServicesUpdatedAt);
       }
     }
   }

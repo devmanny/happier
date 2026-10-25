@@ -1362,6 +1362,7 @@ export async function runCodex(opts: {
             pushSender: api.push(),
             waitingForCommandLabel: 'Codex',
             logPrefix: '[Codex]',
+            turnKey: context?.turnToken ?? null,
             sessionTitle: getSessionNotificationTitle(session.getMetadataSnapshot.bind(session)),
             assistantPreviewText: resolveReadyNotificationAssistantText({
                 includeMessageText: includeAssistantPreviewText,
@@ -1528,6 +1529,7 @@ export async function runCodex(opts: {
         process,
         exit: (code) => process.exit(code),
         sessionExitReport: { sessionId: session.sessionId },
+        parentNoticeSession: session,
         onTerminationRequested: () => {
             session.beginRuntimeTermination?.();
             void closeProviderInputAdmission();

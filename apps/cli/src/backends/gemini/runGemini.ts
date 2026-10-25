@@ -486,6 +486,7 @@ export async function runGemini(opts: {
       pushSender: api.push(),
       waitingForCommandLabel: 'Gemini',
       logPrefix: '[Gemini]',
+      turnKey: context?.turnToken ?? null,
       sessionTitle: getSessionNotificationTitle(session.getMetadataSnapshot.bind(session)),
       assistantPreviewText: resolveReadyNotificationAssistantText({
         includeMessageText: includeAssistantPreviewText,
@@ -642,6 +643,7 @@ export async function runGemini(opts: {
     process,
     exit: (code) => process.exit(code),
     sessionExitReport: { sessionId: session.sessionId },
+    parentNoticeSession: session,
     onTerminationRequested: () => {
       session.beginRuntimeTermination?.();
       void closeProviderInputAdmission();

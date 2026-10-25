@@ -4,12 +4,17 @@ import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLo
 import { buildReadyNotificationContent, type AccountSettings } from '@happier-dev/protocol'
 import { dispatchActivityNotificationAsync } from '@/activity/notifications/dispatchActivityNotification'
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot'
+import { notifyParentSessionInBackground } from '@/session/lineage/notifyParentSession'
 
 import type { ExpoPushActivityNotificationOptions } from '@/activity/notifications/sendExpoPushActivityNotification'
 
 type PushSender = {
   sendToAllDevices?: (title: string, body: string, opts: { sessionId: string }, delivery?: ExpoPushActivityNotificationOptions) => void
   sendToAllDevicesAsync?: (title: string, body: string, data: Record<string, unknown>, delivery?: ExpoPushActivityNotificationOptions) => Promise<void>
+}
+
+type ReadySession = Pick<SessionClientPort, 'sessionId' | 'sendSessionEvent'> & {
+  getMetadataSnapshot?: (() => unknown) | null
 }
 
 function resolveReadyNotificationSettingsContext(opts: Readonly<{
@@ -33,8 +38,8 @@ function resolveReadyNotificationSettingsContext(opts: Readonly<{
 }
 
 export function sendReadyWithPushNotification(opts: {
-  session: Pick<SessionClientPort, 'sessionId' | 'sendSessionEvent'>
-  pushSender: PushSender
+  session: ReadySession
+  pushSender: PushSender | null
   waitingForCommandLabel: string
   logPrefix: string
   sessionTitle?: string | null
@@ -44,8 +49,23 @@ export function sendReadyWithPushNotification(opts: {
   settingsSecretsReadKeys?: ReadonlyArray<Uint8Array | null | undefined>
   loggerDebug?: (message: string, error: unknown) => void
   shouldSendPush?: () => boolean
+  /** Provider turn identity (when known) so a re-emitted ready for the same turn is not a new parent notice. */
+  turnKey?: string | null
 }): void {
   opts.session.sendSessionEvent({ type: 'ready' })
+
+  // A session spawned by another session reports its completed turn to that parent
+  // regardless of the user's push settings: the parent is an agent, not a device.
+  notifyParentSessionInBackground({
+    session: opts.session,
+    event: {
+      kind: 'turn_completed',
+      assistantPreviewText: opts.assistantPreviewText ?? null,
+      turnKey: opts.turnKey ?? null,
+    },
+  })
+
+  if (!opts.pushSender) return
 
   try {
     const currentSettingsContext = resolveReadyNotificationSettingsContext({
