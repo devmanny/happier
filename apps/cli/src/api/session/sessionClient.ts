@@ -84,6 +84,7 @@ import {
     type SessionSyncPendingInputServerContractResult,
 } from '@/api/clientCompatibility/sessionSyncPendingInputServerContract';
 import { fetchSessionByIdCompat, fetchSessionTurnsProjection } from '@/session/transport/http/sessionsHttp';
+import { createTurnInputKindTracker } from './turnInputKind';
 import type { SessionMessageCommitResult } from './sessionMessageCommitResult';
 
 export type SessionRuntimeActivityClientConfig = Readonly<{
@@ -689,6 +690,7 @@ export class ApiSessionClient extends EventEmitter {
     private readonly receivedMessageIds = new LruSet(SESSION_CLIENT_RECEIVED_MESSAGE_ID_CACHE_MAX_ENTRIES);
     private lastObservedMessageSeq = 0;
     private lastObservedUserMessageSeq = 0;
+    private readonly turnInputKindTracker = createTurnInputKindTracker();
     private readonly turnAssistantTextSnapshotStore = createTurnAssistantTextSnapshotStore({
         maxTextChars: configuration.readyNotificationAssistantTextMaxChars,
     });
@@ -804,7 +806,19 @@ export class ApiSessionClient extends EventEmitter {
         turnToken?: string;
         startSeqExclusive?: number | null;
     }): string {
-        return this.turnAssistantTextSnapshotStore.beginTurn(params);
+        const turnToken = this.turnAssistantTextSnapshotStore.beginTurn(params);
+        this.turnInputKindTracker.beginTurn(turnToken);
+        return turnToken;
+    }
+
+    /** True when the given turn was started only by automatic Happier notices (child/nesting). */
+    isTurnInputAutomaticNoticeOnly(params: { turnToken?: string | null }): boolean {
+        return this.turnInputKindTracker.isAutomaticNoticeOnly(params.turnToken);
+    }
+
+    /** Server metadata version; negative until the first server snapshot is known. */
+    getMetadataVersion(): number {
+        return this.metadataVersion;
     }
 
     getTurnAssistantTextSnapshot(params: {
@@ -3291,6 +3305,7 @@ export class ApiSessionClient extends EventEmitter {
             this.markAgentQueueDeliveredLocalId(localId);
         }
         if (this.pendingMessageCallback) {
+            this.turnInputKindTracker.recordDispatchedUserInput(userMessage.content.text);
             await this.pendingMessageCallback(userMessage, {
                 seq: typeof message?.seq === 'number' && Number.isFinite(message.seq) ? message.seq : null,
                 ...(opts.providerAcceptancePending ? { providerAcceptancePending: true } : {}),
@@ -3334,6 +3349,7 @@ export class ApiSessionClient extends EventEmitter {
                 ? this.bufferedPendingMessageDeliveryInfoByLocalId.get(localId)
                 : undefined;
             if (localId) this.bufferedPendingMessageDeliveryInfoByLocalId.delete(localId);
+            this.turnInputKindTracker.recordDispatchedUserInput(message.content.text);
             void Promise.resolve(callback(message, deliveryInfo ?? { seq: null })).catch((error) => {
                 logger.debug('[pendingQueue] buffered provider-input callback failed', {
                     sessionId: this.sessionId,

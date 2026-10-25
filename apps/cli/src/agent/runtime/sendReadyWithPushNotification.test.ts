@@ -84,6 +84,56 @@ describe('sendReadyWithPushNotification', () => {
     expect(notifyParentSessionInBackground).toHaveBeenCalledOnce()
   })
 
+  it('keeps ready and the parent notice but sends no device push for a turn driven only by automatic notices', () => {
+    const sendToAllDevices = vi.fn()
+    const session = { ...createSessionStub('child-3'), isTurnInputAutomaticNoticeOnly: vi.fn(() => true) }
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: { sendToAllDevices },
+      waitingForCommandLabel: 'Codex',
+      logPrefix: '[Codex]',
+      assistantPreviewText: 'Noted.',
+      turnKey: 'turn-9',
+    })
+
+    expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' })
+    expect(notifyParentSessionInBackground).toHaveBeenCalledOnce()
+    expect(session.isTurnInputAutomaticNoticeOnly).toHaveBeenCalledWith({ turnToken: 'turn-9' })
+    expect(sendToAllDevices).not.toHaveBeenCalled()
+  })
+
+  it('skips configured notification channels too for an automatic-notice turn', async () => {
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 202 }))
+    vi.stubGlobal('fetch', fetchSpy)
+    setActiveAccountSettingsSnapshot({
+      source: 'network',
+      settings: accountSettingsParse({
+        notificationChannelsV1: [{
+          v: 1, id: 'webhook-primary', kind: 'webhook', enabled: true,
+          url: 'https://hooks.example.test/happier',
+          topics: { ready: true, permissionRequest: false, userActionRequest: false },
+        }],
+      }),
+      settingsVersion: 7,
+      loadedAtMs: 123,
+      settingsSecretsReadKeys: [],
+    })
+    const session = { ...createSessionStub('child-4'), isTurnInputAutomaticNoticeOnly: () => true }
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: { sendToAllDevicesAsync: vi.fn(async () => {}) },
+      waitingForCommandLabel: 'Codex',
+      logPrefix: '[Codex]',
+      turnKey: 'turn-10',
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' })
+  })
+
   it('uses the latest assistant preview text when enabled', () => {
     const sendToAllDevices = vi.fn()
     const session = createSessionStub('session-123')

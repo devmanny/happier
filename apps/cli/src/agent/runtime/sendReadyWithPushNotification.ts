@@ -13,6 +13,7 @@ type PushSender = {
 
 type ReadySession = Pick<SessionClientPort, 'sessionId' | 'sendSessionEvent'> & {
   getMetadataSnapshot?: (() => unknown) | null
+  isTurnInputAutomaticNoticeOnly?: (params: { turnToken?: string | null }) => boolean
 }
 
 function resolveReadyNotificationSettingsContext(opts: Readonly<{
@@ -64,6 +65,12 @@ export function sendReadyWithPushNotification(opts: {
   })
 
   if (!opts.pushSender) return
+
+  // A turn that only reacted to automatic notices is machine traffic between sessions;
+  // waking the user's devices for it would turn every child report into a push.
+  if (opts.turnKey && opts.session.isTurnInputAutomaticNoticeOnly?.({ turnToken: opts.turnKey }) === true) {
+    return
+  }
 
   try {
     const currentSettingsContext = resolveReadyNotificationSettingsContext({

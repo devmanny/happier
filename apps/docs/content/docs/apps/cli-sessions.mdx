@@ -84,6 +84,8 @@ Each event is reported once; retries and reconnects do not repeat it. If the par
 
 **Moves are announced too.** When a running session sees its direct parent change, it tells the new parent that it has a new direct child (title, id, folder, machine and whether it is working, idle or blocked), tells the previous parent that the session is no longer its direct child, and tells its own agent who its parent is now. The parent seen when the session starts is its baseline and is not announced.
 
+**No device push for machine traffic.** When a parent's turn was started only by these automatic notices, the parent still emits its ready event and still reports to its own parent, but it does not send the ready push or webhook notification to your devices.
+
 **Direct kin only.** Notices go one level only, in both directions: a session hears from its direct children and reports to its direct parent. A child that spawns its own children does not forward their events upward, and every notice reminds the agent to talk only to its direct parent and direct children, never to grandparents or grandchildren. This is guidance in the notice text, not a restriction on `happier session send`.
 
 If a session is moved under one of its own children, the two would otherwise wake each other forever. The child side breaks that loop: it does not report to a parent whose own parent is itself, and logs the skipped notice.

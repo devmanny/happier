@@ -8,6 +8,8 @@ export type ParentLinkWatchedSession = ParentSessionNoticeSession & Readonly<{
   off: (event: 'metadata-updated', listener: () => void) => unknown;
   getAgentStateSnapshot?: () => AgentState | null | undefined;
   getSessionPresenceSnapshot?: () => Readonly<{ thinking: boolean }>;
+  /** Negative until the first server snapshot is known; local startup metadata is not a baseline. */
+  getMetadataVersion?: () => number;
 }>;
 
 type WatcherState = {
@@ -32,6 +34,7 @@ const watchersBySessionId = new Map<string, WatcherState>();
 
 function readMetadata(session: ParentLinkWatchedSession): unknown {
   try {
+    if (typeof session.getMetadataVersion === 'function' && session.getMetadataVersion() < 0) return null;
     return session.getMetadataSnapshot?.() ?? null;
   } catch {
     return null;

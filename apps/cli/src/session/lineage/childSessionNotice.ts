@@ -36,6 +36,12 @@ export type ChildSessionNoticeEvent =
 
 export const CHILD_SESSION_NOTICE_HEADER = '[Happier automatic notice — child session event, not a user message]';
 export const PARENT_LINK_NOTICE_HEADER = '[Happier automatic notice — session nesting changed, not a user message]';
+/** True for the text of any automatic notice this module produces. */
+export function isChildSessionNoticeText(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith(CHILD_SESSION_NOTICE_HEADER) || trimmed.startsWith(PARENT_LINK_NOTICE_HEADER);
+}
+
 /** Every notice ends with this so agents keep the conversation to direct kin only. */
 export const DIRECT_KIN_GUIDANCE =
   'Communicate only with your direct parent and your direct children; never relay to, or contact, grandparents or grandchildren.';

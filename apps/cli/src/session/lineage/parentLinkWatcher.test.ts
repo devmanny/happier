@@ -170,6 +170,26 @@ describe('startParentLinkWatcher', () => {
     }));
   });
 
+  it('waits for the first server-sourced metadata before taking the baseline', () => {
+    // A resumed runner starts with locally built metadata (no listParentV1) and only then
+    // receives the server snapshot. That snapshot is the baseline, not a move.
+    const session = new FakeSession('child-1', { path: '/repo', host: 'mac' });
+    let metadataVersion = -1;
+    (session as unknown as { getMetadataVersion: () => number }).getMetadataVersion = () => metadataVersion;
+    startParentLinkWatcher(session);
+
+    metadataVersion = 3;
+    session.metadata = { path: '/repo', host: 'mac', listParentV1: { v: 1, updatedAt: 1, parentSessionId: 'parent-a' } };
+    session.emit('metadata-updated');
+    expect(notifyParentLinkChangeBestEffort).not.toHaveBeenCalled();
+
+    session.setListParent('parent-b', 2);
+    expect(notifyParentLinkChangeBestEffort).toHaveBeenCalledWith(expect.objectContaining({
+      previousParentSessionId: 'parent-a',
+      nextParentSessionId: 'parent-b',
+    }));
+  });
+
   it('does not watch offline placeholder sessions', () => {
     const session = new FakeSession('offline-123', { path: '/repo', host: 'mac' });
     startParentLinkWatcher(session);
