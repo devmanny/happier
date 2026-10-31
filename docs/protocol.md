@@ -236,6 +236,13 @@ machines. The daemon never registers these methods.
   - `host`: a running Mac app. It serves from launch, with or without a browser window.
 - The CLI moves to the next slot only when the relay reports that no client serves the method.
   A request that may have reached a device is never re-sent.
+- Every request carries `sessionId`, set by the CLI from the session whose MCP bridge made the
+  call. A session's first navigation opens its own tab, titled with the session's name, on the
+  device that served the call. A session lists, selects and closes only its own tabs, and may
+  have several. Any other tab id answers `tab_not_found`. Each tab has its own web view: calls
+  on one tab run in order, and other tabs run alongside. All tabs share the browser's website
+  data (cookies and logins). Agents never change the tab the user is looking at. A session's
+  tabs close when it stops or is archived, unless a browser view is showing them.
 - Operations, request/response schemas and error codes are defined in
   `packages/protocol/src/deviceBrowser/deviceBrowserRpc.ts`. The Swift mirror is
   `apps/apple/HappierKit/Sources/HappierKit/Browser/DeviceBrowserRPC.swift`.
