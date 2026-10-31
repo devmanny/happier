@@ -27,7 +27,7 @@ struct Composer: View {
     @State private var talking = false
     /// The held mic is stuck to the trash: letting go deletes what was said.
     @State private var talkCancelArmed = false
-    /// The trash's and the mic's centers along the row, for the mic to stick to the trash.
+    /// The trash's and the mic's centers across the window, for the mic to stick to the trash.
     @State private var trashX: CGFloat?
     @State private var micX: CGFloat?
     @State private var textBeforeTalking = ""
@@ -265,9 +265,11 @@ struct Composer: View {
                 .opacity(talking ? 0 : 1)
                 .allowsHitTesting(!talking)
                 .accessibilityHidden(talking)
+                // Where the trash will be: the panel lays it out from this edge.
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minX + TalkPanel.trashCenter } action: { trashX = $0 }
                 .overlay {
                     if talking {
-                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed) { trashX = $0 }
+                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
@@ -288,7 +290,7 @@ struct Composer: View {
                     } onHoldEnd: { cancelled in
                         stopTalking(cancelled: cancelled)
                     }
-                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(TalkPanel.row)).midX } action: { micX = $0 }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midX } action: { micX = $0 }
                 }
                 // Kept in place, unseen, while talking so the mic doesn't slide out from under the finger.
                 sendButton
@@ -297,7 +299,6 @@ struct Composer: View {
                     .accessibilityHidden(talking)
             }
             .animation(.smooth(duration: 0.2), value: talking)
-            .coordinateSpace(.named(TalkPanel.row))
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -1053,17 +1054,13 @@ struct PushToTalkButton: View {
     let onHoldEnd: (_ cancelled: Bool) -> Void
     /// Where the trash is when the panel hasn't reported it.
     static let cancelDistance: CGFloat = 110
-    /// The magnet pulls the mic onto the trash once the finger is within this share of the
-    /// distance from it (60% of the way there)…
+    /// The red zone: the share of the way nearest the trash. Once the finger is in it, the
+    /// magnet catches the mic onto the trash; the other 60% is the safe, green side…
     static let magnetShare: CGFloat = 0.4
-    /// …and lets go once the finger is back at half the way. Sending pulls harder than
-    /// deleting: a slip of the finger shouldn't throw a message away.
+    /// …and the magnet lets go once the finger is back at half the way.
     static let releaseShare: CGFloat = 0.5
     /// How big the held mic grows, so it shows around the thumb.
     static let heldScale: CGFloat = 1.9
-    /// Short of the magnet it leans back toward where it was held: it moves this share of the
-    /// finger's way, so it feels held by gravity on both sides.
-    static let homePull: CGFloat = 0.4
     @State private var pressing = false
     @State private var held = false
     @State private var holdTimer: Task<Void, Never>?
@@ -1130,15 +1127,15 @@ struct PushToTalkButton: View {
             .accessibilityAction { onTap() }
     }
 
-    /// With the finger, wherever it goes, under two pulls: back toward where it was held (the
-    /// stronger one), and onto the trash once the finger is most of the way there.
+    /// Under the finger, wherever it goes, until the finger is in the red zone near the trash:
+    /// then the magnet catches it there.
     private func follow(_ finger: CGSize) {
-        let trash = min(trashOffset ?? -Self.cancelDistance, -1)
+        // A measured trash closer than the mic itself is a layout still settling.
+        let trash = trashOffset.flatMap { $0 < -60 ? $0 : nil } ?? -Self.cancelDistance
         let fromTrash = hypot(finger.width - trash, finger.height)
         let stuck = fromTrash < abs(trash) * (cancelArmed ? Self.releaseShare : Self.magnetShare)
         // Not too far from the composer: above the field at most, a little below the row.
-        let free = CGSize(width: min(max(finger.width * Self.homePull, trash), 40),
-                          height: min(max(finger.height * Self.homePull, -200), 60))
+        let free = CGSize(width: min(max(finger.width, trash), 40), height: min(max(finger.height, -260), 80))
         if stuck != cancelArmed {
             cancelArmed = stuck
             // A firmer tap when it sticks, like a magnet catching.
@@ -1157,9 +1154,8 @@ struct PushToTalkButton: View {
 struct TalkPanel: View {
     let levels: [Float]
     let cancelArmed: Bool
-    /// The trash's center along the composer row (`TalkPanel.row`), where the mic sticks.
-    var onTrash: (CGFloat) -> Void = { _ in }
-    static let row = "talkRow"
+    /// From the row's leading edge to the trash's center, where the held mic sticks.
+    static let trashCenter: CGFloat = 16
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1168,7 +1164,6 @@ struct TalkPanel: View {
                 .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .scaleEffect(cancelArmed ? 1.25 : 1)
                 .animation(.smooth(duration: 0.15), value: cancelArmed)
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.row)).midX } action: { onTrash($0) }
             Text(cancelArmed ? "Release to cancel" : "‹ Slide to cancel")
                 .font(.subheadline.weight(cancelArmed ? .semibold : .regular))
                 .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
