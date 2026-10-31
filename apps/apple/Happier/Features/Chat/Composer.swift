@@ -20,14 +20,16 @@ struct Composer: View {
     @Environment(HappierStore.self) private var store
     @State private var sheet: SheetKind?
     @State private var dictation = Dictation()
-    @State private var photoItems: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
-    #if os(iOS)
-    @Environment(\.openURL) private var openURL
+    // Only iOS has a camera to open; the pickers take these everywhere.
+    /// Holding the mic: push to talk.
+    @State private var talking = false
+    /// Slid far enough toward the trash: letting go cancels.
+    @State private var talkCancelArmed = false
+    @State private var textBeforeTalking = ""
     @State private var showCamera = false
     @State private var showCameraPermission = false
-    #endif
     @State private var focused = false
     @State private var editor = ComposerEditor()
     /// After sending during the keyboard's own dictation: what it still writes until then is dropped.
@@ -56,6 +58,38 @@ struct Composer: View {
         AttachmentLoader.add(drafts, to: $attachments, store: store)
     }
 
+    /// Push to talk: what's being read stops so you can speak, and from now on the agent's
+    /// answers in this conversation are read aloud.
+    private func startTalking() {
+        textBeforeTalking = text
+        talkCancelArmed = false
+        talking = true
+        AppHaptics.confirm()
+        MessageSpeaker.shared.stop()
+        if MessageSpeaker.shared.autoReadSessionId != sessionId {
+            MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
+        }
+        Task { await dictation.begin(prefix: text) { text = $0 } }
+    }
+
+    /// Released: the last words come in, then it's sent; slid onto the trash, nothing is sent
+    /// and the field is as it was.
+    private func stopTalking(cancelled: Bool) {
+        if cancelled {
+            dictation.stop()
+            text = textBeforeTalking
+            talking = false
+            talkCancelArmed = false
+            AppHaptics.warning()
+            return
+        }
+        Task {
+            await dictation.finish()
+            talking = false
+            if canSend { send() } else { AppHaptics.light() }
+        }
+    }
+
     private func send() {
         guard canSend else { return }
         // Sending ends a dictation (the keyboard's Return as well as the send button).
@@ -71,6 +105,7 @@ struct Composer: View {
         #endif
         let picked = attachments
         attachments = []
+        AppHaptics.confirm()
         onSend(picked)
     }
 
@@ -79,15 +114,22 @@ struct Composer: View {
             if let session, let goal = SessionGoal.current(in: session.metadata), goal.isOngoing {
                 GoalChip(goal: goal, controls: SessionGoal.controls(agentState: session.agentState)) { action in
                     switch action {
-                    case .edit: goalDraft = goal.objective
-                    case .status(let status): Task { await store.setGoal(sessionId, status: status) }
-                    case .clear: Task { await store.clearGoal(sessionId) }
+                    case .edit:
+                        AppHaptics.light()
+                        goalDraft = goal.objective
+                    case .status(let status):
+                        AppHaptics.confirm()
+                        Task { await store.setGoal(sessionId, status: status) }
+                    case .clear:
+                        AppHaptics.warning()
+                        Task { await store.clearGoal(sessionId) }
                     }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             if let stale = store.staleRunner(for: sessionId) {
                 StaleRunnerBubble(updating: store.restartingRunners.contains(sessionId)) {
+                    AppHaptics.confirm()
                     Task { await store.restartStaleRunner(stale.sessionId) }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -117,25 +159,6 @@ struct Composer: View {
             ModelPickerSheet { SessionModelPicker(sessionId: sessionId) }
             .presentationDetents([.medium, .large])
         }
-        .fullScreenCover(isPresented: $showCamera) {
-            CameraPicker { outcome in
-                showCamera = false
-                switch outcome {
-                case .photo(let data): add([AttachmentLoader.photo(data)])
-                case .cancelled: break
-                case .failed: store.lastError = String(localized: "The photo couldn't be captured. Please try again.")
-                }
-            }
-            .ignoresSafeArea()
-        }
-        .alert("Camera Access", isPresented: $showCameraPermission) {
-            Button("Open Settings") {
-                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Allow camera access in Settings to take a photo and attach it to your message.")
-        }
         #endif
         #if os(macOS)
         .onAppear {
@@ -147,23 +170,15 @@ struct Composer: View {
         .onDisappear { paste.remove() }
         .onChange(of: focused, initial: true) { _, isFocused in paste.composerFocused = isFocused }
         #endif
-        .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
-        .onChange(of: photoItems) { _, items in
-            guard !items.isEmpty else { return }
-            photoItems = []
-            Task {
-                add(await AttachmentLoader.drafts(from: items))
-            }
-        }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            add(((try? result.get()) ?? []).compactMap(AttachmentLoader.file(at:)))
-        }
+        .modifier(AttachmentSources(showPhotos: $showPhotos, showFiles: $showFiles, showCamera: $showCamera,
+                                    showCameraPermission: $showCameraPermission) { add($0) })
         .alert("Goal", isPresented: Binding(get: { goalDraft != nil }, set: { if !$0 { goalDraft = nil } })) {
             TextField("What should the agent keep working toward?", text: Binding(get: { goalDraft ?? "" }, set: { goalDraft = $0 }), axis: .vertical)
             Button("Set Goal") {
                 let objective = (goalDraft ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 goalDraft = nil
                 guard !objective.isEmpty else { return }
+                AppHaptics.confirm()
                 Task { await store.setGoal(sessionId, objective: objective) }
             }
             Button("Cancel", role: .cancel) { goalDraft = nil }
@@ -171,7 +186,10 @@ struct Composer: View {
             Text("The agent keeps pursuing it across turns until it's done.")
         }
         .onChange(of: dictation.error) { _, error in
-            if let error { store.lastError = error }
+            if let error {
+                AppHaptics.error()
+                store.lastError = error
+            }
         }
     }
 
@@ -210,52 +228,78 @@ struct Composer: View {
             }
 
             HStack(spacing: 8) {
-                AddMenu(canMention: session?.machineId != nil && session?.path != nil,
-                        canSetGoal: session.map { SessionGoal.controls(agentState: $0.agentState).canSet } ?? false) {
-                    if let draft = AttachmentLoader.clipboardImage() {
-                        add([draft])
-                    } else if let pasted = AttachmentLoader.clipboardText(), !pasted.isEmpty {
-                        text += pasted
-                        focused = true
-                    }
-                } onPhotos: {
-                    showPhotos = true
-                } onCamera: {
-                    #if os(iOS)
-                    Task {
-                        guard CameraPicker.isAvailable else { return }
-                        if await CameraPicker.requestAccess() {
-                            showCamera = true
-                        } else {
-                            showCameraPermission = true
+                // Push to talk takes over this part of the row (WhatsApp): the trash, "Slide to
+                // cancel" and the moving bars in place of these controls, which hide meanwhile.
+                HStack(spacing: 8) {
+                    AddMenu(canMention: session?.machineId != nil && session?.path != nil,
+                            canSetGoal: session.map { SessionGoal.controls(agentState: $0.agentState).canSet } ?? false) {
+                        if let draft = AttachmentLoader.clipboardImage() {
+                            add([draft])
+                        } else if let pasted = AttachmentLoader.clipboardText(), !pasted.isEmpty {
+                            text += pasted
+                            focused = true
                         }
+                    } onPhotos: {
+                        showPhotos = true
+                    } onCamera: {
+                        AttachmentSources.openCamera(show: $showCamera, denied: $showCameraPermission)
+                    } onFiles: {
+                        showFiles = true
+                    } onMention: {
+                        mentioning = true
+                    } onGoal: {
+                        goalDraft = session.flatMap { SessionGoal.current(in: $0.metadata) }.flatMap { $0.isOngoing ? $0.objective : nil } ?? ""
                     }
-                    #endif
-                } onFiles: {
-                    showFiles = true
-                } onMention: {
-                    mentioning = true
-                } onGoal: {
-                    goalDraft = session.flatMap { SessionGoal.current(in: $0.metadata) }.flatMap { $0.isOngoing ? $0.objective : nil } ?? ""
-                }
-                .equatable()
-                .sheet(isPresented: $mentioning) { mentionPicker }
-                if let controls {
-                    modelPill(controls)
-                    permissionPill(controls)
-                }
-                Spacer(minLength: 0)
-                if !canSend || dictation.isRecording {
-                    CircleButton(systemImage: dictation.isRecording ? "waveform" : "mic", active: dictation.isRecording) {
-                        dictation.toggle(prefix: text) { text = $0 }
+                    .equatable()
+                    .sheet(isPresented: $mentioning) { mentionPicker }
+                    if let controls {
+                        modelPill(controls)
+                        permissionPill(controls)
                     }
-                    .symbolEffect(.variableColor.iterative, isActive: dictation.isRecording)
-                    .accessibilityLabel(dictation.isRecording ? "Stop dictation" : "Dictate")
+                    Spacer(minLength: 0)
                 }
+                .opacity(talking ? 0 : 1)
+                .allowsHitTesting(!talking)
+                .accessibilityHidden(talking)
+                .overlay {
+                    if talking {
+                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                if !canSend || dictation.isRecording || talking {
+                    // Tap: dictate into the field. Hold: push to talk, sent when released, and the
+                    // agent's answer is read aloud (a spoken conversation).
+                    PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed) {
+                        if dictation.isRecording {
+                            dictation.stop()
+                            AppHaptics.light()
+                        } else {
+                            AppHaptics.light()
+                            dictation.toggle(prefix: text) { text = $0 }
+                        }
+                    } onHoldStart: {
+                        startTalking()
+                    } onHoldEnd: { cancelled in
+                        stopTalking(cancelled: cancelled)
+                    }
+                }
+                // Kept in place, unseen, while talking so the mic doesn't slide out from under the finger.
                 sendButton
+                    .opacity(talking ? 0 : 1)
+                    .allowsHitTesting(!talking)
+                    .accessibilityHidden(talking)
             }
+            .animation(.smooth(duration: 0.2), value: talking)
         }
         .padding(12)
+        // The project's color, faintly, so each window says which project it's in. A plain fill
+        // under the glass, not a glass tint: iPadOS drops tints in windows in the background.
+        .background {
+            if let color = store.folderColor(of: session)?.color {
+                RoundedRectangle(cornerRadius: 26, style: .continuous).fill(color.opacity(0.14))
+            }
+        }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
@@ -271,6 +315,7 @@ struct Composer: View {
             if running > 0 {
                 BackgroundActivityPill(count: running) {
                     Self.log.notice("background pill tapped (\(running, privacy: .public) running)")
+                    AppHaptics.light()
                     onShowActivity()
                 }
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -296,6 +341,7 @@ struct Composer: View {
 
     private func modelPill(_ controls: SessionControls) -> some View {
         Button {
+            AppHaptics.light()
             sheet = .model
         } label: {
             HStack(spacing: 5) {
@@ -318,6 +364,7 @@ struct Composer: View {
             .font(.subheadline.weight(.medium))
         }
         .buttonStyle(.glass)
+        .glassHover()
         .accessibilityLabel("Model")
         #if os(macOS)
         .popover(isPresented: Binding(get: { sheet == .model }, set: { if !$0 { sheet = nil } }), arrowEdge: .top) {
@@ -342,6 +389,7 @@ struct Composer: View {
             .font(.subheadline.weight(.medium))
         }
         .buttonStyle(.glass)
+        .glassHover()
         .fixedSize()
         .accessibilityLabel("Permission mode")
         .popover(isPresented: $showPermissions, arrowEdge: .top) {
@@ -362,7 +410,7 @@ struct Composer: View {
                         .padding(.vertical, 6)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             .padding(6)
@@ -379,7 +427,12 @@ struct Composer: View {
     @ViewBuilder private var sendButton: some View {
         let stop = working && !canSend
         Button {
-            stop ? onStop() : send()
+            if stop {
+                AppHaptics.warning()
+                onStop()
+            } else {
+                send()
+            }
         } label: {
             Image(systemName: stop ? "stop.fill" : "arrow.up")
                 .font(.body.weight(.bold))
@@ -387,10 +440,10 @@ struct Composer: View {
                 .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(.glassProminent)
+        .glassHover()
         .buttonBorderShape(.circle)
         .tint(stop ? .red : .userBubble)
         .disabled(!stop && !canSend)
-        .sensoryFeedback(.impact(weight: .light), trigger: text.isEmpty)
         .accessibilityLabel(stop ? "Stop agent" : "Send")
     }
 
@@ -485,11 +538,13 @@ struct CircleButton: View {
         if active {
             Button(action: action) { icon }
                 .buttonStyle(.glassProminent)
+                .glassHover()
                 .buttonBorderShape(.circle)
                 .tint(.userBubble)
         } else {
             Button(action: action) { icon }
                 .buttonStyle(.glass)
+                .glassHover()
                 .buttonBorderShape(.circle)
         }
     }
@@ -533,7 +588,7 @@ enum FileSuggestionResults: Equatable {
     }
 }
 
-private struct FileSuggestions: View {
+struct FileSuggestions: View {
     let results: FileSuggestionResults
     let onSelect: (String) -> Void
 
@@ -565,6 +620,7 @@ private struct FileSuggestions: View {
                 ForEach(paths, id: \.self) { path in
                     let label = FileSuggestionResults.label(path)
                     Button {
+                        AppHaptics.selection()
                         onSelect(path)
                     } label: {
                         HStack(spacing: 8) {
@@ -582,7 +638,7 @@ private struct FileSuggestions: View {
                         .padding(.vertical, 9)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
         }
@@ -600,6 +656,7 @@ private struct SlashSuggestions: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(commands) { command in
                 Button {
+                    AppHaptics.selection()
                     onSelect(command)
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -613,7 +670,7 @@ private struct SlashSuggestions: View {
                     .padding(.vertical, 10)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.vertical, 4)
@@ -623,7 +680,7 @@ private struct SlashSuggestions: View {
 
 /// The ⊕ menu: paste, camera, photos and files, mentions, and the goal. Compared by its displayed
 /// options so unrelated session updates don't rebuild the menu while it is open.
-private struct AddMenu: View, Equatable {
+struct AddMenu: View, Equatable {
     let canMention: Bool
     let canSetGoal: Bool
     let onPaste: () -> Void
@@ -639,17 +696,9 @@ private struct AddMenu: View, Equatable {
 
     var body: some View {
         Menu {
-            Button("Paste", systemImage: "doc.on.clipboard", action: onPaste)
-            Button("Photo or Video", systemImage: "photo.on.rectangle", action: onPhotos)
-            #if os(iOS)
-            if CameraPicker.isAvailable {
-                Button("Take Photo", systemImage: "camera", action: onCamera)
-            }
-            #endif
-            Button("File", systemImage: "doc", action: onFiles)
+            // Pointing the agent first, then what to attach; the camera last (used least).
             if canMention {
-                Divider()
-                Button(action: onMention) {
+                Button { AppHaptics.light(); onMention() } label: {
                     Label {
                         Text("Mention a File")
                         Text("Point the agent at a file of the project")
@@ -659,8 +708,7 @@ private struct AddMenu: View, Equatable {
                 }
             }
             if canSetGoal {
-                Divider()
-                Button(action: onGoal) {
+                Button { AppHaptics.light(); onGoal() } label: {
                     Label {
                         Text("Goal")
                         Text("Set a goal to keep pursuing")
@@ -669,6 +717,15 @@ private struct AddMenu: View, Equatable {
                     }
                 }
             }
+            if canMention || canSetGoal { Divider() }
+            Button("File", systemImage: "doc") { AppHaptics.light(); onFiles() }
+            Button("Photo or Video", systemImage: "photo.on.rectangle") { AppHaptics.light(); onPhotos() }
+            Button("Paste", systemImage: "doc.on.clipboard") { AppHaptics.light(); onPaste() }
+            #if os(iOS)
+            if CameraPicker.isAvailable {
+                Button("Take Photo", systemImage: "camera") { AppHaptics.light(); onCamera() }
+            }
+            #endif
         } label: {
             Image(systemName: "plus")
                 .font(.body.weight(.semibold))
@@ -677,7 +734,10 @@ private struct AddMenu: View, Equatable {
         // The same glass disc as the mic and send buttons beside it, on every platform.
         .menuStyle(.button)
         .menuIndicator(.hidden)
+        // The same order whichever way the menu opens (up from the iPhone composer, down on the Mac).
+        .menuOrder(.fixed)
         .buttonStyle(.glass)
+        .glassHover()
         .buttonBorderShape(.circle)
         .fixedSize()
         .accessibilityLabel("Add")
@@ -711,6 +771,7 @@ private struct PermissionMenu: View, Equatable {
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
+        .glassHover()
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Permission mode")
@@ -780,6 +841,7 @@ struct EffortSlider: View {
                 .gesture(DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         let nearest = stops.indices.min { abs(stops[$0] + knob / 2 - value.location.x) < abs(stops[$1] + knob / 2 - value.location.x) } ?? 0
+                        if nearest != index { AppHaptics.selection() }
                         if nearest != dragIndex {
                             withAnimation(.snappy(duration: 0.18)) { dragIndex = nearest }
                         }
@@ -788,7 +850,6 @@ struct EffortSlider: View {
                         if let dragIndex, levels[dragIndex] != selection { onCommit(levels[dragIndex]) }
                         dragIndex = nil
                     })
-                .sensoryFeedback(.selection, trigger: index)
                 .animation(.snappy(duration: 0.2), value: index)
             }
             .frame(height: knob + inset * 2)
@@ -797,7 +858,10 @@ struct EffortSlider: View {
             .accessibilityValue(Self.name(levels[index]))
             .accessibilityAdjustableAction { direction in
                 let next = direction == .increment ? min(index + 1, levels.count - 1) : max(index - 1, 0)
-                if next != index { onCommit(levels[next]) }
+                if next != index {
+                    AppHaptics.selection()
+                    onCommit(levels[next])
+                }
             }
         }
         .padding(.horizontal, 4)
@@ -859,6 +923,7 @@ private struct StaleRunnerBubble: View {
         }
         // Amber glass: a gentle heads-up, not an error.
         .buttonStyle(.glass(.regular.tint(.orange.opacity(0.22))))
+        .glassHover()
         .controlSize(.small)
         .disabled(updating)
         .accessibilityHint(Text("Restarts this session on the CLI the computer now runs. The conversation is kept."))
@@ -958,7 +1023,7 @@ private struct GoalChip: View {
             .glassEffect(.regular, in: Capsule())
         }
         .menuStyle(.button)
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .menuIndicator(.hidden)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel(Text("Goal: \(goal.objective)"))
@@ -971,5 +1036,114 @@ private struct GoalChip: View {
         case .pending: String(localized: "Pending")
         default: nil
         }
+    }
+}
+
+/// The composer's mic: a tap dictates into the field (tap again to stop); held down, it's push to
+/// talk — it listens while held and sends when let go, or cancels when slid left onto the trash.
+struct PushToTalkButton: View {
+    let recording: Bool
+    let talking: Bool
+    @Binding var cancelArmed: Bool
+    let onTap: () -> Void
+    let onHoldStart: () -> Void
+    let onHoldEnd: (_ cancelled: Bool) -> Void
+    /// How far left the finger goes to land on the trash.
+    static let cancelDistance: CGFloat = 110
+    @State private var pressing = false
+    @State private var held = false
+    @State private var holdTimer: Task<Void, Never>?
+
+    var body: some View {
+        Image(systemName: talking || recording ? "waveform" : "mic")
+            .font(.body.weight(.semibold))
+            .frame(width: 22, height: 22)
+            .foregroundStyle(talking || recording ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            .symbolEffect(.variableColor.iterative, isActive: talking || recording)
+            .padding(9)
+            .background {
+                if talking {
+                    Circle().fill(cancelArmed ? Color.gray : Color.red)
+                } else if recording {
+                    Circle().fill(Color.userBubble)
+                }
+            }
+            .glassEffect(.regular.interactive(), in: Circle())
+            .scaleEffect(talking ? 1.15 : pressing ? 0.9 : 1)
+            .animation(.smooth(duration: 0.15), value: talking)
+            .animation(.smooth(duration: 0.1), value: pressing)
+            .contentShape(Circle())
+            #if os(iOS)
+            .contentShape(.hoverEffect, Circle())
+            .hoverEffect(.lift)
+            #endif
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if !pressing {
+                        pressing = true
+                        AppHaptics.light()
+                        holdTimer = Task {
+                            try? await Task.sleep(for: .milliseconds(200))
+                            guard !Task.isCancelled, pressing else { return }
+                            held = true
+                            onHoldStart()
+                        }
+                    }
+                    guard held else { return }
+                    let armed = value.translation.width < -Self.cancelDistance
+                    if armed != cancelArmed {
+                        cancelArmed = armed
+                        AppHaptics.light()
+                    }
+                }
+                .onEnded { value in
+                    holdTimer?.cancel()
+                    pressing = false
+                    if held {
+                        held = false
+                        onHoldEnd(value.translation.width < -Self.cancelDistance)
+                    } else {
+                        onTap()
+                    }
+                })
+            .accessibilityLabel(recording ? "Stop dictation" : "Dictate")
+            .accessibilityHint("Hold to talk; release to send")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onTap() }
+    }
+}
+
+/// Push to talk's panel in the composer's row, in place of its controls (the words heard show in
+/// the field above): the trash with "Slide to cancel" beside it on the left, where the finger
+/// doesn't cover them, and bars moving with the voice next to the mic. No glass of its own: the
+/// composer's is enough, and a second layer let the hidden controls show through.
+struct TalkPanel: View {
+    let levels: [Float]
+    let cancelArmed: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: cancelArmed ? "trash.fill" : "trash")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                .scaleEffect(cancelArmed ? 1.25 : 1)
+                .animation(.smooth(duration: 0.15), value: cancelArmed)
+            Text(cancelArmed ? "Release to cancel" : "‹ Slide to cancel")
+                .font(.subheadline.weight(cancelArmed ? .semibold : .regular))
+                .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            HStack(alignment: .center, spacing: 2) {
+                ForEach(Array(levels.suffix(16).enumerated()), id: \.offset) { _, level in
+                    Capsule()
+                        .fill(cancelArmed ? Color.secondary : Color.red)
+                        .frame(width: 3, height: 4 + CGFloat(level) * 18)
+                }
+            }
+            .frame(width: 62, height: 24, alignment: .trailing)
+            .animation(.linear(duration: 0.05), value: levels.count)
+        }
+        .padding(.leading, 6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

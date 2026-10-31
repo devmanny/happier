@@ -46,8 +46,9 @@ public enum ChatRow: Identifiable, Sendable, Equatable {
                 if item.isMessage {
                     fold(inProgress: false)
                     rows.append(.item(item))
-                } else if item.awaitsApproval {
-                    // Approvals stay visible; the steps before them keep folding in place.
+                } else if item.staysVisible {
+                    // Questions keep their place after answering; other approvals stay visible
+                    // while waiting. The steps before them keep folding in place.
                     fold(inProgress: isLast && working && index > (lastMessage ?? -1))
                     rows.append(.item(item))
                 } else {
@@ -82,7 +83,7 @@ public enum ChatRow: Identifiable, Sendable, Equatable {
             run = []
         }
         for step in steps {
-            if case .toolCall(let tool) = step { run.append(tool) } else {
+            if case .toolCall(let tool) = step, !tool.isQuestion { run.append(tool) } else {
                 flush()
                 rows.append(.item(step))
             }
@@ -99,8 +100,8 @@ public enum ChatRow: Identifiable, Sendable, Equatable {
 }
 
 private extension ChatItem {
-    var awaitsApproval: Bool {
-        if case .toolCall(let tool) = self { return tool.permission?.status == .pending }
+    var staysVisible: Bool {
+        if case .toolCall(let tool) = self { return tool.isQuestion || tool.permission?.status == .pending }
         return false
     }
 

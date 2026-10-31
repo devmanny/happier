@@ -29,4 +29,20 @@ import Testing
         #expect(SessionGoal.controls(agentState: state) == SessionGoal.Controls(canSet: true, canClear: false))
         #expect(SessionGoal.controls(agentState: .null) == SessionGoal.Controls(canSet: false, canClear: false))
     }
+
+    /// A new session doesn't run yet: whether its agent takes a goal is what the same agent's
+    /// running sessions report.
+    @Test func aNewSessionOffersAGoalWhenItsAgentDoes() throws {
+        func session(_ id: String, flavor: String, canSet: Bool) throws -> Session {
+            var session = try Session(row: ["id": .string(id), "seq": 0, "createdAt": 1, "updatedAt": 1, "active": true, "activeAt": 1,
+                                            "encryptionMode": "plain", "metadata": .string("{\"flavor\":\"\(flavor)\"}"),
+                                            "metadataVersion": 1, "agentStateVersion": 1], keys: nil)
+            session.agentState = ["capabilities": ["sessionGoalSetSupported": .bool(canSet)]]
+            return session
+        }
+        let sessions = [try session("a", flavor: "codex", canSet: true), try session("b", flavor: "claude", canSet: false)]
+        #expect(SessionGoal.supported(agentId: "codex", sessions: sessions))
+        #expect(!SessionGoal.supported(agentId: "claude", sessions: sessions))
+        #expect(!SessionGoal.supported(agentId: "opencode", sessions: sessions))
+    }
 }

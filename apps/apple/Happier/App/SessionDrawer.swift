@@ -23,7 +23,7 @@ struct SessionDrawer: View {
                 NavigationStack {
                     DrawerSessionList(selected: selection, select: { selection = $0 }) { id in
                         selection = id
-                        setOpen(false)
+                        setOpen(false, feedback: false)
                     }
                     .equatable()
                 }
@@ -99,6 +99,7 @@ struct SessionDrawer: View {
             } actions: {
                 Button("Show Sessions") { setOpen(true) }
                     .buttonStyle(.glassProminent)
+                    .glassHover()
             }
         }
     }
@@ -124,7 +125,8 @@ struct SessionDrawer: View {
         setOpen(position + velocity * 0.15 > width / 2)
     }
 
-    private func setOpen(_ open: Bool) {
+    private func setOpen(_ open: Bool, feedback: Bool = true) {
+        if feedback, isOpen != open { AppHaptics.light() }
         // Opening the sidebar puts the keyboard away, like any other navigation: before the slide,
         // so the conversation isn't relaid out under the keyboard halfway through it.
         if open { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }

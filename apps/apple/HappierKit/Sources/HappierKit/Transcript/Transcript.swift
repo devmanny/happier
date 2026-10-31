@@ -7,8 +7,8 @@ import Foundation
 /// permissions from `agentState`, and optimistic pending user messages. Sidechain rows (sub-agent
 /// work under a Task tool) are kept out of the main list, as in the UI.
 ///
-/// Items are rebuilt from the retained rows on every change; this keeps the reduction a pure
-/// function of (rows, agentState, pending) with no incremental-state drift.
+/// The reduction comes from retained rows. State-only questions already shown stay visible
+/// between their reply and the corresponding history row arriving.
 public struct Transcript: Sendable {
     public private(set) var items: [ChatItem] = []
     public private(set) var pendingRequests: [PendingRequest] = []
@@ -122,7 +122,11 @@ public struct Transcript: Sendable {
         var builder = reduced
         subagents = isSidechain ? [] : Subagent.list(in: builder.items, threads: threads)
         pendingRequests = Self.pendingRequests(from: agentState)
-        builder.applyPermissions(agentState: agentState, pending: pendingRequests)
+        let visibleQuestions = items.compactMap { item -> ToolCall? in
+            guard case .toolCall(let tool) = item, tool.isQuestion, tool.itemId.hasPrefix("request:") else { return nil }
+            return tool
+        }
+        builder.applyPermissions(agentState: agentState, pending: pendingRequests, visibleQuestions: visibleQuestions)
         for p in pending where !builder.seenLocalIds.contains(p.localId) {
             builder.items.append(.userText(UserText(id: UserText.stableId(localId: p.localId), text: p.text, createdAt: p.createdAt, localId: p.localId, isPending: true, attachments: p.attachments)))
         }
@@ -130,6 +134,17 @@ public struct Transcript: Sendable {
     }
 
     static let userActionTools: Set<String> = ["AskUserQuestion", "ask_user_question", "ExitPlanMode", "exit_plan_mode", "AcpHistoryImport"]
+
+    /// The agent's latest spoken text (not its thinking), nil before it has said anything.
+    public var lastAgentText: String? {
+        for item in items.reversed() {
+            if case .agentText(let text) = item, !text.isThinking {
+                let trimmed = text.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
 
     static func pendingRequests(from agentState: JSONValue) -> [PendingRequest] {
         guard let requests = agentState["requests"]?.objectValue else { return [] }
@@ -155,7 +170,7 @@ private struct Builder {
     var items: [ChatItem] = []
     var seenLocalIds: Set<String> = []
     private var toolIndex: [String: Int] = [:]
-    private var bufferedResults: [String: (content: JSONValue, isError: Bool)] = [:]
+    private var bufferedResults: [String: (content: JSONValue, isError: Bool, structured: JSONValue?)] = [:]
     private var segmentIndex: [String: Int] = [:]
     private var streamIndex: [String: Int] = [:]
 
@@ -174,15 +189,16 @@ private struct Builder {
             switch block {
             case .userText(let text, let attachments):
                 var user = UserText(id: row.localId.map(UserText.stableId) ?? itemId, text: text, createdAt: row.createdAt,
-                                    localId: row.localId, isPending: false, files: attachments)
+                                    localId: row.localId, isPending: false, files: attachments,
+                                    sessionMessageOrigin: row.record["role"]?.stringValue == "user" ? SessionMessageOrigin.parse(meta) : nil)
                 user.seq = row.seq
                 items.append(.userText(user))
             case .text(let text, let thinking):
                 addText(text, thinking: thinking, itemId: itemId, createdAt: row.createdAt, seq: row.seq, meta: meta)
             case .toolCall(let id, let name, let input, let title):
                 addTool(id: id, name: name, input: input, title: title, itemId: itemId, createdAt: row.createdAt)
-            case .toolResult(let id, let content, let isError, let append):
-                addResult(id: id, content: content, isError: isError, append: append)
+            case .toolResult(let id, let content, let isError, let append, let structured):
+                addResult(id: id, content: content, isError: isError, append: append, structured: structured)
             case .event(let kind, let data):
                 items.append(.event(TranscriptEvent(id: itemId, kind: kind, data: data, createdAt: row.createdAt)))
             }
@@ -219,24 +235,35 @@ private struct Builder {
 
     private mutating func addTool(id: String, name: String, input: JSONValue, title: String?, itemId: String, createdAt: Date) {
         guard toolIndex[id] == nil else { return }
-        var tool = ToolCall(id: id, itemId: itemId, name: name, input: input, title: title, state: .running, result: nil, permission: nil, createdAt: createdAt)
-        if let buffered = bufferedResults.removeValue(forKey: id) {
-            tool.result = buffered.content
-            tool.state = buffered.isError ? .error : .completed
-        }
-        toolIndex[id] = items.count
-        items.append(.toolCall(tool))
+        insertTool(ToolCall(id: id, itemId: itemId, name: name, input: input, title: title, state: .running, result: nil, permission: nil, createdAt: createdAt), at: items.count)
     }
 
-    private mutating func addResult(id: String, content: JSONValue, isError: Bool, append: Bool) {
+    private mutating func insertTool(_ original: ToolCall, at index: Int) {
+        var tool = original
+        if let buffered = bufferedResults.removeValue(forKey: tool.id) {
+            tool.result = buffered.content
+            tool.structuredResult = buffered.structured
+            tool.state = buffered.isError ? .error : .completed
+        }
+        if index < items.count {
+            toolIndex = toolIndex.mapValues { $0 >= index ? $0 + 1 : $0 }
+            segmentIndex = segmentIndex.mapValues { $0 >= index ? $0 + 1 : $0 }
+            streamIndex = streamIndex.mapValues { $0 >= index ? $0 + 1 : $0 }
+        }
+        toolIndex[tool.id] = index
+        items.insert(.toolCall(tool), at: index)
+    }
+
+    private mutating func addResult(id: String, content: JSONValue, isError: Bool, append: Bool, structured: JSONValue?) {
         guard let index = toolIndex[id], case .toolCall(var tool) = items[index] else {
-            bufferedResults[id] = (content, isError)
+            bufferedResults[id] = (content, isError, structured)
             return
         }
         if append, let previous = tool.result {
             tool.result = .string(previous.flattenedText + content.flattenedText)
         } else {
             tool.result = content
+            tool.structuredResult = structured
             tool.state = isError ? .error : .completed
         }
         items[index] = .toolCall(tool)
@@ -244,27 +271,35 @@ private struct Builder {
 
     /// Phase 0 of the UI reducer: attach `agentState` requests to tool calls by id, then by
     /// (name, arguments); pending requests without a transcript row get a placeholder.
-    mutating func applyPermissions(agentState: JSONValue, pending: [PendingRequest]) {
+    mutating func applyPermissions(agentState: JSONValue, pending: [PendingRequest], visibleQuestions: [ToolCall]) {
         for request in pending {
             let permission = ToolPermission(id: request.id, status: .pending, kind: request.kind, reason: nil, decision: nil)
             if let index = matchTool(id: request.id, name: request.tool, arguments: request.arguments) {
                 update(index) { $0.permission = permission }
             } else {
-                toolIndex[request.id] = items.count
-                items.append(.toolCall(ToolCall(
+                insertTool(ToolCall(
                     id: request.id, itemId: "request:\(request.id)", name: request.tool, input: request.arguments,
                     title: request.arguments["description"]?.stringValue, state: .running, result: nil,
-                    permission: permission, createdAt: request.createdAt ?? .now)))
+                    permission: permission, createdAt: request.createdAt ?? .now), at: items.count)
             }
         }
         for (id, completed) in agentState["completedRequests"]?.objectValue ?? [:] {
             let tool = completed["tool"]?.stringValue ?? ""
-            guard let index = matchTool(id: id, name: tool, arguments: completed["arguments"] ?? .null) else { continue }
+            let arguments = completed["arguments"] ?? .null
+            // A question already displayed from agentState must not vanish between its reply
+            // and the history row arriving. Never inject unseen completed requests into history.
+            if matchTool(id: id, name: tool, arguments: arguments) == nil,
+               let question = visibleQuestions.first(where: { $0.permission?.id == id && $0.name == tool && $0.input == arguments }) {
+                let insertion = items.firstIndex { $0.createdAt > question.createdAt } ?? items.count
+                insertTool(question, at: insertion)
+            }
+            guard let index = matchTool(id: id, name: tool, arguments: arguments) else { continue }
             let status = ToolPermission.Status(rawValue: completed["status"]?.stringValue ?? "") ?? .canceled
             let kind: ToolPermission.Kind = completed["kind"]?.stringValue == "user_action" || Transcript.userActionTools.contains(tool) ? .userAction : .permission
             let reason = completed["reason"]?.stringValue
             update(index) { call in
-                call.permission = ToolPermission(id: id, status: status, kind: kind, reason: reason, decision: completed["decision"]?.stringValue)
+                call.permission = ToolPermission(id: id, status: status, kind: kind, reason: reason, decision: completed["decision"]?.stringValue,
+                                                 answers: StructuredQuestionnaire.decodeAnswers(completed["structuredAnswersV1"] ?? completed["answers"]))
                 if status != .approved {
                     call.state = .error
                     if call.result == nil, let reason { call.result = .string(reason) }

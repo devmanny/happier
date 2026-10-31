@@ -11,6 +11,8 @@ struct SessionListView: View {
     var onOpen: ((String) -> Void)?
     @State private var query = ""
     @State private var showAccount = false
+    /// The integrated browser as a sheet, where there are no extra windows (iPhone).
+    @State private var showBrowser = false
     @State private var showNotifications = false
     @Environment(NotificationInbox.self) private var inbox
     /// The bell carries a dot while notifications of sessions still listed are waiting.
@@ -28,8 +30,6 @@ struct SessionListView: View {
     @State private var unreadOnly = false
     /// Sessions whose sub-sessions are unfolded.
     @State private var expanded: Set<String> = []
-    /// The drawer's search field, out of sight until its toolbar button is tapped.
-    @State private var searchShown = false
     /// A session dropped on another, waiting for what to do with the two.
     @State private var combining: SessionCombine?
     /// The session being renamed, and the name typed for it.
@@ -38,6 +38,12 @@ struct SessionListView: View {
     @State private var movingInto: Session?
     /// The row a dragged session is over.
     @State private var dropTarget: String?
+    #if os(macOS)
+    /// The session a dragged file is held over, opened after a moment (spring-loading).
+    @State private var springTarget: String?
+    #endif
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
 
     private var sessions: [Session] {
         let all = store.sessionList
@@ -46,7 +52,9 @@ struct SessionListView: View {
     }
 
     private var archivedMatches: [Session] {
-        archivedSearch?.items.filter { $0.matches(query) && (!unreadOnly || $0.unreadSince != nil) } ?? []
+        archivedSearch?.items.filter {
+            $0.matches(query) && (!unreadOnly || $0.unreadSince != nil) && !store.deletedSessionIds.contains($0.id)
+        } ?? []
     }
 
     private var unreadSessions: [Session] { sessions.filter { $0.unreadSince != nil } }
@@ -79,11 +87,15 @@ struct SessionListView: View {
         // The same compact row everywhere (iPhone drawer, iPad and Mac sidebar).
         let content = HStack(spacing: 6) {
             if let onOpen {
-                Button { onOpen(session.id) } label: {
+                Button {
+                    AppHaptics.selection()
+                    onOpen(session.id)
+                } label: {
                     SessionRow(session: session).equatable()
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(DrawerRowStyle())
+                // The row style of the list itself: it highlights the whole row on touch.
+                .buttonStyle(.plain)
             } else {
                 SessionRow(session: session).equatable()
             }
@@ -92,6 +104,8 @@ struct SessionListView: View {
         .padding(.leading, CGFloat(depth) * indent)
         // The row's breathing room sits inside it, so tree lines run on into the next row.
         .padding(.vertical, isDrawer ? 8 : 6)
+        // Lights up under the Apple Pencil or pointer on iPad, like a system list row.
+        .pointerHoverRow()
         .background(alignment: .leading) {
             if let tree { TreeLines(tree: tree, indent: Self.drawerIndent, radius: Self.drawerAvatar / 2) }
         }
@@ -115,6 +129,14 @@ struct SessionListView: View {
                 if over { dropTarget = session.id } else if dropTarget == session.id { dropTarget = nil }
             }
         }
+        #else
+        // Spring-loading: holding a dragged file over a session opens it, so the file can be
+        // dropped into that conversation. The row itself never takes the drop.
+        .onDrop(of: [.fileURL, .image], isTargeted: Binding(
+            get: { springTarget == session.id },
+            set: { over in
+                if over { springTarget = session.id } else if springTarget == session.id { springTarget = nil }
+            })) { _ in false }
         #endif
         if onOpen != nil {
             content
@@ -125,7 +147,7 @@ struct SessionListView: View {
                 .listRowBackground(selection == session.id
                     ? RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.1)).padding(.horizontal, 8)
                     : nil)
-                .rowActions(session, store: store, rename: { startRenaming(session) }, moveInto: { movingInto = session })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -133,7 +155,7 @@ struct SessionListView: View {
             content
                 .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                 .tag(session.id)
-                .rowActions(session, store: store, rename: { startRenaming(session) }, moveInto: { movingInto = session })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -145,7 +167,9 @@ struct SessionListView: View {
     private func drop(_ items: [String], on target: Session) -> Bool {
         dropTarget = nil
         guard let id = items.lazy.compactMap(SessionDrag.sessionId).first, let dragged = store.sessions[id] else { return false }
-        return combine(dragged, into: target)
+        let accepted = combine(dragged, into: target)
+        if accepted { AppHaptics.confirm() }
+        return accepted
     }
 
     /// Puts `session` inside `target`: straight in when `target` already holds sessions, otherwise
@@ -168,6 +192,12 @@ struct SessionListView: View {
         return true
     }
 
+    /// "Open in New Window", where windows can be opened (Mac, iPad).
+    private func openInWindow(_ session: Session) -> (() -> Void)? {
+        guard supportsMultipleWindows else { return nil }
+        return { openWindow(id: SessionWindow.id, value: session.id) }
+    }
+
     private func startRenaming(_ session: Session) {
         renaming = session
     }
@@ -176,6 +206,7 @@ struct SessionListView: View {
     private func subSessionsButton(_ id: String, count: Int) -> some View {
         let open = expanded.contains(id)
         return Button {
+            AppHaptics.selection()
             withAnimation(.smooth(duration: 0.2)) {
                 if open { expanded.remove(id) } else { expanded.insert(id) }
             }
@@ -192,7 +223,7 @@ struct SessionListView: View {
             .glassEffect(.regular.interactive(), in: Capsule())
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityLabel(open ? Text("Hide sub-sessions") : Text("Show \(count) sub-sessions"))
     }
 
@@ -246,17 +277,23 @@ struct SessionListView: View {
         Section {
             if !groups.inactive.isEmpty {
                 let flat = Self.flatten(groups.inactive)
-                Button { olderSessions = .inactive } label: {
+                Button {
+                    AppHaptics.light()
+                    olderSessions = .inactive
+                } label: {
                     folderRow("Inactive", systemImage: "moon.zzz", count: flat.count, unread: flat.contains { $0.unreadSince != nil })
                 }
-                .buttonStyle(DrawerRowStyle())
+                .buttonStyle(.plain)
                 .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
                 .listRowSeparatorTint(isDrawer ? Self.separatorTint : nil)
             }
-            Button { olderSessions = .archived } label: {
+            Button {
+                AppHaptics.light()
+                olderSessions = .archived
+            } label: {
                 folderRow("Archived", systemImage: "archivebox", count: nil, unread: false)
             }
-            .buttonStyle(DrawerRowStyle())
+            .buttonStyle(.plain)
             .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
             .listRowSeparatorTint(isDrawer ? Self.separatorTint : nil)
         }
@@ -269,11 +306,14 @@ struct SessionListView: View {
         if !archived.isEmpty || archivedSearch?.isLoading == true {
             Section("Archived") {
                 ForEach(archived) { session in
-                    Button { openArchived(session) } label: {
+                    Button {
+                        AppHaptics.selection()
+                        openArchived(session)
+                    } label: {
                         SessionRow(session: session).equatable()
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(DrawerRowStyle())
+                    .buttonStyle(.plain)
                     .archivedActions(session, store: store) { archivedSearch?.remove(session.id) }
                 }
                 if archivedSearch?.isLoading == true {
@@ -319,12 +359,13 @@ struct SessionListView: View {
 
 extension View {
     /// Swipe right: read / unread. Swipe left: archive. Long press: everything, plus pin and stop.
-    func rowActions(_ session: Session, store: HappierStore, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil) -> some View {
+    func rowActions(_ session: Session, store: HappierStore, openInWindow: (() -> Void)? = nil, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil) -> some View {
         let unread = session.unreadSince != nil
         let pinned = store.isPinned(session.id)
         return self
             .swipeActions(edge: .leading) {
                 Button {
+                    AppHaptics.selection()
                     Task { await store.setRead(session.id, unread) }
                 } label: {
                     Label(unread ? "Read" : "Unread", systemImage: unread ? "message" : "message.badge")
@@ -333,6 +374,7 @@ extension View {
             }
             .swipeActions(edge: .trailing) {
                 Button {
+                    AppHaptics.confirm()
                     Task { await store.archive(session.id) }
                 } label: {
                     Label("Archive", systemImage: "archivebox")
@@ -340,20 +382,49 @@ extension View {
                 .tint(.indigo)
             }
             .contextMenu {
+                if let openInWindow {
+                    Button("Open in New Window", systemImage: "macwindow.badge.plus") { openInWindow() }
+                    Divider()
+                }
+                // Auto read: off from here; on only once the conversation is loaded, so what's
+                // already in it isn't read out.
+                if MessageSpeaker.shared.autoReadSessionId == session.id {
+                    Button("Stop Reading New Messages", systemImage: "speaker.slash") {
+                        MessageSpeaker.shared.toggleAutoRead(session.id, store: store)
+                    }
+                } else if store.transcripts[session.id]?.isLoaded == true {
+                    Button("Read New Messages Aloud", systemImage: "speaker.wave.2") {
+                        MessageSpeaker.shared.toggleAutoRead(session.id, store: store)
+                    }
+                }
+                if let path = session.path {
+                    FolderColorMenu(path: path, current: store.accountSettings?.folderColor(for: path)) { color in
+                        store.setFolderColor(color, forPath: path)
+                    }
+                }
                 Button(unread ? "Mark as Read" : "Mark as Unread", systemImage: unread ? "message" : "message.badge") {
+                    AppHaptics.selection()
                     Task { await store.setRead(session.id, unread) }
                 }
                 Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
+                    AppHaptics.selection()
                     Task { await store.setPinned(session.id, !pinned) }
                 }
                 if let rename {
-                    Button("Rename…", systemImage: "pencil") { rename() }
+                    Button("Rename…", systemImage: "pencil") {
+                        AppHaptics.light()
+                        rename()
+                    }
                 }
                 if let moveInto {
-                    Button("Move Into…", systemImage: "arrow.turn.down.right") { moveInto() }
+                    Button("Move Into…", systemImage: "arrow.turn.down.right") {
+                        AppHaptics.light()
+                        moveInto()
+                    }
                 }
                 if let parentId = session.parentSessionId, store.sessions.keys.contains(parentId) {
                     Button {
+                        AppHaptics.confirm()
                         Task { await store.nest(session.id, under: nil) }
                     } label: {
                         Label("Detach from Parent", image: "DetachFromParent")
@@ -363,9 +434,16 @@ extension View {
                               providerName: session.agentId.flatMap { Agent.displayNames[$0] },
                               providerSessionId: session.vendorSessionId)
                 if session.active {
-                    Button("Stop Session", systemImage: "power", role: .destructive) { store.requestStop(session.id) }
+                    Button("Stop Session", systemImage: "power", role: .destructive) {
+                        AppHaptics.warning()
+                        store.requestStop(session.id)
+                    }
                 }
-                Button("Archive", systemImage: "archivebox") { Task { await store.archive(session.id) } }
+                Button("Archive", systemImage: "archivebox") {
+                    AppHaptics.confirm()
+                    Task { await store.archive(session.id) }
+                }
+                DeleteSessionButton(session: session, store: store)
             } preview: {
                 SessionMenuPreview(session: session)
             }
@@ -409,7 +487,10 @@ private struct SessionMenuPreview: View {
 
 extension SessionListView {
     var body: some View {
-        List(selection: isDrawer ? .constant(nil) : $selection) {
+        List(selection: isDrawer ? .constant(nil) : Binding(get: { selection }, set: { next in
+            if next != selection { AppHaptics.selection() }
+            selection = next
+        })) {
             if store.undecryptableSessionCount > 0 {
                 Label("\(store.undecryptableSessionCount) sessions can't be read on this device", systemImage: "lock.trianglebadge.exclamationmark")
                     .font(.footnote)
@@ -437,20 +518,44 @@ extension SessionListView {
             // Claude/ChatGPT sidebar footer: the account, and starting a new session; the iPhone
             // drawer, the iPad sidebar and the Mac sidebar alike, so New Session is always in view.
             HStack {
-                Button { showAccount = true } label: {
-                    Image(systemName: "person.crop.circle").font(.title2)
+                Button {
+                    AppHaptics.light()
+                    showAccount = true
+                } label: {
+                    Image(systemName: "gearshape").font(.title2)
                 }
                 .buttonStyle(.glass)
+                .glassHover()
                 .buttonBorderShape(.circle)
                 // As tall as New Session beside it.
                 .controlSize(.large)
-                .accessibilityLabel(Text("Account"))
+                .accessibilityLabel(Text("Settings"))
+                // The integrated browser: its own window on the Mac and iPad, a sheet on the iPhone.
+                Button {
+                    AppHaptics.light()
+                    if supportsMultipleWindows {
+                        openWindow(id: BrowserWindow.id, value: BrowserWindow.value)
+                    } else {
+                        showBrowser = true
+                    }
+                } label: {
+                    Image(systemName: "safari").font(.title2)
+                }
+                .buttonStyle(.glass)
+                .glassHover()
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+                .accessibilityLabel(Text("Browser"))
                 Spacer()
                 // A new, empty conversation where the composer starts the session.
-                Button { if let onOpen { onOpen(NewChat.id) } else { selection = NewChat.id } } label: {
+                Button {
+                    AppHaptics.light()
+                    if let onOpen { onOpen(NewChat.id) } else { selection = NewChat.id }
+                } label: {
                     Label("New Session", systemImage: "plus").font(.body.weight(.semibold))
                 }
                 .buttonStyle(.glassProminent)
+                .glassHover()
                 .controlSize(.large)
                 .keyboardShortcut("n", modifiers: .command)
             }
@@ -474,22 +579,9 @@ extension SessionListView {
         }
         .navigationTitle(isDrawer ? "Happier" : "Sessions")
         #if os(iOS)
-        .modifier(SessionSearch(drawer: isDrawer, query: $query))
-        .safeAreaBar(edge: .top) {
-            if isDrawer, searchShown {
-                DrawerSearchField(query: $query) {
-                    withAnimation(.smooth(duration: 0.25)) {
-                        query = ""
-                        searchShown = false
-                    }
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .onChange(of: selection) {
-            // Opening a session puts an unused search field away again.
-            if query.isEmpty { searchShown = false }
-        }
+        // The system field under the title: always there beside the conversation (iPad, iPhone
+        // sideways), like the Mac's; in the drawer it comes down with a pull, like Mail's.
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: isDrawer ? .automatic : .always), prompt: "Search Sessions")
         #else
         // Inside the sidebar, like Messages: the conversation has its own search.
         .searchable(text: $query, placement: .sidebar, prompt: "Search Sessions")
@@ -508,6 +600,7 @@ extension SessionListView {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
+                    AppHaptics.light()
                     showRelay = true
                 } label: {
                     ConnectionDot(connection: store.connection)
@@ -517,20 +610,14 @@ extension SessionListView {
                 .accessibilityHint(Text("Shows the relay you're connected to"))
             }
             ToolbarItem(placement: .primaryAction) {
-                Button { showNotifications = true } label: {
+                Button {
+                    AppHaptics.light()
+                    showNotifications = true
+                } label: {
                     Label("Notifications", systemImage: unseenNotifications ? "bell.badge" : "bell")
                 }
                 .help(Text("Notifications"))
             }
-            #if os(iOS)
-            if isDrawer, !searchShown {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Search Sessions", systemImage: "magnifyingglass") {
-                        withAnimation(.smooth(duration: 0.25)) { searchShown = true }
-                    }
-                }
-            }
-            #endif
             ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
 
         }
@@ -544,6 +631,14 @@ extension SessionListView {
             withAnimation(.smooth(duration: 0.2)) { _ = expanded.insert(targetId) }
         })
         .modifier(RenameSessionAlert(session: $renaming))
+        #if os(macOS)
+        .task(id: springTarget) {
+            guard let target = springTarget else { return }
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, springTarget == target else { return }
+            selection = target
+        }
+        #endif
         .sheet(item: $movingInto) { session in
             MoveIntoSheet(session: session) { target in
                 // Asked once the sheet is gone, so the question has somewhere to show.
@@ -553,6 +648,11 @@ extension SessionListView {
                 }
             }
         }
+        .onChange(of: inbox.showRequested, initial: true) { _, requested in
+            guard requested else { return }
+            inbox.showRequested = false
+            showNotifications = true
+        }
         .sheet(isPresented: $showNotifications) {
             NotificationCenterView()
                 #if os(macOS)
@@ -560,8 +660,11 @@ extension SessionListView {
                 #endif
         }
         .task { await inbox.refresh() }
+        .sheet(isPresented: $showBrowser) {
+            BrowserView(inSheet: true)
+        }
         .sheet(isPresented: $showAccount) {
-            NavigationStack { AccountView() }
+            NavigationStack { SettingsView() }
                 #if os(macOS)
                 .frame(minWidth: 420, minHeight: 460)
                 #endif
@@ -576,17 +679,12 @@ extension SessionListView {
     }
 }
 
-private struct DrawerRowStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label.opacity(configuration.isPressed ? 0.55 : 1)
-    }
-}
-
 /// The one-glance session row, the same in every list (drawer, sidebar, the older-sessions window,
 /// pickers): the agent icon carrying the unread dot, the title, and the folder underneath.
 struct SessionRow: View, Equatable {
     let session: Session
     @Environment(HappierStore.self) private var store
+    @State private var speaker = MessageSpeaker.shared
 
     /// Redrawn when its own session changes, not every time any session in the list does.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
@@ -627,13 +725,22 @@ struct SessionRow: View, Equatable {
                             .foregroundStyle(.secondary)
                             .accessibilityLabel(Text("Archived"))
                     }
+                    if speaker.autoReadSessionId == session.id {
+                        // New messages of this session are read aloud (moving while it reads).
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Color.userBubble)
+                            .symbolEffect(.variableColor.iterative, isActive: speaker.speakingText != nil)
+                            .accessibilityLabel(Text("Reading new messages aloud"))
+                    }
                     Text(session.title)
                         .font(.subheadline.weight(session.unreadSince != nil ? .semibold : .regular))
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     RowTrailing(session: session, now: now)
                 }
-                // The session's project folder (or machine), always readable under the title.
+                // The session's project folder (or machine), always readable under the title. Its
+                // color, if it has one, is the avatar's disc.
                 Text(session.displayPath ?? session.host ?? "")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -723,54 +830,8 @@ private struct ConnectionDot: View {
     }
 }
 
-struct AccountView: View {
-    @Environment(HappierStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
-    @State private var revealKey = false
-
-    var body: some View {
-        Form {
-            Section("Server") {
-                LabeledContent("Address", value: store.server.host() ?? store.server.absoluteString)
-                LabeledContent("Status") {
-                    switch store.connection {
-                    case .online: Text("Connected").foregroundStyle(.green)
-                    case .connecting: Text("Connecting…")
-                    case .offline: Text("Offline").foregroundStyle(.red)
-                    }
-                }
-            }
-            ReadAloudVoices()
-            if let secret = store.recoverySecret {
-                Section {
-                    if revealKey {
-                        Text(SecretKeyFormat.format(secret))
-                            .font(.body.monospaced())
-                            .textSelection(.enabled)
-                    } else {
-                        Button("Show Secret Key") { revealKey = true }
-                    }
-                } header: {
-                    Text("Secret Key")
-                } footer: {
-                    Text("Anyone with this key can read your sessions. Keep it somewhere safe.")
-                }
-            }
-            Section {
-                Button("Sign Out", role: .destructive) {
-                    dismiss()
-                    store.signOut()
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .navigationTitle("Account")
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-        }
-    }
-}
-
+/// The footer's account window, ordered like Claude's and ChatGPT's settings: who and where you're
+/// signed in, your devices, how the app behaves, the key that protects it all, then signing out.
 /// The App Store download indicator: a progress ring around a small stop square.
 private struct UploadRing: View {
     let fraction: Double
@@ -836,21 +897,6 @@ private struct TreeLines: View {
 }
 
 #if os(iOS)
-/// Session search outside the drawer: the system field (the drawer has its own, `DrawerSearchField`).
-private struct SessionSearch: ViewModifier {
-    let drawer: Bool
-    @Binding var query: String
-
-    func body(content: Content) -> some View {
-        if drawer {
-            content
-        } else {
-            // At the top of the sidebar, like the Mac's (`.sidebar` puts it at the bottom on iOS 26).
-            content.searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search Sessions")
-        }
-    }
-}
-
 private struct SessionListStyle: ViewModifier {
     let drawer: Bool
 
@@ -863,49 +909,6 @@ private struct SessionListStyle: ViewModifier {
     }
 }
 
-/// The drawer's search, opened by the magnifier: a field pinned at the top with the keyboard up.
-/// Its own field because iOS puts a `.searchable` added after the screen appears at the bottom.
-private struct DrawerSearchField: View {
-    @Binding var query: String
-    let onClose: () -> Void
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search Sessions", text: $query)
-                    .focused($focused)
-                    .submitLabel(.search)
-                    .autocorrectionDisabled()
-                if !query.isEmpty {
-                    Button { query = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear")
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .glassEffect(.regular.interactive(), in: Capsule())
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.medium))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("Close Search")
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
-        .task {
-            try? await Task.sleep(for: .milliseconds(50))
-            focused = true
-        }
-    }
-}
 #endif
 
 /// "Rename Session": the one rename prompt, from a session row's menu and from a conversation's ⓘ menu.
@@ -919,11 +922,12 @@ struct RenameSessionAlert: ViewModifier {
             .alert("Rename Session", isPresented: Binding(get: { session != nil }, set: { if !$0 { session = nil } }), presenting: session) { session in
                 TextField("Name", text: $name)
                 Button("Save") {
+                    AppHaptics.confirm()
                     let name = name
                     Task { await store.rename(session.id, to: name) }
                 }
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button("Cancel", role: .cancel) {}
+                Button("Cancel", role: .cancel) { AppHaptics.light() }
             }
             .onChange(of: session?.id, initial: true) { name = session?.title ?? "" }
     }

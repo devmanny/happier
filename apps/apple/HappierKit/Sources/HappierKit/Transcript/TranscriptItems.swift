@@ -60,9 +60,11 @@ public struct UserText: Equatable, Sendable {
     public var attachments: [String] = []
     /// The attached files with where they live and their previews (sent messages).
     public var files: [MessageAttachment] = []
+    /// Explicit inter-session message metadata, independent of its transport role.
+    public var sessionMessageOrigin: SessionMessageOrigin?
 
     public init(id: String, text: String, createdAt: Date, localId: String?, isPending: Bool, attachments: [String] = [],
-                files: [MessageAttachment] = []) {
+                files: [MessageAttachment] = [], sessionMessageOrigin: SessionMessageOrigin? = nil) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
@@ -70,6 +72,13 @@ public struct UserText: Equatable, Sendable {
         self.isPending = isPending
         self.attachments = files.isEmpty ? attachments : files.map(\.name)
         self.files = files
+        self.sessionMessageOrigin = sessionMessageOrigin
+    }
+
+    /// Automatic CLI lineage activity; attachments retain the normal user-message presentation.
+    public var sessionNotice: SessionNotice? {
+        guard sessionMessageOrigin == nil, attachments.isEmpty, files.isEmpty else { return nil }
+        return SessionNotice.parse(text)
     }
 
     /// One identity per sent message across optimistic, queued and committed states.
@@ -98,6 +107,9 @@ public struct ToolCall: Equatable, Sendable {
     public var result: JSONValue?
     public var permission: ToolPermission?
     public let createdAt: Date
+    /// Claude's structured `toolUseResult` (file contents, stdout and stderr, new todos, matched
+    /// files), kept beside the text `result` the other readers use.
+    public var structuredResult: JSONValue? = nil
 }
 
 public struct ToolPermission: Equatable, Sendable {
@@ -109,6 +121,8 @@ public struct ToolPermission: Equatable, Sendable {
     public let kind: Kind
     public var reason: String?
     public var decision: String?
+    /// Exact recorded question answers. Modern arrays retain commas and newlines.
+    public var answers: [String: [String]]? = nil
 }
 
 public struct TranscriptEvent: Equatable, Sendable {
@@ -126,6 +140,37 @@ public struct PendingRequest: Identifiable, Equatable, Sendable {
     public let arguments: JSONValue
     public let kind: ToolPermission.Kind
     public let createdAt: Date?
+
+    /// One line saying what the agent wants: "Bash: git push", "Edit: Main.swift", the question
+    /// it asked, "Approve the plan".
+    public var summary: String {
+        let call = ToolCall(id: id, itemId: id, name: tool, input: arguments, title: nil, state: .running, result: nil,
+                            permission: nil, createdAt: createdAt ?? .distantPast)
+        let name = ToolRendering.canonicalName(call)
+        func string(_ keys: String...) -> String? {
+            for key in keys {
+                if let value = arguments[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty { return value }
+            }
+            return nil
+        }
+        func file(_ path: String) -> String { path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? path }
+        let line: String
+        switch name {
+        case "AskUserQuestion":
+            line = arguments["questions"]?.arrayValue?.first?["question"]?.stringValue ?? String(localized: "Answer a question")
+        case "ExitPlanMode":
+            line = String(localized: "Approve the plan")
+        case "Bash":
+            line = string("command", "cmd").map { "\(name): \($0)" } ?? name
+        case "Edit", "MultiEdit", "Write", "Read", "Patch", "Delete":
+            line = string("file_path", "path", "filePath", "file").map { "\(name): \(file($0))" } ?? name
+        case "WebFetch", "WebSearch":
+            line = string("url", "query", "q").map { "\(name): \($0)" } ?? name
+        default:
+            line = ToolRendering.mcpTitle(name) ?? string("description", "title").map { "\(name): \($0)" } ?? name
+        }
+        return String(line.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(160))
+    }
 }
 
 public extension JSONValue {

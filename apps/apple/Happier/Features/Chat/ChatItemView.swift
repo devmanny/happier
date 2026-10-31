@@ -1,5 +1,4 @@
 import HappierKit
-import QuickLook
 import SwiftUI
 
 struct ChatItemView: View {
@@ -10,7 +9,15 @@ struct ChatItemView: View {
     var body: some View {
         switch item {
         case .userText(let message):
-            UserBubble(message: message, tail: tail, sessionId: sessionId)
+            if let origin = message.sessionMessageOrigin {
+                SessionActivityRow(messageText: message.text, origin: origin, itemId: message.id, sessionId: sessionId,
+                                   date: message.createdAt, transportStatus: message.isPending ? String(localized: "Queued") : nil)
+            } else if let notice = message.sessionNotice {
+                SessionActivityRow(notice: notice, itemId: message.id, sessionId: sessionId, date: message.createdAt,
+                                   transportStatus: message.isPending ? String(localized: "Queued") : nil)
+            } else {
+                UserBubble(message: message, tail: tail, sessionId: sessionId)
+            }
         case .agentText(let message):
             if message.isThinking {
                 ThinkingRow(message: message)
@@ -30,8 +37,8 @@ private struct UserBubble: View {
     let tail: Bool
     let sessionId: String
     @Environment(HappierStore.self) private var store
-    /// The attachment open in Quick Look.
-    @State private var lookingAt: URL?
+    @Environment(\.openSessionFilePreview) private var openFilePreview
+    @Environment(\.userBubbleColor) private var bubbleColor
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
@@ -49,7 +56,7 @@ private struct UserBubble: View {
                         HStack(spacing: 6) {
                             Spacer(minLength: 56)
                             ForEach(line) { file in
-                                MessageAttachmentTile(file: file, sessionId: sessionId, size: size) { lookingAt = $0 }
+                                MessageAttachmentTile(file: file, sessionId: sessionId, size: size) { openFilePreview?($0) }
                             }
                         }
                     }
@@ -68,12 +75,12 @@ private struct UserBubble: View {
                                 .tint(.white)
                         }
                         ForEach(unpreviewed) { file in
-                            MessageAttachmentChip(file: file, sessionId: sessionId) { lookingAt = $0 }
+                            MessageAttachmentChip(file: file, sessionId: sessionId) { openFilePreview?($0) }
                         }
                     }
                     .foregroundStyle(.white)
                     .bubblePadding(fromUser: true)
-                    .background(Color.userBubble, in: BubbleShape(fromUser: true, tail: tail))
+                    .background(bubbleColor, in: BubbleShape(fromUser: true, tail: tail))
                     .messageActions(text: message.text, date: message.createdAt, shape: BubbleShape(fromUser: true, tail: tail), selectionId: message.id,
                                     target: message.seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .user) })
                     .selectableMessage(id: message.id, markdown: message.text, fromUser: true, shape: BubbleShape(fromUser: true, tail: tail))
@@ -88,11 +95,19 @@ private struct UserBubble: View {
                         Text(error)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
-                        Button("Retry", systemImage: "arrow.clockwise") {
-                            Task { await store.retrySend(localId, in: sessionId) }
+                        HStack(spacing: 8) {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                AppHaptics.warning()
+                                withAnimation(.smooth(duration: 0.2)) { store.discardFailedSend(localId, in: sessionId) }
+                            }
+                            .accessibilityIdentifier("discard-send-\(localId)")
+                            Button("Retry", systemImage: "arrow.clockwise") {
+                                AppHaptics.confirm()
+                                Task { await store.retrySend(localId, in: sessionId) }
+                            }
+                            .accessibilityIdentifier("retry-send-\(localId)")
                         }
                         .buttonStyle(.bordered)
-                        .accessibilityIdentifier("retry-send-\(localId)")
                     }
                     .font(.caption)
                     .padding(.leading, 56)
@@ -117,8 +132,6 @@ private struct UserBubble: View {
                 }
             }
         }
-        // The system viewer: zoom, play, share.
-        .quickLookPreview($lookingAt)
     }
 }
 
@@ -168,16 +181,15 @@ private struct ReplyOptions: View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(options, id: \.self) { option in
                 Button {
-                    #if os(iOS)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    #endif
+                    AppHaptics.confirm()
                     onSelect(option)
                 } label: {
                     pill(option)
                 }
-                // Blue-on-glass, like the composer's pills, instead of a drawn border.
+                // Blue text on clear glass, like the composer's pills. Not `.tint`: on the Mac it
+                // fills the glass with the tint and the blue text vanishes into it.
                 .buttonStyle(.glass)
-                .tint(Color.userBubble)
+                .glassHover()
                 .onDrag {
                     replyDragStarted?(option)
                     return NSItemProvider(object: option as NSString)
@@ -189,9 +201,9 @@ private struct ReplyOptions: View {
                 }
                 .contextMenu {
                     if let editInComposer {
-                        Button("Edit before Sending", systemImage: "pencil") { editInComposer(option) }
+                        Button("Edit before Sending", systemImage: "pencil") { AppHaptics.light(); editInComposer(option) }
                     }
-                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(option) }
+                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(option); AppHaptics.success() }
                 }
                 .accessibilityHint("Sends this reply")
             }
@@ -215,6 +227,7 @@ private struct ThinkingRow: View {
         VStack(alignment: .leading, spacing: 6) {
             // The same line as a tool call or a work summary: icon, caption, chevron.
             Button {
+                AppHaptics.light()
                 withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
@@ -231,7 +244,7 @@ private struct ThinkingRow: View {
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .accessibilityHint(expanded ? "Hides the thought process" : "Shows the thought process")
             if expanded {
                 Text(message.text)
@@ -313,9 +326,10 @@ private struct MessageActionsModifier: ViewModifier {
             }
             .contextMenu {
                 Section(date.formatted(date: .abbreviated, time: .shortened)) {
-                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text) }
+                    Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text); AppHaptics.success() }
                     let speaking = MessageSpeaker.shared.isSpeaking(text)
                     Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
+                        AppHaptics.light()
                         MessageSpeaker.shared.toggle(text)
                     }
                     if let selectionId, let beginTextSelection {
@@ -326,10 +340,12 @@ private struct MessageActionsModifier: ViewModifier {
                     }
                     if let target {
                         Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
+                            AppHaptics.selection()
                             store.togglePin(sessionId: target.sessionId, seq: target.seq, role: target.role)
                         }
                         if target.seq > 0 {
                             Button("Fork from Here", systemImage: "arrow.triangle.branch") {
+                                AppHaptics.confirm()
                                 // A forked user message comes back as the new session's draft (seq >= 2).
                                 let restored = target.role == .user && target.seq >= 2 ? text : nil
                                 Task { await store.fork(target.sessionId, upToSeq: target.seq, restoring: restored) }
@@ -337,6 +353,7 @@ private struct MessageActionsModifier: ViewModifier {
                         }
                         if target.role == .user, store.sessions[target.sessionId]?.canRollback(toUserMessageSeq: target.seq) == true {
                             Button("Restore to Here", systemImage: "arrow.uturn.backward", role: .destructive) {
+                                AppHaptics.warning()
                                 Task { await store.rollback(target.sessionId, toUserMessageSeq: target.seq, restoring: text) }
                             }
                         }

@@ -10,6 +10,8 @@ struct AgentAvatar: View {
     var size: CGFloat = 26
     /// Glass that answers to touch, for an avatar that is also a button.
     var interactive = false
+    /// The project folder's color, for the disc behind the logo (instead of the brand's hint).
+    var folderTint: Color? = nil
 
     /// Brand colours, muted: the disc is mostly the neutral glass with a hint of the brand, the
     /// logo in the brand colour itself.
@@ -20,18 +22,20 @@ struct AgentAvatar: View {
 
     var body: some View {
         let brand = agentId.flatMap { Self.brands[$0] }
-        let glass: Glass = brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
+        let glass: Glass = folderTint != nil ? .regular : brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
         ZStack {
-            // A little smaller than the avatar's slot, snug around the logo.
+            // A little smaller than the avatar's slot, snug around the logo. A folder's color is a
+            // plain fill, not a glass tint, so it stays when the window is in the background.
             Circle()
-                .fill(.clear)
+                .fill(folderTint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.clear))
                 .frame(width: size * 0.82, height: size * 0.82)
                 .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
             if let agentId {
                 Image("Agents/\(agentId)")
                     .resizable()
                     .scaledToFit()
-                    .foregroundStyle(brand.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+                    // White on a folder's color; otherwise the brand's own color.
+                    .foregroundStyle(folderTint != nil ? AnyShapeStyle(.white) : brand.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
                     .frame(width: size * 0.5, height: size * 0.5)
             } else {
                 Image(systemName: "sparkle")
@@ -48,9 +52,12 @@ struct AgentAvatar: View {
 struct SessionAvatar: View {
     let session: Session
     var size: CGFloat = 26
+    /// Optional: context-menu and drag previews draw outside the app's environment, and a
+    /// required store there crashes the app (the folder color is just left out).
+    @Environment(HappierStore.self) private var store: HappierStore?
 
     var body: some View {
-        AgentAvatar(agentId: session.agentId, size: size)
+        AgentAvatar(agentId: session.agentId, size: size, folderTint: store?.folderColor(of: session)?.deep)
     }
 }
 
@@ -185,11 +192,149 @@ enum ChatDate {
 }
 
 /// The way out of a sheet whose choices apply at once (Account, Relay, Notifications, Background,
-/// the model picker…): the glass X, leading. Sheets that pick something keep a Cancel button.
+/// the model picker…): the system's close button (the glass X, placed and localized by it).
+/// Sheets that pick something keep a Cancel button.
 struct SheetCloseButton: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        Button("Close", systemImage: "xmark") { dismiss() }
+        Button(role: .close) {
+            AppHaptics.light()
+            dismiss()
+        }
+    }
+}
+
+/// The one style for a control the system has no style for (a transcript line that unfolds, a
+/// thumbnail, the agent avatar as a button): the label as drawn, dimmed while pressed, and the
+/// iPad's hover under the Apple Pencil or a pointer. Everything else uses a system style
+/// (`.borderless`, `.glass`, the row style inside a `List`), which already has both.
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            #if os(iOS)
+            // The whole button lights up (a full row, not just its text and icon), a little
+            // wider than its frame, like a system list row under the pointer.
+            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 10, style: .continuous).inset(by: -6))
+            .hoverEffect(.highlight)
+            #endif
+    }
+}
+
+extension ButtonStyle where Self == PressableButtonStyle {
+    static var pressable: PressableButtonStyle { PressableButtonStyle() }
+}
+
+extension View {
+    /// A `List` row of the sidebar: the system's selection does not light the row up under the
+    /// Apple Pencil or a pointer on iPad (observed on iPadOS 26), so the row gets the highlight itself.
+    func pointerHoverRow(cornerRadius: CGFloat = 12) -> some View {
+        #if os(iOS)
+        contentShape(.hoverEffect, RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+        #else
+        self
+        #endif
+    }
+}
+
+extension View {
+    /// Glass buttons don't light up under the Apple Pencil or a pointer on iPad by themselves; this
+    /// gives them the system's lift, as Apple recommends for controls that lack it.
+    @ViewBuilder
+    func glassHover() -> some View {
+        #if os(iOS)
+        // The glass is a capsule (or a circle, its square case): the lift takes its shape.
+        contentShape(.hoverEffect, Capsule())
+            .hoverEffect(.lift)
+        #else
+        self
+        #endif
+    }
+}
+
+extension AccountSettings.FolderColor {
+    /// The system color it stands for; used faintly (a tint, a dot), never as a fill.
+    var color: Color {
+        switch self {
+        case .red: .red
+        case .orange: .orange
+        case .yellow: .yellow
+        case .green: .green
+        case .teal: .teal
+        case .blue: .blue
+        case .indigo: .indigo
+        case .purple: .purple
+        case .pink: .pink
+        case .gray: .gray
+        }
+    }
+
+    var name: LocalizedStringKey {
+        switch self {
+        case .red: "Red"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .green: "Green"
+        case .teal: "Teal"
+        case .blue: "Blue"
+        case .indigo: "Indigo"
+        case .purple: "Purple"
+        case .pink: "Pink"
+        case .gray: "Gray"
+        }
+    }
+}
+
+extension HappierStore {
+    /// The color the user gave this session's project folder, if any.
+    func folderColor(of session: Session?) -> AccountSettings.FolderColor? {
+        guard let path = session?.path else { return nil }
+        return accountSettings?.folderColor(for: path)
+    }
+
+    func setFolderColor(_ color: AccountSettings.FolderColor?, forPath path: String) {
+        Task { await updateAccountSettings { $0.delta(folderColor: color, for: path) } }
+    }
+}
+
+/// "Folder Color": the project's color for every session in it, synced across devices.
+struct FolderColorMenu: View {
+    let path: String
+    let current: AccountSettings.FolderColor?
+    let choose: (AccountSettings.FolderColor?) -> Void
+
+    var body: some View {
+        Menu("Folder Color", systemImage: "circle.lefthalf.filled") {
+            Picker("Folder Color", selection: Binding(get: { current }, set: { choose($0) })) {
+                Text("None").tag(AccountSettings.FolderColor?.none)
+                ForEach(AccountSettings.FolderColor.allCases, id: \.self) { color in
+                    Label { Text(color.name) } icon: {
+                        Image(systemName: "circle.fill").foregroundStyle(color.color, color.color)
+                    }
+                    .tag(Optional(color))
+                }
+            }
+            .pickerStyle(.inline)
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// The color of your own message bubbles: the app's blue, or the conversation's project
+    /// folder color (darkened, for the white text), set once by the conversation.
+    @Entry var userBubbleColor: Color = .userBubble
+}
+
+extension AccountSettings.FolderColor {
+    /// The folder's color deepened so white text and logos read on it in light and dark mode
+    /// (your bubbles, the avatar's disc); the light hues need more.
+    var deep: Color {
+        switch self {
+        case .yellow: color.mix(with: .black, by: 0.55)
+        case .orange, .green, .teal: color.mix(with: .black, by: 0.42)
+        default: color.mix(with: .black, by: 0.3)
+        }
     }
 }

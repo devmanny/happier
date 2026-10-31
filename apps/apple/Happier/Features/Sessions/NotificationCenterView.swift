@@ -15,7 +15,7 @@ struct NotificationCenterView: View {
                     Button { open(notification) } label: {
                         NotificationRow(notification: notification)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button("Delete", systemImage: "trash", role: .destructive) { delete(notification) }
                     }

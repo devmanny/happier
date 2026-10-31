@@ -37,6 +37,7 @@ struct AgentModelPicker: View {
                 ForEach(agents, id: \.self) { agent in
                     Button {
                         guard agent != choice.agentId else { return }
+                        AppHaptics.selection()
                         choice = AgentModelChoice(agentId: agent)
                     } label: {
                         HStack(spacing: 10) {
@@ -48,7 +49,7 @@ struct AgentModelPicker: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             Section {
@@ -86,6 +87,7 @@ struct AgentModelPicker: View {
     private func modelRow(id: String, name: String, detail: String) -> some View {
         Button {
             guard id != choice.modelId else { return }
+            AppHaptics.selection()
             // The effort stays while the new model offers it; otherwise that model's own default.
             let next = models(choice.agentId).first { $0.id == id }
             choice.modelId = id
@@ -102,7 +104,7 @@ struct AgentModelPicker: View {
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     @ViewBuilder

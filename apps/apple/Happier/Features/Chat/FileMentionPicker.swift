@@ -51,7 +51,7 @@ struct FileMentionPicker: View {
                 Button { pick(path) } label: {
                     FileMentionRow(name: label.name, detail: label.folder, isDirectory: label.isFolder)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             #if os(iOS)
             .listStyle(.plain)
@@ -94,7 +94,7 @@ private struct FileMentionFolder: View {
                         Button { pick(relative(entry.path)) } label: {
                             FileMentionRow(name: entry.name, detail: nil, isDirectory: false)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 #if os(iOS)

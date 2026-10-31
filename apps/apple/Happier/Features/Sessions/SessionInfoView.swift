@@ -124,6 +124,7 @@ struct SessionInfoView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Button {
                 MessageClipboard.copy(value)
+                AppHaptics.success()
                 copiedIdentifier = value
             } label: {
                 Image(systemName: copiedIdentifier == value ? "checkmark" : "doc.on.doc")

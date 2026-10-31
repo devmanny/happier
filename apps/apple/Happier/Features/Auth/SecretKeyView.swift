@@ -15,6 +15,7 @@ struct SecretKeyView: View {
         Form {
             Section {
                 TextField("XXXXX-XXXXX-XXXXX-…", text: $key, axis: .vertical)
+                    .accessibilityIdentifier("account-secret-key")
                     .font(.body.monospaced())
                     .lineLimit(2...4)
                     .autocorrectionDisabled()
@@ -32,10 +33,11 @@ struct SecretKeyView: View {
         .formStyle(.grouped)
         .navigationTitle("Secret Key")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel", role: .cancel) { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
                 if working { HappierSpinner() } else {
                     Button("Sign In") { Task { await signIn() } }
+                        .accessibilityIdentifier("account-sign-in")
                         .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }

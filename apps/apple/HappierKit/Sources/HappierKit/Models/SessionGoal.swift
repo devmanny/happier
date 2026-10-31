@@ -39,6 +39,12 @@ public struct SessionGoal: Equatable, Sendable {
                         canClear: capabilities?["sessionGoalClearSupported"]?.boolValue == true)
     }
 
+    /// For a session not started yet: whether its agent takes a goal, as the same agent's running
+    /// sessions report it.
+    public static func supported(agentId: String, sessions: [Session]) -> Bool {
+        sessions.contains { $0.agentId == agentId && controls(agentState: $0.agentState).canSet }
+    }
+
     private static func goal(title: String?, status: String?) -> SessionGoal? {
         guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
         return SessionGoal(objective: title, status: status.flatMap(Status.init(rawValue:)) ?? .active)

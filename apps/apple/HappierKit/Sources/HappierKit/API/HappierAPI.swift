@@ -15,6 +15,40 @@ public struct HappierAPI: Sendable {
         http = HTTPClient(baseURL: server, token: token, session: session)
     }
 
+    // MARK: Linking another device (the signed-in side)
+
+    /// Whether the Account keeps content end-to-end encrypted (`GET /v1/account/encryption`); a relay
+    /// without the route is treated as encrypted, as the TypeScript client does.
+    public func accountIsEncrypted() async throws -> Bool {
+        do {
+            return try await http.get("/v1/account/encryption")["mode"]?.stringValue != "plain"
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            return true
+        }
+    }
+
+    /// The Account's published keys (`GET /v1/user/:id`), nil when the relay doesn't know it.
+    public func accountLinkProfile(accountId: String) async throws -> AccountLinkProfile? {
+        let user: JSONValue?
+        do {
+            user = try await http.get("/v1/user/\(accountId)")["user"]
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            return nil
+        }
+        guard let user, user["id"]?.stringValue == accountId else { return nil }
+        return AccountLinkProfile(publicKey: user["publicKey"]?.stringValue,
+                                  contentPublicKey: user["contentPublicKey"]?.stringValue,
+                                  contentPublicKeySig: user["contentPublicKeySig"]?.stringValue)
+    }
+
+    /// Hands the sealed credentials to the waiting device (`POST /v1/auth/account/response`).
+    public func approveAccountLink(publicKey: Data, response: Data) async throws {
+        _ = try await http.post("/v1/auth/account/response", [
+            "publicKey": .string(publicKey.base64EncodedString()),
+            "response": .string(response.base64EncodedString()),
+        ])
+    }
+
     /// All non-archived sessions via `/v2/sessions` cursor paging; falls back to `/v1/sessions`.
     public func listSessions() async throws -> [JSONValue] {
         var rows: [JSONValue] = []
@@ -90,6 +124,12 @@ public struct HappierAPI: Sendable {
 
     public func machine(id: String) async throws -> JSONValue? {
         try await http.get("/v1/machines/\(id)")["machine"]
+    }
+
+    /// Removes a machine from the account (`POST /v1/machines/:id/revoke`): its access keys and
+    /// automation assignments go; it can sign in again from the CLI.
+    public func revokeMachine(id: String) async throws {
+        _ = try await http.post("/v1/machines/\(id)/revoke")
     }
 
     // MARK: Pending queue (`pendingRoutes.ts`)
@@ -195,6 +235,49 @@ public struct HappierAPI: Sendable {
 
     public func setSessionPin(_ sessionId: String, pinned: Bool) async throws {
         _ = try await http.put("/v2/session-organization/pins/\(sessionId)", ["pinned": .bool(pinned)])
+    }
+
+    // MARK: Account settings (`registerAccountSettingsRoutes.ts`)
+
+    public enum AccountSettingsWrite: Sendable {
+        case saved(version: Int)
+        /// Someone else wrote first: their document and version, to merge onto and retry.
+        case conflict(version: Int, content: JSONValue?)
+    }
+
+    /// The stored document (`{t:'encrypted', c}`, `{t:'plain', v}` or nil) and its version;
+    /// `/v1` on relays without `/v2` (encrypted accounts only there).
+    public func accountSettings() async throws -> (content: JSONValue?, version: Int) {
+        do {
+            let response = try await http.get("/v2/account/settings")
+            return (response["content"].flatMap { $0.isNull ? nil : $0 }, response["version"]?.intValue ?? 0)
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            let response = try await http.get("/v1/account/settings")
+            return (response["settings"]?.stringValue.map { ["t": "encrypted", "c": .string($0)] }, response["settingsVersion"]?.intValue ?? 0)
+        }
+    }
+
+    public func writeAccountSettings(_ content: JSONValue, expectedVersion: Int) async throws -> AccountSettingsWrite {
+        let response: JSONValue
+        let legacy: Bool
+        do {
+            response = try await http.post("/v2/account/settings", ["content": content, "expectedVersion": .number(Double(expectedVersion))])
+            legacy = false
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            guard content["t"]?.stringValue == "encrypted", let ciphertext = content["c"] else { throw error }
+            response = try await http.post("/v1/account/settings", ["settings": ciphertext, "expectedVersion": .number(Double(expectedVersion))])
+            legacy = true
+        }
+        if response["success"]?.boolValue == true {
+            return .saved(version: response["version"]?.intValue ?? expectedVersion + 1)
+        }
+        guard response["error"]?.stringValue == "version-mismatch", let current = response["currentVersion"]?.intValue else {
+            throw HTTPClient.ServerError(status: 200, path: "/v2/account/settings", body: response)
+        }
+        let content = legacy
+            ? response["currentSettings"]?.stringValue.map { ["t": "encrypted", "c": .string($0)] }
+            : response["currentContent"].flatMap { $0.isNull ? nil : $0 }
+        return .conflict(version: current, content: content)
     }
 
     // MARK: Push (`pushRoutes.ts`)

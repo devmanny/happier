@@ -56,6 +56,19 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
     /// Decrypted raw record, kept so edits can re-encrypt it with new text.
     public let record: JSONValue?
 
+    /// Decrypted attachment metadata, shared with the committed transcript presentation.
+    public var files: [MessageAttachment] { MessageAttachment.list(in: record?["meta"]) }
+
+    public var sessionMessageOrigin: SessionMessageOrigin? {
+        guard record?["role"]?.stringValue == "user" else { return nil }
+        return SessionMessageOrigin.parse(record?["meta"])
+    }
+
+    public var sessionNotice: SessionNotice? {
+        guard sessionMessageOrigin == nil, files.isEmpty else { return nil }
+        return SessionNotice.parse(text)
+    }
+
     public static func list(_ rows: [JSONValue], session: Session) -> [PendingMessage] {
         var queued: [(position: Double, created: Double, item: PendingMessage)] = []
         var discarded: [(at: Double, item: PendingMessage)] = []
@@ -66,7 +79,10 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
             let record = try? decodeRecord(row["content"], session: session)
             let text = record.flatMap { r -> String? in
                 let display = r["meta"]?["displayText"]?.stringValue
-                return (display?.isEmpty == false ? display : nil) ?? r["content"]?["text"]?.stringValue
+                let original = r["content"]?["text"]?.stringValue
+                let origin = r["role"]?.stringValue == "user" ? SessionMessageOrigin.parse(r["meta"]) : nil
+                if let original, origin != nil || (MessageAttachment.list(in: r["meta"]).isEmpty && SessionNotice.parse(original) != nil) { return original }
+                return (display?.isEmpty == false ? display : nil) ?? original
             } ?? String(localized: "Couldn’t decrypt this pending message.")
             let state: State
             if isDiscarded {

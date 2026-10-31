@@ -18,7 +18,7 @@ struct NewSessionView: View {
     @State private var effort: String?
     @State private var permissionMode: PermissionMode = .yolo
     /// The agent last started from here; its model and effort are remembered per agent.
-    @AppStorage("happier.newSession.agent") private var lastAgentId = ""
+    @AppStorage(NewSessionDefaults.agentKey) private var lastAgentId = ""
     @State private var firstMessage = ""
     @State private var starting = false
     @State private var error: String?
@@ -26,7 +26,20 @@ struct NewSessionView: View {
     @State private var showBrowser = false
     @State private var showModelPicker = false
     @State private var dictation = Dictation()
-    @FocusState private var messageFocused: Bool
+    @State private var attachments: [AttachmentDraft] = []
+    @State private var showPhotos = false
+    @State private var showFiles = false
+    @State private var showCamera = false
+    @State private var showCameraPermission = false
+    @State private var messageFocused = false
+    @State private var editor = ComposerEditor()
+    /// The `@word` being typed, for the file suggestions above the composer.
+    @State private var mentionQuery: String?
+    @State private var fileResults: FileSuggestionResults = .loading
+    @State private var mentioning = false
+    /// A goal chosen before starting; set on the session before its first message.
+    @State private var goal: String?
+    @State private var goalDraft: String?
 
     private var machine: Machine? { store.machines.first { $0.id == machineId } }
 
@@ -58,10 +71,13 @@ struct NewSessionView: View {
             // An empty conversation, as in ChatGPT and Claude: what you start is written below.
             VStack(spacing: 12) {
                 // The agent's logo is also its picker: the same choices as the pill in the composer.
-                Button { showModelPicker = true } label: {
+                Button {
+                    AppHaptics.light()
+                    showModelPicker = true
+                } label: {
                     AgentAvatar(agentId: agentId, size: 64, interactive: true)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .accessibilityLabel(Text("Agent"))
                 Text("What should we work on?")
                     .font(.title2.weight(.semibold))
@@ -88,23 +104,53 @@ struct NewSessionView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
+            if mentionQuery != nil, machineId != nil, !directory.isEmpty {
+                FileSuggestions(results: fileResults) { path in editor.completeMention(path) }
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             composer
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
         }
+        .animation(.smooth(duration: 0.2), value: mentionQuery != nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(AttachmentSources(showPhotos: $showPhotos, showFiles: $showFiles, showCamera: $showCamera,
+                                    showCameraPermission: $showCameraPermission) { add($0) })
+        // Files dropped anywhere on the empty chat go with the first message, as in a conversation.
+        .dropDestination(for: DroppedAttachment.self) { items, _ in
+            let files = items.map(\.draft).filter { !SessionDrag.isPayload($0.data) }
+            add(files)
+            return !files.isEmpty
+        }
         .navigationTitle("New Session")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .onChange(of: agentId, initial: true) { _, agent in restoreChoices(for: agent) }
+        .onChange(of: agentId, initial: true) { _, agent in
+            restoreChoices(for: agent)
+            applyDefaultPermissionMode(for: agent)
+            if !SessionGoal.supported(agentId: agent, sessions: Array(store.sessions.values)) { goal = nil }
+        }
+        .alert("Goal", isPresented: Binding(get: { goalDraft != nil }, set: { if !$0 { goalDraft = nil } })) {
+            TextField("What should the agent keep working toward?", text: Binding(get: { goalDraft ?? "" }, set: { goalDraft = $0 }), axis: .vertical)
+            Button("Set Goal") {
+                let objective = (goalDraft ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                goalDraft = nil
+                AppHaptics.confirm()
+                withAnimation(.smooth) { goal = objective.isEmpty ? nil : objective }
+            }
+            Button("Cancel", role: .cancel) { goalDraft = nil }
+        } message: {
+            Text("The agent keeps pursuing it across turns until it's done.")
+        }
         .onChange(of: modelId) { _, _ in fitEffort() }
         .onChange(of: dictation.error) { _, error in
             if let error { store.lastError = error }
         }
         .alert("Create Folder?", isPresented: Binding(get: { folderToApprove != nil }, set: { if !$0 { folderToApprove = nil } })) {
             Button("Create and Start") { start(approve: true) }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { AppHaptics.light() }
         } message: {
             Text("\(folderToApprove ?? "") doesn't exist on \(machine?.name ?? "the machine") yet.")
         }
@@ -116,6 +162,9 @@ struct NewSessionView: View {
             }
             if let preferred = agents.first { agentId = preferred }
             messageFocused = true
+            // The per-agent default chosen in Settings (or the React Native app).
+            if store.accountSettings == nil { await store.refreshAccountSettings() }
+            applyDefaultPermissionMode(for: agentId)
         }
         .task(id: machineId) {
             guard let machineId else { return }
@@ -163,20 +212,86 @@ struct NewSessionView: View {
     private var canStart: Bool {
         !starting && machineId != nil && machine?.active == true
             && !directory.trimmingCharacters(in: .whitespaces).isEmpty
-            && !firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    }
+
+    private func add(_ drafts: [AttachmentDraft]) {
+        AttachmentLoader.add(drafts, to: $attachments, store: store)
     }
 
     /// The message and, as pills under it, where and with what it starts: agent and model first.
     /// The same card as a live conversation's composer (`Composer.card`).
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Describe a task or ask a question…", text: $firstMessage, axis: .vertical)
-                .lineLimit(1...8)
-                .focused($messageFocused)
-                .textFieldStyle(.plain)
-                .onSubmit { if canStart { start(approve: false) } }
+            if !attachments.isEmpty {
+                AttachmentStrip(attachments: $attachments)
+            }
+            if let goal {
+                // The goal it will start with, removable before sending.
+                HStack(spacing: 6) {
+                    Image(systemName: "scope").foregroundStyle(Color.userBubble)
+                    Text(goal).lineLimit(2)
+                    Spacer(minLength: 0)
+                    Button("Remove Goal", systemImage: "xmark.circle.fill") { withAnimation(.smooth) { self.goal = nil } }
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.secondary)
+                        .buttonStyle(.pressable)
+                }
+                .font(.footnote)
                 .padding(.horizontal, 6)
+            }
+            // The live conversation's own field: @ suggests the folder's files, pasted images attach.
+            ComposerTextField(
+                text: $firstMessage,
+                placeholder: String(localized: "Describe a task or ask a question…"),
+                isFocused: $messageFocused,
+                editor: editor,
+                onSubmit: { if canStart { start(approve: false) } },
+                onPasteImages: { add($0) },
+                onMentionQuery: { query in withAnimation(.smooth(duration: 0.2)) { mentionQuery = query } }
+            )
+            .task(id: mentionQuery) {
+                guard let query = mentionQuery else {
+                    fileResults = .loading
+                    return
+                }
+                guard let machineId, !directory.isEmpty else { return }
+                fileResults = await FileSuggestionResults.load(query, in: directory, on: machineId, limit: 6, store: store) ?? fileResults
+            }
+            .padding(.horizontal, 6)
             HStack(spacing: 8) {
+                // The live composer's ⊕ menu: mentions and a goal, files, photos and the camera.
+                AddMenu(canMention: machineId != nil && !directory.isEmpty,
+                        canSetGoal: SessionGoal.supported(agentId: agentId, sessions: Array(store.sessions.values))) {
+                    if let draft = AttachmentLoader.clipboardImage() {
+                        add([draft])
+                    } else if let pasted = AttachmentLoader.clipboardText(), !pasted.isEmpty {
+                        firstMessage += pasted
+                        messageFocused = true
+                    }
+                } onPhotos: {
+                    showPhotos = true
+                } onCamera: {
+                    AttachmentSources.openCamera(show: $showCamera, denied: $showCameraPermission)
+                } onFiles: {
+                    showFiles = true
+                } onMention: {
+                    mentioning = true
+                } onGoal: {
+                    goalDraft = goal ?? ""
+                }
+                .equatable()
+                .sheet(isPresented: $mentioning) {
+                    if let machineId {
+                        FileMentionPicker(machineId: machineId, root: directory) { path in
+                            if !editor.insertMention(path) { firstMessage = FileMention.appending(path, to: firstMessage) }
+                            messageFocused = true
+                        }
+                        #if os(macOS)
+                        .frame(minWidth: 460, minHeight: 520)
+                        #endif
+                    }
+                }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         agentMenu
@@ -203,6 +318,7 @@ struct NewSessionView: View {
                     .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.glassProminent)
+                .glassHover()
                 .buttonBorderShape(.circle)
                 .tint(.userBubble)
                 .disabled(!canStart)
@@ -211,18 +327,27 @@ struct NewSessionView: View {
             }
         }
         .padding(12)
+        .background {
+            if let color = store.accountSettings?.folderColor(for: directory)?.color {
+                RoundedRectangle(cornerRadius: 26, style: .continuous).fill(color.opacity(0.14))
+            }
+        }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
     /// Agent, model and effort: opens the same picker as a live session's model pill.
     private var agentMenu: some View {
-        Button { showModelPicker = true } label: {
+        Button {
+            AppHaptics.light()
+            showModelPicker = true
+        } label: {
             chip {
                 Image("Agents/\(agentId)").resizable().scaledToFit().frame(width: 15, height: 15)
                 Text(agentLabel).lineLimit(1)
             }
         }
         .buttonStyle(.glass)
+        .glassHover()
         .accessibilityLabel("Model")
     }
 
@@ -237,13 +362,17 @@ struct NewSessionView: View {
     private var permissionMenu: some View {
         Menu {
             ForEach(PermissionMode.allCases, id: \.self) { mode in
-                Button { permissionMode = mode } label: { checked(mode.label(agentId: agentId), mode == permissionMode) }
+                Button {
+                    if permissionMode != mode { AppHaptics.selection() }
+                    permissionMode = mode
+                } label: { checked(mode.label(agentId: agentId), mode == permissionMode) }
             }
         } label: {
             chip { Text(permissionMode.label(agentId: agentId)) }
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
+        .glassHover()
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Permission mode")
@@ -253,6 +382,7 @@ struct NewSessionView: View {
         Menu {
             ForEach(store.machines) { item in
                 Button {
+                    AppHaptics.selection()
                     machineId = item.id
                     directory = Machine.recentDirectories(machineId: item.id, sessions: Array(store.sessions.values)).first ?? item.homeDir ?? ""
                 } label: {
@@ -267,6 +397,7 @@ struct NewSessionView: View {
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
+        .glassHover()
         .menuIndicator(.hidden)
         .fixedSize()
     }
@@ -274,10 +405,16 @@ struct NewSessionView: View {
     private var folderMenu: some View {
         Menu {
             ForEach(recentDirectories.prefix(8), id: \.self) { path in
-                Button { directory = path } label: { checked(displayPath(path), path == directory) }
+                Button {
+                    if directory != path { AppHaptics.selection() }
+                    directory = path
+                } label: { checked(displayPath(path), path == directory) }
             }
             Divider()
-            Button("Browse Folders…", systemImage: "folder.badge.gearshape") { showBrowser = true }
+            Button("Browse Folders…", systemImage: "folder.badge.gearshape") {
+                AppHaptics.light()
+                showBrowser = true
+            }
                 .disabled(machine?.active != true)
         } label: {
             chip {
@@ -287,6 +424,7 @@ struct NewSessionView: View {
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
+        .glassHover()
         .menuIndicator(.hidden)
         .fixedSize()
     }
@@ -306,6 +444,7 @@ struct NewSessionView: View {
         guard let machineId else { return }
         // Sending ends a dictation, as in a live conversation.
         if dictation.isRecording { dictation.stop() }
+        AppHaptics.confirm()
         starting = true
         error = nil
         let path = directory.trimmingCharacters(in: .whitespaces)
@@ -313,22 +452,36 @@ struct NewSessionView: View {
         let effort = effortLevels.isEmpty ? nil : effort
         Task {
             let outcome = await store.createSession(machineId: machineId, directory: path, agentId: agentId, permissionMode: permissionMode,
-                                                    modelId: modelId, effort: effort, firstMessage: firstMessage, approveNewDirectory: approve)
+                                                    modelId: modelId, effort: effort, firstMessage: firstMessage,
+                                                    attachments: attachments, goal: goal, approveNewDirectory: approve)
             starting = false
             switch outcome {
-            case .created: firstMessage = ""
-            case .needsDirectoryApproval(let folder): folderToApprove = folder
-            case .failed(let message): error = message
+            case .created:
+                AppHaptics.success()
+                firstMessage = ""
+                attachments = []
+                goal = nil
+            case .needsDirectoryApproval(let folder):
+                AppHaptics.warning()
+                folderToApprove = folder
+            case .failed(let message):
+                AppHaptics.error()
+                error = message
             }
         }
     }
 
     // MARK: Remembered model and effort
 
-    private static func modelKey(_ agent: String) -> String { "happier.newSession.model.\(agent)" }
-    private static func effortKey(_ agent: String) -> String { "happier.newSession.effort.\(agent)" }
+    private static func modelKey(_ agent: String) -> String { NewSessionDefaults.modelKey(agent) }
+    private static func effortKey(_ agent: String) -> String { NewSessionDefaults.effortKey(agent) }
 
     /// The model and effort last started with this agent, while it still offers them.
+    /// The account's default permission mode for this agent, when the user chose one.
+    private func applyDefaultPermissionMode(for agent: String) {
+        if let mode = store.accountSettings?.defaultPermissionMode(for: agent) { permissionMode = mode }
+    }
+
     private func restoreChoices(for agent: String) {
         let defaults = UserDefaults.standard
         let remembered = defaults.string(forKey: Self.modelKey(agent))

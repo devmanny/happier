@@ -14,7 +14,10 @@ struct FolderBrowserView: View {
     @State private var rootsError: String?
 
     var body: some View {
-        NavigationStack(path: $stack) {
+        NavigationStack(path: Binding(get: { stack }, set: { next in
+            if next != stack { AppHaptics.selection() }
+            stack = next
+        })) {
             List {
                 if !recents.isEmpty {
                     Section("Recents") {
@@ -49,7 +52,12 @@ struct FolderBrowserView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) {
+                        AppHaptics.light()
+                        dismiss()
+                    }
+                }
             }
             .navigationDestination(for: RemoteFolder.self) { folder in
                 FolderListView(machine: machine, folder: folder, stack: $stack) { path in
@@ -115,8 +123,12 @@ private struct FolderListView: View {
                 } description: {
                     Text(error)
                 } actions: {
-                    Button("Try Again") { Task { await load() } }
+                    Button("Try Again") {
+                        AppHaptics.light()
+                        Task { await load() }
+                    }
                         .buttonStyle(.glassProminent)
+                        .glassHover()
                 }
             } else if visible.isEmpty {
                 ContentUnavailableView(query.isEmpty ? "No Folders" : "No Results", systemImage: "folder",
@@ -132,6 +144,7 @@ private struct FolderListView: View {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("New Folder", systemImage: "folder.badge.plus") {
+                        AppHaptics.light()
                         newName = ""
                         naming = true
                     }
@@ -143,6 +156,7 @@ private struct FolderListView: View {
         }
         .safeAreaInset(edge: .bottom) {
             Button {
+                AppHaptics.confirm()
                 onUse(folder.path)
             } label: {
                 Text("Use “\(folder.name)”")
@@ -152,6 +166,7 @@ private struct FolderListView: View {
                     .padding(.vertical, 6)
             }
             .buttonStyle(.glassProminent)
+            .glassHover()
             .controlSize(.large)
             .padding(.horizontal, 20)
             .padding(.bottom, 8)
@@ -160,7 +175,7 @@ private struct FolderListView: View {
             TextField("Name", text: $newName)
                 .autocorrectionDisabled()
             Button("Create") { Task { await create() } }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) { AppHaptics.light() }
         } message: {
             Text("Inside \(folder.name)")
         }
@@ -185,16 +200,20 @@ private struct FolderListView: View {
     private func create() async {
         let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !name.contains("/"), !name.contains("\\") else {
+            AppHaptics.error()
             store.lastError = String(localized: "Folder names can't be empty or contain slashes.")
             return
         }
+        AppHaptics.confirm()
         creating = true
         defer { creating = false }
         do {
             let created = try await store.createFolder(named: name, in: folder.path, on: machine.id)
             await load()
             stack.append(created)
+            AppHaptics.success()
         } catch {
+            AppHaptics.error()
             store.lastError = UserFacingError.message(for: error)
         }
     }

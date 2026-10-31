@@ -40,6 +40,7 @@ struct RelaySheet: View {
                 ForEach(store.knownServers, id: \.absoluteString) { url in
                     let current = RelayList.canonical(url) == RelayList.canonical(store.server)
                     Button {
+                        AppHaptics.confirm()
                         store.switchServer(to: url)
                         dismiss()
                     } label: {
@@ -56,7 +57,10 @@ struct RelaySheet: View {
                     }
                     .disabled(current)
                 }
-                Button("Add Relay…", systemImage: "plus") { addingRelay = true }
+                Button("Add Relay…", systemImage: "plus") {
+                    AppHaptics.light()
+                    addingRelay = true
+                }
             } header: {
                 Text("Switch Relay")
             } footer: {
@@ -82,12 +86,18 @@ struct RelaySheet: View {
                 #endif
             Button("Connect") {
                 if let url = ServerAddress.normalize(newRelay) {
+                    AppHaptics.confirm()
                     store.switchServer(to: url)
                     dismiss()
+                } else {
+                    AppHaptics.error()
                 }
                 newRelay = ""
             }
-            Button("Cancel", role: .cancel) { newRelay = "" }
+            Button("Cancel", role: .cancel) {
+                AppHaptics.light()
+                newRelay = ""
+            }
         } message: {
             Text("You'll sign in to it if this device hasn't before.")
         }

@@ -5,6 +5,7 @@ options:
   deploymentTarget:
     iOS: "26.0"
     macOS: "26.0"
+    watchOS: "26.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
 settings:
@@ -24,8 +25,15 @@ targets:
     supportedDestinations: [iOS, macOS]
     sources:
       - path: Happier
+      # Shared with the widget extension (the reading aloud's Live Activity).
+      - path: Shared
     dependencies:
       - package: HappierKit
+      - target: HappierWidgets
+      - target: HappierShare
+      # The Apple Watch app rides inside the iPhone app (installed from it, TestFlight included).
+      - target: HappierWatch
+        destinationFilters: [iOS]
     info:
       path: Happier/Resources/Info.plist
       properties:
@@ -37,32 +45,44 @@ targets:
         # algorithms, no distribution in France) and recorded by Apple as non-exempt: No.
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.developer-tools
+        # The integrated browser opens any site, including http dev servers on the local network.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoadsInWebContent: true
         NSCameraUsageDescription: Happier uses the camera to attach photos to your messages and scan pairing QR codes.
         NSMicrophoneUsageDescription: Happier uses the microphone to dictate messages to your agents.
         NSSpeechRecognitionUsageDescription: Happier turns your voice into text so you can dictate messages to your agents.
         UILaunchScreen: {}
+        # Reading messages aloud keeps going with the app minimized or the phone locked.
+        UIBackgroundModes: [audio]
+        # ...and shows on the Dynamic Island and Lock Screen while it does.
+        NSSupportsLiveActivities: true
+        # iPad: several windows, so a conversation can open in its own window beside the main one.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         # iOS continued-processing tasks that keep attachment uploads running in the background.
         BGTaskSchedulerPermittedIdentifiers: [com.devmanny.happier.upload.*]
-        # The integrated browser opens any site, including http dev servers on the local network.
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoadsInWebContent: true
         CFBundleURLTypes:
           - CFBundleURLName: com.devmanny.happier
-            CFBundleURLSchemes: [happier]
+            CFBundleURLSchemes: [happier-native]
     entitlements:
       path: Happier/Resources/Happier.entitlements
       properties:
         aps-environment: development
+        com.apple.developer.associated-domains: [applinks:happier.nomada.cloud]
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.device.camera: true
         com.apple.security.device.audio-input: true
+        # Shared with the widgets: the app leaves them what's waiting for you.
+        com.apple.security.application-groups: [group.com.devmanny.happier]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier
         PRODUCT_NAME: Happier
+        # Code shared with the extensions runs its app-only parts here.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) HAPPIER_APP
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_PREVIEWS: true
@@ -72,3 +92,142 @@ targets:
         # macOS spells the push entitlement differently, so it gets its own file.
         CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: Happier/Resources/Happier-macOS.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
+  HappierWidgets:
+    type: app-extension
+    supportedDestinations: [iOS, macOS]
+    sources:
+      # Its own small images (WidgetAssets): a widget has little memory, and the app's full-size
+      # logo alone used most of it.
+      - path: HappierWidgets
+      - path: Shared
+    dependencies:
+      - package: HappierKit
+    info:
+      path: HappierWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: HappierWidgets/HappierWidgets.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.widgets
+        PRODUCT_NAME: HappierWidgets
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_HARDENED_RUNTIME: true
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: HappierWidgets/HappierWidgets-macOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HappierShare:
+    type: app-extension
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: HappierShare
+      # The agent logos, small (shared with the widgets).
+      - path: HappierWidgets/WidgetAssets.xcassets
+    dependencies:
+      - package: HappierKit
+    info:
+      path: HappierShare/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # Voice memos, photos and videos, documents: up to 20 at a time.
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+              NSExtensionActivationSupportsMovieWithMaxCount: 20
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsAttachmentsWithMaxCount: 20
+    entitlements:
+      path: HappierShare/HappierShare.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.share
+        PRODUCT_NAME: HappierShare
+        ENABLE_HARDENED_RUNTIME: true
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: HappierShare/HappierShare-macOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HappierWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: HappierWatch
+      # The agent logos, small (shared with the widgets), and the badge that draws them.
+      - path: HappierWidgets/WidgetAssets.xcassets
+      - path: HappierWidgets/AgentBadge.swift
+    dependencies:
+      - package: HappierKit
+      - target: HappierWatchWidgets
+    info:
+      path: HappierWatch/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.devmanny.happier
+        # Everything comes from the iPhone app (no account keys, no relay on the wrist).
+        WKRunsIndependentlyOfCompanionApp: false
+        # A complication tapped opens its session.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmanny.happier.watchkitapp
+            CFBundleURLSchemes: [happier-watch]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown]
+    entitlements:
+      path: HappierWatch/HappierWatch.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.watchkitapp
+        PRODUCT_NAME: HappierWatch
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: true
+        SWIFT_EMIT_LOC_STRINGS: true
+        LOCALIZATION_PREFERS_STRING_CATALOGS: true
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "4"
+  HappierWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - path: HappierWatchWidgets
+      - path: HappierWidgets/WidgetAssets.xcassets
+      - path: HappierWidgets/AgentBadge.swift
+    dependencies:
+      - package: HappierKit
+    info:
+      path: HappierWatchWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: HappierWatchWidgets/HappierWatchWidgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.watchkitapp.widgets
+        PRODUCT_NAME: HappierWatchWidgets
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "4"

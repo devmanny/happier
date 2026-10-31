@@ -17,6 +17,7 @@ struct MessageAttachmentTile: View {
 
     var body: some View {
         Button {
+            AppHaptics.light()
             Task { await openFile() }
         } label: {
             ZStack {
@@ -45,7 +46,7 @@ struct MessageAttachmentTile: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(downloading != nil || file.path == nil)
         .accessibilityLabel(Text(file.name))
         .accessibilityHint(Text("Opens the preview"))
@@ -74,6 +75,7 @@ struct MessageAttachmentTile: View {
         do {
             open(try await store.attachmentFile(file, in: sessionId) { downloading = $0 })
         } catch {
+            AppHaptics.error()
             failed = true
         }
     }
@@ -90,10 +92,16 @@ struct MessageAttachmentChip: View {
 
     var body: some View {
         Button {
+            AppHaptics.light()
             Task {
                 downloading = 0
                 defer { downloading = nil }
-                do { open(try await store.attachmentFile(file, in: sessionId) { downloading = $0 }) } catch { failed = true }
+                do {
+                    open(try await store.attachmentFile(file, in: sessionId) { downloading = $0 })
+                } catch {
+                    AppHaptics.error()
+                    failed = true
+                }
             }
         } label: {
             Label {
@@ -107,7 +115,7 @@ struct MessageAttachmentChip: View {
             }
             .font(.footnote.weight(.medium))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(downloading != nil || file.path == nil)
         .accessibilityHint(Text("Downloads and opens the file"))
         .alert("Can't Open the File", isPresented: $failed) {

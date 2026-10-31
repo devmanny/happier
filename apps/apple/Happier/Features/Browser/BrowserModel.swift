@@ -136,6 +136,16 @@ final class BrowserModel: NSObject {
         return tab
     }
 
+    /// Opening the browser from a session shows that session's current tab, opening it first
+    /// when the agent hasn't used the browser yet (the agent then keeps working in it).
+    func showTab(for sessionId: String) {
+        guard let resolved = try? registry.tab(for: sessionId, tabId: nil, create: true) else { return }
+        selectedTabId = (tab(resolved.id) ?? addTab(id: resolved.id, owner: .session(sessionId))).id
+    }
+
+    /// Whether the session has a tab open, for the browser button in its toolbar.
+    func hasTabs(for sessionId: String) -> Bool { tabs.contains { $0.sessionId == sessionId } }
+
     func closeTab(_ id: String) {
         registry.close(id)
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
@@ -155,8 +165,9 @@ final class BrowserModel: NSObject {
         store?.sessions[sessionId]?.title ?? "Session \(sessionId.prefix(6))"
     }
 
-    /// The session's folder color; this base has no folder colors yet.
-    func sessionColor(_ sessionId: String) -> Color? { nil }
+    func sessionColor(_ sessionId: String) -> Color? {
+        store?.folderColor(of: store?.sessions[sessionId])?.deep
+    }
 
     // MARK: - Ended sessions
 

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "HappierKit",
-    platforms: [.iOS(.v26), .macOS(.v26)],
+    platforms: [.iOS(.v26), .macOS(.v26), .watchOS(.v26)],
     products: [
         .library(name: "HappierKit", targets: ["HappierKit"]),
     ],

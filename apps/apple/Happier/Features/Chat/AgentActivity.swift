@@ -28,7 +28,7 @@ struct BackgroundActivityPill: View {
             .glassEffect(.regular.tint(Color.userBubble.opacity(light ? 0.9 : 0.18)), in: Capsule())
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityLabel(Text("\(count) running in the background"))
         .accessibilityHint(Text("Shows the agents and commands"))
         .animation(.smooth(duration: 0.2), value: count)
@@ -262,6 +262,7 @@ struct SubagentThreadView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .modifier(SessionFilePreview(sessionId: sessionId))
         .navigationTitle(subagent.title)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)

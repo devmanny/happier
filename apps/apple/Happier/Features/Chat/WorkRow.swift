@@ -18,6 +18,7 @@ struct WorkRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
+                AppHaptics.light()
                 withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
@@ -46,7 +47,7 @@ struct WorkRow: View {
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .accessibilityLabel(headline)
             .accessibilityHint(expanded ? "Hides the steps" : "Shows every step")
 
@@ -81,7 +82,7 @@ struct WorkRow: View {
 
     private static func summary(_ step: ChatItem) -> String {
         switch step {
-        case .toolCall(let tool): [ToolPresentation.name(tool.name), ToolPresentation.summary(tool)].compactMap { $0 }.joined(separator: " ")
+        case .toolCall(let tool): [ToolPresentation.name(for: tool), ToolPresentation.summary(tool)].compactMap { $0 }.joined(separator: " ")
         case .agentText(let text): text.isThinking ? String(localized: "Thinking") : String(text.text.prefix(80))
         case .userText(let text): String(text.text.prefix(80))
         case .event(let event): event.kind

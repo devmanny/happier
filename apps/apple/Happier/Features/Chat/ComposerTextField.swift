@@ -141,6 +141,9 @@ struct ComposerTextField: UIViewRepresentable {
         let view = ComposerUITextView()
         view.delegate = context.coordinator
         view.coordinator = context.coordinator
+        // Apple Pencil: handwriting starts only on the field itself, not in the margin around it,
+        // which covers the composer's buttons and swallowed their taps.
+        view.addInteraction(UIScribbleInteraction(delegate: context.coordinator))
         view.font = .preferredFont(forTextStyle: .body)
         view.adjustsFontForContentSizeCategory = true
         view.textColor = .label
@@ -182,8 +185,12 @@ struct ComposerTextField: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, UITextViewDelegate, MentionInserting {
+    final class Coordinator: NSObject, UITextViewDelegate, UIScribbleInteractionDelegate, MentionInserting {
         var parent: ComposerTextField
+
+        func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool {
+            interaction.view?.bounds.contains(location) ?? false
+        }
         /// The text as this field last reported it, to tell its own edits from outside ones.
         var lastText = ""
 

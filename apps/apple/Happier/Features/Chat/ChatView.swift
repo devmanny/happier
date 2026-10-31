@@ -24,7 +24,10 @@ struct ChatView: View {
             hasBackground: store.transcripts[sessionId]?.subagents.isEmpty == false || store.delegatedRuns[sessionId]?.isEmpty == false
                 || (session?.runtimeActivityRevision ?? 0) > 0,
             pins: pins, active: session?.active ?? false, archived: session?.archivedAt != nil, loaded: session != nil,
-            nested: session?.parentSessionId.map { store.sessions.keys.contains($0) } ?? false)
+            nested: session?.parentSessionId.map { store.sessions.keys.contains($0) } ?? false,
+            deletable: session?.canDelete ?? false,
+            folderPath: session?.path,
+            folderColor: store.folderColor(of: session))
     }
 
 }
@@ -96,7 +99,8 @@ private struct ChatConversationView: View {
         let present = Set(all.compactMap { item -> String? in if case .userText(let user) = item { user.localId } else { nil } })
         for message in queue where !present.contains(message.localId) {
             all.append(.userText(UserText(id: UserText.stableId(localId: message.localId), text: message.text,
-                                          createdAt: message.createdAt, localId: message.localId, isPending: true)))
+                                          createdAt: message.createdAt, localId: message.localId, isPending: true,
+                                          files: message.files, sessionMessageOrigin: message.sessionMessageOrigin)))
         }
         return all
     }
@@ -208,6 +212,7 @@ private struct ChatConversationView: View {
             .overlay(alignment: .bottom) {
                 if showsJump {
                     Button {
+                        AppHaptics.light()
                         pinnedToEnd = true
                         scrollToBottom()
                     } label: {
@@ -216,6 +221,7 @@ private struct ChatConversationView: View {
                             .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.glass)
+                    .glassHover()
                     .buttonBorderShape(.circle)
                     .controlSize(.large)
                     .padding(.bottom, 10)
@@ -229,12 +235,16 @@ private struct ChatConversationView: View {
                 if let selected {
                     SelectionBar(count: selected.count) {
                         MessageClipboard.copy(selectedText(working: working))
+                        AppHaptics.success()
                         withAnimation(.smooth) { self.selected = nil }
                     } onSend: {
+                        AppHaptics.light()
                         choosingDestination = true
                     } onSelectAll: {
+                        AppHaptics.selection()
                         self.selected = Set(selectableItems(working: working).map(\.id))
                     } onCancel: {
+                        AppHaptics.light()
                         withAnimation(.smooth) { self.selected = nil }
                     }
                     .sheet(isPresented: $choosingDestination) {
@@ -318,9 +328,7 @@ private struct ChatConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .navigationTitle(session?.title ?? "")
-        #if os(macOS)
         .navigationSubtitle(session?.displayPath ?? "")
-        #endif
         .overlay {
             if items.isEmpty {
                 if let error = store.transcriptErrors[sessionId] {
@@ -331,6 +339,7 @@ private struct ChatConversationView: View {
                     } actions: {
                         Button("Try Again") { store.open(sessionId) }
                             .buttonStyle(.glassProminent)
+                            .glassHover()
                     }
                 } else if store.loadingTranscripts.contains(sessionId) {
                     HappierSpinner(size: HappierSpinner.hero)
@@ -368,12 +377,21 @@ private struct ChatConversationView: View {
                     .transition(.opacity)
             }
         }
-        .environment(\.beginMessageSelection) { id in withAnimation(.smooth) { selected = [id] } }
+        .environment(\.beginMessageSelection) { id in
+            AppHaptics.selection()
+            withAnimation(.smooth) { selected = [id] }
+        }
         .environment(\.editInComposer) { text in appendToDraft(text) }
+        // Your bubbles in the project folder's color, when it has one.
+        .environment(\.userBubbleColor, store.folderColor(of: session)?.deep ?? .userBubble)
         .environment(\.textSelectingId, textSelectingId)
-        .environment(\.beginTextSelection) { id in withAnimation(.smooth(duration: 0.2)) { textSelectingId = id } }
+        .environment(\.beginTextSelection) { id in
+            AppHaptics.light()
+            withAnimation(.smooth(duration: 0.2)) { textSelectingId = id }
+        }
         .environment(\.reportTextSelectionFrame) { frame in textSelectingFrame = frame }
         .environment(\.replyDragStarted) { text in draggedReply = text }
+        .modifier(SessionFilePreview(sessionId: sessionId))
         .onAppear {
             store.open(sessionId)
             // What you were typing here before switching away, synced or not.
@@ -433,6 +451,7 @@ private struct ChatConversationView: View {
         // Row taps toggle selection only in selection mode; otherwise the bubble's own controls win.
         .gesture(TapGesture().onEnded {
             guard case .item(let item) = row, MessageSelection.isSelectable(item) else { return }
+            if selected != nil { AppHaptics.selection() }
             if self.selected?.contains(item.id) == true { self.selected?.remove(item.id) } else { self.selected?.insert(item.id) }
         }, including: selected == nil ? .subviews : .all)
         .padding(.top, previous.map { Side($0) == Side(row) ? 0 : 8 } ?? 0)
@@ -573,19 +592,27 @@ private struct SessionToolbar: ViewModifier {
     @Environment(HappierStore.self) private var store
     @State private var showInfo = false
     @State private var renaming: Session?
+    @State private var showBrowser = false
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(BrowserModel.self) private var browser
 
     func body(content: Content) -> some View {
         content
             .toolbar {
-                #if os(iOS)
-                ToolbarItem(placement: .principal) { SessionToolbarTitle(sessionId: sessionId) }
-                #endif
                 #if os(macOS)
                 ToolbarItem(placement: .primaryAction) {
                     Button("Search Here", systemImage: "magnifyingglass") { startFinding() }
                         .keyboardShortcut("f", modifiers: .command)
                 }
                 #endif
+                // Once the agent has used the browser, its tab is one tap away (✨ while it works).
+                if browser.hasTabs(for: sessionId) {
+                    ToolbarItem(placement: .primaryAction) {
+                        SessionBrowserButton(sessionId: sessionId) { openBrowser() }
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId) }
                 SessionUsageToolbar(sessionId: sessionId)
                 ToolbarItem(placement: .primaryAction) {
                     SessionDetailsMenu(details: details, perform: perform).equatable()
@@ -598,6 +625,9 @@ private struct SessionToolbar: ViewModifier {
                     .frame(minWidth: 480, minHeight: 520)
                     #endif
             }
+            .sheet(isPresented: $showBrowser) {
+                BrowserView(inSheet: true)
+            }
             .sheet(isPresented: $showInfo) {
                 SessionInfoView(sessionId: sessionId)
                     #if os(macOS)
@@ -607,40 +637,70 @@ private struct SessionToolbar: ViewModifier {
     }
 
     private func startFinding() {
+        AppHaptics.light()
         withAnimation(.smooth(duration: 0.2)) { finding = true }
+    }
+
+    /// The browser on this session's tab: its own window on the Mac and iPad, a sheet on the iPhone.
+    private func openBrowser() {
+        AppHaptics.light()
+        browser.showTab(for: sessionId)
+        if supportsMultipleWindows {
+            openWindow(id: BrowserWindow.id, value: BrowserWindow.value)
+        } else {
+            showBrowser = true
+        }
     }
 
     private func perform(_ action: SessionDetailsMenu.Action) {
         switch action {
-        case .info: showInfo = true
+        case .info: AppHaptics.light(); showInfo = true
         case .search: startFinding()
-        case .background: showActivity = true
-        case .rename: renaming = store.sessions[sessionId]
-        case .moveToTopLevel: Task { await store.nest(sessionId, under: nil) }
+        case .background: AppHaptics.light(); showActivity = true
+        case .openInWindow: openWindow(id: SessionWindow.id, value: sessionId)
+        case .browser: openBrowser()
+        case .folderColor(let color):
+            AppHaptics.light()
+            if let path = store.sessions[sessionId]?.path { store.setFolderColor(color, forPath: path) }
+        case .rename: AppHaptics.light(); renaming = store.sessions[sessionId]
+        case .moveToTopLevel:
+            AppHaptics.confirm()
+            Task { await store.nest(sessionId, under: nil) }
         case .jump(let itemId):
+            AppHaptics.selection()
             pinnedToEnd = false
             withAnimation(.smooth) { scrollPosition.scrollTo(id: itemId, anchor: .center) }
-        case .stopAgent: Task { await store.abort(sessionId) }
-        case .stopSession: store.requestStop(sessionId)
-        case .archive: Task { await store.archive(sessionId) }
-        case .unarchive: Task { await store.unarchive(sessionId) }
+        case .stopAgent:
+            AppHaptics.warning()
+            Task { await store.abort(sessionId) }
+        case .stopSession: AppHaptics.warning(); store.requestStop(sessionId)
+        case .archive:
+            AppHaptics.confirm()
+            Task { await store.archive(sessionId) }
+        case .unarchive:
+            AppHaptics.confirm()
+            Task { await store.unarchive(sessionId) }
+        case .delete:
+            AppHaptics.warning()
+            if let session = store.sessions[sessionId] { store.requestDelete(session) }
         }
     }
 }
 
-private struct SessionToolbarTitle: View {
+/// The session's tab in the integrated browser; it pulses while the agent is using it.
+private struct SessionBrowserButton: View {
     let sessionId: String
-    @Environment(HappierStore.self) private var store
+    let action: () -> Void
+    @Environment(BrowserModel.self) private var browser
 
     var body: some View {
-        if let session = store.sessions[sessionId] {
-            VStack(spacing: 1) {
-                Text(session.title).font(.headline).lineLimit(1)
-                if let folder = session.displayPath {
-                    Text(folder).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.head)
-                }
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let working = browser.tabs.contains { $0.sessionId == sessionId && ($0.agentActiveUntil ?? .distantPast) > context.date }
+            Button(action: action) {
+                Label("Browser", systemImage: "safari")
+                    .symbolEffect(.pulse, isActive: working)
             }
+            .help(working ? "The agent is using the browser" : "Browser")
         }
     }
 }
@@ -671,7 +731,7 @@ private enum Side: Equatable {
     case user, agent, center
     init(_ row: ChatRow) {
         switch row {
-        case .item(.userText): self = .user
+        case .item(.userText(let message)): self = message.sessionNotice == nil && message.sessionMessageOrigin == nil ? .user : .center
         case .item(.agentText), .item(.toolCall), .work, .tools: self = .agent
         case .item(.event): self = .center
         }
@@ -708,8 +768,9 @@ private struct SelectionBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button("Cancel", action: onCancel)
+            Button("Cancel", role: .cancel, action: onCancel)
                 .buttonStyle(.glass)
+                .glassHover()
             Spacer(minLength: 0)
             Text(count == 1 ? String(localized: "1 selected") : String(localized: "\(count) selected"))
                 .font(.subheadline.weight(.medium))
@@ -725,9 +786,11 @@ private struct SelectionBar: View {
             }
             .menuStyle(.button)
             .buttonStyle(.glass)
+            .glassHover()
             .buttonBorderShape(.circle)
             Button("Copy", action: onCopy)
                 .buttonStyle(.glassProminent)
+                .glassHover()
                 .disabled(count == 0)
         }
         .padding(.horizontal, 14)
@@ -777,16 +840,17 @@ private struct FindBar: View {
                     .disabled(index.map { $0 >= matches.count - 1 } ?? true)
                     .accessibilityLabel(Text("Newer match"))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .glassEffect(.regular.interactive(), in: Capsule())
-            Button(action: onDone) {
+            Button { AppHaptics.light(); onDone() } label: {
                 Image(systemName: "xmark")
                     .font(.body.weight(.medium))
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.glass)
+            .glassHover()
             .buttonBorderShape(.circle)
             .accessibilityLabel(Text("Close Search"))
         }
@@ -810,6 +874,7 @@ private struct FindBar: View {
     private func step(_ delta: Int) {
         guard !matches.isEmpty else { return }
         let next = min(max((index ?? matches.count - 1) + delta, 0), matches.count - 1)
+        if currentId != matches[next] { AppHaptics.selection() }
         currentId = matches[next]
     }
 }
@@ -832,19 +897,28 @@ private struct SessionDetailsMenu: View, Equatable {
         let archived: Bool
         let loaded: Bool
         let nested: Bool
+        let deletable: Bool
+        let folderPath: String?
+        let folderColor: AccountSettings.FolderColor?
     }
 
     enum Action {
-        case info, search, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive
+        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete
+        case folderColor(AccountSettings.FolderColor?)
     }
 
     let details: Details
     let perform: (Action) -> Void
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.inSessionWindow) private var inSessionWindow
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.details == rhs.details }
 
     var body: some View {
         Menu {
+            if supportsMultipleWindows && !inSessionWindow {
+                Button("Open in New Window", systemImage: "macwindow.badge.plus") { perform(.openInWindow) }
+            }
             // Find your way around the conversation.
             Section {
                 Button("Search Here", systemImage: "magnifyingglass") { perform(.search) }
@@ -858,12 +932,17 @@ private struct SessionDetailsMenu: View, Equatable {
                 if details.hasBackground {
                     Button("Subagents & Tasks", systemImage: "square.stack.3d.down.right") { perform(.background) }
                 }
+                // This session's tab in the integrated browser, where its agent browses.
+                Button("Browser", systemImage: "safari") { perform(.browser) }
             }
             if details.loaded {
                 // The session itself: its name and the ids other tools know it by.
                 Section {
                     Button("Session Info…", systemImage: "info.circle") { perform(.info) }
                     Button("Rename…", systemImage: "pencil") { perform(.rename) }
+                    if let path = details.folderPath {
+                        FolderColorMenu(path: path, current: details.folderColor) { perform(.folderColor($0)) }
+                    }
                     if details.nested {
                         Button { perform(.moveToTopLevel) } label: {
                             Label("Detach from Parent", image: "DetachFromParent")
@@ -882,6 +961,9 @@ private struct SessionDetailsMenu: View, Equatable {
                         Button("Unarchive", systemImage: "tray.and.arrow.up") { perform(.unarchive) }
                     } else {
                         Button("Archive", systemImage: "archivebox") { perform(.archive) }
+                    }
+                    if details.deletable {
+                        Button("Delete…", systemImage: "trash", role: .destructive) { perform(.delete) }
                     }
                 }
             }

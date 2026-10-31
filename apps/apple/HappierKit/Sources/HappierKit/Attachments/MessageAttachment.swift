@@ -70,6 +70,10 @@ public struct AttachmentThumbnail: Equatable, Sendable {
     }
 
     private static func video(at url: URL) async -> AttachmentThumbnail? {
+        // The watch never attaches videos; it has no frame extraction either.
+        #if os(watchOS)
+        return nil
+        #else
         let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
@@ -77,6 +81,7 @@ public struct AttachmentThumbnail: Equatable, Sendable {
         guard let frame = try? await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image else { return nil }
         let duration = (try? await asset.load(.duration)).map(CMTimeGetSeconds)
         return encode(frame, durationSeconds: duration)
+        #endif
     }
 
     private static func encode(_ image: CGImage, durationSeconds: Double?) -> AttachmentThumbnail? {

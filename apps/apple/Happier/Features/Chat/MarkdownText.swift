@@ -22,11 +22,9 @@ struct MarkdownText: View {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .prose(let text):
-                    Text(Self.attributed(text))
-                        .textSelectable(selectable)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .code(let code):
-                    CodeBlockView(code: code)
+                    ProseView(text: text)
+                case .code(let code, let language):
+                    CodeBlockView(code: code, language: language)
                 case .table(let table):
                     MarkdownTableView(table: table)
                 case .quote(let inner):
@@ -208,21 +206,114 @@ private struct MarkdownTableView: View {
     }
 }
 
-/// A fenced code block: scrolls sideways when wide, with a copy button in its corner that turns
-/// into a check for a moment once copied.
+/// Prose as it reads: headings at their size, list and task items with their marker and
+/// indent, rules as a line, and runs of plain lines as one styled text (`MarkdownProse`).
+private struct ProseView: View {
+    let text: String
+    @Environment(\.messageTextSelectable) private var selectable
+
+    enum Block {
+        case text(String)
+        case line(MarkdownProse.Line)
+    }
+
+    var body: some View {
+        let blocks = Self.blocks(text)
+        if blocks.count == 1, case .text(let text) = blocks[0] {
+            plain(text)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .text(let text): plain(text)
+                    case .line(let line): self.line(line)
+                    }
+                }
+            }
+        }
+    }
+
+    private func plain(_ text: String) -> some View {
+        Text(MarkdownText.attributed(text))
+            .textSelectable(selectable)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func line(_ line: MarkdownProse.Line) -> some View {
+        switch line {
+        case .heading(let level, let text):
+            Text(MarkdownText.attributed(text))
+                .font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
+                .textSelectable(selectable)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, level <= 2 ? 4 : 2)
+                .accessibilityAddTraits(.isHeader)
+        case .bullet(let indent, let marker, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(marker).monospacedDigit().foregroundStyle(.secondary)
+                plain(text)
+            }
+            .padding(.leading, CGFloat(indent) * 16)
+        case .task(let indent, let done, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: done ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(done ? Color.green : Color.secondary)
+                    .accessibilityLabel(done ? Text("Done") : Text("Not done"))
+                plain(text).foregroundStyle(done ? .secondary : .primary)
+            }
+            .padding(.leading, CGFloat(indent) * 16)
+        case .rule:
+            Divider().padding(.vertical, 4)
+        case .text(let text):
+            plain(text)
+        }
+    }
+
+    /// Runs of plain lines stay one text (selection and line spacing as before); the rest stand alone.
+    static func blocks(_ text: String) -> [Block] {
+        blockCache.value(for: text) { text in
+            var blocks: [Block] = []
+            var run: [String] = []
+            func flush() {
+                let joined = run.joined(separator: "\n").trimmingCharacters(in: .newlines)
+                if !joined.isEmpty { blocks.append(.text(joined)) }
+                run = []
+            }
+            for line in MarkdownProse.lines(text) {
+                if case .text(let plain) = line { run.append(plain) } else { flush(); blocks.append(.line(line)) }
+            }
+            flush()
+            return blocks
+        }
+    }
+
+    private static let blockCache = TextCache<[Block]>()
+}
+
+/// A fenced code block: highlighted for its language (a diff in its colours), scrolling sideways
+/// when wide, with a copy button in its corner that turns into a check for a moment once copied.
 private struct CodeBlockView: View {
     let code: String
+    var language: String? = nil
     @Environment(\.messageTextSelectable) private var selectable
     @State private var copied = false
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            Text(code)
-                .font(.callout.monospaced())
-                .textSelectable(selectable)
-                .padding(10)
-                // Room for the copy button over the first line.
-                .padding(.trailing, 28)
+            VStack(alignment: .leading, spacing: 4) {
+                if let language {
+                    Text(language)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                Text(Self.highlighted(code, language: language))
+                    .font(.callout.monospaced())
+                    .textSelectable(selectable)
+            }
+            .padding(10)
+            // Room for the copy button over the first line.
+            .padding(.trailing, 28)
         }
         .background(.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(alignment: .topTrailing) {
@@ -242,11 +333,55 @@ private struct CodeBlockView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .focusEffectDisabled()
             .padding(5)
             .sensoryFeedback(.success, trigger: copied) { _, now in now }
             .accessibilityLabel(copied ? Text("Copied") : Text("Copy code"))
         }
+    }
+}
+
+extension CodeBlockView {
+    /// The code with its tokens coloured, remembered per language and text.
+    static func highlighted(_ code: String, language: String?) -> AttributedString {
+        highlightCache.value(for: "\(language ?? "")\u{0}\(code)") { _ in
+            var text = AttributedString(code)
+            switch language?.lowercased() {
+            case "diff", "patch":
+                var offset = 0
+                for line in code.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let color: Color? = line.hasPrefix("+") && !line.hasPrefix("+++") ? .green
+                        : line.hasPrefix("-") && !line.hasPrefix("---") ? .red
+                        : line.hasPrefix("@@") ? .blue : nil
+                    if let color, let range = text.range(offset: offset, length: line.count) { text[range].foregroundColor = color }
+                    offset += line.count + 1
+                }
+            default:
+                for token in SyntaxHighlighter.tokens(code, language: language) {
+                    guard let lower = AttributedString.Index(token.range.lowerBound, within: text),
+                          let upper = AttributedString.Index(token.range.upperBound, within: text) else { continue }
+                    text[lower..<upper].foregroundColor = switch token.kind {
+                    case .keyword: Color.pink
+                    case .string: Color.orange
+                    case .comment: Color.gray
+                    case .number: Color.blue
+                    case .property: Color.teal
+                    }
+                }
+            }
+            return text
+        }
+    }
+
+    private static let highlightCache = TextCache<AttributedString>()
+}
+
+private extension AttributedString {
+    /// The range covering `length` characters from `offset`, when the text has them.
+    func range(offset: Int, length: Int) -> Range<AttributedString.Index>? {
+        guard length > 0, offset + length <= characters.count else { return nil }
+        let start = characters.index(characters.startIndex, offsetBy: offset)
+        return start..<characters.index(start, offsetBy: length)
     }
 }

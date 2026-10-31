@@ -11,8 +11,17 @@ import AppKit
 /// Owns the store so the platform delegate callbacks (APNs token, notification taps) can reach it.
 @MainActor
 final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
+    /// The running app's delegate, for App Intents (Siri, Shortcuts) that run inside the app.
+    private(set) static weak var current: AppDelegate?
     let store = HappierStore()
     lazy var inbox = NotificationInbox(store: store)
+    /// The integrated browser, shared by every window and served to session agents over the relay.
+    lazy var browser: BrowserModel = {
+        let browser = BrowserModel()
+        browser.store = store
+        store.deviceBrowserHost = browser
+        return browser
+    }()
     #if os(iOS)
     private var backgroundUploads: BackgroundUploads?
     #endif
@@ -39,8 +48,10 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
     /// every other session notification, as in Messages.
     private static let categories: Set<UNNotificationCategory> = [
         UNNotificationCategory(identifier: PushNotifications.Category.permission, actions: [
-            UNNotificationAction(identifier: PushNotifications.Action.allow, title: "Allow", options: [.foreground]),
-            UNNotificationAction(identifier: PushNotifications.Action.deny, title: "Deny", options: [.foreground, .destructive]),
+            // Answered in the background, so they work from the lock screen and the Apple Watch
+            // without opening the app; allowing asks for the device to be unlocked first.
+            UNNotificationAction(identifier: PushNotifications.Action.allow, title: "Allow", options: [.authenticationRequired]),
+            UNNotificationAction(identifier: PushNotifications.Action.deny, title: "Deny", options: [.destructive]),
         ], intentIdentifiers: []),
         UNNotificationCategory(identifier: PushNotifications.Category.userAction, actions: [
             UNNotificationAction(identifier: PushNotifications.Action.open, title: "Answer", options: [.foreground]),
@@ -81,7 +92,12 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
             try? await Task.sleep(for: .seconds(1))
             await inbox.refresh()
         }
-        return [.banner, .list, .sound]
+        // Settings → Notifications → While Happier Is Open (`foregroundBehavior`).
+        switch store.accountSettings?.notifications.foregroundBehavior ?? .full {
+        case .full: return [.banner, .list, .sound]
+        case .silent: return [.list]
+        case .off: return []
+        }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
@@ -92,9 +108,27 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
         let handled = await store.handle(tap)
         // Not awaited: telling the system we're done shouldn't wait on the network.
         Task { await inbox.refresh() }
+        if let permission = tap.permission {
+            if !handled { await Self.reportUnansweredPermission(permission, to: content) }
+            await finishBackgroundReply()
+            return
+        }
         guard let reply = tap.reply else { return }
         if !handled { await Self.reportUnsentReply(reply, to: content) }
         await finishBackgroundReply()
+    }
+
+    /// An Allow or Deny that couldn't reach the agent comes back as the request, to answer again.
+    private static func reportUnansweredPermission(_ permission: PushTap.Permission, to original: UNNotificationContent) async {
+        let content = UNMutableNotificationContent()
+        content.title = original.title
+        content.body = permission.allow
+            ? String(localized: "Couldn't allow it. \(original.body)")
+            : String(localized: "Couldn't deny it. \(original.body)")
+        content.userInfo = original.userInfo
+        content.categoryIdentifier = PushNotifications.Category.permission
+        content.sound = .default
+        try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     /// A reply that didn't go out comes back as a notification you can answer again.
@@ -127,8 +161,11 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
 #if os(iOS)
 extension AppDelegate: UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        Self.current = self
         UNUserNotificationCenter.current().delegate = self
         backgroundUploads = BackgroundUploads(store: store)
+        WatchBridge.shared.store = store
+        WatchBridge.shared.activate()
         return true
     }
 
@@ -143,6 +180,7 @@ extension AppDelegate: UIApplicationDelegate {
 #else
 extension AppDelegate: NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
+        Self.current = self
         UNUserNotificationCenter.current().delegate = self
     }
 

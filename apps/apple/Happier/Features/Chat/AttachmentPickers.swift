@@ -1,6 +1,9 @@
 import AVFoundation
 import HappierKit
 import PhotosUI
+#if os(iOS)
+import QuickLook
+#endif
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -30,8 +33,11 @@ enum AttachmentLoader {
     static func add(_ drafts: [AttachmentDraft], to attachments: Binding<[AttachmentDraft]>, store: HappierStore) {
         let screened = HappierStore.screenAttachments(drafts)
         if !screened.tooLarge.isEmpty {
+            AppHaptics.error()
             let limit = ByteCountFormatter.string(fromByteCount: Int64(HappierStore.maxAttachmentBytes), countStyle: .file)
             store.lastError = String(localized: "\(screened.tooLarge.joined(separator: ", ")) is larger than \(limit).")
+        } else if !screened.accepted.isEmpty {
+            AppHaptics.success()
         }
         withAnimation(.smooth) { attachments.wrappedValue += screened.accepted }
     }
@@ -138,14 +144,22 @@ private struct PickedMovie: Transferable {
 /// Picked attachments inside the composer card, removable before sending.
 struct AttachmentStrip: View {
     @Binding var attachments: [AttachmentDraft]
+    #if os(macOS)
+    @State private var lookingAt: URL?
+    #endif
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(attachments) { draft in
-                    AttachmentThumbnail(draft: draft)
+                    // Tap to see it large; on iPhone and iPad an image can be marked up there
+                    // (lines, arrows, text) and the marked-up one is what gets sent.
+                    Button { open(draft) } label: { AttachmentThumbnail(draft: draft) }
+                        .buttonStyle(.pressable)
+                        .accessibilityHint(Text("Opens it large"))
                         .overlay(alignment: .topTrailing) {
                             Button {
+                                AppHaptics.light()
                                 withAnimation(.smooth) { attachments.removeAll { $0.id == draft.id } }
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
@@ -153,7 +167,7 @@ struct AttachmentStrip: View {
                                     .foregroundStyle(.white, .black.opacity(0.6))
                                     .font(.title3)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.pressable)
                             .offset(x: 6, y: -6)
                             .accessibilityLabel("Remove \(draft.name)")
                         }
@@ -163,8 +177,100 @@ struct AttachmentStrip: View {
             .padding(.trailing, 6)
         }
         .scrollClipDisabled()
+        #if os(macOS)
+        .quickLookPreview($lookingAt)
+        #endif
+    }
+
+    private func open(_ draft: AttachmentDraft) {
+        AppHaptics.light()
+        guard let file = AttachmentMarkup.temporaryFile(for: draft) else { return }
+        #if os(iOS)
+        let id = draft.id
+        AttachmentMarkup.shared.present(file, editable: AttachmentMarkup.canMarkUp(draft)) { data in
+            guard let index = attachments.firstIndex(where: { $0.id == id }) else { return }
+            AttachmentPreviews.forget(draft.name)
+            attachments[index] = AttachmentDraft(name: draft.name, mimeType: draft.mimeType, data: data)
+        }
+        #else
+        lookingAt = file
+        #endif
     }
 }
+
+/// Opens an attachment not sent yet in the system's viewer; on iPhone and iPad an image or PDF
+/// opens with Markup, and what's drawn replaces the attachment.
+@MainActor
+final class AttachmentMarkup: NSObject {
+    static let shared = AttachmentMarkup()
+
+    static func canMarkUp(_ draft: AttachmentDraft) -> Bool {
+        guard let mime = draft.mimeType else { return false }
+        return mime.hasPrefix("image/") || mime == "application/pdf"
+    }
+
+    /// The draft as a file with its name (and an extension the viewer recognizes).
+    static func temporaryFile(for draft: AttachmentDraft) -> URL? {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("attachment-\(UUID().uuidString)", isDirectory: true)
+        var name = draft.name
+        if (name as NSString).pathExtension.isEmpty,
+           let ext = draft.mimeType.flatMap({ UTType(mimeType: $0)?.preferredFilenameExtension }) {
+            name += "." + ext
+        }
+        let file = folder.appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try draft.data.write(to: file)
+            return file
+        } catch {
+            return nil
+        }
+    }
+
+    #if os(iOS)
+    private var file: URL?
+    private var editable = false
+    private var onEdit: ((Data) -> Void)?
+
+    func present(_ file: URL, editable: Bool, onEdit: @escaping (Data) -> Void) {
+        self.file = file
+        self.editable = editable
+        self.onEdit = onEdit
+        let controller = QLPreviewController()
+        controller.dataSource = self
+        controller.delegate = self
+        Self.topController()?.present(controller, animated: true)
+    }
+
+    private static func topController() -> UIViewController? {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+        return top
+    }
+    #endif
+}
+
+#if os(iOS)
+extension AttachmentMarkup: QLPreviewControllerDataSource, QLPreviewControllerDelegate {
+    nonisolated func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+
+    nonisolated func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem {
+        MainActor.assumeIsolated { (file ?? URL(fileURLWithPath: "/dev/null")) as NSURL }
+    }
+
+    nonisolated func previewController(_ controller: QLPreviewController, editingModeFor previewItem: any QLPreviewItem) -> QLPreviewItemEditingMode {
+        MainActor.assumeIsolated { editable ? .updateContents : .disabled }
+    }
+
+    nonisolated func previewController(_ controller: QLPreviewController, didUpdateContentsOf previewItem: any QLPreviewItem) {
+        guard let url = previewItem.previewItemURL, let data = try? Data(contentsOf: url) else { return }
+        Task { @MainActor in self.onEdit?(data) }
+    }
+}
+#endif
 
 /// Preview frame for a picked attachment: the image itself, or a frame of the video, and a copy
 /// of the file for Quick Look.
@@ -181,6 +287,13 @@ enum AttachmentPreviews {
     private static var cache: [String: AttachmentPreview] = [:]
 
     static func cached(_ name: String) -> AttachmentPreview? { cache[name] }
+
+    /// The attachment changed (marked up): its preview and kept copy are made again from the new image.
+    static func forget(_ name: String) {
+        cache[name] = nil
+        let kept = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Happier/Attachments").appending(path: name)
+        try? FileManager.default.removeItem(at: kept)
+    }
 
     static func preview(for draft: AttachmentDraft) async -> AttachmentPreview? {
         if let hit = cache[draft.name] { return hit }
@@ -294,5 +407,64 @@ private struct AttachmentThumbnail: View {
             }
         }
         .task(id: draft.id) { preview = await AttachmentPreviews.preview(for: draft) }
+    }
+}
+
+/// The pickers behind the ⊕ menu (photos and videos, files, the camera), the same for every
+/// composer: a live conversation's and a new session's.
+struct AttachmentSources: ViewModifier {
+    @Binding var showPhotos: Bool
+    @Binding var showFiles: Bool
+    @Binding var showCamera: Bool
+    @Binding var showCameraPermission: Bool
+    let onAdd: ([AttachmentDraft]) -> Void
+    @Environment(HappierStore.self) private var store
+    @Environment(\.openURL) private var openURL
+    @State private var photoItems: [PhotosPickerItem] = []
+
+    /// Asks for the camera, opening it when allowed and explaining how to allow it when not.
+    static func openCamera(show: Binding<Bool>, denied: Binding<Bool>) {
+        #if os(iOS)
+        Task {
+            guard CameraPicker.isAvailable else { return }
+            if await CameraPicker.requestAccess() { show.wrappedValue = true } else { denied.wrappedValue = true }
+        }
+        #endif
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
+            .onChange(of: photoItems) { _, items in
+                guard !items.isEmpty else { return }
+                photoItems = []
+                Task { onAdd(await AttachmentLoader.drafts(from: items)) }
+            }
+            .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                onAdd(((try? result.get()) ?? []).compactMap(AttachmentLoader.file(at:)))
+            }
+            #if os(iOS)
+            .fullScreenCover(isPresented: $showCamera) {
+                CameraPicker { outcome in
+                    showCamera = false
+                    switch outcome {
+                    case .photo(let data): onAdd([AttachmentLoader.photo(data)])
+                    case .cancelled: break
+                    case .failed:
+                        AppHaptics.error()
+                        store.lastError = String(localized: "The photo couldn't be captured. Please try again.")
+                    }
+                }
+                .ignoresSafeArea()
+            }
+            .alert("Camera Access", isPresented: $showCameraPermission) {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Allow camera access in Settings to take a photo and attach it to your message.")
+            }
+            #endif
     }
 }

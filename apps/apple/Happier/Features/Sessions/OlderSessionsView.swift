@@ -67,7 +67,8 @@ struct OlderSessionsView: View {
                 let inactiveTree = SessionSidebar.groups(store.sessionList, pinned: store.pinnedSessionIds) { store.listDate($0) }.inactive
                 let filtering = unreadOnly || !query.isEmpty
                 let inactiveMatches = filtering ? Self.flatten(inactiveTree).filter(shows) : nil
-                let archived = filtering ? archive.items.filter(shows) : archive.items
+                let kept = archive.items.filter { !store.deletedSessionIds.contains($0.id) }
+                let archived = filtering ? kept.filter(shows) : kept
                 List {
                     Section {
                         anchor(.inactive)
@@ -153,7 +154,10 @@ struct OlderSessionsView: View {
     }
 
     private func chip(_ title: LocalizedStringKey, count: Int, loading: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            AppHaptics.selection()
+            action()
+        } label: {
             HStack(spacing: 6) {
                 Text(title)
                 if loading { HappierSpinner(size: HappierSpinner.mini) }
@@ -166,6 +170,7 @@ struct OlderSessionsView: View {
             .animation(.smooth, value: count)
         }
         .buttonStyle(.glass)
+        .glassHover()
     }
 
     private func inactiveRow(_ session: Session) -> some View {
@@ -181,6 +186,7 @@ struct OlderSessionsView: View {
     /// The sidebar's row, with its breathing room, opening the session.
     private func openButton(_ session: Session) -> some View {
         Button {
+            AppHaptics.selection()
             dismiss()
             onOpen(session)
         } label: {
@@ -188,7 +194,7 @@ struct OlderSessionsView: View {
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func placeholder(_ text: LocalizedStringKey) -> some View {
@@ -207,12 +213,29 @@ struct OlderSessionsView: View {
     }
 }
 
+/// "Delete…" for the user's own stopped sessions (`ui.session.delete`); the store asks first.
+struct DeleteSessionButton: View {
+    let session: Session
+    let store: HappierStore
+
+    var body: some View {
+        if session.canDelete {
+            Divider()
+            Button("Delete…", systemImage: "trash", role: .destructive) {
+                AppHaptics.warning()
+                store.requestDelete(session)
+            }
+        }
+    }
+}
+
 extension View {
-    /// Unarchive by swipe or long press.
+    /// Unarchive by swipe or long press; delete from the long press.
     func archivedActions(_ session: Session, store: HappierStore, onUnarchive: @escaping () -> Void) -> some View {
         self
             .swipeActions(edge: .leading) {
                 Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                    AppHaptics.confirm()
                     onUnarchive()
                     Task { await store.unarchive(session.id) }
                 }
@@ -220,9 +243,11 @@ extension View {
             }
             .contextMenu {
                 Button("Unarchive", systemImage: "tray.and.arrow.up") {
+                    AppHaptics.confirm()
                     onUnarchive()
                     Task { await store.unarchive(session.id) }
                 }
+                DeleteSessionButton(session: session, store: store)
             }
     }
 }
@@ -234,6 +259,7 @@ struct UnreadFilterButton: View {
 
     var body: some View {
         Button {
+            AppHaptics.selection()
             withAnimation(.smooth(duration: 0.2)) { isOn.toggle() }
         } label: {
             Label("Unread", systemImage: isOn ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")

@@ -23,7 +23,7 @@ public final class HappierStore {
 
     public static let defaultServer = URL(string: "https://happier.nomada.cloud")!
 
-    public private(set) var phase: Phase = .launching
+    public internal(set) var phase: Phase = .launching
     public private(set) var connection: Connection = .offline
     public private(set) var server: URL
     /// Observed per session: activity in one session doesn't redraw views showing another.
@@ -55,6 +55,62 @@ public final class HappierStore {
     public var draftSeeds: [String: String] = [:]
     /// A session the UI should navigate to (e.g. a freshly created fork).
     public var openRequest: String?
+    /// An incoming link survives the signed-out screen and account teardown during relay switch.
+    public private(set) var pendingSessionLink: SessionLink?
+    public private(set) var sessionLinkConfirmation: SessionLink?
+    @ObservationIgnored private var sessionLinkTask: Task<Void, Never>?
+    public var isOpeningSessionLink: Bool { pendingSessionLink != nil }
+
+    /// One receiver for both the HTTPS landing URL and the native URL scheme.
+    @discardableResult
+    public func handleSessionLink(_ url: URL) -> Bool {
+        guard let link = SessionLink(url: url) else {
+            lastError = String(localized: "This Happier link is invalid or unsupported.")
+            return false
+        }
+        cancelSessionLink()
+        pendingSessionLink = link
+        let target = knownServers.first { RelayList.canonical($0) == RelayList.canonical(link.server) } ?? link.server
+        if RelayList.canonical(target) != RelayList.canonical(server), !hasCredentials(for: target) {
+            sessionLinkConfirmation = link
+        } else {
+            beginSessionLink()
+        }
+        return true
+    }
+
+    public func confirmSessionLink() {
+        guard sessionLinkConfirmation != nil else { return }
+        sessionLinkConfirmation = nil
+        beginSessionLink()
+    }
+
+    public func cancelSessionLink() {
+        sessionLinkTask?.cancel()
+        sessionLinkTask = nil
+        pendingSessionLink = nil
+        sessionLinkConfirmation = nil
+    }
+
+    private func beginSessionLink() {
+        guard let link = pendingSessionLink else { return }
+        let target = knownServers.first { RelayList.canonical($0) == RelayList.canonical(link.server) } ?? link.server
+        switchServer(to: target)
+        if phase == .launching { restore() }
+        resumeSessionLink()
+    }
+
+    private func resumeSessionLink() {
+        guard phase == .ready, sessionLinkTask == nil, sessionLinkConfirmation == nil,
+              let link = pendingSessionLink, RelayList.canonical(server) == RelayList.canonical(link.server) else { return }
+        sessionLinkTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await self.openRelatedSession(link.sessionId)
+            guard !Task.isCancelled, self.pendingSessionLink == link else { return }
+            self.pendingSessionLink = nil
+            self.sessionLinkTask = nil
+        }
+    }
     /// Server pending queue per open session (queued, blocked and discarded rows).
     public private(set) var pendingQueues: [String: [PendingMessage]] = [:]
     /// Last first-page load failure per session (cleared on retry).
@@ -68,7 +124,7 @@ public final class HappierStore {
     @ObservationIgnored private var api: HappierAPI?
     @ObservationIgnored private var socket: SocketIOClient?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
-    @ObservationIgnored private var openSessionIds: Set<String> = []
+    @ObservationIgnored private var openSessionIds = OpenSessions()
     @ObservationIgnored private var loadTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingFetches: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingFetchDirty: Set<String> = []
@@ -107,6 +163,7 @@ public final class HappierStore {
     }
 
     public func signIn(_ credentials: Credentials, server: URL) throws {
+        if let link = pendingSessionLink, RelayList.canonical(link.server) != RelayList.canonical(server) { cancelSessionLink() }
         self.server = server
         UserDefaults.standard.set(server, forKey: "happier.server")
         try credentialStore.save(credentials, server: server)
@@ -115,6 +172,7 @@ public final class HappierStore {
     }
 
     public func signOut() {
+        cancelSessionLink()
         if let api, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
             UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
             Task { try? await api.deletePushToken(token) }
@@ -123,6 +181,64 @@ public final class HappierStore {
         let snapshots = self.snapshots
         Task { await snapshots?.clear() }
         disconnectAccount()
+    }
+
+    // MARK: - Account settings (shared with the React Native app and read by the CLI)
+
+    /// Nil until loaded, or while this device can't read them (`accountSettingsError` says why).
+    public private(set) var accountSettings: AccountSettings?
+    public private(set) var accountSettingsError: String?
+    @ObservationIgnored private var accountSettingsVersion = 0
+    @ObservationIgnored private var accountSettingsArePlain = false
+
+    public func refreshAccountSettings() async {
+        guard let api else { return }
+        do {
+            let stored = try await api.accountSettings()
+            var plain = stored.content?["t"]?.stringValue == "plain"
+            if stored.content == nil { plain = try await !api.accountIsEncrypted() }
+            guard let values = AccountSettingsContent.open(stored.content, keys: keys) else {
+                accountSettings = nil
+                accountSettingsError = String(localized: "This device can't read your account settings.")
+                return
+            }
+            accountSettingsArePlain = plain
+            accountSettingsVersion = stored.version
+            accountSettings = AccountSettings(values: values)
+            accountSettingsError = nil
+        } catch {
+            accountSettingsError = UserFacingError.message(for: error)
+        }
+    }
+
+    /// Writes the keys `change` returns over the latest settings. Shown at once, and retried on
+    /// top of another device's write (`syncSettings.ts`); put back if it can't be saved.
+    public func updateAccountSettings(_ change: (AccountSettings) -> [String: JSONValue]) async {
+        guard let api, var current = accountSettings else { return }
+        let shown = current
+        accountSettings = current.merging(change(current))
+        do {
+            for _ in 0..<3 {
+                let next = current.merging(change(current))
+                let content = try AccountSettingsContent.seal(next.values, keys: keys, plain: accountSettingsArePlain)
+                switch try await api.writeAccountSettings(content, expectedVersion: accountSettingsVersion) {
+                case .saved(let version):
+                    accountSettingsVersion = version
+                    accountSettings = next
+                    return
+                case .conflict(let version, let content):
+                    guard let values = AccountSettingsContent.open(content, keys: keys) else {
+                        throw RPCError(message: String(localized: "This device can't read your account settings."), code: nil)
+                    }
+                    accountSettingsVersion = version
+                    current = AccountSettings(values: values)
+                }
+            }
+            throw RPCError(message: String(localized: "Your settings changed on another device at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            accountSettings = shown
+            report(error)
+        }
     }
 
     // MARK: - Relays
@@ -144,6 +260,7 @@ public final class HappierStore {
     /// Moves to another relay without signing out of this one: its saved sign-in is used when
     /// there is one, otherwise the sign-in screen opens on that relay.
     public func switchServer(to url: URL) {
+        if let link = pendingSessionLink, RelayList.canonical(link.server) != RelayList.canonical(url) { cancelSessionLink() }
         guard RelayList.canonical(url) != RelayList.canonical(server) else { return }
         let saved = try? credentialStore.load(server: url)
         if phase == .ready { disconnectAccount() }
@@ -191,8 +308,13 @@ public final class HappierStore {
         draftSeeds = [:]
         openRequest = nil
         pinnedSessionIds = []
+        deleteRequest = nil
+        deletedSessionIds = []
+        accountSettings = nil
+        accountSettingsError = nil
+        accountSettingsVersion = 0
         machines = []
-        openSessionIds = []
+        openSessionIds = OpenSessions()
         draftStates.values.forEach { $0.upload?.cancel() }
         draftStates = [:]
         pendingDraftsKey = nil
@@ -209,6 +331,23 @@ public final class HappierStore {
         phase = .signedOut
     }
 
+    /// Signs in another device that shows the "Link with Another Device" QR: after checking with the
+    /// relay that this device's key is still the Account's, its credentials go sealed for that device.
+    public func approveDeviceLink(_ link: String) async throws {
+        guard let request = AccountLinkRequest(link) else {
+            throw RPCError(message: String(localized: "That isn't a Happier link code. Scan the code on the device you want to sign in."), code: "invalid_link")
+        }
+        guard let api, let credentials, let accountId = credentials.accountId else {
+            throw RPCError(message: String(localized: "Sign in on this device first."), code: "signed_out")
+        }
+        let encrypted = try await api.accountIsEncrypted()
+        if encrypted {
+            guard let profile = try await api.accountLinkProfile(accountId: accountId) else { throw AccountKeyProvisioning.Unavailable() }
+            try AccountKeyProvisioning.verify(encrypted: true, account: profile, credentials: credentials)
+        }
+        try await api.approveAccountLink(publicKey: request.publicKey, response: try credentials.accountLinkResponse(for: request))
+    }
+
     /// The 32-byte recovery secret, when this device holds it (for showing the backup key).
     public var recoverySecret: Data? { keys?.masterSecret }
     public var accountId: String? { credentials?.accountId }
@@ -221,6 +360,7 @@ public final class HappierStore {
         }
         api = HappierAPI(server: server, token: credentials.token)
         Task { await registerPushToken() }
+        Task { await refreshAccountSettings() }
         let scope = "\(server.host() ?? server.absoluteString)/\(credentials.accountId ?? "account")"
         pins = MessagePins(scope: scope)
         pendingDraftsKey = "happier.pendingDrafts.\(scope)"
@@ -230,6 +370,7 @@ public final class HappierStore {
         phase = .ready
         syncTask?.cancel()
         syncTask = Task { await runSync() }
+        resumeSessionLink()
     }
 
     // MARK: - Session list
@@ -294,7 +435,9 @@ public final class HappierStore {
         let keys = self.keys
         let decoded = await Task.detached(priority: .userInitiated) { Self.decodeSessions(snapshot.rows, keys: keys) }.value
         guard !hasLoadedSessions, self.snapshots === snapshots else { return }
-        sessions.replaceAll(with: decoded.sessions)
+        var next = decoded.sessions
+        for id in openedArchivedIds where next[id] == nil { next[id] = sessions[id] }
+        sessions.replaceAll(with: next)
         undecryptableSessionCount = decoded.failures
         snapshotCursor = snapshot.cursor
         hasLoadedSessions = true
@@ -433,13 +576,21 @@ public final class HappierStore {
 
     /// iOS freezes networking while the app is in the background: close the socket cleanly so
     /// nothing is left half-open, and reconnect + resync as soon as the app is back.
+    /// Set while something in the background still needs new messages (reading them aloud as
+    /// they arrive): the relay connection stays open instead of closing with the app minimized.
+    public var keepsConnectionInBackground = false {
+        didSet {
+            if !keepsConnectionInBackground, inBackground, uploadProgress.isEmpty { suspendForBackground() }
+        }
+    }
+
     public func appDidEnterBackground() {
         guard phase == .ready else { return }
         inBackground = true
         flushDrafts()
         // Uploads in flight keep the socket (and the app, through a background task) alive; the
         // connection is closed once they finish.
-        guard uploadProgress.isEmpty else { return }
+        guard uploadProgress.isEmpty, !keepsConnectionInBackground else { return }
         suspendForBackground()
     }
 
@@ -509,6 +660,8 @@ public final class HappierStore {
         case "ephemeral":
             if payload["type"]?.stringValue == "session-draft-updated" || payload["sessionDraft"]?.boolValue == true {
                 handleDraftHint(payload)
+            } else if payload["type"]?.stringValue == "machine-activity", let id = payload["id"]?.stringValue {
+                if let index = machines.firstIndex(where: { $0.id == id }) { machines[index].apply(activity: payload) }
             } else if payload["type"]?.stringValue == "activity", let id = payload["id"]?.stringValue {
                 let wasThinking = sessions[id]?.thinking == true
                 sessions[id]?.apply(activity: payload)
@@ -551,11 +704,19 @@ public final class HappierStore {
             if openSessionIds.contains(sid) { refreshPending(sid) }
         case "new-session":
             if let session = try? Session(row: body, keys: keys) { sessions[session.id] = session }
-        case "delete-session":
-            if let sid = body["sid"]?.stringValue {
-                sessions[sid] = nil
-                transcripts[sid] = nil
+        case "new-machine":
+            await refreshMachines()
+        case "update-machine":
+            guard let id = body["machineId"]?.stringValue else { return }
+            guard let index = machines.firstIndex(where: { $0.id == id }), body["dataEncryptionKey"] == nil else {
+                // Unknown, or its key changed: read it again.
+                if !machines.isEmpty { await refreshMachines() }
+                return
             }
+            do { try machines[index].apply(update: body) } catch { logBackground(error, "machine update") }
+            if machines[index].revokedAt != nil || machines[index].replacedByMachineId != nil { machines.remove(at: index) }
+        case "delete-session":
+            if let sid = body["sid"]?.stringValue { forgetDeletedSession(sid) }
         default:
             break
         }
@@ -566,7 +727,7 @@ public final class HappierStore {
     /// Starts loading a transcript. The load is owned by the store, not by the calling view, so a
     /// view that SwiftUI recreates or dismisses mid-flight cannot leave the transcript half-loaded.
     public func open(_ id: String) {
-        openSessionIds.insert(id)
+        openSessionIds.open(id)
         refreshRunnerStatus(id)
         Task { await loadDraft(id) }
         startLoading(id)
@@ -616,7 +777,7 @@ public final class HappierStore {
     }
 
     public func close(_ id: String) {
-        openSessionIds.remove(id)
+        openSessionIds.close(id)
     }
 
     public func loadOlder(_ id: String) async {
@@ -797,6 +958,16 @@ public final class HappierStore {
         return await deliver(send, api: api)
     }
 
+    /// Drops a message that failed to send, with its files: it never reached the server (a
+    /// delivered one is released by its transcript row instead), so only this device holds it.
+    public func discardFailedSend(_ localId: String, in id: String) {
+        guard failedSends[localId] != nil, outgoingSends[localId]?.isSending != true else { return }
+        outgoingSends[localId]?.isCancelled = true
+        outgoingSends[localId] = nil
+        failedSends[localId] = nil
+        transcripts[id]?.removePending(localId: localId)
+    }
+
     private func deliver(_ send: OutgoingSend, api: HappierAPI) async -> Bool {
         let localId = send.localId
         let id = send.sessionId
@@ -814,7 +985,7 @@ public final class HappierStore {
             if uploadProgress.removeValue(forKey: localId) != nil {
                 uploadSessionIds[localId] = nil
                 uploadObserver?.uploadDidFinish(localId: localId, success: succeeded)
-                if inBackground, uploadProgress.isEmpty { suspendForBackground() }
+                if inBackground, uploadProgress.isEmpty, !keepsConnectionInBackground { suspendForBackground() }
             }
         }
         do {
@@ -929,8 +1100,7 @@ public final class HappierStore {
         guard let api else { return }
         do {
             let rows = try await api.machines()
-            machines = rows.compactMap { try? Machine(row: $0, keys: keys) }
-                .sorted { ($0.active ? 0 : 1, $0.name.lowercased()) < ($1.active ? 0 : 1, $1.name.lowercased()) }
+            machines = Machine.visible(rows.compactMap { try? Machine(row: $0, keys: keys) })
         } catch { report(error) }
         await syncDeviceBrowserRegistrations(loadMachines: false)
     }
@@ -968,6 +1138,75 @@ public final class HappierStore {
 
     private func answerSocketRequest(_ payload: JSONValue) async -> JSONValue? {
         await DeviceBrowserRPC.reply(to: payload, machines: machines, slots: deviceBrowserSlots, host: deviceBrowserHost)
+    }
+
+    // MARK: - Managing machines (`machine/[id]/index.tsx`)
+
+    /// Renames a machine (`displayName`; empty goes back to its host name) by rewriting its whole
+    /// metadata over the expected version, retried on top of a newer one (`machineMetadataMerge.ts`).
+    public func renameMachine(_ machineId: String, to name: String) async {
+        guard let socket, connection == .online else {
+            lastError = String(localized: "Not connected. Try again when the connection is back.")
+            return
+        }
+        do {
+            for _ in 0..<3 {
+                guard let machine = machines.first(where: { $0.id == machineId }) else { return }
+                let ack = try await socket.emitWithAck("machine-update-metadata", [
+                    "machineId": .string(machineId),
+                    "metadata": .string(try machine.encodeMetadata(machine.renamedMetadata(name))),
+                    "expectedVersion": .number(Double(machine.metadataVersion)),
+                ])
+                guard let response = ack.first else { throw RPCError(message: String(localized: "The relay didn't answer."), code: nil) }
+                let version = response["version"]?.intValue
+                if let version, let index = machines.firstIndex(where: { $0.id == machineId }) {
+                    try machines[index].apply(metadata: response["metadata"], version: version)
+                }
+                switch response["result"]?.stringValue {
+                case "success": return
+                case "version-mismatch" where version != nil: continue
+                default:
+                    throw RPCError(message: response["message"]?.stringValue ?? String(localized: "Failed to rename machine."), code: response["result"]?.stringValue)
+                }
+            }
+            throw RPCError(message: String(localized: "The machine changed too often to rename it. Try again."), code: "version-mismatch")
+        } catch { report(error) }
+    }
+
+    /// Asks the machine's daemon to shut down (`stop-daemon`). Running sessions stay alive, but no
+    /// new ones start there until the daemon is started again on that computer.
+    public func stopDaemon(_ machineId: String) async -> Bool {
+        do {
+            _ = try await machineRPC(machineId, method: "stop-daemon", params: [:])
+            await refreshMachines()
+            return true
+        } catch let error as RPCError where RPCErrorCodes.unavailable.contains(error.code ?? "") {
+            lastError = String(localized: "Happier can't reach the daemon on this machine. It may be offline, still starting, or disconnected from the relay.")
+        } catch { report(error) }
+        return false
+    }
+
+    /// Removes a machine from the account; it can come back by signing in again from its CLI.
+    public func revokeMachine(_ machineId: String) async -> Bool {
+        guard let api else { return false }
+        do {
+            try await api.revokeMachine(id: machineId)
+            machines.removeAll { $0.id == machineId }
+            return true
+        } catch { report(error) }
+        return false
+    }
+
+    /// The agent CLIs and tmux the machine has (`capabilities.detect`, "machine-details"); nil when
+    /// its CLI is too old to say.
+    public func detectTools(on machineId: String, refresh: Bool = false) async throws -> DetectedTools? {
+        var params: [String: JSONValue] = ["checklistId": "machine-details"]
+        if refresh { params["bypassCache"] = true }
+        do {
+            return DetectedTools(response: try await machineRPC(machineId, method: "capabilities.detect", params: .object(params), timeout: .seconds(20)))
+        } catch let error as RPCError where error.code == "RPC_METHOD_NOT_FOUND" {
+            return nil
+        }
     }
 
     // MARK: - Machine folders (`daemon.filesystem.*`, `createDirectory`)
@@ -1093,7 +1332,8 @@ public final class HappierStore {
     /// waits for the session to appear, sends the first message and opens it.
     public func createSession(machineId: String, directory: String, agentId: String, permissionMode: PermissionMode,
                               modelId: String? = nil, effort: String? = nil,
-                              firstMessage: String, approveNewDirectory: Bool = false) async -> SpawnOutcome {
+                              firstMessage: String, attachments: [AttachmentDraft] = [], goal: String? = nil,
+                              approveNewDirectory: Bool = false) async -> SpawnOutcome {
         let nonce = UUID().uuidString.lowercased()
         let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode, modelId: modelId,
                                          effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory)
@@ -1129,7 +1369,14 @@ public final class HappierStore {
                 if sessions[sessionId] == nil { try await Task.sleep(for: .seconds(1)) }
             }
             let message = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !message.isEmpty, sessions[sessionId] != nil { await send(message, to: sessionId) }
+            // A goal chosen before starting is set first, so the first turn already pursues it.
+            if let goal = goal?.trimmingCharacters(in: .whitespacesAndNewlines), !goal.isEmpty, sessions[sessionId] != nil {
+                await setGoal(sessionId, objective: goal)
+            }
+            // The first message's files upload to the new session's machine like any later message's.
+            if !message.isEmpty || !attachments.isEmpty, sessions[sessionId] != nil {
+                await send(message, attachments: attachments, to: sessionId)
+            }
             openRequest = sessionId
             return .created(sessionId: sessionId)
         } catch {
@@ -1249,11 +1496,12 @@ public final class HappierStore {
 
     /// An attached file, downloaded from the session's machine once (`daemon.bulkTransfer.download.*`,
     /// as the official client's file previews) and kept in Caches for later opens.
-    public func attachmentFile(_ file: MessageAttachment, in sessionId: String,
+    /// `refresh` fetches mutable linked files again; a failed refresh never returns stale bytes.
+    public func attachmentFile(_ file: MessageAttachment, in sessionId: String, refresh: Bool = false,
                                progress: @escaping @MainActor (Double) -> Void = { _ in }) async throws -> URL {
         guard let path = file.path else { throw RPCError(message: "This attachment has no file on the computer.", code: nil) }
         let url = Self.attachmentCacheURL(for: file, sessionId: sessionId)
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        if !refresh, FileManager.default.fileExists(atPath: url.path) { return url }
         if let running = attachmentDownloads[url] { return try await running.value }
         let task = Task { () throws -> URL in
             try await download(path: path, sessionId: sessionId, to: url, progress: progress)
@@ -1293,6 +1541,11 @@ public final class HappierStore {
         return folder.appending(path: file.name)
     }
 
+    /// Relative paths use the session folder; absolute paths keep the remote machine's syntax.
+    static func attachmentPathForMachine(_ path: String, sessionPath: String?) -> String {
+        RemoteFileLink.isAbsolutePath(path) ? path : ((sessionPath ?? "") as NSString).appendingPathComponent(path)
+    }
+
     /// The chunked, encrypted download of one file into `destination`. Tries the session's own
     /// route, then the machine's (for a session not running), with the path from its folder.
     private func download(path: String, sessionId: String, to destination: URL, progress: @escaping @MainActor (Double) -> Void) async throws {
@@ -1309,7 +1562,7 @@ public final class HappierStore {
             guard let session = sessions[sessionId], let machineId = session.machineId else {
                 throw RPCError(message: "The computer for this session isn't known.", code: nil)
             }
-            let absolute = path.hasPrefix("/") ? path : ((session.path ?? "") as NSString).appendingPathComponent(path)
+            let absolute = Self.attachmentPathForMachine(path, sessionPath: session.path)
             var machineRequest = request
             if case .object(var object) = machineRequest { object["path"] = .string(absolute); machineRequest = .object(object) }
             call = { [unowned self] method, params in try await machineRPC(machineId, method: method, params: params) }
@@ -1357,11 +1610,14 @@ public final class HappierStore {
     }
 
     public func reply(_ reply: PermissionReply, to request: (id: String, tool: String), in sessionId: String) async {
+        do { try await sendPermissionReply(reply, to: request, in: sessionId) } catch { report(error) }
+    }
+
+    /// The one way a permission is answered, from the conversation or from a notification.
+    private func sendPermissionReply(_ reply: PermissionReply, to request: (id: String, tool: String), in sessionId: String) async throws {
         let agentId = sessions[sessionId]?.agentId
-        do {
-            _ = try await sessionRPC(sessionId, method: "permission", params: reply.payload(requestId: request.id, tool: request.tool, agentId: agentId))
-            if reply.abortsTurn(agentId: agentId) { await abort(sessionId) }
-        } catch { report(error) }
+        _ = try await sessionRPC(sessionId, method: "permission", params: reply.payload(requestId: request.id, tool: request.tool, agentId: agentId))
+        if reply.abortsTurn(agentId: agentId) { await abort(sessionId) }
     }
 
     /// Answers an AskUserQuestion-style request (`structuredQuestionAnswersV1.ts`).
@@ -1553,6 +1809,40 @@ public final class HappierStore {
         } catch { report(error) }
     }
 
+    // MARK: - Deleting a session for good
+
+    /// A delete the user has to confirm (`ui.session.delete`); the UI asks and calls `confirmDelete`.
+    /// It holds the session itself: archived ones, browsed page by page, aren't in `sessions`.
+    public var deleteRequest: Session?
+    /// Sessions deleted from this device, for lists that hold their own copies (the archive).
+    public private(set) var deletedSessionIds: Set<String> = []
+
+    public func requestDelete(_ session: Session) {
+        guard session.canDelete else { return }
+        deleteRequest = session
+    }
+
+    /// `DELETE /v1/sessions/:id`: the relay removes the session with its messages and tells every
+    /// device (`delete-session`). It is dropped here at once rather than when that update arrives.
+    public func confirmDelete(_ session: Session) async {
+        guard let api, session.canDelete else { return }
+        do {
+            try await api.delete(sessionId: session.id)
+            forgetDeletedSession(session.id)
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            // Already gone.
+            forgetDeletedSession(session.id)
+        } catch { report(error) }
+    }
+
+    private func forgetDeletedSession(_ sessionId: String) {
+        deletedSessionIds.insert(sessionId)
+        sessions[sessionId] = nil
+        transcripts[sessionId] = nil
+        pendingQueues[sessionId] = nil
+        pinnedSessionIds.removeAll { $0 == sessionId }
+    }
+
     // MARK: - Renaming and nesting sessions by hand
 
     /// Renames a session (its `summary`, as the official app's rename and the agent's own title
@@ -1625,6 +1915,33 @@ public final class HappierStore {
         let page = try await api.archivedSessions(cursor: cursor, limit: limit)
         let keys = self.keys
         return (page.rows.compactMap { try? Session(row: $0, keys: keys) }, page.nextCursor)
+    }
+
+    /// Opens a session referenced by an inter-session message or automatic activity notice.
+    public func openRelatedSession(_ id: String) async {
+        if sessions[id] != nil {
+            openRequest = id
+            return
+        }
+        guard let api, let account = snapshots else {
+            lastError = String(localized: "Connect to load this session.")
+            return
+        }
+        do {
+            let row = try await api.session(id: id)
+            guard !Task.isCancelled, snapshots === account else { return }
+            guard let row, row != .null else {
+                lastError = String(localized: "This session is no longer available.")
+                return
+            }
+            openArchived(try Session(row: row, keys: keys))
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            guard !Task.isCancelled, snapshots === account else { return }
+            lastError = String(localized: "This session is no longer available.")
+        } catch {
+            guard !Task.isCancelled, snapshots === account else { return }
+            report(error)
+        }
     }
 
     /// Opens an archived conversation found in the archive or a search.
@@ -1996,11 +2313,15 @@ public final class HappierStore {
 
     /// Session-scoped RPC through the server relay (`apiSocket.ts:334-405`).
     public func sessionRPC(_ sessionId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
-        guard let socket, connection == .online else { throw RPCError(message: "Not connected", code: nil) }
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        // Back from the background the connection is still returning: wait for it, within this
+        // call's own budget, rather than failing an upload made in that moment.
+        let socket = try await connectedSocket(until: deadline, clock: clock)
         guard let session = sessions[sessionId] else { throw RPCError(message: "Unknown session", code: nil) }
         let encodedParams: JSONValue = session.isPlain ? params : .string(try session.encodeDocument(params))
         let ack = try await socket.emitWithAck(
-            "rpc-call", ["method": .string("\(sessionId):\(method)"), "params": encodedParams], timeout: timeout)
+            "rpc-call", ["method": .string("\(sessionId):\(method)"), "params": encodedParams], timeout: deadline - clock.now)
         guard let response = ack.first else { throw RPCError(message: "Empty RPC response", code: nil) }
         guard response["ok"]?.boolValue == true else {
             throw RPCError(message: response["error"]?.stringValue ?? "RPC failed", code: response["errorCode"]?.stringValue)
@@ -2013,6 +2334,16 @@ public final class HappierStore {
                 code: result["errorCode"]?.stringValue)
         }
         return result
+    }
+
+    /// The relay connection once it's up, checked every tenth of a second until `deadline`. Only
+    /// a signed-in store keeps reconnecting; signed out there is nothing to wait for.
+    private func connectedSocket(until deadline: ContinuousClock.Instant, clock: ContinuousClock) async throws -> SocketIOClient {
+        while true {
+            if let socket, connection == .online { return socket }
+            guard phase == .ready, clock.now < deadline else { throw RPCError(message: "Not connected", code: nil) }
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 
     /// Failure of something the user asked for: logged and shown as a readable alert.
@@ -2058,6 +2389,11 @@ public final class HappierStore {
         if let text = tap.reply, let sessionId = tap.sessionId {
             return await replyFromNotification(text, to: sessionId)
         }
+        // Allow or Deny on the notification (the lock screen, the Apple Watch): answered in the
+        // background without opening the app.
+        if let permission = tap.permission, let sessionId = tap.sessionId {
+            return await permissionFromNotification(permission, in: sessionId)
+        }
         pendingPushTap = tap
         await handlePendingPushTap()
         return true
@@ -2066,29 +2402,43 @@ public final class HappierStore {
     /// The app may have been woken in the background just for this: sign in from the saved
     /// credentials and fetch the one session rather than wait for the whole list.
     private func replyFromNotification(_ text: String, to sessionId: String) async -> Bool {
-        restore()
-        guard phase == .ready, let api else { return false }
-        if sessions[sessionId] == nil {
-            do {
-                guard let row = try await api.session(id: sessionId) else { return false }
-                sessions[sessionId] = try Session(row: row, keys: keys)
-            } catch {
-                log.error("reply: session fetch failed: \(String(describing: error), privacy: .public)")
-                return false
-            }
-        }
+        guard await sessionForNotification(sessionId) else { return false }
         guard await send(text, to: sessionId) else { return false }
         markRead(sessionId)
         return true
+    }
+
+    private func permissionFromNotification(_ permission: PushTap.Permission, in sessionId: String) async -> Bool {
+        guard await sessionForNotification(sessionId) else { return false }
+        do {
+            try await sendPermissionReply(permission.allow ? .allow : .deny(reason: nil), to: (permission.requestId, permission.tool), in: sessionId)
+            return true
+        } catch {
+            log.error("permission from notification failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
+    }
+
+    /// Woken just for a notification's action: signed in from the saved credentials, with the
+    /// one session it's about rather than the whole list.
+    private func sessionForNotification(_ sessionId: String) async -> Bool {
+        restore()
+        guard phase == .ready, let api else { return false }
+        guard sessions[sessionId] == nil else { return true }
+        do {
+            guard let row = try await api.session(id: sessionId) else { return false }
+            sessions[sessionId] = try Session(row: row, keys: keys)
+            return true
+        } catch {
+            log.error("notification: session fetch failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
     }
 
     private func handlePendingPushTap() async {
         guard hasLoadedSessions, let tap = pendingPushTap else { return }
         pendingPushTap = nil
         guard let sessionId = tap.sessionId, sessions[sessionId] != nil else { return }
-        if let permission = tap.permission {
-            await reply(permission.allow ? .allow : .deny(reason: nil), to: (permission.requestId, permission.tool), in: sessionId)
-        }
         openRequest = sessionId
     }
 

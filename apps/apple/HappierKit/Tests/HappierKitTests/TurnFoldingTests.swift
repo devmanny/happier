@@ -48,6 +48,17 @@ import Testing
         #expect(shape(ChatRow.rows(from: items, working: true)) == ["user:q", "work1…", "tool:2"])
     }
 
+    @Test func answeredQuestionsStayVisibleOutsideFoldedWorkAndToolGroups() {
+        let question = ChatItem.toolCall(ToolCall(
+            id: "question", itemId: "i-question", name: "AskUserQuestion",
+            input: ["questions": [["question": "Where?", "options": ["Calendar", "Reminder"]]]],
+            title: nil, state: .completed, result: ["answers": ["Where?": ["Calendar"]]],
+            permission: nil, createdAt: .distantPast))
+        let items = [tool("before"), question, tool("after"), text("done")]
+        #expect(shape(ChatRow.rows(from: items, working: false)) == ["work1", "tool:question", "work1", "text:done"])
+        #expect(shape(ChatRow.groupTools(items)) == ["tool:before", "tool:question", "tool:after", "text:done"])
+    }
+
     @Test func expandedStepsGroupConsecutiveTools() {
         let steps = [text("a"), tool("1"), tool("2"), text("b"), tool("3")]
         #expect(shape(ChatRow.groupTools(steps)) == ["text:a", "tools2", "text:b", "tool:3"])

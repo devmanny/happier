@@ -49,6 +49,7 @@ struct LinkDeviceView: View {
                     Text(error).foregroundStyle(.red).font(.footnote).multilineTextAlignment(.center)
                     Button("Try Again") { attempt += 1 }
                         .buttonStyle(.glassProminent)
+                        .glassHover()
                 }
             } else if linkURL != nil {
                 Label("Waiting for approval…", systemImage: "hourglass")
@@ -61,7 +62,7 @@ struct LinkDeviceView: View {
         .padding(24)
         .navigationTitle("Link Device")
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel", role: .cancel) { dismiss() } }
         }
         .task(id: attempt) { await link() }
     }

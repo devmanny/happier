@@ -7,7 +7,7 @@ enum Normalizer {
         case text(String, thinking: Bool)
         case toolCall(id: String, name: String, input: JSONValue, title: String?)
         /// `append` streams terminal output into an existing result.
-        case toolResult(id: String, content: JSONValue, isError: Bool, append: Bool)
+        case toolResult(id: String, content: JSONValue, isError: Bool, append: Bool, structured: JSONValue? = nil)
         case event(kind: String, data: JSONValue)
     }
 
@@ -19,7 +19,10 @@ enum Normalizer {
         case "user":
             if meta?["happier"]?["kind"]?.stringValue == "tool-answer-delivery.v1" { return [] }
             guard let text = record["content"]?["text"]?.stringValue else { return [] }
-            return [.userText(meta?["displayText"]?.stringValue ?? text, attachments: MessageAttachment.list(in: meta))]
+            let attachments = MessageAttachment.list(in: meta)
+            let preservesOriginal = SessionMessageOrigin.parse(meta) != nil || (attachments.isEmpty && SessionNotice.parse(text) != nil)
+            let shown = preservesOriginal ? text : meta?["displayText"]?.stringValue ?? text
+            return [.userText(shown, attachments: attachments)]
         case "agent":
             guard let content = record["content"] else { return [] }
             switch content["type"]?.stringValue {
@@ -47,14 +50,19 @@ enum Normalizer {
             return (content?.arrayValue ?? []).compactMap(contentBlock)
         case "user":
             if let text = content?.stringValue { return [.userText(text, attachments: [])] }
-            return (content?.arrayValue ?? []).compactMap { block in
+            let blocks = content?.arrayValue ?? []
+            // `toolUseResult` describes the message's tool result; with several it can't be told apart.
+            let resultCount = blocks.count { ["tool_result", "tool-call-result"].contains($0["type"]?.stringValue ?? "") }
+            let structured = resultCount == 1 ? data["toolUseResult"].flatMap { $0.isNull ? nil : $0 } : nil
+            return blocks.compactMap { block in
                 // A subagent's thread opens with the prompt it was given.
                 if sidechain, block["type"]?.stringValue == "text", let text = block["text"]?.stringValue {
                     return .userText(text, attachments: [])
                 }
                 guard ["tool_result", "tool-call-result"].contains(block["type"]?.stringValue ?? "") else { return nil }
                 let id = block["tool_use_id"]?.stringValue ?? block["callId"]?.stringValue ?? ""
-                return .toolResult(id: id, content: block["content"] ?? .null, isError: block["is_error"]?.boolValue ?? false, append: false)
+                return .toolResult(id: id, content: block["content"] ?? .null, isError: block["is_error"]?.boolValue ?? false, append: false,
+                                   structured: structured)
             }
         default:
             return []

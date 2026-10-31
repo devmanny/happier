@@ -20,7 +20,8 @@ public struct MarkdownTable: Equatable, Sendable {
 public enum MarkdownSegments {
     public indirect enum Segment: Equatable, Sendable {
         case prose(String)
-        case code(String)
+        /// A fenced block and the language its fence names (```` ```swift ````), if any.
+        case code(String, language: String? = nil)
         case table(MarkdownTable)
         case options([String])
         /// A `>` block; its content is Markdown of its own (another quote included).
@@ -53,13 +54,14 @@ public enum MarkdownSegments {
 
             if trimmed.hasPrefix("```") {
                 flushProse()
+                let info = trimmed.drop { $0 == "`" }.split(whereSeparator: \.isWhitespace).first.map(String.init)
                 var code: [Substring] = []
                 while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                     code.append(lines[index])
                     index += 1
                 }
                 index += 1
-                segments.append(.code(code.joined(separator: "\n")))
+                segments.append(.code(code.joined(separator: "\n"), language: info.flatMap { $0.isEmpty ? nil : $0 }))
                 continue
             }
 
@@ -137,7 +139,6 @@ public enum MarkdownSegments {
             }
         }
         let rows = lines[(start + 2)..<end]
-            .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("|") }
             .map { line -> [String] in
                 var row = cells(line)
                 while row.count < headers.count { row.append("") }

@@ -1,11 +1,17 @@
 import AVFoundation
 import HappierKit
+#if os(iOS)
+import ActivityKit
+import MediaPlayer
+#endif
 import NaturalLanguage
 import SwiftUI
 
 /// Reads a message aloud with the system voices (offline, the voices installed in Settings), one
-/// sentence at a time so it can pause, skip back and forward, and change speed mid-sentence. One
-/// message at a time: speaking another one, or the same one again, stops the current reading.
+/// sentence at a time so it can pause, skip back and forward, and change speed mid-sentence.
+/// Messages are read in a queue: picking one by hand reads it alone; auto read (per
+/// conversation) adds each new agent message after the others, so none cuts another off, and the
+/// player can jump a whole message back or ahead.
 @MainActor
 @Observable
 final class MessageSpeaker: NSObject {
@@ -18,10 +24,26 @@ final class MessageSpeaker: NSObject {
     private(set) var sentenceCount = 0
     /// Multiple of the voice's normal pace; kept between readings.
     private(set) var rate: Double
+    /// The messages read and waiting.
+    private(set) var queue = ReadAloudQueue()
+    /// The conversation whose new agent messages are read as they arrive.
+    private(set) var autoReadSessionId: String?
+    @ObservationIgnored private var autoReadCursor: AutoReadCursor?
+    /// Follows the auto-read conversation in the store, not on screen, so it keeps going with
+    /// the app in the background.
+    @ObservationIgnored private var followTask: Task<Void, Never>?
+    /// Silence playing while auto read waits in the background, so iOS keeps the app running.
+    @ObservationIgnored private var keepAlive: AVAudioEngine?
+    /// What the Live Activity calls the reading: the auto-read conversation's title.
+    @ObservationIgnored private var readingTitle = String(localized: "Reading aloud")
+    @ObservationIgnored private weak var autoReadStore: HappierStore?
+    #if os(iOS)
+    @ObservationIgnored private var activity: Activity<ReadAloudAttributes>?
+    #endif
 
     private static let rateKey = "happier.speech.rate"
 
-    @ObservationIgnored private let synthesizer = AVSpeechSynthesizer()
+    @ObservationIgnored private var synthesizer = AVSpeechSynthesizer()
     @ObservationIgnored private var sentences: [String] = []
     @ObservationIgnored private var voice: AVSpeechSynthesisVoice?
     @ObservationIgnored private var currentUtterance: ObjectIdentifier?
@@ -37,6 +59,7 @@ final class MessageSpeaker: NSObject {
         rate = SpeechRate.steps.contains(stored) ? stored : 1.2
         super.init()
         synthesizer.delegate = self
+        installRemoteCommands()
     }
 
     func isSpeaking(_ markdown: String) -> Bool { speakingText == markdown }
@@ -45,7 +68,103 @@ final class MessageSpeaker: NSObject {
         if speakingText == markdown {
             stop()
         } else {
+            queue.play(.init(id: "picked:\(markdown.hashValue)", text: markdown))
+            if autoReadSessionId == nil { readingTitle = String(localized: "Reading aloud") }
             start(markdown)
+        }
+    }
+
+    // MARK: Auto read
+
+    /// Turns reading new agent messages of `sessionId` on or off; what's already there isn't read.
+    /// After the microphone used the audio session (dictation, push to talk) the system's speech
+    /// synthesizer can stay silent for good; a fresh one speaks again. Only while nothing is read.
+    func renewAfterRecording() {
+        guard speakingText == nil else { return }
+        synthesizer.delegate = nil
+        synthesizer = AVSpeechSynthesizer()
+        synthesizer.delegate = self
+    }
+
+    func toggleAutoRead(_ sessionId: String, store: HappierStore) {
+        followTask?.cancel()
+        followTask = nil
+        if autoReadSessionId == sessionId {
+            autoReadSessionId = nil
+            autoReadCursor = nil
+            autoReadStore = nil
+            store.keepsConnectionInBackground = false
+            setKeepAlive(false)
+            if speakingText == nil { deactivateAudio() }
+            refreshActivity()
+            return
+        }
+        autoReadSessionId = sessionId
+        autoReadStore = store
+        readingTitle = store.sessions[sessionId]?.title ?? String(localized: "Reading aloud")
+        autoReadCursor = AutoReadCursor(existing: store.transcripts[sessionId]?.items ?? [])
+        // New messages must keep arriving with the app minimized.
+        store.keepsConnectionInBackground = true
+        refreshActivity()
+        followTask = Task { [weak self, weak store] in
+            while !Task.isCancelled, let store {
+                self?.feed(sessionId, items: store.transcripts[sessionId]?.items ?? [],
+                           turnActive: store.sessions[sessionId]?.thinking ?? false)
+                await withCheckedContinuation { continuation in
+                    withObservationTracking {
+                        _ = store.transcripts[sessionId]?.items
+                        _ = store.sessions[sessionId]?.thinking
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The app went to the background (or came back): while auto read waits for the next
+    /// message, silence keeps iOS from suspending it.
+    func appMovedToBackground(_ background: Bool) {
+        setKeepAlive(background && autoReadSessionId != nil)
+    }
+
+    /// The conversation changed: its newly completed agent messages join the queue.
+    func feed(_ sessionId: String, items: [ChatItem], turnActive: Bool) {
+        guard autoReadSessionId == sessionId, var cursor = autoReadCursor else { return }
+        let changes = cursor.take(items, turnActive: turnActive)
+        autoReadCursor = cursor
+        defer { if !changes.isEmpty { refreshActivity() } }
+        for change in changes {
+            switch change {
+            case .new(let block):
+                if let now = queue.enqueue(block) { start(now.text) }
+            case .grew(let id, let added, let text):
+                // Streamed messages keep growing: the new part is read too, after what came before.
+                switch queue.grow(id: id, text: text, added: added) {
+                case .appendToCurrent(let more):
+                    sentences += SpokenText.sentences(markdown: more)
+                    sentenceCount = sentences.count
+                case .started(let block):
+                    start(block.text)
+                case .updated, .queued:
+                    break
+                }
+            }
+        }
+    }
+
+    /// The next whole message.
+    func nextBlock() {
+        if let next = queue.advance() { start(next.text) } else { endReading() }
+    }
+
+    /// The previous whole message (or this one again from its start when it's the first).
+    func previousBlock() {
+        if let previous = queue.previous() {
+            start(previous.text)
+        } else if speakingText != nil {
+            sentenceIndex = 0
+            resumePlaying(from: 0)
         }
     }
 
@@ -63,12 +182,13 @@ final class MessageSpeaker: NSObject {
             isPaused = true
             synthesizer.pauseSpeaking(at: .word)
         }
+        refreshActivity()
     }
 
     func forward() {
         guard speakingText != nil else { return }
         guard sentenceIndex + 1 < sentences.count else {
-            stop()
+            nextBlock()
             return
         }
         sentenceIndex += 1
@@ -86,7 +206,21 @@ final class MessageSpeaker: NSObject {
     func faster() { setRate(SpeechRate.faster(rate)) }
     func slower() { setRate(SpeechRate.slower(rate)) }
 
+    /// Everything off (the Live Activity's stop): this reading, what waits, and auto read.
+    func stopEverything() {
+        if let sessionId = autoReadSessionId, let store = autoReadStore {
+            toggleAutoRead(sessionId, store: store)
+        }
+        stop()
+    }
+
+    /// Stops reading and drops what was waiting; auto read stays on for new messages.
     func stop() {
+        queue.clear()
+        endReading()
+    }
+
+    private func endReading() {
         currentUtterance = nil
         synthesizer.stopSpeaking(at: .immediate)
         finish()
@@ -103,10 +237,11 @@ final class MessageSpeaker: NSObject {
         currentUtterance = nil
         synthesizer.stopSpeaking(at: .immediate)
         #if os(iOS)
-        // Plays with the silent switch on, lowering other audio while it reads.
+        // Plays with the silent switch on and the app minimized, lowering other audio while it reads.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
+        publishNowPlaying(markdown)
         sentences = parts
         voice = Self.voice(for: parts.joined(separator: " "))
         sentenceIndex = 0
@@ -114,6 +249,7 @@ final class MessageSpeaker: NSObject {
         isPaused = false
         speakingText = markdown
         speakSentence(from: 0)
+        refreshActivity()
     }
 
     private func setRate(_ newRate: Double) {
@@ -212,6 +348,9 @@ final class MessageSpeaker: NSObject {
         sentenceIndex += 1
         if sentenceIndex < sentences.count {
             speakSentence(from: 0)
+        } else if let next = queue.advance() {
+            // This message is done; the next one waiting starts.
+            start(next.text)
         } else {
             finish()
         }
@@ -231,7 +370,128 @@ final class MessageSpeaker: NSObject {
         sentenceIndex = 0
         sentenceCount = 0
         #if os(iOS)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        #endif
+        // Auto read keeps the audio session for the next message (other audio back to full volume).
+        if autoReadSessionId == nil { deactivateAudio() } else { mixWithOthers() }
+        refreshActivity()
+    }
+
+    // MARK: Live Activity
+
+    /// Shows what's being read on the Dynamic Island and the Lock Screen, while reading or while
+    /// auto read waits for the next message; gone once both are over.
+    private func refreshActivity() {
+        #if os(iOS)
+        guard speakingText != nil || autoReadSessionId != nil else {
+            if let activity {
+                self.activity = nil
+                // ActivityKit's handles are safe to use from any task.
+                nonisolated(unsafe) let ending = activity
+                Task { await ending.end(nil, dismissalPolicy: .immediate) }
+            }
+            return
+        }
+        let state = ReadAloudAttributes.ContentState(
+            title: readingTitle,
+            snippet: String((sentences.first ?? "").prefix(120)),
+            isSpeaking: speakingText != nil,
+            isPaused: isPaused,
+            waiting: queue.waiting,
+            autoRead: autoReadSessionId != nil)
+        let content = ActivityContent(state: state, staleDate: nil)
+        if let activity {
+            nonisolated(unsafe) let current = activity
+            Task { await current.update(content) }
+        } else if ActivityAuthorizationInfo().areActivitiesEnabled {
+            activity = try? Activity.request(attributes: ReadAloudAttributes(), content: content)
+        }
+        #endif
+    }
+
+    private func deactivateAudio() {
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+    }
+
+    private func mixWithOthers() {
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
+    }
+
+    /// Silent audio while waiting in the background: iOS keeps an app running only while it plays.
+    private func setKeepAlive(_ on: Bool) {
+        #if os(iOS)
+        if !on {
+            keepAlive?.stop()
+            keepAlive = nil
+            return
+        }
+        guard keepAlive == nil else { return }
+        if speakingText == nil { mixWithOthers() }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1),
+              let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44_100) else { return }
+        silence.frameLength = silence.frameCapacity
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        do {
+            try engine.start()
+            player.scheduleBuffer(silence, at: nil, options: .loops)
+            player.play()
+            keepAlive = engine
+        } catch {
+            keepAlive = nil
+        }
+        #endif
+    }
+
+    // MARK: Lock Screen and Control Center
+
+    private func publishNowPlaying(_ markdown: String) {
+        #if os(iOS)
+        let firstLine = SpokenText.sentences(markdown: markdown).first ?? ""
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: String(firstLine.prefix(80)),
+            MPMediaItemPropertyArtist: "Happier",
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+        ]
+        #endif
+    }
+
+    /// Play/pause and previous/next message from the Lock Screen, Control Center and headphones.
+    private func installRemoteCommands() {
+        #if os(iOS)
+        let center = MPRemoteCommandCenter.shared()
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self, self.speakingText != nil else { return .noActionableNowPlayingItem }
+            self.togglePause()
+            return .success
+        }
+        center.playCommand.addTarget { [weak self] _ in
+            guard let self, self.speakingText != nil, self.isPaused else { return .commandFailed }
+            self.togglePause()
+            return .success
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let self, self.speakingText != nil, !self.isPaused else { return .commandFailed }
+            self.togglePause()
+            return .success
+        }
+        center.nextTrackCommand.addTarget { [weak self] _ in
+            guard let self, self.speakingText != nil else { return .noActionableNowPlayingItem }
+            self.nextBlock()
+            return .success
+        }
+        center.previousTrackCommand.addTarget { [weak self] _ in
+            guard let self, self.speakingText != nil else { return .noActionableNowPlayingItem }
+            self.previousBlock()
+            return .success
+        }
         #endif
     }
 }
@@ -250,13 +510,15 @@ extension MessageSpeaker: AVSpeechSynthesizerDelegate {
     }
 }
 
-/// The reading's controls, floating above the composer while a message is read aloud: back,
-/// slower, the speed, faster, play/pause, forward, and close; a thin line shows the progress.
+/// The reading's controls, floating above the composer while a message is read aloud: previous
+/// message, back a sentence, slower, the speed, faster, play/pause, forward a sentence, next
+/// message (with how many wait), and close; a thin line shows the progress.
 struct SpeechControls: View {
     @State private var speaker = MessageSpeaker.shared
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
+            control("Previous Message", systemImage: "backward.end.fill") { speaker.previousBlock() }
             control("Back", systemImage: "backward.fill") { speaker.back() }
             control("Slower", systemImage: "tortoise.fill") { speaker.slower() }
                 .disabled(speaker.rate <= SpeechRate.steps.first!)
@@ -272,6 +534,20 @@ struct SpeechControls: View {
             }
             .font(.title3)
             control("Forward", systemImage: "forward.fill") { speaker.forward() }
+            control("Next Message", systemImage: "forward.end.fill") { speaker.nextBlock() }
+                .disabled(!speaker.queue.hasNext)
+                .overlay(alignment: .topTrailing) {
+                    // How many messages are waiting their turn.
+                    if speaker.queue.waiting > 0 {
+                        Text("\(speaker.queue.waiting)")
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .background(Color.userBubble, in: Capsule())
+                            .offset(x: -2, y: 2)
+                            .contentTransition(.numericText())
+                    }
+                }
             control("Stop Reading", systemImage: "xmark") { speaker.stop() }
                 .foregroundStyle(.secondary)
         }
@@ -297,11 +573,34 @@ struct SpeechControls: View {
     private func control(_ title: LocalizedStringKey, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .frame(width: 40, height: 36)
+                .frame(width: 33, height: 36)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .contentTransition(.symbolEffect(.replace))
         .accessibilityLabel(Text(title))
+    }
+}
+
+/// The toolbar's auto read switch, beside the usage ring: reads each new agent message of this
+/// conversation as it arrives, queued after the one being read.
+struct AutoReadButton: View {
+    let sessionId: String
+    @State private var speaker = MessageSpeaker.shared
+    @Environment(HappierStore.self) private var store
+
+    private var on: Bool { speaker.autoReadSessionId == sessionId }
+
+    var body: some View {
+        Button {
+            AppHaptics.light()
+            speaker.toggleAutoRead(sessionId, store: store)
+        } label: {
+            Label(on ? "Stop Reading New Messages" : "Read New Messages Aloud",
+                  systemImage: on ? "speaker.wave.2.fill" : "speaker.wave.2")
+        }
+        .tint(on ? Color.userBubble : nil)
+        .symbolEffect(.variableColor.iterative, isActive: on && speaker.speakingText != nil)
+        .help(on ? "Stop reading new messages aloud" : "Read each new message aloud as it arrives")
     }
 }

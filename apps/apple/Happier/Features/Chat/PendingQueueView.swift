@@ -10,6 +10,8 @@ struct PendingBubble: View {
     let sessionId: String
     let working: Bool
     @Environment(HappierStore.self) private var store
+    /// The conversation's bubble color (its project folder's), as for sent messages.
+    @Environment(\.userBubbleColor) private var bubbleColor
     @State private var showActions = false
     @State private var confirmSendNow = false
     @State private var editing = false
@@ -19,28 +21,24 @@ struct PendingBubble: View {
     private var canSteerNow: Bool { working && (session?.steerAvailable ?? false) }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 3) {
-            HStack {
-                Spacer(minLength: 56)
-                // Your Markdown, as in sent messages (light on blue).
-                MarkdownText(message.text)
-                    .environment(\.colorScheme, .dark)
-                    .tint(.white)
-                    .foregroundStyle(.white)
-                    .bubblePadding(fromUser: true)
-                    .background(Color.userBubble.opacity(message.state == .discarded ? 0.35 : 0.55),
-                                in: BubbleShape(fromUser: true, tail: true))
-                    .onTapGesture { showActions = true }
-                    .contextMenu { actions }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Shows actions for this queued message")
+        Group {
+            if let origin = message.sessionMessageOrigin {
+                SessionActivityRow(messageText: message.text, origin: origin, itemId: UserText.stableId(localId: message.localId),
+                                   sessionId: sessionId, date: message.createdAt, transportStatus: statusLabel,
+                                   transportStatusIsBlocked: isBlocked) {
+                    activityActions(prefix: "session-message")
+                }
+            } else if let notice = message.sessionNotice {
+                SessionActivityRow(notice: notice, itemId: UserText.stableId(localId: message.localId), sessionId: sessionId, date: message.createdAt,
+                                   transportStatus: statusLabel, transportStatusIsBlocked: isBlocked) {
+                    activityActions(prefix: "session-notice")
+                }
+            } else {
+                userBubble
             }
-            Text(statusLabel)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(isBlocked ? Color.orange : Color.secondary)
-                .padding(.trailing, 6)
         }
-        .confirmationDialog(message.text, isPresented: $showActions, titleVisibility: .visible) {
+        .confirmationDialog(actionsTitle,
+                            isPresented: $showActions, titleVisibility: .visible) {
             actions
             // iOS adds its own; on the Mac this is the way out (and what Esc does).
             Button("Cancel", role: .cancel) {}
@@ -51,6 +49,7 @@ struct PendingBubble: View {
         }
         .alert(sendNowTitle, isPresented: $confirmSendNow) {
             Button("Send Now", role: .destructive) {
+                AppHaptics.warning()
                 Task {
                     if message.state == .discarded {
                         await store.restoreAndSend(message.localId, action: .sendNow, in: sessionId)
@@ -68,39 +67,82 @@ struct PendingBubble: View {
             Button("Save") {
                 let text = editText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return }
+                AppHaptics.confirm()
                 Task { await store.editPending(message.localId, text: text, in: sessionId) }
             }
             Button("Cancel", role: .cancel) {}
         }
     }
 
+    private var actionsTitle: String {
+        if message.sessionMessageOrigin != nil { return String(localized: "Session Message") }
+        if message.sessionNotice != nil { return String(localized: "Automatic Notice") }
+        return message.text
+    }
+
+    private func activityActions(prefix: String) -> some View {
+        Button("More Actions", systemImage: "ellipsis.circle") {
+            AppHaptics.light()
+            showActions = true
+        }
+        .font(.caption)
+        .buttonStyle(.borderless)
+        .frame(minHeight: 44, alignment: .leading)
+        .contextMenu { actions }
+        .accessibilityIdentifier("\(prefix)-actions-\(message.localId)")
+    }
+
+    private var userBubble: some View {
+        VStack(alignment: .trailing, spacing: 3) {
+            HStack {
+                Spacer(minLength: 56)
+                // Your Markdown, as in sent messages (light on blue).
+                MarkdownText(message.text)
+                    .environment(\.colorScheme, .dark)
+                    .tint(.white)
+                    .foregroundStyle(.white)
+                    .bubblePadding(fromUser: true)
+                    .background(bubbleColor.opacity(message.state == .discarded ? 0.35 : 0.55),
+                                in: BubbleShape(fromUser: true, tail: true))
+                    .onTapGesture { AppHaptics.light(); showActions = true }
+                    .contextMenu { actions }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Shows actions for this queued message")
+            }
+            Text(statusLabel)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(isBlocked ? Color.orange : Color.secondary)
+                .padding(.trailing, 6)
+        }
+    }
+
     @ViewBuilder private var actions: some View {
         switch message.state {
         case .discarded:
-            Button("Re-queue") { Task { await store.requeuePending(message.localId, in: sessionId) } }
+            Button("Re-queue") { AppHaptics.confirm(); Task { await store.requeuePending(message.localId, in: sessionId) } }
             if canSteerNow {
-                Button("Steer Now") { Task { await store.restoreAndSend(message.localId, action: .steerNow, in: sessionId) } }
+                Button("Steer Now") { AppHaptics.confirm(); Task { await store.restoreAndSend(message.localId, action: .steerNow, in: sessionId) } }
             }
-            Button(sendNowLabel) { confirmSendNow = true }
-            Button("Copy") { MessageClipboard.copy(message.text) }
-            Button("Remove", role: .destructive) { Task { await store.removePending(message.localId, in: sessionId) } }
+            Button(sendNowLabel) { AppHaptics.light(); confirmSendNow = true }
+            Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
+            Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
         case .blocked:
-            Button("Retry") { Task { await store.requeuePending(message.localId, in: sessionId) } }
-            Button(sendNowLabel) { confirmSendNow = true }
-            Button("Edit") { beginEdit() }
-            Button("Copy") { MessageClipboard.copy(message.text) }
-            Button("Remove", role: .destructive) { Task { await store.removePending(message.localId, in: sessionId) } }
+            Button("Retry") { AppHaptics.confirm(); Task { await store.requeuePending(message.localId, in: sessionId) } }
+            Button(sendNowLabel) { AppHaptics.light(); confirmSendNow = true }
+            Button("Edit") { AppHaptics.light(); beginEdit() }
+            Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
+            Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
         case .delivering:
             // The runner has taken it; the server refuses changes from here on (no double send).
-            Button("Copy") { MessageClipboard.copy(message.text) }
+            Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
         case .queued:
             if canSteerNow {
-                Button("Steer Now") { Task { await store.steerPendingNow(message.localId, in: sessionId) } }
+                Button("Steer Now") { AppHaptics.confirm(); Task { await store.steerPendingNow(message.localId, in: sessionId) } }
             }
-            Button(sendNowLabel) { confirmSendNow = true }
-            Button("Edit") { beginEdit() }
-            Button("Copy") { MessageClipboard.copy(message.text) }
-            Button("Remove", role: .destructive) { Task { await store.removePending(message.localId, in: sessionId) } }
+            Button(sendNowLabel) { AppHaptics.light(); confirmSendNow = true }
+            Button("Edit") { AppHaptics.light(); beginEdit() }
+            Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
+            Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
         }
     }
 

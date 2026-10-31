@@ -22,7 +22,7 @@ import Testing
 
     @Test func optionsInsideCodeFencesStayCode() {
         let text = "```xml\n<options>\n<option>A</option>\n</options>\n```"
-        #expect(MarkdownSegments.parse(text) == [.code("<options>\n<option>A</option>\n</options>")])
+        #expect(MarkdownSegments.parse(text) == [.code("<options>\n<option>A</option>\n</options>", language: "xml")])
     }
 
     @Test func emptyOptionsBlockIsDropped() {
@@ -46,6 +46,13 @@ import Testing
                                  rows: [["GasCorp", "**Sí**"], ["Clonar repos (esta)", "No: igual que en la RN"]],
                                  alignments: [.default, .default])),
             .prose("Listo."),
+        ])
+    }
+
+    @Test func gfmRowsWithoutOuterPipesKeepTheirCells() {
+        let text = "Name | Value\n--- | ---\nManny | 1\nWen | 2"
+        #expect(MarkdownSegments.parse(text) == [
+            .table(MarkdownTable(headers: ["Name", "Value"], rows: [["Manny", "1"], ["Wen", "2"]], alignments: [.default, .default])),
         ])
     }
 

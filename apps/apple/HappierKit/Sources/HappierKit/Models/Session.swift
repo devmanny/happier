@@ -41,6 +41,9 @@ public struct Session: Identifiable, Sendable, Equatable {
     public var agentStateVersion: Int
 
     public let isPlain: Bool
+    /// The viewer's access when someone else shared the session (`share.accessLevel`: view, edit,
+    /// admin); nil for the user's own sessions (`v2SessionListRows.ts`).
+    public let sharedAccessLevel: String?
     /// Content cipher for E2EE sessions; nil for plaintext sessions.
     public let cipher: ContentCipher?
 
@@ -70,6 +73,7 @@ public struct Session: Identifiable, Sendable, Equatable {
         guard let id = row["id"]?.stringValue else { throw Failure.undecryptable("missing id") }
         self.id = id
         isPlain = row["encryptionMode"]?.stringValue == "plain"
+        sharedAccessLevel = row["share"]?["accessLevel"]?.stringValue
         if isPlain {
             cipher = nil
         } else {
@@ -200,6 +204,18 @@ public struct Session: Identifiable, Sendable, Equatable {
     }
 
     public var sortDate: Date { meaningfulActivityAt ?? updatedAt }
+
+    /// Whether the user may delete the session for good (`sessionActionContext.ts` `canDelete`):
+    /// only their own, once it has stopped, and not while a preserved terminal host still holds it.
+    public var canDelete: Bool {
+        sharedAccessLevel == nil && !active && !hasPreservedTerminalHost
+    }
+
+    /// `resolveTerminalControlServiceabilityPolicy(...).hostPresence == 'preserved'`.
+    private var hasPreservedTerminalHost: Bool {
+        guard let policy = metadata["terminal"]?["controlServiceabilityV1"], policy["v"]?.intValue == 1 else { return false }
+        return policy["retired"]?.boolValue != true
+    }
 
     private var isTurnTerminal: Bool { ["completed", "cancelled", "failed"].contains(latestTurnStatus ?? "") }
 

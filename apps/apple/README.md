@@ -9,6 +9,8 @@ Happier server and end-to-end encryption as `apps/ui`, so sessions started from 
 | --- | --- |
 | `HappierKit/` | Swift package: crypto, auth, HTTP/Socket.IO sync, transcript reducer. Testable with `swift test`. |
 | `Happier/` | The multiplatform SwiftUI app. |
+| `HappierWidgets/`, `HappierShare/` | Home Screen widgets and the share extension (iOS and macOS). |
+| `HappierWatch/`, `HappierWatchWidgets/` | The Apple Watch app and its complications, embedded in the iPhone app. |
 | `project.yml` | XcodeGen spec; `Happier.xcodeproj` is generated and not committed. |
 
 ## Build
@@ -51,6 +53,19 @@ echo '{"keyId":"<KEY ID>","teamId":"DPF7ZLTLN2","keyPath":"AuthKey.p8"}' > ~/.ha
 
 Without it the CLI skips `apns:` tokens. Development-signed builds register sandbox tokens;
 Developer ID/App Store builds production ones.
+
+## Apple Watch
+
+The watch keeps no account keys and never talks to the relay: the iPhone app is its only source.
+`AttentionWidgetPublisher` sends it the same two snapshots the Home Screen widgets read
+(`AttentionSnapshot` with the first pending request and the agent's last words, `ActivitySnapshot`)
+as the WatchConnectivity application context; the watch app saves them in the App Group for its
+complications (Needs You, Working Now, Usage). Allow/Deny, a dictated reply and a dictated new
+session go back as `WatchMessage`s; the iPhone answers them through `HappierStore.handle(PushTap)`
+(the notification buttons' path, which signs in from the saved credentials when woken in the
+background) and `QuickSessionStart` → `createSession` with the agent, model, effort, machine and
+folder the new-session screen last used (`NewSessionDefaults`). "New session in Happier" is also
+an App Shortcut on both the iPhone and the watch (Siri, Shortcuts, the Ultra's Action button).
 
 ## Current scope
 

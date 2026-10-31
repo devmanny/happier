@@ -20,13 +20,14 @@ struct SessionPickerSheet: View {
         NavigationStack {
             List(candidates) { session in
                 Button {
+                    AppHaptics.selection()
                     dismiss()
                     onPick(session)
                 } label: {
                     SessionRow(session: session)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             #if os(iOS)
             .listStyle(.plain)
@@ -41,7 +42,10 @@ struct SessionPickerSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel", role: .cancel) {
+                        AppHaptics.light()
+                        dismiss()
+                    }
                 }
             }
         }

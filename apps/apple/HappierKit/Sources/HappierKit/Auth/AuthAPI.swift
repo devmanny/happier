@@ -22,21 +22,54 @@ public struct AuthAPI: Sendable {
         http = HTTPClient(baseURL: server, session: session)
     }
 
-    // MARK: Restore with secret key (POST /v1/auth challenge)
+    // MARK: Restore with secret key, or a new account (POST /v1/auth challenge)
 
     public func signIn(secret: Data) async throws -> Credentials {
+        try await authenticate(secret: secret, publishContentKey: false)
+    }
+
+    /// What the relay allows a new device to do (`GET /v1/features`).
+    public func options() async throws -> AuthOptions {
+        AuthOptions(features: try await http.get("/v1/features"))
+    }
+
+    /// A new account under a new device key (`createAccount` in `index.tsx`): `/v1/auth` creates
+    /// it for a key it doesn't know. Returns the key, which only this device then holds; show it
+    /// for safekeeping.
+    public func createAccount(publishContentKey: Bool) async throws -> (credentials: Credentials, secret: Data) {
+        let secret = HappierCrypto.randomBytes(32)
+        do {
+            return (try await authenticate(secret: secret, publishContentKey: publishContentKey), secret)
+        } catch let error as HTTPClient.ServerError where error.status == 403 && error.body?["error"]?.stringValue == "signup-disabled" {
+            throw Failure.rejected(String(localized: "This relay doesn't accept new accounts."))
+        }
+    }
+
+    private func authenticate(secret: Data, publishContentKey: Bool) async throws -> Credentials {
         let keys = try AccountKeys(masterSecret: secret)
-        guard let publicKey = keys.signingPublicKey else { throw Failure.rejected("invalid secret") }
-        let challenge = HappierCrypto.randomBytes(32)
-        let response = try await http.post("/v1/auth", [
-            "publicKey": .string(publicKey.base64EncodedString()),
-            "challenge": .string(challenge.base64EncodedString()),
-            "signature": .string(try keys.sign(challenge).base64EncodedString()),
-        ])
+        let response = try await http.post("/v1/auth", try Self.challengeBody(keys: keys, challenge: HappierCrypto.randomBytes(32),
+                                                                             publishContentKey: publishContentKey))
         guard let token = response["token"]?.stringValue else {
             throw Failure.rejected(response["error"]?.stringValue ?? "no token")
         }
         return .legacy(token: token, secret: secret)
+    }
+
+    /// `getToken.ts`: the Ed25519 key signs a fresh challenge; with sharing content keys on, the
+    /// account's X25519 content key is published, signed by the same key.
+    static func challengeBody(keys: AccountKeys, challenge: Data, publishContentKey: Bool) throws -> JSONValue {
+        guard let publicKey = keys.signingPublicKey else { throw Failure.rejected("invalid secret") }
+        var body: [String: JSONValue] = [
+            "publicKey": .string(publicKey.base64EncodedString()),
+            "challenge": .string(challenge.base64EncodedString()),
+            "signature": .string(try keys.sign(challenge).base64EncodedString()),
+        ]
+        if publishContentKey {
+            let content = keys.content.publicKey
+            body["contentPublicKey"] = .string(content.base64EncodedString())
+            body["contentPublicKeySig"] = .string(try keys.sign(AccountKeyProvisioning.contentKeyBindingMessage(content)).base64EncodedString())
+        }
+        return .object(body)
     }
 
     // MARK: Link from a signed-in device (new device shows a QR)
@@ -112,4 +145,32 @@ public struct AuthAPI: Sendable {
         return (pair, response["confirmCode"]?.stringValue ?? "")
     }
 
+}
+
+/// The sign-in options a relay offers (`useRemoteAuthEntryOptions.ts` over `/v1/features`).
+public struct AuthOptions: Sendable, Equatable {
+    /// A new device key can create an account here (key-challenge `provision`).
+    public let canCreateAccount: Bool
+    /// New accounts publish their content key (`features.sharing.contentKeys`).
+    public let publishesContentKey: Bool
+
+    public init(features: JSONValue) {
+        let keyChallengeEnabled = features["features"]?["auth"]?["login"]?["keyChallenge"]?["enabled"]?.boolValue != false
+        let auth = features["capabilities"]?["auth"]
+        let canProvision: Bool
+        if let methods = auth?["methods"]?.arrayValue {
+            let keyChallenge = methods.first { $0["id"]?.stringValue == "key_challenge" }
+            canProvision = keyChallenge?["actions"]?.arrayValue?.contains {
+                $0["id"]?.stringValue == "provision" && $0["enabled"]?.boolValue == true
+                    && ["keyed", "either"].contains($0["mode"]?.stringValue ?? "keyed")
+            } ?? false
+        } else if let signup = auth?["signup"]?["methods"]?.arrayValue {
+            canProvision = signup.contains { $0["id"]?.stringValue == "anonymous" && $0["enabled"]?.boolValue == true }
+        } else {
+            // Relays from before auth capabilities: anonymous sign-up only.
+            canProvision = true
+        }
+        canCreateAccount = keyChallengeEnabled && canProvision
+        publishesContentKey = features["features"]?["sharing"]?["contentKeys"]?["enabled"]?.boolValue == true
+    }
 }

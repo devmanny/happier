@@ -6,9 +6,11 @@ struct WelcomeView: View {
     @State private var route: Route?
     @State private var serverText = ""
     @State private var showServer = false
+    /// What the typed relay allows; nil until it answers (or when it can't be reached).
+    @State private var authOptions: AuthOptions?
 
     enum Route: Identifiable {
-        case link, secretKey
+        case link, secretKey, create
         var id: Self { self }
     }
 
@@ -43,6 +45,7 @@ struct WelcomeView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glassProminent)
+                .glassHover()
                 .controlSize(.large)
                 .disabled(server == nil)
 
@@ -53,8 +56,23 @@ struct WelcomeView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
+                .glassHover()
                 .controlSize(.large)
                 .disabled(server == nil)
+
+                if authOptions?.canCreateAccount == true {
+                    Button {
+                        route = .create
+                    } label: {
+                        Label("Create New Account", systemImage: "person.badge.plus")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .glassHover()
+                    .controlSize(.large)
+                    .disabled(server == nil)
+                    .accessibilityIdentifier("account-create-new")
+                }
 
                 VStack(spacing: 6) {
                     Button {
@@ -68,7 +86,9 @@ struct WelcomeView: View {
                                 .rotationEffect(.degrees(showServer ? 180 : 0))
                         }
                     }
-                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("account-relay-address")
+                    .accessibilityValue(server?.absoluteString ?? serverText)
+                    .buttonStyle(.pressable)
                     if showServer {
                         TextField(HappierStore.defaultServer.absoluteString, text: $serverText)
                             .textFieldStyle(.roundedBorder)
@@ -96,6 +116,7 @@ struct WelcomeView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.glass)
+                    .glassHover()
                 }
             }
             .frame(maxWidth: 380)
@@ -103,12 +124,26 @@ struct WelcomeView: View {
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { serverText = store.server.absoluteString }
+        .task(id: server) {
+            authOptions = nil
+            guard let server else { return }
+            // Typing an address: wait for a pause before asking that relay.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            authOptions = try? await AuthAPI(server: server).options()
+        }
+        .onChange(of: store.pendingSessionLink) { _, link in
+            if let link, RelayList.canonical(link.server) == RelayList.canonical(store.server), store.sessionLinkConfirmation == nil {
+                serverText = store.server.absoluteString
+            }
+        }
         .sheet(item: $route) { route in
             NavigationStack {
                 let server = self.server ?? store.server
                 switch route {
                 case .link: LinkDeviceView(server: server)
                 case .secretKey: SecretKeyView(server: server)
+                case .create: CreateAccountView(server: server, publishesContentKey: authOptions?.publishesContentKey ?? false)
                 }
             }
             #if os(macOS)

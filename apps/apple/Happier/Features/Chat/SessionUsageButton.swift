@@ -20,7 +20,10 @@ struct SessionUsageButton: View {
     }
 
     var body: some View {
-        Button { showDetails = true } label: {
+        Button {
+            AppHaptics.light()
+            showDetails = true
+        } label: {
             ZStack {
                 ring(fraction: contextFraction, tint: .primary, diameter: 20)
                 ring(fraction: weekly.map { $0.usedPercent / 100 },

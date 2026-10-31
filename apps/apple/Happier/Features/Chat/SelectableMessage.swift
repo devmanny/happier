@@ -70,12 +70,16 @@ import UIKit
 private struct SelectableMessageText: UIViewRepresentable {
     let markdown: String
     let color: UIColor
+    @Environment(\.openURL) private var openURL
+
+    func makeCoordinator() -> Coordinator { Coordinator(openURL: openURL) }
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = false
+        view.delegate = context.coordinator
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
@@ -87,8 +91,20 @@ private struct SelectableMessageText: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.openURL = openURL
         let text = Self.attributed(markdown, color: color)
         if view.attributedText.string != text.string { view.attributedText = text }
+    }
+
+    @MainActor final class Coordinator: NSObject, UITextViewDelegate {
+        var openURL: OpenURLAction
+
+        init(openURL: OpenURLAction) { self.openURL = openURL }
+
+        func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = textItem.content else { return defaultAction }
+            return UIAction { [weak self] _ in self?.openURL(url) }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
@@ -131,7 +147,7 @@ private struct SelectableMessageText: UIViewRepresentable {
             switch segment {
             case .prose(let text):
                 paragraph(inline(text, color: color))
-            case .code(let code):
+            case .code(let code, _):
                 paragraph(NSAttributedString(string: code, attributes: [
                     .font: UIFont.monospacedSystemFont(ofSize: body.pointSize * 0.9, weight: .regular), .foregroundColor: color,
                 ]))

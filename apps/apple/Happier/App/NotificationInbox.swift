@@ -8,6 +8,8 @@ import UserNotifications
 @MainActor @Observable
 final class NotificationInbox {
     private(set) var notifications: [DeliveredNotification] = []
+    /// Asked from outside the lists (the Home Screen widget): show the notifications.
+    var showRequested = false
     @ObservationIgnored private let store: HappierStore
     @ObservationIgnored private let center = UNUserNotificationCenter.current()
 
