@@ -1,6 +1,10 @@
+import AudioToolbox
 import Foundation
 #if os(iOS)
+import CoreHaptics
 import UIKit
+#else
+import AppKit
 #endif
 
 /// Feedback for deliberate interactions. Call from the action itself, never a live-data update.
@@ -59,4 +63,23 @@ enum AppHaptics {
         notificationFeedback.notificationOccurred(.error)
         #endif
     }
+
+    /// Push to talk starting to listen, and letting go (sent or deleted). Where nothing vibrates
+    /// (iPad, Mac) a short tone says it instead: the one iOS plays when recording starts and stops.
+    static func listening(_ starts: Bool, cancelled: Bool = false) {
+        guard isEnabled else { return }
+        if starts { confirm() } else if cancelled { warning() } else { light() }
+        guard !vibrates else { return }
+        #if os(iOS)
+        AudioServicesPlaySystemSound(starts ? 1113 : 1114)
+        #else
+        NSSound(named: starts ? "Tink" : "Pop")?.play()
+        #endif
+    }
+
+    #if os(iOS)
+    private static let vibrates = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    #else
+    private static let vibrates = false
+    #endif
 }

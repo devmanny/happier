@@ -25,8 +25,11 @@ struct Composer: View {
     // Only iOS has a camera to open; the pickers take these everywhere.
     /// Holding the mic: push to talk.
     @State private var talking = false
-    /// Slid far enough toward the trash: letting go cancels.
+    /// The held mic is stuck to the trash: letting go deletes what was said.
     @State private var talkCancelArmed = false
+    /// The trash's and the mic's centers along the row, for the mic to stick to the trash.
+    @State private var trashX: CGFloat?
+    @State private var micX: CGFloat?
     @State private var textBeforeTalking = ""
     @State private var showCamera = false
     @State private var showCameraPermission = false
@@ -64,7 +67,7 @@ struct Composer: View {
         textBeforeTalking = text
         talkCancelArmed = false
         talking = true
-        AppHaptics.confirm()
+        AppHaptics.listening(true)
         MessageSpeaker.shared.stop()
         if MessageSpeaker.shared.autoReadSessionId != sessionId {
             MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
@@ -80,13 +83,14 @@ struct Composer: View {
             text = textBeforeTalking
             talking = false
             talkCancelArmed = false
-            AppHaptics.warning()
+            AppHaptics.listening(false, cancelled: true)
             return
         }
+        AppHaptics.listening(false)
         Task {
             await dictation.finish()
             talking = false
-            if canSend { send() } else { AppHaptics.light() }
+            if canSend { send() }
         }
     }
 
@@ -263,14 +267,15 @@ struct Composer: View {
                 .accessibilityHidden(talking)
                 .overlay {
                     if talking {
-                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed)
+                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed) { trashX = $0 }
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
                 if !canSend || dictation.isRecording || talking {
                     // Tap: dictate into the field. Hold: push to talk, sent when released, and the
                     // agent's answer is read aloud (a spoken conversation).
-                    PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed) {
+                    PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
+                                     trashOffset: trashX.flatMap { trash in micX.map { trash - $0 } }) {
                         if dictation.isRecording {
                             dictation.stop()
                             AppHaptics.light()
@@ -283,6 +288,7 @@ struct Composer: View {
                     } onHoldEnd: { cancelled in
                         stopTalking(cancelled: cancelled)
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(TalkPanel.row)).midX } action: { micX = $0 }
                 }
                 // Kept in place, unseen, while talking so the mic doesn't slide out from under the finger.
                 sendButton
@@ -291,6 +297,7 @@ struct Composer: View {
                     .accessibilityHidden(talking)
             }
             .animation(.smooth(duration: 0.2), value: talking)
+            .coordinateSpace(.named(TalkPanel.row))
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -1038,32 +1045,51 @@ struct PushToTalkButton: View {
     let recording: Bool
     let talking: Bool
     @Binding var cancelArmed: Bool
+    /// From the mic to the trash along the row (negative: the trash is on the left); nil until
+    /// the panel is laid out.
+    var trashOffset: CGFloat?
     let onTap: () -> Void
     let onHoldStart: () -> Void
     let onHoldEnd: (_ cancelled: Bool) -> Void
-    /// How far left the finger goes to land on the trash.
+    /// Where the trash is when the panel hasn't reported it.
     static let cancelDistance: CGFloat = 110
+    /// The magnet pulls the mic onto the trash once the finger is within this share of the
+    /// distance from it (60% of the way there)…
+    static let magnetShare: CGFloat = 0.4
+    /// …and lets go once the finger is back at half the way. Sending pulls harder than
+    /// deleting: a slip of the finger shouldn't throw a message away.
+    static let releaseShare: CGFloat = 0.5
+    /// How big the held mic grows, so it shows around the thumb.
+    static let heldScale: CGFloat = 1.9
+    /// Short of the magnet it leans back toward where it was held: it moves this share of the
+    /// finger's way, so it feels held by gravity on both sides.
+    static let homePull: CGFloat = 0.4
     @State private var pressing = false
     @State private var held = false
     @State private var holdTimer: Task<Void, Never>?
+    /// Where the held mic sits: under the finger, or stuck to the trash.
+    @State private var dragOffset: CGSize = .zero
 
     var body: some View {
-        Image(systemName: talking || recording ? "waveform" : "mic")
+        // The mic stays a mic: the thumb covers it, and the panel shows that it listens.
+        Image(systemName: cancelArmed && talking ? "trash" : talking || recording ? "mic.fill" : "mic")
             .font(.body.weight(.semibold))
             .frame(width: 22, height: 22)
             .foregroundStyle(talking || recording ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-            .symbolEffect(.variableColor.iterative, isActive: talking || recording)
+            .contentTransition(.symbolEffect(.replace))
             .padding(9)
             .background {
                 if talking {
-                    // Green while it listens; red once the finger reaches the trash.
-                    Circle().fill(cancelArmed ? Color.red : Color.green)
+                    // The app's blue while it listens; red once stuck to the trash.
+                    Circle().fill(cancelArmed ? Color.red : Color.userBubble)
                 } else if recording {
                     Circle().fill(Color.userBubble)
                 }
             }
             .glassEffect(.regular.interactive(), in: Circle())
-            .scaleEffect(talking ? 1.15 : pressing ? 0.9 : 1)
+            // Bigger while held, so it shows around the thumb, and it follows the finger.
+            .scaleEffect(talking ? Self.heldScale : pressing ? 0.9 : 1)
+            .offset(talking ? dragOffset : .zero)
             .animation(.smooth(duration: 0.15), value: talking)
             .animation(.smooth(duration: 0.1), value: pressing)
             .contentShape(Circle())
@@ -1084,18 +1110,16 @@ struct PushToTalkButton: View {
                         }
                     }
                     guard held else { return }
-                    let armed = value.translation.width < -Self.cancelDistance
-                    if armed != cancelArmed {
-                        cancelArmed = armed
-                        AppHaptics.light()
-                    }
+                    follow(value.translation)
                 }
-                .onEnded { value in
+                .onEnded { _ in
                     holdTimer?.cancel()
                     pressing = false
                     if held {
                         held = false
-                        onHoldEnd(value.translation.width < -Self.cancelDistance)
+                        // Stuck to the trash it's deleted, wherever the finger is; otherwise sent.
+                        onHoldEnd(cancelArmed)
+                        withAnimation(.spring(duration: 0.3)) { dragOffset = .zero }
                     } else {
                         onTap()
                     }
@@ -1104,6 +1128,25 @@ struct PushToTalkButton: View {
             .accessibilityHint("Hold to talk; release to send")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onTap() }
+    }
+
+    /// With the finger, wherever it goes, under two pulls: back toward where it was held (the
+    /// stronger one), and onto the trash once the finger is most of the way there.
+    private func follow(_ finger: CGSize) {
+        let trash = min(trashOffset ?? -Self.cancelDistance, -1)
+        let fromTrash = hypot(finger.width - trash, finger.height)
+        let stuck = fromTrash < abs(trash) * (cancelArmed ? Self.releaseShare : Self.magnetShare)
+        // Not too far from the composer: above the field at most, a little below the row.
+        let free = CGSize(width: min(max(finger.width * Self.homePull, trash), 40),
+                          height: min(max(finger.height * Self.homePull, -200), 60))
+        if stuck != cancelArmed {
+            cancelArmed = stuck
+            // A firmer tap when it sticks, like a magnet catching.
+            if stuck { AppHaptics.confirm() } else { AppHaptics.light() }
+            withAnimation(.spring(duration: 0.25, bounce: 0.3)) { dragOffset = stuck ? CGSize(width: trash, height: 0) : free }
+        } else if !stuck {
+            dragOffset = free
+        }
     }
 }
 
@@ -1114,6 +1157,9 @@ struct PushToTalkButton: View {
 struct TalkPanel: View {
     let levels: [Float]
     let cancelArmed: Bool
+    /// The trash's center along the composer row (`TalkPanel.row`), where the mic sticks.
+    var onTrash: (CGFloat) -> Void = { _ in }
+    static let row = "talkRow"
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1122,6 +1168,7 @@ struct TalkPanel: View {
                 .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .scaleEffect(cancelArmed ? 1.25 : 1)
                 .animation(.smooth(duration: 0.15), value: cancelArmed)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.row)).midX } action: { onTrash($0) }
             Text(cancelArmed ? "Release to cancel" : "‹ Slide to cancel")
                 .font(.subheadline.weight(cancelArmed ? .semibold : .regular))
                 .foregroundStyle(cancelArmed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
