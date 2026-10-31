@@ -218,6 +218,31 @@ from this current-work projection.
 - `rpc-call`
   - `{ method, params }` -> callback `{ ok, result? | error? }`
   - Server forwards to the registered socket via `rpc-request` (ack-based).
+  - A method name maps to one socket per account; the latest `rpc-register` wins and a
+    disconnect removes that socket's methods.
+
+#### Integrated browser of the native app (`device.browser.v1.*`)
+
+The native Apple app serves its WebKit browser to session agents with no relay changes. Its
+user-scoped socket registers `<machineId>:device.browser.v1.<slot>` for every machine it
+knows. A session on that machine calls the method like any machine RPC (`callExactMachineRpc`),
+so params and result are encrypted with that machine's data key, or stay plain for plain
+machines. The daemon never registers these methods.
+
+- Slots, tried in this order by the CLI (`apps/cli/src/mcp/deviceBrowser`):
+  - `focused`: the device where the user opened the browser most recently (iPhone, iPad or
+    Mac). iOS loses it when the app goes to the background, because iOS closes the socket. It
+    comes back when the app returns with the browser still on screen.
+  - `host`: a running Mac app. It serves from launch, with or without a browser window.
+- The CLI moves to the next slot only when the relay reports that no client serves the method.
+  A request that may have reached a device is never re-sent.
+- Operations, request/response schemas and error codes are defined in
+  `packages/protocol/src/deviceBrowser/deviceBrowserRpc.ts`. The Swift mirror is
+  `apps/apple/HappierKit/Sources/HappierKit/Browser/DeviceBrowserRPC.swift`.
+- Session agents see these operations as the Happier MCP tools `browser_navigate`,
+  `browser_screenshot`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`,
+  `browser_evaluate`, `browser_wait` and `browser_tabs`. These tools are auto-approved, and a
+  Settings toggle on each device turns agent access off.
 
 ## HTTP endpoints by area
 See `api.md` for the full HTTP endpoint catalog and auth flows.

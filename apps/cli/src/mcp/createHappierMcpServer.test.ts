@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { callMachineRpc } = vi.hoisted(() => ({ callMachineRpc: vi.fn() }));
+const { callMachineRpc, callExactMachineRpc } = vi.hoisted(() => ({ callMachineRpc: vi.fn(), callExactMachineRpc: vi.fn() }));
 
-vi.mock('@/session/transport/rpc/machineRpc', () => ({ callMachineRpc }));
+vi.mock('@/session/transport/rpc/machineRpc', () => ({ callMachineRpc, callExactMachineRpc }));
 
 const env = process.env;
 
@@ -10,6 +10,7 @@ describe('createHappierMcpServer', () => {
   beforeEach(() => {
     vi.resetModules();
     callMachineRpc.mockReset();
+    callExactMachineRpc.mockReset();
     process.env = { ...env };
     delete process.env.HAPPIER_ACTIONS_SETTINGS_V1;
   });
@@ -753,5 +754,41 @@ describe('createHappierMcpServer', () => {
       host: 'leeroy-mbp',
       machineId: 'machine-1',
     });
+  });
+  it('routes browser tools to the user app over the session machine namespace', async () => {
+    for (const mocked of [
+      '@modelcontextprotocol/sdk/server/mcp.js',
+      '@/agent/tools/happierTools/dispatchBuiltInHappierTool',
+      '@/session/actions/createCliActionExecutorHarness',
+      '@/mcp/server/registerHappierMcpBuiltInTools',
+    ]) vi.doUnmock(mocked);
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+    callExactMachineRpc.mockResolvedValue({ ok: true, device: { name: 'Mac mini', platform: 'macos' }, tabs: [] });
+    const { createHappierMcpServer } = await import('@/mcp/createHappierMcpServer');
+    const credentials = {
+      token: 'token-1',
+      encryption: { type: 'legacy' as const, secret: new Uint8Array(32).fill(1) },
+    };
+    const { mcp } = createHappierMcpServer({
+      sessionId: 'sess_mcp_browser_1',
+      rpcHandlerManager: { invokeLocal: vi.fn() },
+      getCurrentSessionLocation: () => ({ machineId: 'machine-session' }),
+      sendClaudeSessionMessage: () => {},
+      updateMetadata: () => {},
+    } as any, { credentials });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '1.0.0' });
+    await Promise.all([mcp.connect(serverTransport), client.connect(clientTransport)]);
+
+    const result = await client.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
+
+    expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+    expect(callExactMachineRpc).toHaveBeenCalledWith(expect.objectContaining({
+      credentials,
+      machineId: 'machine-session',
+      method: 'device.browser.v1.focused',
+      request: { op: 'tabs', action: 'list' },
+    }));
   });
 });

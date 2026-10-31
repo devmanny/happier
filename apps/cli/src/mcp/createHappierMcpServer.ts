@@ -14,7 +14,9 @@ import type { Credentials } from '@/persistence';
 import { createCliActionExecutorHarness } from '@/session/actions/createCliActionExecutorHarness';
 import { createDaemonMemoryActionDeps } from '@/session/actions/createDaemonMemoryActionDeps';
 import { resolveSessionEncryptionContextFromCredentials } from '@/session/transport/encryption/sessionEncryptionContext';
-import { callMachineRpc } from '@/session/transport/rpc/machineRpc';
+import { callExactMachineRpc, callMachineRpc } from '@/session/transport/rpc/machineRpc';
+import { createDeviceBrowserClient } from '@/mcp/deviceBrowser/deviceBrowserClient';
+import { registerDeviceBrowserMcpTools } from '@/mcp/deviceBrowser/registerDeviceBrowserMcpTools';
 import {
   PromptRegistryInstallRequestV1Schema,
   PromptRegistryInstallResponseV1Schema,
@@ -289,6 +291,16 @@ export function createHappierMcpServer(
       isActionEnabled: actionToolBridge.isActionEnabled,
     },
   });
+
+  // The integrated browser of the user's Happier app is served under this session's machine
+  // namespace and encrypted with that machine's key; without credentials or a machine there is
+  // no addressable device, so the tools are not offered.
+  const browserMachineId = typeof sessionLocation?.machineId === 'string' ? sessionLocation.machineId.trim() : '';
+  if (credentials && browserMachineId) {
+    const deviceBrowser = createDeviceBrowserClient(async ({ method, request, timeoutMs }) =>
+      await callExactMachineRpc({ credentials, machineId: browserMachineId, method, request, timeoutMs }));
+    registerDeviceBrowserMcpTools(mcp, { invoke: deviceBrowser.invoke });
+  }
 
   return {
     mcp,

@@ -1,5 +1,7 @@
 import { isChangeTitleToolLikeName } from '@happier-dev/protocol/tools/v2';
 
+import { isHappierDeviceBrowserToolName } from '@/mcp/deviceBrowser/deviceBrowserToolNames';
+
 const TRUSTED_SAFE_TOOL_NAMES = new Set([
   'think',
   'save_memory',
@@ -25,5 +27,6 @@ export function isTrustedAlwaysAutoApproveToolName(
   if (!normalized) return false;
   if (isChangeTitleToolLikeName(normalized)) return true;
   if (TRUSTED_SAFE_TOOL_NAMES.has(normalized)) return true;
+  if (isHappierDeviceBrowserToolName(normalized)) return true;
   return additionalExactNames.some((name) => normalized === name.trim().toLowerCase());
 }

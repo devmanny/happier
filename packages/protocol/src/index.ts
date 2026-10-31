@@ -3692,3 +3692,25 @@ export {
 } from './machines/machineContentKeyTransitionV1.js';
 
 export { assertAccountKeyProvisioningAllowed, AccountKeyProvisioningUnavailableError, verifyAccountContentPublicKeyBinding, createAccountContentPublicKeyBindingMessage } from './auth/accountKeyProvisioning.js';
+
+export {
+  DEVICE_BROWSER_ERROR_CODES,
+  DEVICE_BROWSER_MAX_WAIT_MS,
+  DEVICE_BROWSER_RPC_SLOTS,
+  DeviceBrowserDeviceSchema,
+  DeviceBrowserFailureSchema,
+  DeviceBrowserRequestSchema,
+  DeviceBrowserResponseSchema,
+  DeviceBrowserSuccessSchema,
+  DeviceBrowserTabSchema,
+  deviceBrowserRpcMethod,
+  type DeviceBrowserDevice,
+  type DeviceBrowserErrorCode,
+  type DeviceBrowserFailure,
+  type DeviceBrowserOperation,
+  type DeviceBrowserRequest,
+  type DeviceBrowserResponse,
+  type DeviceBrowserRpcSlot,
+  type DeviceBrowserSuccess,
+  type DeviceBrowserTab,
+} from './deviceBrowser/deviceBrowserRpc.js';

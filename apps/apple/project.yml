@@ -45,6 +45,9 @@ targets:
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         # iOS continued-processing tasks that keep attachment uploads running in the background.
         BGTaskSchedulerPermittedIdentifiers: [com.devmanny.happier.upload.*]
+        # The integrated browser opens any site, including http dev servers on the local network.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoadsInWebContent: true
         CFBundleURLTypes:
           - CFBundleURLName: com.devmanny.happier
             CFBundleURLSchemes: [happier]

@@ -1,0 +1,32 @@
+import SwiftUI
+
+/// Settings → Browser: whether session agents may drive the integrated browser, and its data.
+struct BrowserSettingsSection: View {
+    @Environment(BrowserModel.self) private var browser
+    @AppStorage(BrowserModel.agentAccessKey) private var agentAccess = true
+    @State private var confirmingClear = false
+
+    var body: some View {
+        Section {
+            Toggle(isOn: $agentAccess) {
+                Label("Agents Can Use the Browser", systemImage: "safari")
+            }
+            .onChange(of: agentAccess) { browser.updateSlots() }
+            Button("Clear Browsing Data", systemImage: "trash", role: .destructive) {
+                confirmingClear = true
+            }
+            .confirmationDialog("Clear cookies, logins and site data of the integrated browser?",
+                                isPresented: $confirmingClear, titleVisibility: .visible) {
+                Button("Clear Browsing Data", role: .destructive) { Task { await browser.clearWebsiteData() } }
+            }
+        } header: {
+            Text("Browser")
+        } footer: {
+            #if os(macOS)
+            Text("Session agents can open pages, read them, click, type and take screenshots in Happier's browser, with its cookies and logins, without asking each time. This Mac serves them even when the browser window is closed.")
+            #else
+            Text("Session agents can open pages, read them, click, type and take screenshots in Happier's browser, with its cookies and logins, without asking each time. Here it serves them after you open the browser, while Happier stays open; otherwise agents use your Mac.")
+            #endif
+        }
+    }
+}

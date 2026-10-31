@@ -14,6 +14,10 @@ public actor SocketIOClient {
         public var description: String { "Socket.IO connect rejected: \(message)" }
     }
 
+    /// Answers a server event that asks for an acknowledgement (relay `rpc-request`); nil means
+    /// the event is not handled and is acknowledged as unsupported so the server never waits.
+    public typealias RequestHandler = @Sendable (_ name: String, _ args: [JSONValue]) async -> JSONValue?
+
     public struct AckTimeout: Error {}
     public struct NotConnected: Error {}
 
@@ -30,6 +34,7 @@ public actor SocketIOClient {
     private var heartbeatDeadline: Duration = .seconds(45)
     private var lastHeartbeat = ContinuousClock.now
     private var closed = false
+    private var requestHandler: RequestHandler?
 
     public nonisolated let events: AsyncStream<Event>
     private let eventSink: AsyncStream<Event>.Continuation
@@ -93,6 +98,10 @@ public actor SocketIOClient {
         }
     }
 
+    public func setRequestHandler(_ handler: RequestHandler?) {
+        requestHandler = handler
+    }
+
     /// Reply to a server event that requested an acknowledgement.
     public func ack(_ id: Int, _ args: JSONValue...) async throws {
         try await send(.ack(id: id, args: args))
@@ -144,8 +153,12 @@ public actor SocketIOClient {
             shutdown(reason: "connect error: \(message)")
         case .event(let name, let args, let ackId):
             if let ackId {
-                // The Happier UI registers no client RPC handlers; answer so the server never waits.
-                try await send(.ack(id: ackId, args: [["ok": false, "error": "not supported"]]))
+                // Answered off the receive loop: a handler may take as long as its RPC allows.
+                let handler = requestHandler
+                Task {
+                    let reply = await handler?(name, args)
+                    try? await self.ack(ackId, reply ?? ["ok": false, "error": "not supported"])
+                }
             }
             eventSink.yield(.event(name: name, args: args))
         case .ack(let id, let args):

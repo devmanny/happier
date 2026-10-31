@@ -469,10 +469,16 @@ public final class HappierStore {
                 serverURL: server, path: "/v1/updates",
                 auth: ["token": .string(token), "clientType": "user-scoped", "clientPurpose": "sync"])
             self.socket = socket
+            registeredBrowserMethods = []
+            await socket.setRequestHandler { [weak self] name, args in
+                guard name == "rpc-request", let payload = args.first else { return nil }
+                return await self?.answerSocketRequest(payload)
+            }
             do {
                 try await socket.connect()
                 connection = .online
                 backoff = .seconds(1)
+                await syncDeviceBrowserRegistrations()
                 await refreshSessions()
                 for id in openSessionIds {
                     startLoading(id)
@@ -926,6 +932,42 @@ public final class HappierStore {
             machines = rows.compactMap { try? Machine(row: $0, keys: keys) }
                 .sorted { ($0.active ? 0 : 1, $0.name.lowercased()) < ($1.active ? 0 : 1, $1.name.lowercased()) }
         } catch { report(error) }
+        await syncDeviceBrowserRegistrations(loadMachines: false)
+    }
+
+    // MARK: - Integrated browser (agents drive it over the relay; see DeviceBrowserRPC)
+
+    /// The app's WebKit browser; nil until the app builds it.
+    @ObservationIgnored public weak var deviceBrowserHost: DeviceBrowserHost?
+    /// Slots this device serves right now (Settings toggle, platform and browser-open state decide).
+    public private(set) var deviceBrowserSlots: Set<DeviceBrowserSlot> = []
+    @ObservationIgnored private var registeredBrowserMethods: Set<String> = []
+
+    /// `reclaim` re-registers the served methods even when already registered, so this device
+    /// becomes the most recent one on the relay (opening the browser here wins the `focused` slot).
+    public func setDeviceBrowserSlots(_ slots: Set<DeviceBrowserSlot>, reclaim: Bool = false) {
+        let changed = slots != deviceBrowserSlots
+        deviceBrowserSlots = slots
+        guard changed || reclaim else { return }
+        Task { await syncDeviceBrowserRegistrations(reclaim: reclaim) }
+    }
+
+    private func syncDeviceBrowserRegistrations(loadMachines: Bool = true, reclaim: Bool = false) async {
+        guard let socket, connection == .online else { return }
+        if loadMachines, machines.isEmpty, !deviceBrowserSlots.isEmpty {
+            await refreshMachines()
+            return
+        }
+        let desired = Set(DeviceBrowserRPC.methods(machineIds: machines.map(\.id), slots: deviceBrowserSlots))
+        let toRegister = reclaim ? desired : desired.subtracting(registeredBrowserMethods)
+        let toUnregister = registeredBrowserMethods.subtracting(desired)
+        registeredBrowserMethods = desired
+        for method in toUnregister.sorted() { try? await socket.emit("rpc-unregister", ["method": .string(method)]) }
+        for method in toRegister.sorted() { try? await socket.emit("rpc-register", ["method": .string(method)]) }
+    }
+
+    private func answerSocketRequest(_ payload: JSONValue) async -> JSONValue? {
+        await DeviceBrowserRPC.reply(to: payload, machines: machines, slots: deviceBrowserSlots, host: deviceBrowserHost)
     }
 
     // MARK: - Machine folders (`daemon.filesystem.*`, `createDirectory`)
