@@ -152,6 +152,18 @@ public struct Session: Identifiable, Sendable, Equatable {
         }
     }
 
+    /// The session after a heartbeat, or nil when nothing worth redrawing changed: running
+    /// sessions send one every few seconds, and applying each redrew every session list. Like the
+    /// RN app's `ActivityUpdateAccumulator`, a timestamp alone counts once it is 60 s newer, half
+    /// the 120 s freshness window `status(at:)` uses.
+    public func applying(activity: JSONValue) -> Session? {
+        var updated = self
+        updated.apply(activity: activity)
+        if updated.active != active || updated.thinking != thinking { return updated }
+        guard let before = activeAt, let after = updated.activeAt else { return updated.activeAt == activeAt ? nil : updated }
+        return after.timeIntervalSince(before) > 60 ? updated : nil
+    }
+
     // MARK: Documents
 
     /// E2EE: base64 ciphertext. Plain: a JSON string (`parsePlainSessionPayload.ts`).

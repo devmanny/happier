@@ -131,31 +131,23 @@ extension View {
 /// The three bouncing dots shown while the agent is working.
 struct TypingIndicator: View {
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .frame(width: 8, height: 8)
-                    .phaseAnimator([0.35, 1.0]) { dot, phase in
-                        dot.opacity(phase)
-                    } animation: { _ in
-                        .easeInOut(duration: 0.5).delay(Double(index) * 0.18)
-                    }
+        // Core Animation fades the dots by itself: a SwiftUI animation here redrew the whole
+        // conversation every frame while the agent worked.
+        PulsingDots(color: .secondary)
+            .frame(width: 34, height: 8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .background(Color.agentBubble, in: Capsule())
+            .background(alignment: .bottomLeading) {
+                // iMessage's typing bubble trails off in two small circles instead of a pointed tail.
+                ZStack(alignment: .bottomLeading) {
+                    Circle().fill(Color.agentBubble).frame(width: 13, height: 13).offset(x: 1, y: 2)
+                    Circle().fill(Color.agentBubble).frame(width: 6, height: 6).offset(x: -4, y: 8)
+                }
             }
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-        .background(Color.agentBubble, in: Capsule())
-        .background(alignment: .bottomLeading) {
-            // iMessage's typing bubble trails off in two small circles instead of a pointed tail.
-            ZStack(alignment: .bottomLeading) {
-                Circle().fill(Color.agentBubble).frame(width: 13, height: 13).offset(x: 1, y: 2)
-                Circle().fill(Color.agentBubble).frame(width: 6, height: 6).offset(x: -4, y: 8)
-            }
-        }
-        .padding(.leading, 4)
-        .padding(.bottom, 6)
-        .accessibilityLabel("Agent is working")
+            .padding(.leading, 4)
+            .padding(.bottom, 6)
+            .accessibilityLabel("Agent is working")
     }
 }
 

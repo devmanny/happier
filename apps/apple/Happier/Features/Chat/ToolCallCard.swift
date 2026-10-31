@@ -79,9 +79,15 @@ struct ToolCallCard: View {
                 withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: ToolPresentation.icon(for: tool))
-                        .font(.caption2)
-                        .frame(width: 14)
+                    // While it runs, the Happier mark in place of the tool's icon (Core Animation:
+                    // a sweep of light here redrew the whole conversation every frame).
+                    if tool.state == .running {
+                        HappierSpinner(size: HappierSpinner.mini)
+                    } else {
+                        Image(systemName: ToolPresentation.icon(for: tool))
+                            .font(.caption2)
+                            .frame(width: 14)
+                    }
                     Text(ToolPresentation.name(for: tool))
                         .font(.caption.weight(.medium))
                     if let summary = ToolPresentation.summary(tool) {
@@ -98,8 +104,6 @@ struct ToolCallCard: View {
                     }
                 }
                 .foregroundStyle(.secondary)
-                // A sweep of light while it runs, instead of a spinner.
-                .shimmer(tool.state == .running)
                 .accessibilityValue(tool.state == .running ? Text("Running") : Text(""))
                 .padding(.vertical, 3)
                 .padding(.horizontal, 4)
@@ -211,9 +215,13 @@ struct ToolGroupRow: View {
                 withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "square.stack.3d.up")
-                        .font(.caption2)
-                        .frame(width: 14)
+                    if running {
+                        HappierSpinner(size: HappierSpinner.mini)
+                    } else {
+                        Image(systemName: "square.stack.3d.up")
+                            .font(.caption2)
+                            .frame(width: 14)
+                    }
                     Text("\(tools.count) tools")
                         .font(.caption.weight(.medium))
                     if !expanded, let last = tools.last {
@@ -230,7 +238,6 @@ struct ToolGroupRow: View {
                     }
                 }
                 .foregroundStyle(.secondary)
-                .shimmer(running)
                 .padding(.vertical, 3)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())

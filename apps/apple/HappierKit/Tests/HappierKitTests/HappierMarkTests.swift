@@ -22,4 +22,22 @@ import Testing
         #expect(HappierMark.dots.allSatisfy { HappierMark.opacity($0, atMs: 900) == HappierMark.restOpacity })
         #expect(HappierMark.opacity(dot("BL"), atMs: 1004 + 65) == 1)
     }
+
+    /// Core Animation plays the mark from keyframes, off the main thread: they trace the same
+    /// light at every moment of the loop.
+    @Test func keyframesTraceTheSameLight() {
+        for dot in HappierMark.dots {
+            let frames = HappierMark.keyframes(for: dot)
+            #expect(frames.first?.time == 0)
+            #expect(frames.last?.time == 1)
+            #expect(zip(frames, frames.dropFirst()).allSatisfy { $0.time <= $1.time })
+            for ms in stride(from: 0.0, to: HappierMark.cycleMs, by: 7) {
+                let t = ms / HappierMark.cycleMs
+                let after = frames.firstIndex { $0.time >= t } ?? frames.count - 1
+                let b = frames[after], a = frames[max(after - 1, 0)]
+                let played = b.time == a.time ? b.opacity : a.opacity + (b.opacity - a.opacity) * (t - a.time) / (b.time - a.time)
+                #expect(abs(played - HappierMark.opacity(dot, atMs: ms)) < 0.0001, "\(dot.id) at \(ms) ms")
+            }
+        }
+    }
 }

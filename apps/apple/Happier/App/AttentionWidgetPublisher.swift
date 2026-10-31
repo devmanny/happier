@@ -3,8 +3,9 @@ import SwiftUI
 import WidgetKit
 
 /// Keeps the Home Screen widgets current: whenever what's waiting on you changes, it leaves them
-/// the new list in the shared App Group and asks them to redraw. Its own view, so only it
-/// observes every session update.
+/// the new list in the shared App Group and asks them to redraw. It reads the sessions at most
+/// every couple of seconds, not on each update: with dozens of sessions streaming, recomputing on
+/// every change kept the CPU busy.
 struct AttentionWidgetPublisher: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
@@ -52,26 +53,7 @@ struct AttentionWidgetPublisher: View {
         Color.clear
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
-            .task(id: signature) {
-                // Let a burst of updates settle before redrawing the widgets.
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled else { return }
-                publish()
-            }
-            .task(id: activity) {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled else { return }
-                let snapshot = ActivitySnapshot(sessions: store.sessionList, usage: Array(store.providerUsage.values), server: store.server)
-                guard !snapshot.looksLike(ActivitySnapshot.load()) else { return }
-                snapshot.save()
-                WidgetCenter.shared.reloadAllTimelines()
-                publishToWatch()
-            }
-            .task(id: targets) {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled else { return }
-                ShareTargets(sessions: store.sessionList).save()
-            }
+            .task { await follow() }
             .onChange(of: scenePhase) { _, phase in if phase == .background { publish() } }
             .onDisappear {
                 // Signed out: the widgets forget this account's sessions.
@@ -84,6 +66,40 @@ struct AttentionWidgetPublisher: View {
                                                         activity: ActivitySnapshot(working: [], recent: [], usage: [], updatedAt: .now)))
                 #endif
             }
+    }
+
+    /// Waits for the sessions to change, lets the burst settle, then publishes what differs.
+    private func follow() async {
+        var last: (signature: [String], activity: [String], targets: [String])?
+        while !Task.isCancelled {
+            if last != nil {
+                await withCheckedContinuation { continuation in
+                    withObservationTracking {
+                        // Every entry: `values` observes them all.
+                        _ = store.sessions.values
+                        _ = store.transcripts.values
+                        _ = store.providerUsage
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+            }
+            let now = (signature: signature, activity: activity, targets: targets)
+            if now.signature != last?.signature { publish() }
+            if now.activity != last?.activity { publishActivity() }
+            if now.targets != last?.targets { ShareTargets(sessions: store.sessionList).save() }
+            last = now
+        }
+    }
+
+    private func publishActivity() {
+        let snapshot = ActivitySnapshot(sessions: store.sessionList, usage: Array(store.providerUsage.values), server: store.server)
+        guard !snapshot.looksLike(ActivitySnapshot.load()) else { return }
+        snapshot.save()
+        WidgetCenter.shared.reloadAllTimelines()
+        publishToWatch()
     }
 
     private func publish() {

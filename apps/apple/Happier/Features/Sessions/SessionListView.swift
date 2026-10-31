@@ -1,6 +1,25 @@
 import HappierKit
 import SwiftUI
 
+/// The session list as the sidebar shows it. With dozens of sessions streaming, following every
+/// message re-sorted and redrew the whole list many times a second, even behind an open chat on
+/// the iPhone (a warm phone, a busy Mac); this follows the store and lets a burst settle first.
+@MainActor @Observable
+private final class SessionListSnapshot {
+    /// Nil until the first read; the list then reads the store directly.
+    private(set) var sessions: [Session]?
+
+    func follow(_ store: HappierStore) async {
+        while !Task.isCancelled {
+            await withCheckedContinuation { continuation in
+                let next = withObservationTracking { store.sessionList } onChange: { continuation.resume() }
+                if next != sessions { sessions = next }
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+    }
+}
+
 /// The conversation list. In the iPhone side drawer (`onOpen` set) it is the ChatGPT/Claude-style
 /// sidebar: compact rows that keep the agent icon and the folder, Pinned and Recent sections, and
 /// the account and New Session at the bottom. In the split view (Mac, iPad) it is the sidebar column.
@@ -45,8 +64,11 @@ struct SessionListView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
 
+    /// The sorted list, refreshed at most twice a second instead of on every message.
+    @State private var listed = SessionListSnapshot()
+
     private var sessions: [Session] {
-        let all = store.sessionList
+        let all = listed.sessions ?? store.sessionList
         guard !query.isEmpty else { return all }
         return SessionPins.pinnedFirst(all.filter { $0.matches(query) }, pinned: store.pinnedSessionIds, id: \.id)
     }
@@ -660,6 +682,7 @@ extension SessionListView {
                 #endif
         }
         .task { await inbox.refresh() }
+        .task { await listed.follow(store) }
         .sheet(isPresented: $showBrowser) {
             BrowserView(inSheet: true)
         }

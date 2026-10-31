@@ -74,6 +74,18 @@ import Testing
         #expect(!session.isUserFacing)
     }
 
+    /// A running session sends a heartbeat every few seconds; applying each one redrew every
+    /// session list and kept the CPU busy. As in the RN app's `ActivityUpdateAccumulator`, only a
+    /// visible change counts, or a timestamp 60 s newer (half the 120 s freshness window).
+    @Test func onlySignificantActivityChangesTheSession() throws {
+        let session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["active": true, "activeAt": .number(nowMs)]), keys: keys)
+        #expect(session.applying(activity: ["active": true, "activeAt": .number(nowMs + 5_000)]) == nil)
+        #expect(session.applying(activity: ["active": true, "activeAt": .number(nowMs + 61_000)])?.activeAt
+            == Date(timeIntervalSince1970: (nowMs + 61_000) / 1000))
+        #expect(session.applying(activity: ["active": true, "thinking": true, "activeAt": .number(nowMs + 1_000)])?.status(at: now) == .working)
+        #expect(session.applying(activity: ["active": false, "activeAt": .number(nowMs + 1_000)])?.active == false)
+    }
+
     @Test func statusFollowsUIPrecedence() throws {
         var session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["pendingPermissionRequestCount": 1]), keys: keys)
         #expect(session.status(at: now) == .permissionRequired)

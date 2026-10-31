@@ -45,4 +45,14 @@ public enum HappierMark {
         }
         return restOpacity
     }
+
+    /// The same loop as keyframes (time as a fraction of `cycleMs`), for Core Animation to play
+    /// without waking the main thread every frame.
+    public static func keyframes(for dot: Dot) -> [(time: Double, opacity: Double)] {
+        let start = rank(dot) * stepMs
+        var frames: [(time: Double, opacity: Double)] = start > 0 ? [(0, restOpacity)] : []
+        frames += pulse.map { ((start + $0.at) / cycleMs, $0.opacity) }
+        frames.append((1, restOpacity))
+        return frames
+    }
 }

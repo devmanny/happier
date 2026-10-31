@@ -22,9 +22,13 @@ struct WorkRow: View {
                 withAnimation(.smooth(duration: 0.25)) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
-                    // Still while it runs: the status pill above the composer carries the motion.
-                    Image(systemName: inProgress ? "circle.dotted" : "checkmark.circle")
-                        .font(.caption)
+                    // The Happier mark while it runs (Core Animation, so it costs nothing per frame).
+                    if inProgress {
+                        HappierSpinner(size: HappierSpinner.mini)
+                    } else {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption)
+                    }
                     Text(headline)
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
@@ -42,7 +46,6 @@ struct WorkRow: View {
                     }
                 }
                 .foregroundStyle(.secondary)
-                .shimmer(inProgress)
                 .padding(.vertical, 3)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())

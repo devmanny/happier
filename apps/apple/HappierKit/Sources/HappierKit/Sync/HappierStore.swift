@@ -662,11 +662,11 @@ public final class HappierStore {
                 handleDraftHint(payload)
             } else if payload["type"]?.stringValue == "machine-activity", let id = payload["id"]?.stringValue {
                 if let index = machines.firstIndex(where: { $0.id == id }) { machines[index].apply(activity: payload) }
-            } else if payload["type"]?.stringValue == "activity", let id = payload["id"]?.stringValue {
-                let wasThinking = sessions[id]?.thinking == true
-                sessions[id]?.apply(activity: payload)
+            } else if payload["type"]?.stringValue == "activity", let id = payload["id"]?.stringValue,
+                      let session = sessions[id], let updated = session.applying(activity: payload) {
+                sessions[id] = updated
                 // A runner can only be restarted between turns; re-check when a turn ends.
-                if wasThinking, sessions[id]?.thinking == false, openSessionIds.contains(id) { refreshRunnerStatus(id) }
+                if session.thinking, !updated.thinking, openSessionIds.contains(id) { refreshRunnerStatus(id) }
             }
         default:
             break
