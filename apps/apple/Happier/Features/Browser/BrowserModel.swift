@@ -251,11 +251,10 @@ final class BrowserModel: NSObject {
         #endif
     }
 
-    /// Back in the foreground with the browser still on screen, this device is the focused one again.
+    /// Back in the foreground, this device is the focused one again: an iPhone or iPad serves
+    /// agents while you use it, so a page an agent opens shows up where you are.
     func appBecameActive() {
         #if os(iOS)
-        guard openViews > 0 else { return }
-        focusClaimed = true
         updateSlots(reclaim: true)
         #endif
     }
@@ -266,8 +265,11 @@ final class BrowserModel: NSObject {
         if agentAccessEnabled {
             #if os(macOS)
             slots.insert(.host)
-            #endif
             if focusClaimed { slots.insert(.focused) }
+            #else
+            // Any time Happier is on screen, not only once the browser was opened here.
+            if focusClaimed || UIApplication.shared.applicationState == .active { slots.insert(.focused) }
+            #endif
         }
         store.setDeviceBrowserSlots(slots, reclaim: reclaim)
     }

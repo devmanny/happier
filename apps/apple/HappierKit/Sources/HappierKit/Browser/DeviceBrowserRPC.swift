@@ -8,7 +8,8 @@ import Foundation
 /// machine's content key (plain machines stay plain). Slots are last-registration-wins on the
 /// relay; the CLI tries `focused` first and `host` only when nobody serves `focused`.
 public enum DeviceBrowserSlot: String, CaseIterable, Sendable, Hashable {
-    /// The device whose browser UI the user opened most recently.
+    /// The device the user is using: an iPhone or iPad with Happier on screen, or the device
+    /// whose browser UI the user opened most recently.
     case focused
     /// An always-connected Mac app.
     case host

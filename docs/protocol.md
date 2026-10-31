@@ -230,9 +230,11 @@ so params and result are encrypted with that machine's data key, or stay plain f
 machines. The daemon never registers these methods.
 
 - Slots, tried in this order by the CLI (`apps/cli/src/mcp/deviceBrowser`):
-  - `focused`: the device where the user opened the browser most recently (iPhone, iPad or
-    Mac). iOS loses it when the app goes to the background, because iOS closes the socket. It
-    comes back when the app returns with the browser still on screen.
+  - `focused`: the device the user is using. An iPhone or iPad claims it whenever the app comes
+    to the foreground, so pages an agent opens show up where the user is; a Mac claims it when
+    its browser window opens. The most recent claim wins. iOS loses it when the app goes to the
+    background, because iOS closes the socket. Tabs live on the device that served the call, so
+    a session that moves to another device starts there in a new tab.
   - `host`: a running Mac app. It serves from launch, with or without a browser window.
 - The CLI moves to the next slot only when the relay reports that no client serves the method.
   A request that may have reached a device is never re-sent.

@@ -327,11 +327,6 @@ struct NewSessionView: View {
             }
         }
         .padding(12)
-        .background {
-            if let color = store.accountSettings?.folderColor(for: directory)?.color {
-                RoundedRectangle(cornerRadius: 26, style: .continuous).fill(color.opacity(0.14))
-            }
-        }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 

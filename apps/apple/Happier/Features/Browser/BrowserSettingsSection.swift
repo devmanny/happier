@@ -25,7 +25,7 @@ struct BrowserSettingsSection: View {
             #if os(macOS)
             Text("Session agents can open pages, read them, click, type and take screenshots in Happier's browser, with its cookies and logins, without asking each time. This Mac serves them even when the browser window is closed.")
             #else
-            Text("Session agents can open pages, read them, click, type and take screenshots in Happier's browser, with its cookies and logins, without asking each time. Here it serves them after you open the browser, while Happier stays open; otherwise agents use your Mac.")
+            Text("Session agents can open pages, read them, click, type and take screenshots in Happier's browser, with its cookies and logins, without asking each time. Here it serves them while Happier is on screen, so the pages they open show up where you are; otherwise agents use your Mac.")
             #endif
         }
     }

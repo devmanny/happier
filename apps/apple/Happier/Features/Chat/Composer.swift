@@ -293,13 +293,6 @@ struct Composer: View {
             .animation(.smooth(duration: 0.2), value: talking)
         }
         .padding(12)
-        // The project's color, faintly, so each window says which project it's in. A plain fill
-        // under the glass, not a glass tint: iPadOS drops tints in windows in the background.
-        .background {
-            if let color = store.folderColor(of: session)?.color {
-                RoundedRectangle(cornerRadius: 26, style: .continuous).fill(color.opacity(0.14))
-            }
-        }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
