@@ -1,4 +1,5 @@
 import { listBuiltInHappierTools } from '@/agent/tools/happierTools/listBuiltInHappierTools';
+import { DEVICE_BROWSER_MCP_TOOLS } from '@/mcp/deviceBrowser/registerDeviceBrowserMcpTools';
 
 type ToolRegistrar = Readonly<{
   registerTool: (name: string, definition: any, handler: (args: any, extra?: unknown) => Promise<any>) => void;
@@ -32,5 +33,11 @@ export function registerHappierMcpBridgeTools(
     };
 
     server.registerTool(tool.name, meta, forward(tool.name));
+  }
+
+  // The integrated browser tools run in the session MCP server; results (screenshots included)
+  // pass through unchanged. Without a machine or credentials that server reports the tool missing.
+  for (const tool of DEVICE_BROWSER_MCP_TOOLS) {
+    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema }, forward(tool.name));
   }
 }

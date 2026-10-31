@@ -13,7 +13,7 @@ const tabId = z.string().optional().describe('Tab id from browser_tabs; defaults
 const ref = z.string().optional().describe('Element ref from the latest browser_snapshot (e.g. "e12").');
 const selector = z.string().optional().describe('CSS selector, used when no ref is given.');
 
-type ToolSpec = Readonly<{
+export type ToolSpec = Readonly<{
   name: DeviceBrowserMcpToolName;
   title: string;
   description: string;
@@ -23,7 +23,11 @@ type ToolSpec = Readonly<{
 
 const withOp = (op: string) => (args: Record<string, unknown>) => ({ op, ...args });
 
-const TOOLS: readonly ToolSpec[] = [
+/**
+ * The browser tools: one definition list for the session MCP server (which runs them) and the
+ * stdio bridge providers use (which forwards them to that server).
+ */
+export const DEVICE_BROWSER_MCP_TOOLS: readonly ToolSpec[] = [
   {
     name: 'browser_navigate',
     title: 'Browser: navigate',
@@ -135,7 +139,7 @@ function formatResponse(response: DeviceBrowserResponse) {
 
 /** Registers the `browser_*` tools that drive the integrated browser of the user's Happier app. */
 export function registerDeviceBrowserMcpTools(server: McpServer, deps: Readonly<{ invoke: Invoke }>): void {
-  for (const tool of TOOLS) {
+  for (const tool of DEVICE_BROWSER_MCP_TOOLS) {
     server.registerTool(
       tool.name,
       { title: tool.title, description: tool.description, inputSchema: tool.inputSchema },
