@@ -1056,7 +1056,8 @@ struct PushToTalkButton: View {
             .padding(9)
             .background {
                 if talking {
-                    Circle().fill(cancelArmed ? Color.gray : Color.red)
+                    // Green while it listens; red once the finger reaches the trash.
+                    Circle().fill(cancelArmed ? Color.red : Color.green)
                 } else if recording {
                     Circle().fill(Color.userBubble)
                 }
@@ -1129,7 +1130,7 @@ struct TalkPanel: View {
             HStack(alignment: .center, spacing: 2) {
                 ForEach(Array(levels.suffix(16).enumerated()), id: \.offset) { _, level in
                     Capsule()
-                        .fill(cancelArmed ? Color.secondary : Color.red)
+                        .fill(cancelArmed ? Color.secondary : Color.green)
                         .frame(width: 3, height: 4 + CGFloat(level) * 18)
                 }
             }
