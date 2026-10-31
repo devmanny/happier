@@ -15,15 +15,13 @@ struct HappierApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .modifier(BrowserReadiness())
                 .environment(store)
                 .environment(delegate.inbox)
                 .environment(delegate.browser)
                 .modifier(FollowsAppAppearance())
                 .task(id: store.phase == .ready) {
                     guard store.phase == .ready else { return }
-                    // The Mac serves the browser to agents from launch; iOS once it is opened.
-                    delegate.browser.updateSlots()
-                    delegate.browser.startWatchingSessions()
                     await delegate.enablePushNotifications()
                 }
                 .onChange(of: scenePhase) { _, phase in

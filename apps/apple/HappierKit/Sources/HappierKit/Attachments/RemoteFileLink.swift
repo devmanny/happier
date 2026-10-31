@@ -39,3 +39,22 @@ public struct RemoteFileLink: Equatable, Sendable {
         path.range(of: #"\A[A-Za-z]:[/\\]"#, options: .regularExpression) != nil
     }
 }
+
+/// Where a link tapped in a conversation goes: a file on the session's computer opens its
+/// preview; a web page asks whether to open in Happier's browser or the default one; anything
+/// else (mail, phone, app links) goes to the system.
+public enum ConversationLink: Equatable, Sendable {
+    case file(RemoteFileLink)
+    case webPage(URL)
+    case other(URL)
+
+    public init(_ url: URL) {
+        if let file = RemoteFileLink(url: url) {
+            self = .file(file)
+        } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            self = .webPage(url)
+        } else {
+            self = .other(url)
+        }
+    }
+}

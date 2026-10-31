@@ -156,6 +156,39 @@ final class BrowserModel: NSObject {
         if selectedTabId == id { selectedTabId = tabs.first { $0.owner == .user }?.id }
     }
 
+    /// Opens a link the user chose to see here: in a new tab of the session it came from (so that
+    /// session's agent can work with it), or in a tab of the user's own; that tab is shown.
+    func show(_ url: URL, forSession sessionId: String?) {
+        if let sessionId {
+            let tab = addTab(id: registry.open(for: .session(sessionId)), owner: .session(sessionId), url: url)
+            selectedTabId = tab.id
+        } else {
+            newTab(url: url)
+        }
+    }
+
+    /// Shows the browser: its own window on the Mac and iPad, the caller's sheet on the iPhone.
+    static func present(openWindow: OpenWindowAction, multipleWindows: Bool, sheet: Binding<Bool>) {
+        if multipleWindows {
+            openWindow(id: BrowserWindow.id, value: BrowserWindow.value)
+        } else {
+            sheet.wrappedValue = true
+        }
+    }
+
+    static func openInDefaultBrowser(_ url: URL) {
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #else
+        UIApplication.shared.open(url)
+        #endif
+    }
+
+    /// A session's tab is named after the session; the user's tabs after their page.
+    func tabTitle(_ tab: BrowserTab) -> String {
+        tab.sessionId.map(sessionTitle) ?? tab.pageTitle
+    }
+
     func tabDisplayed(_ id: String, _ shown: Bool) {
         if shown { displayedTabIds.insert(id) } else { displayedTabIds.remove(id) }
     }

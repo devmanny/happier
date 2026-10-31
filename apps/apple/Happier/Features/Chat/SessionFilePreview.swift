@@ -15,6 +15,12 @@ struct SessionFilePreview: ViewModifier {
 
     let sessionId: String
     @Environment(HappierStore.self) private var store
+    @Environment(BrowserModel.self) private var browser
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    /// A web link waiting for the user to pick where it opens.
+    @State private var webLink: URL?
+    @State private var browserSheet = false
     @State private var lookingAt: URL?
     @State private var previewFiles: [URL] = []
     @State private var document: ReadableFilePreview?
@@ -26,11 +32,32 @@ struct SessionFilePreview: ViewModifier {
         content
             .environment(\.openSessionFilePreview) { requested = .local($0) }
             .environment(\.openURL, OpenURLAction { url in
-                guard let file = RemoteFileLink(url: url) else { return .systemAction }
-                AppHaptics.light()
-                requested = .remote(file)
-                return .handled
+                switch ConversationLink(url) {
+                case .file(let file):
+                    AppHaptics.light()
+                    requested = .remote(file)
+                    return .handled
+                case .webPage(let page):
+                    // Asks every time: Happier's browser (this session's agent can then work in
+                    // that tab) or the device's default browser.
+                    AppHaptics.light()
+                    webLink = page
+                    return .handled
+                case .other:
+                    return .systemAction
+                }
             })
+            .confirmationDialog("Open Link", isPresented: Binding(get: { webLink != nil }, set: { if !$0 { webLink = nil } }),
+                                titleVisibility: .visible, presenting: webLink) { url in
+                Button("Happier Browser") {
+                    browser.show(url, forSession: sessionId)
+                    BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
+                }
+                Button("Default Browser") { BrowserModel.openInDefaultBrowser(url) }
+            } message: { url in
+                Text(url.host() ?? url.absoluteString)
+            }
+            .modifier(BrowserSheet(shown: $browserSheet))
             .quickLookPreview($lookingAt, in: previewFiles)
             .sheet(item: $document) { document in
                 ReadableFilePreviewView(document: document)

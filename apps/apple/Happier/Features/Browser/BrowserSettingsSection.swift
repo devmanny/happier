@@ -5,9 +5,16 @@ struct BrowserSettingsSection: View {
     @Environment(BrowserModel.self) private var browser
     @AppStorage(BrowserModel.agentAccessKey) private var agentAccess = true
     @State private var confirmingClear = false
+    @State private var browserSheet = false
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
 
     var body: some View {
         Section {
+            Button("Open Browser", systemImage: "safari") {
+                AppHaptics.light()
+                BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
+            }
             Toggle(isOn: $agentAccess) {
                 Label("Agents Can Use the Browser", systemImage: "safari")
             }

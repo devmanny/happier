@@ -30,8 +30,6 @@ struct SessionListView: View {
     var onOpen: ((String) -> Void)?
     @State private var query = ""
     @State private var showAccount = false
-    /// The integrated browser as a sheet, where there are no extra windows (iPhone).
-    @State private var showBrowser = false
     @State private var showNotifications = false
     @Environment(NotificationInbox.self) private var inbox
     /// The bell carries a dot while notifications of sessions still listed are waiting.
@@ -552,22 +550,6 @@ extension SessionListView {
                 // As tall as New Session beside it.
                 .controlSize(.large)
                 .accessibilityLabel(Text("Settings"))
-                // The integrated browser: its own window on the Mac and iPad, a sheet on the iPhone.
-                Button {
-                    AppHaptics.light()
-                    if supportsMultipleWindows {
-                        openWindow(id: BrowserWindow.id, value: BrowserWindow.value)
-                    } else {
-                        showBrowser = true
-                    }
-                } label: {
-                    Image(systemName: "safari").font(.title2)
-                }
-                .buttonStyle(.glass)
-                .glassHover()
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
-                .accessibilityLabel(Text("Browser"))
                 Spacer()
                 // A new, empty conversation where the composer starts the session.
                 Button {
@@ -683,9 +665,6 @@ extension SessionListView {
         }
         .task { await inbox.refresh() }
         .task { await listed.follow(store) }
-        .sheet(isPresented: $showBrowser) {
-            BrowserView(inSheet: true)
-        }
         .sheet(isPresented: $showAccount) {
             NavigationStack { SettingsView() }
                 #if os(macOS)

@@ -83,4 +83,16 @@ import Testing
         #expect(try Data(contentsOf: cache) == cachedBytes)
         #expect(store.lastError == "Unrelated error")
     }
+
+    /// A link in a conversation: a file on the session's computer opens its preview, a web page asks
+    /// where to open (Happier's browser or the default one), anything else goes to the system.
+    @Test func conversationLinksSplitIntoFilesWebPagesAndOthers() throws {
+        #expect(ConversationLink(URL(string: "/Users/manny/report.md")!) == .file(RemoteFileLink(url: URL(string: "/Users/manny/report.md")!)!))
+        for web in ["https://example.com/a?b=1", "http://localhost:3000/", "HTTPS://Example.com"] {
+            #expect(ConversationLink(URL(string: web)!) == .webPage(URL(string: web)!), "\(web)")
+        }
+        for other in ["mailto:a@b.c", "tel:+5215555", "happier-native://inbox"] {
+            #expect(ConversationLink(URL(string: other)!) == .other(URL(string: other)!), "\(other)")
+        }
+    }
 }
