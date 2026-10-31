@@ -19,7 +19,7 @@ struct BrowserView: View {
                 ToolbarItem(placement: .principal) { addressField.frame(minWidth: 280, idealWidth: 620, maxWidth: 820) }
                 ToolbarItemGroup(placement: .primaryAction) { reloadButton; AgentBrowserIndicator(); tabsMenu }
             }
-            .navigationTitle(browser.selectedTab?.displayTitle ?? "Browser")
+            .navigationTitle(browser.selectedTab.map(windowTitle) ?? "Browser")
             #else
             .safeAreaInset(edge: .top, spacing: 0) { phoneBar }
             #endif
@@ -28,6 +28,11 @@ struct BrowserView: View {
             .onChange(of: browser.selectedTab?.url, initial: true) { _, url in
                 if !addressFocused { address = url?.absoluteString ?? "" }
             }
+    }
+
+    /// A session's tab is titled with the session's name.
+    private func windowTitle(_ tab: BrowserTab) -> String {
+        tab.sessionId.map { "\(browser.sessionTitle($0)) · \(tab.pageTitle)" } ?? tab.pageTitle
     }
 
     private var page: some View {
@@ -108,6 +113,8 @@ struct BrowserView: View {
         }
     }
 
+    /// Your tabs, then each session's tabs under its name and folder color; ✨ marks a tab an agent
+    /// is using. Picking one only changes what you see.
     private var tabsMenu: some View {
         Menu {
             Button { browser.newTab(); addressFocused = true } label: { Label("New Tab", systemImage: "plus") }
@@ -115,9 +122,18 @@ struct BrowserView: View {
                 Button(role: .destructive) { browser.closeTab(tab.id) } label: { Label("Close Tab", systemImage: "xmark") }
             }
             if browser.tabs.count > 1 {
-                Divider()
-                Picker("Tabs", selection: Binding(get: { browser.selectedTab?.id }, set: { browser.selectedTabId = $0 })) {
-                    ForEach(browser.tabs) { tab in Text(tab.displayTitle).tag(Optional(tab.id)) }
+                Picker("Your Tabs", selection: selection) {
+                    ForEach(browser.tabs.filter { $0.owner == .user }) { tab in
+                        Text(tab.pageTitle).tag(Optional(tab.id))
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+            ForEach(sessionIds, id: \.self) { sessionId in
+                Picker(browser.sessionTitle(sessionId), selection: selection) {
+                    ForEach(browser.tabs.filter { $0.sessionId == sessionId }) { tab in
+                        SessionTabLabel(tab: tab).tag(Optional(tab.id))
+                    }
                 }
                 .pickerStyle(.inline)
             }
@@ -127,6 +143,32 @@ struct BrowserView: View {
         .menuIndicator(.hidden)
         .accessibilityLabel(Text("Tabs"))
     }
+
+    private var selection: Binding<String?> {
+        Binding(get: { browser.selectedTab?.id }, set: { browser.selectedTabId = $0 })
+    }
+
+    /// Sessions with tabs, in the order their first tab opened.
+    private var sessionIds: [String] {
+        var seen: Set<String> = []
+        return browser.tabs.compactMap(\.sessionId).filter { seen.insert($0).inserted }
+    }
+}
+
+/// A session tab in the menu: its folder color, the page, and ✨ while an agent uses it.
+struct SessionTabLabel: View {
+    @Environment(BrowserModel.self) private var browser
+    let tab: BrowserTab
+
+    var body: some View {
+        let active = (tab.agentActiveUntil ?? .distantPast) > Date()
+        Label {
+            Text(active ? "✨ \(tab.pageTitle)" : tab.pageTitle)
+        } icon: {
+            Image(systemName: "circle.fill")
+                .foregroundStyle(tab.sessionId.flatMap(browser.sessionColor) ?? .secondary)
+        }
+    }
 }
 
 /// A discreet sign that a session agent drove the browser in the last seconds; never blocks.
@@ -135,7 +177,7 @@ struct AgentBrowserIndicator: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            if let until = browser.agentActiveUntil, until > context.date {
+            if browser.tabs.contains(where: { ($0.agentActiveUntil ?? .distantPast) > context.date }) {
                 Label("Agent", systemImage: "sparkles")
                     .labelStyle(.iconOnly)
                     .foregroundStyle(.tint)
@@ -156,7 +198,10 @@ struct BrowserWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
-    func updateNSView(_ view: NSView, context: Context) { host(tab.webView, in: view) }
+    func updateNSView(_ view: NSView, context: Context) {
+        host(tab.webView, in: view)
+        browser.tabDisplayed(tab.id, true)
+    }
 
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         coordinator.release(from: view)
@@ -181,7 +226,9 @@ struct BrowserWebView: NSViewRepresentable {
         }
         /// Only when this view still holds it: a newer view of the same tab may already show it.
         func release(from view: AnyObject) {
-            if tab.webView.superview === view { browser?.park(tab) }
+            guard tab.webView.superview === view else { return }
+            browser?.park(tab)
+            browser?.tabDisplayed(tab.id, false)
         }
     }
 }
@@ -193,6 +240,7 @@ struct BrowserWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView { UIView() }
 
     func updateUIView(_ view: UIView, context: Context) {
+        browser.tabDisplayed(tab.id, true)
         let webView = tab.webView
         guard webView.superview !== view else { return }
         webView.removeFromSuperview()
@@ -216,7 +264,9 @@ struct BrowserWebView: UIViewRepresentable {
         }
         /// Only when this view still holds it: a newer view of the same tab may already show it.
         func release(from view: AnyObject) {
-            if tab.webView.superview === view { browser?.park(tab) }
+            guard tab.webView.superview === view else { return }
+            browser?.park(tab)
+            browser?.tabDisplayed(tab.id, false)
         }
     }
 }

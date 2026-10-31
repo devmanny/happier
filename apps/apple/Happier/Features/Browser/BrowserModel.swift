@@ -12,7 +12,11 @@ import AppKit
 @MainActor @Observable
 final class BrowserTab: Identifiable {
     let id: String
+    /// The user (opened by hand) or the session whose agent drives it.
+    let owner: DeviceBrowserTabOwner
     let webView: WKWebView
+    /// Until when the ✨ shows on this tab: an agent used it in the last seconds.
+    private(set) var agentActiveUntil: Date?
     private(set) var title = ""
     private(set) var url: URL?
     private(set) var isLoading = false
@@ -21,8 +25,9 @@ final class BrowserTab: Identifiable {
     private(set) var estimatedProgress = 0.0
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
 
-    init(id: String, configuration: WKWebViewConfiguration) {
+    init(id: String, owner: DeviceBrowserTabOwner, configuration: WKWebViewConfiguration) {
         self.id = id
+        self.owner = owner
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 900), configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
         #if os(iOS)
@@ -42,9 +47,18 @@ final class BrowserTab: Identifiable {
         ]
     }
 
-    var displayTitle: String {
+    var pageTitle: String {
         if !title.isEmpty { return title }
         return url?.host() ?? "New Tab"
+    }
+
+    var sessionId: String? {
+        if case .session(let id) = owner { return id }
+        return nil
+    }
+
+    func noteAgentActivity() {
+        agentActiveUntil = Date().addingTimeInterval(4)
     }
 }
 
@@ -57,15 +71,22 @@ final class BrowserTab: Identifiable {
 final class BrowserModel: NSObject {
     static let agentAccessKey = "browser.agentAccess"
 
+    /// Every tab, user's and sessions', in opening order; each has its own web view.
     private(set) var tabs: [BrowserTab] = []
+    /// The tab the browser UI shows. Only the user changes it; agents never do.
     var selectedTabId: String?
-    /// Until when the "agent is using the browser" indicator shows.
-    private(set) var agentActiveUntil: Date?
     /// Open browser windows or sheets on this device.
     private(set) var openViews = 0
+    /// Tabs some browser view is showing right now (kept when their session ends). Written while
+    /// views update, so not observed.
+    @ObservationIgnored private(set) var displayedTabIds: Set<String> = []
+    @ObservationIgnored private var watchingSessions = false
 
     @ObservationIgnored weak var store: HappierStore?
-    @ObservationIgnored private var nextTabNumber = 1
+    @ObservationIgnored var registry = DeviceBrowserTabRegistry()
+    /// One call at a time per tab; different tabs (sessions) run alongside.
+    @ObservationIgnored let operations = KeyedSerialQueue()
+    @ObservationIgnored private var sessionWatch = DeviceBrowserSessionWatch()
     @ObservationIgnored private var focusClaimed = false
     @ObservationIgnored let configuration: WKWebViewConfiguration
     @ObservationIgnored private let parking = BrowserParking()
@@ -82,7 +103,12 @@ final class BrowserModel: NSObject {
         super.init()
     }
 
-    var selectedTab: BrowserTab? { tabs.first { $0.id == selectedTabId } ?? tabs.first }
+    var selectedTab: BrowserTab? { tabs.first { $0.id == selectedTabId } ?? tabs.first { $0.owner == .user } }
+
+    func tab(_ id: String) -> BrowserTab? { tabs.first { $0.id == id } }
+
+    /// Any agent active in the last seconds, for the toolbar's ✨.
+    var agentActive: Bool { tabs.contains { ($0.agentActiveUntil ?? .distantPast) > Date() } }
 
     var agentAccessEnabled: Bool {
         UserDefaults.standard.object(forKey: Self.agentAccessKey) as? Bool ?? true
@@ -90,25 +116,78 @@ final class BrowserModel: NSObject {
 
     // MARK: - Tabs
 
+    /// A tab the user opens; it becomes the one the browser shows.
     @discardableResult
-    func newTab(url: URL? = nil, select: Bool = true) -> BrowserTab {
-        let tab = BrowserTab(id: "t\(nextTabNumber)", configuration: configuration)
-        nextTabNumber += 1
+    func newTab(url: URL? = nil) -> BrowserTab {
+        let tab = addTab(id: registry.open(for: .user), owner: .user, url: url)
+        selectedTabId = tab.id
+        return tab
+    }
+
+    /// Creates the web view for a tab the registry already assigned.
+    @discardableResult
+    func addTab(id: String, owner: DeviceBrowserTabOwner, url: URL? = nil) -> BrowserTab {
+        let tab = BrowserTab(id: id, owner: owner, configuration: configuration)
         tab.webView.navigationDelegate = self
         tab.webView.uiDelegate = self
         parking.park(tab.webView)
         tabs.append(tab)
-        if select || selectedTabId == nil { selectedTabId = tab.id }
         if let url { tab.webView.load(URLRequest(url: url)) }
         return tab
     }
 
     func closeTab(_ id: String) {
+        registry.close(id)
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let tab = tabs.remove(at: index)
         tab.webView.stopLoading()
         tab.webView.removeFromSuperview()
-        if selectedTabId == id { selectedTabId = tabs.isEmpty ? nil : tabs[min(index, tabs.count - 1)].id }
+        finishWaiting(tab.webView)
+        if selectedTabId == id { selectedTabId = tabs.first { $0.owner == .user }?.id }
+    }
+
+    func tabDisplayed(_ id: String, _ shown: Bool) {
+        if shown { displayedTabIds.insert(id) } else { displayedTabIds.remove(id) }
+    }
+
+    /// The session's name and folder color for its tabs.
+    func sessionTitle(_ sessionId: String) -> String {
+        store?.sessions[sessionId]?.title ?? "Session \(sessionId.prefix(6))"
+    }
+
+    /// The session's folder color; this base has no folder colors yet.
+    func sessionColor(_ sessionId: String) -> Color? { nil }
+
+    // MARK: - Ended sessions
+
+    /// Watches the session list and closes tabs of sessions that stopped or were archived,
+    /// unless a browser view is showing them.
+    func startWatchingSessions() {
+        guard !watchingSessions else { return }
+        watchingSessions = true
+        watchSessions()
+    }
+
+    private func watchSessions() {
+        guard let store else { return }
+        withObservationTracking {
+            reconcileSessionTabs(store)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.watchSessions() }
+        }
+    }
+
+    private func reconcileSessionTabs(_ store: HappierStore) {
+        let owners = Set(tabs.compactMap(\.sessionId))
+        var ended: Set<String> = []
+        for sessionId in owners {
+            let session = store.sessions[sessionId]
+            let state = session.map { DeviceBrowserSessionWatch.State(active: $0.active, archived: $0.archivedAt != nil) }
+            if sessionWatch.observe(sessionId, state) { ended.insert(sessionId) }
+        }
+        guard !ended.isEmpty else { return }
+        let live = owners.subtracting(ended)
+        for id in registry.tabsToClose(liveSessionIds: live, visibleTabIds: displayedTabIds) { closeTab(id) }
     }
 
     /// Returns a view the UI shows a tab's web view in; the tab goes back to the off-screen host when hidden.
@@ -139,7 +218,7 @@ final class BrowserModel: NSObject {
     /// The browser UI opened: this device becomes the most recent one serving `focused`.
     func viewAppeared() {
         openViews += 1
-        if tabs.isEmpty { newTab() }
+        if selectedTab == nil { newTab() }
         focusClaimed = true
         updateSlots(reclaim: true)
     }
@@ -182,10 +261,6 @@ final class BrowserModel: NSObject {
         store.setDeviceBrowserSlots(slots, reclaim: reclaim)
     }
 
-    func noteAgentActivity() {
-        agentActiveUntil = Date().addingTimeInterval(4)
-    }
-
     func clearWebsiteData() async {
         let store = WKWebsiteDataStore.default()
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
@@ -209,6 +284,8 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate {
             navigationWaiters[ObjectIdentifier(webView), default: []].append(continuation)
         }
     }
+
+    func finishWaiting(_ webView: WKWebView) { finishNavigation(webView, error: nil) }
 
     private func finishNavigation(_ webView: WKWebView, error: Error?) {
         let waiters = navigationWaiters.removeValue(forKey: ObjectIdentifier(webView)) ?? []
@@ -236,7 +313,14 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate {
     nonisolated func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                              for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         MainActor.assumeIsolated {
-            if let url = navigationAction.request.url { newTab(url: url) }
+            guard let url = navigationAction.request.url else { return nil }
+            switch tabs.first(where: { $0.webView === webView })?.owner {
+            case .session(let sessionId):
+                // A session's popup stays that session's, and does not take over the user's view.
+                addTab(id: registry.open(for: .session(sessionId)), owner: .session(sessionId), url: url)
+            default:
+                newTab(url: url)
+            }
             return nil
         }
     }

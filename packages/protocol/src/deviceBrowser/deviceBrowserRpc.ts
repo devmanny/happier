@@ -32,7 +32,13 @@ const TabId = z.string().trim().min(1);
 const ElementRef = z.string().trim().min(1);
 const Selector = z.string().trim().min(1);
 
-const tabTarget = { tabId: TabId.optional() };
+/**
+ * The session the call acts for. The CLI sets it from the session whose MCP bridge made the call;
+ * agents never supply it. Each session gets its own tabs and can neither read nor drive another
+ * session's tabs or the user's own tabs.
+ */
+const SessionScope = { sessionId: z.string().trim().min(1) };
+const tabTarget = { ...SessionScope, tabId: TabId.optional() };
 const elementTarget = { ref: ElementRef.optional(), selector: Selector.optional() };
 
 function hasAtMostOneElementTarget(value: { ref?: string; selector?: string }): boolean {
@@ -43,7 +49,7 @@ function hasExactlyOneElementTarget(value: { ref?: string; selector?: string }):
   return (value.ref !== undefined) !== (value.selector !== undefined);
 }
 
-const StatusRequest = z.object({ op: z.literal('status') }).strict();
+const StatusRequest = z.object({ op: z.literal('status'), ...SessionScope }).strict();
 
 const NavigateRequest = z.object({
   op: z.literal('navigate'),
@@ -113,6 +119,7 @@ const WaitRequest = z.object({
 
 const TabsRequest = z.object({
   op: z.literal('tabs'),
+  ...SessionScope,
   action: z.enum(['list', 'new', 'select', 'close']),
   tabId: TabId.optional(),
   url: z.string().trim().min(1).optional(),
@@ -142,12 +149,18 @@ export const DeviceBrowserDeviceSchema = z.object({
 }).strict();
 export type DeviceBrowserDevice = z.infer<typeof DeviceBrowserDeviceSchema>;
 
+/**
+ * One of the calling session's tabs. `selected` marks the session's current tab (where calls
+ * without `tabId` go), never what the user is looking at. `sessionTitle` is the session's name,
+ * which the app shows on the tab.
+ */
 export const DeviceBrowserTabSchema = z.object({
   id: TabId,
   url: z.string(),
   title: z.string(),
   selected: z.boolean(),
   loading: z.boolean(),
+  sessionTitle: z.string().optional(),
 }).strict();
 export type DeviceBrowserTab = z.infer<typeof DeviceBrowserTabSchema>;
 

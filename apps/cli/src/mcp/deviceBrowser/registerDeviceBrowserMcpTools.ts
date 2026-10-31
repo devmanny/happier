@@ -9,7 +9,7 @@ export { DEVICE_BROWSER_MCP_TOOL_NAMES };
 
 type Invoke = (request: unknown) => Promise<DeviceBrowserResponse>;
 
-const tabId = z.string().optional().describe('Tab id from browser_tabs; defaults to the selected tab.');
+const tabId = z.string().optional().describe('One of this session\'s tab ids from browser_tabs; defaults to this session\'s current tab.');
 const ref = z.string().optional().describe('Element ref from the latest browser_snapshot (e.g. "e12").');
 const selector = z.string().optional().describe('CSS selector, used when no ref is given.');
 
@@ -31,7 +31,7 @@ export const DEVICE_BROWSER_MCP_TOOLS: readonly ToolSpec[] = [
   {
     name: 'browser_navigate',
     title: 'Browser: navigate',
-    description: 'Open a URL in the integrated browser of the user\'s Happier app (iPhone, iPad or Mac), or go back/forward/reload. It shares that browser\'s cookies and logins.',
+    description: 'Open a URL in this session\'s own tab of the integrated browser in the user\'s Happier app (iPhone, iPad or Mac), created on first use; or go back/forward/reload. Tabs share the browser\'s cookies and logins.',
     inputSchema: {
       url: z.string().optional().describe('URL to open (required unless action is back/forward/reload).'),
       action: z.enum(['go', 'back', 'forward', 'reload']).optional(),
@@ -113,7 +113,7 @@ export const DEVICE_BROWSER_MCP_TOOLS: readonly ToolSpec[] = [
   {
     name: 'browser_tabs',
     title: 'Browser: tabs',
-    description: 'List, open, select or close tabs of the integrated browser. "list" also reports which device is answering.',
+    description: 'List, open, select or close this session\'s own tabs of the integrated browser (other sessions\' and the user\'s tabs are not visible). "select" changes which of them later calls use by default, not what the user sees. "list" also reports which device is answering.',
     inputSchema: {
       action: z.enum(['list', 'new', 'select', 'close']),
       tabId: z.string().optional(),

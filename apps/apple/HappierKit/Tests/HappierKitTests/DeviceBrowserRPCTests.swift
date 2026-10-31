@@ -7,8 +7,10 @@ import Testing
 @Suite struct DeviceBrowserRPCTests {
     @MainActor final class FakeHost: DeviceBrowserHost {
         var received: [DeviceBrowserRequest] = []
-        func perform(_ request: DeviceBrowserRequest) async -> DeviceBrowserResponse {
-            received.append(request)
+        var sessions: [String] = []
+        func perform(_ command: DeviceBrowserCommand) async -> DeviceBrowserResponse {
+            received.append(command.request)
+            sessions.append(command.sessionId)
             return .success(.init(device: .init(name: "Mac mini", platform: .macos),
                                   tabs: [.init(id: "t1", url: "https://example.com/", title: "Example", selected: true, loading: false)]))
         }
@@ -45,11 +47,12 @@ import Testing
     @Test @MainActor func answersEncryptedRequestsWithTheMachineKey() async throws {
         let cipher = ContentCipher.aesGCM(key: Data(repeating: 7, count: 32))
         let host = FakeHost()
-        let params = JSONValue.string(try cipher.encryptBase64(["op": "tabs", "action": "list"]))
+        let params = JSONValue.string(try cipher.encryptBase64(["op": "tabs", "action": "list", "sessionId": "sess_a"]))
 
         let reply = await DeviceBrowserRPC.respond(params: params, cipher: cipher, host: host)
 
         #expect(host.received == [.tabs(action: .list, tabId: nil, url: nil)])
+        #expect(host.sessions == ["sess_a"])
         let decoded = try cipher.decryptBase64(try #require(reply.stringValue))
         #expect(decoded["ok"] == true)
         #expect(decoded["device"]?["platform"] == "macos")
@@ -58,7 +61,7 @@ import Testing
 
     @Test @MainActor func reportsInvalidRequestsWithoutRunningThem() async throws {
         let host = FakeHost()
-        let reply = await DeviceBrowserRPC.respond(params: ["op": "click"], cipher: nil, host: host)
+        let reply = await DeviceBrowserRPC.respond(params: ["op": "click", "sessionId": "sess_a"], cipher: nil, host: host)
         #expect(host.received.isEmpty)
         #expect(reply["ok"] == false)
         #expect(reply["errorCode"] == "invalid_request")
@@ -69,10 +72,10 @@ import Testing
         let machine = try Machine(row: ["id": "m2", "active": true, "dataEncryptionKey": .string(marker), "metadata": .string(doc)], keys: nil)
         let host = FakeHost()
 
-        let served = await DeviceBrowserRPC.reply(to: ["method": "m2:device.browser.v1.host", "params": ["op": "status"]],
+        let served = await DeviceBrowserRPC.reply(to: ["method": "m2:device.browser.v1.host", "params": ["op": "status", "sessionId": "sess_a"]],
                                                   machines: [machine], slots: [.host], host: host)
         #expect(served?["ok"] == true)
-        let unserved = await DeviceBrowserRPC.reply(to: ["method": "m2:device.browser.v1.focused", "params": ["op": "status"]],
+        let unserved = await DeviceBrowserRPC.reply(to: ["method": "m2:device.browser.v1.focused", "params": ["op": "status", "sessionId": "sess_a"]],
                                                     machines: [machine], slots: [.host], host: host)
         #expect(unserved?["errorCode"] == "disabled")
         let other = await DeviceBrowserRPC.reply(to: ["method": "m2:spawn-happy-session", "params": [:]],

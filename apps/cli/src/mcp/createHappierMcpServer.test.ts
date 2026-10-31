@@ -788,7 +788,7 @@ describe('createHappierMcpServer', () => {
       credentials,
       machineId: 'machine-session',
       method: 'device.browser.v1.focused',
-      request: { op: 'tabs', action: 'list' },
+      request: { op: 'tabs', action: 'list', sessionId: 'sess_mcp_browser_1' },
     }));
   });
 });

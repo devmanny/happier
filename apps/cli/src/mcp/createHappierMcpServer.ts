@@ -298,7 +298,8 @@ export function createHappierMcpServer(
   const browserMachineId = typeof sessionLocation?.machineId === 'string' ? sessionLocation.machineId.trim() : '';
   if (credentials && browserMachineId) {
     const deviceBrowser = createDeviceBrowserClient(async ({ method, request, timeoutMs }) =>
-      await callExactMachineRpc({ credentials, machineId: browserMachineId, method, request, timeoutMs }));
+      await callExactMachineRpc({ credentials, machineId: browserMachineId, method, request, timeoutMs }),
+    { sessionId: client.sessionId });
     registerDeviceBrowserMcpTools(mcp, { invoke: deviceBrowser.invoke });
   }
 

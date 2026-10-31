@@ -164,18 +164,25 @@ public struct DeviceBrowserTab: Equatable, Sendable {
     public let id: String
     public let url: String
     public let title: String
+    /// The calling session's current tab (not what the user is looking at).
     public let selected: Bool
     public let loading: Bool
-    public init(id: String, url: String, title: String, selected: Bool, loading: Bool) {
+    public let sessionTitle: String?
+    public init(id: String, url: String, title: String, selected: Bool, loading: Bool, sessionTitle: String? = nil) {
         self.id = id
         self.url = url
         self.title = title
         self.selected = selected
         self.loading = loading
+        self.sessionTitle = sessionTitle
     }
 
     var json: JSONValue {
-        ["id": .string(id), "url": .string(url), "title": .string(title), "selected": .bool(selected), "loading": .bool(loading)]
+        var object: [String: JSONValue] = [
+            "id": .string(id), "url": .string(url), "title": .string(title), "selected": .bool(selected), "loading": .bool(loading),
+        ]
+        if let sessionTitle { object["sessionTitle"] = .string(sessionTitle) }
+        return .object(object)
     }
 }
 
@@ -240,7 +247,7 @@ public enum DeviceBrowserResponse: Equatable, Sendable {
 
 /// Executes browser operations; implemented by the app's WebKit browser.
 @MainActor public protocol DeviceBrowserHost: AnyObject {
-    func perform(_ request: DeviceBrowserRequest) async -> DeviceBrowserResponse
+    func perform(_ command: DeviceBrowserCommand) async -> DeviceBrowserResponse
 }
 
 public enum DeviceBrowserRPC {
@@ -276,7 +283,7 @@ public enum DeviceBrowserRPC {
             } else {
                 decoded = params
             }
-            response = await host.perform(try DeviceBrowserRequest(json: decoded))
+            response = await host.perform(try DeviceBrowserCommand(json: decoded))
         } catch let error as DeviceBrowserError {
             response = .failure(error)
         } catch {

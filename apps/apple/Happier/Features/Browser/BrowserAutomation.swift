@@ -17,14 +17,12 @@ extension BrowserModel: DeviceBrowserHost {
     /// Largest full-page capture, in points; bounds the bitmap WebKit is asked to render.
     static let maxFullPageHeight: CGFloat = 16_000
 
-    func perform(_ request: DeviceBrowserRequest) async -> DeviceBrowserResponse {
+    func perform(_ command: DeviceBrowserCommand) async -> DeviceBrowserResponse {
         guard agentAccessEnabled else {
             return .failure(.init(.disabled, "Agent access to the browser is turned off in Happier Settings."))
         }
-        noteAgentActivity()
-        defer { noteAgentActivity() }
         do {
-            return .success(try await run(request))
+            return .success(try await run(command.request, for: command.sessionId))
         } catch let error as DeviceBrowserError {
             return .failure(error)
         } catch {
@@ -32,135 +30,167 @@ extension BrowserModel: DeviceBrowserHost {
         }
     }
 
-    private func run(_ request: DeviceBrowserRequest) async throws -> DeviceBrowserResult {
+    /// Resolves the session's tab synchronously (no two calls can race to create it), then runs
+    /// the operation in that tab's queue.
+    private func run(_ request: DeviceBrowserRequest, for sessionId: String) async throws -> DeviceBrowserResult {
         switch request {
         case .status:
-            return result(tab: selectedTab)
-
-        case .navigate(let tabId, let url, let action, let newTab):
-            let tab: BrowserTab
-            if newTab {
-                tab = self.newTab()
-            } else {
-                tab = try self.tab(tabId, createIfNone: true)
-            }
-            switch action {
-            case .go:
-                guard let url = url.flatMap(Self.url(fromTyped:)) else { throw DeviceBrowserError(.invalidRequest, "Invalid URL") }
-                tab.webView.load(URLRequest(url: url))
-            case .back:
-                guard tab.webView.goBack() != nil else { throw DeviceBrowserError(.navigationFailed, "No page to go back to") }
-            case .forward:
-                guard tab.webView.goForward() != nil else { throw DeviceBrowserError(.navigationFailed, "No page to go forward to") }
-            case .reload:
-                tab.webView.reload()
-            }
-            try await settle(tab)
-            return try await settledResult(tab)
-
-        case .screenshot(let tabId, let fullPage):
-            let tab = try self.tab(tabId)
-            return result(tab: tab, image: try await screenshot(tab, fullPage: fullPage))
-
-        case .snapshot(let tabId, let maxChars):
-            let tab = try self.tab(tabId)
-            let value = try await call(BrowserScripts.snapshot, in: tab, ["maxChars": maxChars ?? Self.defaultSnapshotChars])
-            let header = "Page: \(tab.title)\nURL: \(tab.webView.url?.absoluteString ?? "")\n\n"
-            return result(tab: tab, text: header + (value?["text"]?.stringValue ?? ""), truncated: value?["truncated"]?.boolValue)
-
-        case .click(let tabId, let target):
-            let tab = try self.tab(tabId)
-            let value = try await call(BrowserScripts.click, in: tab, Self.arguments(target))
-            try Self.checkElement(value, target)
-            try? await Task.sleep(for: .milliseconds(300))
-            await settleIfLoading(tab)
-            return result(tab: tab, value: value)
-
-        case .type(let tabId, let target, let text, let clear, let submit):
-            let tab = try self.tab(tabId)
-            var arguments = Self.arguments(target)
-            arguments["text"] = text
-            arguments["clear"] = clear
-            arguments["submit"] = submit
-            let value = try await call(BrowserScripts.type, in: tab, arguments)
-            if value?["error"]?.stringValue == "not_editable" {
-                throw DeviceBrowserError(.elementNotFound, "The element does not accept text")
-            }
-            try Self.checkElement(value, target)
-            if submit {
-                try? await Task.sleep(for: .milliseconds(300))
-                await settleIfLoading(tab)
-            }
-            return result(tab: tab, value: value)
-
-        case .scroll(let tabId, let target, let deltaX, let deltaY, let edge):
-            let tab = try self.tab(tabId)
-            var arguments = Self.arguments(target)
-            arguments["deltaX"] = deltaX
-            arguments["deltaY"] = deltaY
-            arguments["to"] = edge?.rawValue ?? ""
-            let value = try await call(BrowserScripts.scroll, in: tab, arguments)
-            try Self.checkElement(value, target)
-            return result(tab: tab, value: value)
-
-        case .evaluate(let tabId, let script):
-            let tab = try self.tab(tabId)
-            return result(tab: tab, value: try await evaluate(script, in: tab))
-
-        case .wait(let tabId, let condition, let timeoutMs):
-            let tab = try self.tab(tabId)
-            try await wait(for: condition, in: tab, timeoutMs: timeoutMs ?? Self.defaultWaitMs)
-            return result(tab: tab)
+            return result(for: sessionId, tab: nil)
 
         case .tabs(let action, let tabId, let url):
             switch action {
             case .list:
-                break
+                return result(for: sessionId, tab: nil)
             case .new:
-                let tab = newTab(url: url.flatMap(Self.url(fromTyped:)))
-                if url != nil {
-                    try await settle(tab)
-                    return try await settledResult(tab)
+                let tab = sessionTab(registry.open(for: .session(sessionId)), sessionId)
+                guard let url = url.flatMap(Self.url(fromTyped:)) else { return result(for: sessionId, tab: tab) }
+                return try await queued(tab) {
+                    tab.webView.load(URLRequest(url: url))
+                    try await self.settle(tab)
+                    return try await self.settledResult(tab, sessionId)
                 }
             case .select:
-                selectedTabId = try self.tab(tabId).id
+                try registry.select(tabId ?? "", for: sessionId)
+                return result(for: sessionId, tab: self.tab(tabId ?? ""))
             case .close:
-                closeTab(try self.tab(tabId).id)
+                try registry.close(tabId ?? "", for: sessionId)
+                closeTab(tabId ?? "")
+                return result(for: sessionId, tab: nil)
             }
-            return result(tab: selectedTab)
+
+        case .navigate(let tabId, let url, let action, let newTab):
+            let tab = newTab
+                ? sessionTab(registry.open(for: .session(sessionId)), sessionId)
+                : try resolve(sessionId, tabId, create: true)
+            return try await queued(tab) {
+                switch action {
+                case .go:
+                    guard let url = url.flatMap(Self.url(fromTyped:)) else { throw DeviceBrowserError(.invalidRequest, "Invalid URL") }
+                    tab.webView.load(URLRequest(url: url))
+                case .back:
+                    guard tab.webView.goBack() != nil else { throw DeviceBrowserError(.navigationFailed, "No page to go back to") }
+                case .forward:
+                    guard tab.webView.goForward() != nil else { throw DeviceBrowserError(.navigationFailed, "No page to go forward to") }
+                case .reload:
+                    tab.webView.reload()
+                }
+                try await self.settle(tab)
+                return try await self.settledResult(tab, sessionId)
+            }
+
+        case .screenshot(let tabId, let fullPage):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) { self.result(for: sessionId, tab: tab, image: try await self.screenshot(tab, fullPage: fullPage)) }
+
+        case .snapshot(let tabId, let maxChars):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) {
+                let value = try await self.call(BrowserScripts.snapshot, in: tab, ["maxChars": maxChars ?? Self.defaultSnapshotChars])
+                let header = "Page: \(tab.title)\nURL: \(tab.webView.url?.absoluteString ?? "")\n\n"
+                return self.result(for: sessionId, tab: tab, text: header + (value?["text"]?.stringValue ?? ""),
+                                   truncated: value?["truncated"]?.boolValue)
+            }
+
+        case .click(let tabId, let target):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) {
+                let value = try await self.call(BrowserScripts.click, in: tab, Self.arguments(target))
+                try Self.checkElement(value, target)
+                try? await Task.sleep(for: .milliseconds(300))
+                await self.settleIfLoading(tab)
+                return self.result(for: sessionId, tab: tab, value: value)
+            }
+
+        case .type(let tabId, let target, let text, let clear, let submit):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) {
+                var arguments = Self.arguments(target)
+                arguments["text"] = text
+                arguments["clear"] = clear
+                arguments["submit"] = submit
+                let value = try await self.call(BrowserScripts.type, in: tab, arguments)
+                if value?["error"]?.stringValue == "not_editable" {
+                    throw DeviceBrowserError(.elementNotFound, "The element does not accept text")
+                }
+                try Self.checkElement(value, target)
+                if submit {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await self.settleIfLoading(tab)
+                }
+                return self.result(for: sessionId, tab: tab, value: value)
+            }
+
+        case .scroll(let tabId, let target, let deltaX, let deltaY, let edge):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) {
+                var arguments = Self.arguments(target)
+                arguments["deltaX"] = deltaX
+                arguments["deltaY"] = deltaY
+                arguments["to"] = edge?.rawValue ?? ""
+                let value = try await self.call(BrowserScripts.scroll, in: tab, arguments)
+                try Self.checkElement(value, target)
+                return self.result(for: sessionId, tab: tab, value: value)
+            }
+
+        case .evaluate(let tabId, let script):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) { self.result(for: sessionId, tab: tab, value: try await self.evaluate(script, in: tab)) }
+
+        case .wait(let tabId, let condition, let timeoutMs):
+            let tab = try resolve(sessionId, tabId)
+            return try await queued(tab) {
+                try await self.wait(for: condition, in: tab, timeoutMs: timeoutMs ?? Self.defaultWaitMs)
+                return self.result(for: sessionId, tab: tab)
+            }
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - Session tabs
 
-    private func tab(_ id: String?, createIfNone: Bool = false) throws -> BrowserTab {
-        if let id {
-            guard let tab = tabs.first(where: { $0.id == id }) else { throw DeviceBrowserError(.tabNotFound, "No tab \(id)") }
-            return tab
-        }
-        if let tab = selectedTab { return tab }
-        if createIfNone { return newTab() }
-        throw DeviceBrowserError(.tabNotFound, "No open tab; navigate to a URL first")
+    /// The session's tab for a call; navigation creates the first one, other operations need it.
+    private func resolve(_ sessionId: String, _ tabId: String?, create: Bool = false) throws -> BrowserTab {
+        let resolved = try registry.tab(for: sessionId, tabId: tabId, create: create)
+        if let tab = tab(resolved.id) { return tab }
+        return sessionTab(resolved.id, sessionId)
     }
 
-    private func info(_ tab: BrowserTab, title: String? = nil) -> DeviceBrowserTab {
+    /// The web view of a tab the registry just gave a session (never shown unless the user picks it).
+    private func sessionTab(_ id: String, _ sessionId: String) -> BrowserTab {
+        tab(id) ?? addTab(id: id, owner: .session(sessionId))
+    }
+
+    /// One operation at a time per tab; the tab shows ✨ while an agent uses it.
+    private func queued(_ tab: BrowserTab, _ operation: @escaping @MainActor () async throws -> DeviceBrowserResult) async throws -> DeviceBrowserResult {
+        let outcome: Result<DeviceBrowserResult, Error> = await operations.run(tab.id) {
+            tab.noteAgentActivity()
+            defer { tab.noteAgentActivity() }
+            do { return .success(try await operation()) } catch { return .failure(error) }
+        }
+        return try outcome.get()
+    }
+
+    private func info(_ tab: BrowserTab, sessionId: String, title: String? = nil) -> DeviceBrowserTab {
         .init(id: tab.id, url: tab.webView.url?.absoluteString ?? "", title: title ?? tab.webView.title ?? "",
-              selected: tab.id == selectedTab?.id, loading: tab.webView.isLoading)
+              selected: registry.currentTab(of: sessionId) == tab.id, loading: tab.webView.isLoading,
+              sessionTitle: sessionTitle(sessionId))
+    }
+
+    /// The answer lists only the calling session's tabs.
+    private func result(for sessionId: String, tab: BrowserTab?, text: String? = nil, truncated: Bool? = nil,
+                        value: JSONValue? = nil, image: DeviceBrowserImage? = nil) -> DeviceBrowserResult {
+        let own = registry.tabs(of: sessionId).compactMap { self.tab($0) }
+        return .init(device: Self.device, tab: tab.map { info($0, sessionId: sessionId) },
+                     tabs: own.map { info($0, sessionId: sessionId) }, text: text, truncated: truncated, value: value, image: image)
     }
 
     /// Right after a load WebKit may not have published the title yet; the page itself has it.
-    private func settledResult(_ tab: BrowserTab) async throws -> DeviceBrowserResult {
-        var result = result(tab: tab)
+    private func settledResult(_ tab: BrowserTab, _ sessionId: String) async throws -> DeviceBrowserResult {
+        var result = result(for: sessionId, tab: tab)
         if tab.webView.title?.isEmpty ?? true, let title = try? await call("return document.title", in: tab)?.stringValue {
-            result.tab = info(tab, title: title)
-            result.tabs = tabs.map { $0.id == tab.id ? info($0, title: title) : info($0) }
+            result.tab = info(tab, sessionId: sessionId, title: title)
+            result.tabs = result.tabs?.map { $0.id == tab.id ? info(tab, sessionId: sessionId, title: title) : $0 }
         }
         return result
-    }
-
-    private func result(tab: BrowserTab?, text: String? = nil, truncated: Bool? = nil, value: JSONValue? = nil,
-                        image: DeviceBrowserImage? = nil) -> DeviceBrowserResult {
-        .init(device: Self.device, tab: tab.map { info($0) }, tabs: tabs.map { info($0) }, text: text, truncated: truncated, value: value, image: image)
     }
 
     /// Waits for the started navigation to finish (or fail), bounded by `navigationTimeout`.
@@ -190,9 +220,6 @@ extension BrowserModel: DeviceBrowserHost {
         try? await settle(tab)
     }
 
-    private func finishWaiting(_ webView: WKWebView) {
-        for waiter in navigationWaiters.removeValue(forKey: ObjectIdentifier(webView)) ?? [] { waiter.resume(returning: nil) }
-    }
 
     private func call(_ body: String, in tab: BrowserTab, _ arguments: [String: Any] = [:],
                       world: WKContentWorld = .defaultClient) async throws -> JSONValue? {

@@ -14,7 +14,7 @@ describe('device browser RPC contract', () => {
     expect(deviceBrowserRpcMethod('host')).toBe('device.browser.v1.host');
   });
 
-  it('accepts each tool operation and rejects ambiguous element targets', () => {
+  it('accepts each tool operation for the calling session and rejects ambiguous element targets', () => {
     for (const request of [
       { op: 'status' },
       { op: 'navigate', url: 'https://example.com', newTab: true },
@@ -28,7 +28,9 @@ describe('device browser RPC contract', () => {
       { op: 'wait', text: 'Listo', timeoutMs: 5000 },
       { op: 'tabs', action: 'select', tabId: 't1' },
     ]) {
-      expect(DeviceBrowserRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
+      const scoped = { ...request, sessionId: 'sess_a' };
+      expect(DeviceBrowserRequestSchema.safeParse(scoped).success, JSON.stringify(scoped)).toBe(true);
+      expect(DeviceBrowserRequestSchema.safeParse(request).success, `${JSON.stringify(request)} without a session`).toBe(false);
     }
     for (const request of [
       { op: 'navigate' },
@@ -39,8 +41,10 @@ describe('device browser RPC contract', () => {
       { op: 'wait', durationMs: 10, timeoutMs: 999_999 },
       { op: 'tabs', action: 'select' },
       { op: 'unknown' },
+      { op: 'status', sessionId: '' },
     ]) {
-      expect(DeviceBrowserRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(false);
+      const scoped = { sessionId: 'sess_a', ...request };
+      expect(DeviceBrowserRequestSchema.safeParse(scoped).success, JSON.stringify(scoped)).toBe(false);
     }
   });
 
@@ -48,7 +52,7 @@ describe('device browser RPC contract', () => {
     const ok = DeviceBrowserResponseSchema.parse({
       ok: true,
       device: { name: 'Mac mini', platform: 'macos' },
-      tab: { id: 't1', url: 'https://example.com/', title: 'Example', selected: true, loading: false },
+      tab: { id: 't1', url: 'https://example.com/', title: 'Example', selected: true, loading: false, sessionTitle: 'Fix login' },
       image: { mimeType: 'image/png', data: 'iVBORw0KGgo=', width: 10, height: 20 },
     });
     expect(ok.ok).toBe(true);

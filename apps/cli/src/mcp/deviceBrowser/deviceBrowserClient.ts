@@ -43,14 +43,21 @@ export function resolveDeviceBrowserTimeoutMs(request: DeviceBrowserRequest): nu
 }
 
 /**
- * Sends one browser operation to the user's Happier app. Slots are tried in contract order and a
+ * Sends one browser operation of one session to the user's Happier app. Slots are tried in contract order and a
  * later slot is addressed only when the relay proved no client serves the earlier one; a request
  * that may have reached a device is never re-sent elsewhere.
  */
-export function createDeviceBrowserClient(transport: DeviceBrowserTransport): DeviceBrowserClient {
+export function createDeviceBrowserClient(
+  transport: DeviceBrowserTransport,
+  scope: Readonly<{ sessionId: string }>,
+): DeviceBrowserClient {
   return {
     invoke: async (rawRequest) => {
-      const parsedRequest = DeviceBrowserRequestSchema.safeParse(rawRequest);
+      // The calling session owns the call: an agent cannot act for another session.
+      const scoped = rawRequest && typeof rawRequest === 'object'
+        ? { ...(rawRequest as Record<string, unknown>), sessionId: scope.sessionId }
+        : rawRequest;
+      const parsedRequest = DeviceBrowserRequestSchema.safeParse(scoped);
       if (!parsedRequest.success) {
         return failure('invalid_request', parsedRequest.error.issues.map((issue: { message: string }) => issue.message).join('; '));
       }
