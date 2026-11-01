@@ -8,8 +8,7 @@ struct RootView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var multipleWindows
     @State private var shareRequests = 0
-    // The optional iOS browser build must expose its address field on launch, even signed out.
-    @State private var showBrowser = BrowserModel.isBrowserRole
+    @State private var showBrowser = false
 
     var body: some View {
         Group {
@@ -23,7 +22,14 @@ struct RootView: View {
             }
         }
         .animation(.smooth, value: store.phase)
-        .task { store.restore() }
+        .task {
+            store.restore()
+            // Mac and iPad use the browser's own window and native toolbar;
+            // iPhone uses its sheet. Browsing is available before sign-in.
+            if BrowserModel.isBrowserRole {
+                BrowserModel.present(openWindow: openWindow, multipleWindows: multipleWindows, sheet: $showBrowser)
+            }
+        }
         .onOpenURL { url in
             switch AppLink(url: url, isBrowserRole: BrowserModel.isBrowserRole) {
             case .inbox:

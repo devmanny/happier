@@ -53,6 +53,11 @@ This variant registers HTTP/HTTPS links and opens the browser on launch, includi
 Happier sign-in. Incoming websites open in user-owned tabs. Existing native session, inbox,
 new-session and share URLs retain their destinations.
 
+Mac and iPad use a Safari-style native toolbar: the blue Happier mark on the left, back/forward
+controls, a centered address field, Share and New Tab, with the tab strip below. The toolbar
+reserves the system window controls rather than drawing the mark over them. Browser builds
+open a separate browser window when the device supports multiple windows; iPhone uses a sheet.
+
 Apple ignores a browser app's Universal Link claims, so this variant omits the app's associated
 domains. A session's HTTPS link opens its landing page in the chosen browser; **Open in Happier Native**
 uses the existing `happier-native://session/...` URL. Happier's browser variant also renders that
@@ -62,7 +67,7 @@ confirmation still applies.
 The browser variant hides **Open in Default Browser**, which could otherwise reopen the same app.
 
 Run `xcodegen generate --spec project.yml` to return to the ordinary iOS/macOS project. This
-preparation covers iOS/iPadOS. macOS requires its separate
+spec covers iOS/iPadOS. The [macOS browser variant](#passkeys-in-the-macos-browser) requires its separate
 [`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
 approval and is not enabled by the iOS spec.
 
@@ -113,6 +118,49 @@ do not prove that Apple grants access or that the sites accept authentication.
 
 References: [WebKit's entitlement restriction](https://bugs.webkit.org/show_bug.cgi?id=250912),
 [Apple's passkey support for browsers](https://developer.apple.com/documentation/authenticationservices/passkey-use-in-web-browsers).
+
+## Passkeys in the macOS browser
+
+**Status: optional development configuration prepared; the Mac entitlement request remains a draft.**
+Apple approval, provisioning and signed passkey validation remain pending. The iOS request
+`QHLPSLWXM8` does not grant the macOS capability.
+
+`project.browser-macos.yml` opens the existing browser window on launch, including before
+Happier sign-in. Its address field, tabs and window resizing are available immediately.
+It registers HTTP/HTTPS handlers and retains `happier-native` links. Incoming HTTPS session
+links render their landing page; the page's explicit action opens the native session.
+
+An Account Holder on the organization team must submit Apple's
+[macOS browser passkey request](https://developer.apple.com/contact/request/macos-browsers-passkeys/)
+for bundle ID `com.devmanny.happier`, team `DPF7ZLTLN2`. Once Apple grants
+[`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential),
+enable the capability for that App ID and refresh the signing profiles. Then generate the
+Mac browser project and use the approved signing configuration:
+
+```sh
+cd apps/apple
+xcodegen generate --spec project.browser-macos.yml
+open Happier.xcodeproj
+```
+
+The browser build derives its signing entitlements from `Happier/Resources/Happier-macOS.entitlements`
+and adds only the managed passkey capability. The generated file lives in Xcode's derived-files
+directory; the ordinary Mac permissions, including push, app groups and associated domains,
+remain intact. Generate `project.yml` again to restore the ordinary iOS/macOS project.
+
+For compilation and browser-UI checks before approval, use an unsigned development build:
+
+```sh
+xcodebuild -project Happier.xcodeproj -scheme Happier -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+The configuration tests in `tests/test_browser_project.py` check both optional variants and
+execute the Mac entitlement-generation step. Compilation or an unsigned UI check does not
+validate access to passkeys. Before claiming support, test **both creation and sign-in with an
+existing iCloud Keychain passkey** in the approved, signed Mac build. Check cancellation and
+retry, persistence after relaunch, external HTTP/HTTPS links, and native session links. WebKit
+and the system credential interface handle these flows; no JavaScript credential bridge is needed.
 
 ## Protocol mapping
 

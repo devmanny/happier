@@ -42,16 +42,43 @@ struct BrowserView: View {
                 if browser.tabs.count > 1 { BrowserTabStrip() }
             }
             .toolbar {
+                // Native placement reserves the Mac window controls and iPad's
+                // system chrome; never overlay the logo on the title bar.
+                ToolbarItem(placement: .navigation) {
+                    Color.blue
+                        .frame(width: 24, height: 24)
+                        .mask {
+                            // Keep the original smile cutout when tinting the brand asset.
+                            Image("Logo")
+                                .renderingMode(.original)
+                                .resizable()
+                                .scaledToFit()
+                                .colorInvert()
+                                .luminanceToAlpha()
+                        }
+                        .accessibilityElement()
+                        .accessibilityLabel(Text("Happier"))
+                        .accessibilityAddTraits(.isImage)
+                        .help("Happier")
+                }
+                .sharedBackgroundVisibility(.hidden)
+                ToolbarSpacer(.fixed, placement: .navigation)
                 ToolbarItemGroup(placement: .navigation) {
                     BrowserBackButton()
                     BrowserForwardButton()
                 }
                 ToolbarItem(placement: .principal) {
                     BrowserAddressField(compact: false)
-                        .frame(minWidth: 280, idealWidth: 560, maxWidth: 720)
+                        .frame(minWidth: 180, idealWidth: 560, maxWidth: 720)
                 }
                 if inSheet {
                     ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
+                }
+                if let url = browser.selectedTab?.url {
+                    ToolbarItem(placement: .primaryAction) {
+                        ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
+                            .help("Share")
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { browser.newTab() } label: { Label("New Tab", systemImage: "plus") }
