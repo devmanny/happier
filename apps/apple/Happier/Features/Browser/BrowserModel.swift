@@ -70,6 +70,9 @@ final class BrowserTab: Identifiable {
 @MainActor @Observable
 final class BrowserModel: NSObject {
     static let agentAccessKey = "browser.agentAccess"
+    /// Build role only, not a claim that passkeys work on this device. WebKit owns WebAuthn
+    /// availability, credential selection and user verification using the signed entitlements.
+    static var isBrowserRole: Bool { Bundle.main.object(forInfoDictionaryKey: "HappierBrowserRole") as? Bool == true }
 
     /// Every tab, user's and sessions', in opening order; each has its own web view.
     private(set) var tabs: [BrowserTab] = []
@@ -348,6 +351,15 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate {
 
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         MainActor.assumeIsolated { finishNavigation(webView, error: Self.isCancellation(error) ? nil : error) }
+    }
+
+    /// The native landing page can return to a session even when iOS ignores this browser's
+    /// Universal Links. Only our own scheme is handed to the app's existing URL receiver.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        guard let url = navigationAction.request.url, url.scheme?.lowercased() == "happier-native" else { return .allow }
+        finishWaiting(webView)
+        Self.openInDefaultBrowser(url)
+        return .cancel
     }
 
     /// A newer navigation replacing this one is not a failure of the page.

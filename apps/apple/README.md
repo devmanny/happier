@@ -24,6 +24,90 @@ open Happier.xcodeproj          # Run the "Happier" scheme on My Mac or an iPhon
 (cd HappierKit && HAPPIER_LIVE_SERVER=https://api.happier.dev swift test --filter LiveServerTests)
 ```
 
+## Passkeys in the iOS browser
+
+The integrated browser uses WebKit's WebAuthn implementation and the system credential picker.
+Passkeys stay in Apple Passwords or the user's credential provider. Happier does not implement
+a JavaScript credential bridge or store private keys. Authentication requires the user to show
+the tab and complete the system prompt.
+
+**Status: prepared for an entitled iPhone/iPad build; device authentication still needs validation.**
+The ordinary `project.yml` does not request restricted browser capabilities. To use passkeys for
+third-party sites such as Google, GitHub and Vercel in `WKWebView`, first obtain Apple's
+`com.apple.developer.web-browser` managed entitlement for `com.devmanny.happier`:
+
+1. Review [Apple's browser requirements](https://developer.apple.com/documentation/xcode/preparing-your-app-to-be-the-default-browser)
+   and submit the [default browser entitlement request](https://developer.apple.com/contact/request/default-browser-entitlement/).
+   Apple decides whether Happier qualifies; generating this project does not grant access.
+2. Once granted, enable the capability for the App ID and refresh the development/distribution
+   provisioning profiles. The profile and the app's signature must both contain the entitlement.
+3. Generate the optional iOS project and build with that approved signing configuration:
+
+   ```sh
+   cd apps/apple
+   xcodegen generate --spec project.browser-ios.yml
+   open Happier.xcodeproj
+   ```
+
+This variant registers HTTP/HTTPS links and opens the browser on launch, including before
+Happier sign-in. Incoming websites open in user-owned tabs. Existing native session, inbox,
+new-session and share URLs retain their destinations.
+
+Apple ignores a browser app's Universal Link claims, so this variant omits the app's associated
+domains. A session's HTTPS link opens its landing page in the chosen browser; **Open in Happier Native**
+uses the existing `happier-native://session/...` URL. If Happier is the chosen browser, its URL
+receiver recognizes the session link directly. The usual relay-switch confirmation still applies.
+The browser variant hides **Open in Default Browser**, which could otherwise reopen the same app.
+
+Run `xcodegen generate --spec project.yml` to return to the ordinary iOS/macOS project. This
+preparation covers iOS/iPadOS. macOS requires its separate
+[`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
+approval and is not enabled by the iOS spec.
+
+### Apple entitlement request
+
+Use the signing identity from `project.yml`: app **Happier**, bundle ID
+`com.devmanny.happier`, development team `DPF7ZLTLN2`. Confirm the same team is selected
+in Apple Developer before submitting. Request `com.apple.developer.web-browser`;
+the separate app-installation entitlement is not needed for this passkey work.
+
+Draft explanation for the request (not yet submitted):
+
+> We are preparing an iOS/iPadOS browser configuration for our native Happier client,
+> a companion for coding-agent sessions. Its integrated, tabbed browser uses the
+> system WKWebView to let people browse websites and authenticate to developer
+> services such as Google, GitHub and Vercel. The browser configuration presents an
+> address field on launch, including before Happier sign-in, and registers HTTP and
+> HTTPS URLs. We request the default-browser entitlement to support this browser
+> configuration and WebKit's native WebAuthn flows for third-party websites.
+> Credential selection and verification stay in the system interface; Happier does
+> not implement a JavaScript passkey bridge or store passkey private keys. This
+> configuration still requires validation on a signed, entitled physical device.
+
+Apple requires a signed-in developer account to access the request form. Use the
+account's actual contact and distribution details if requested; this draft does not
+assert approval, App Store availability, or a completed device-authentication test.
+
+### Validation
+
+Validation commands:
+
+```sh
+python3 -m unittest discover -s tests -v
+(cd HappierKit && swift test --filter 'AppLinkTests|SessionLinkTests|DeviceBrowser')
+```
+
+Before claiming passkey support, test the **signed, entitled build on a physical device** with
+a configured passkey provider. Open each of Google, GitHub and Vercel in a visible browser tab;
+select an existing passkey, complete Face ID/device verification, and verify successful sign-in
+and session persistence after relaunch. Also cancel the prompt, retry, and exercise a site's
+alternative sign-in method. Test session landing links from Safari and native widget links,
+with Happier selected and unselected as the default browser. Host tests and a simulator build
+do not prove that Apple grants access or that the sites accept authentication.
+
+References: [WebKit's entitlement restriction](https://bugs.webkit.org/show_bug.cgi?id=250912),
+[Apple's passkey support for browsers](https://developer.apple.com/documentation/authenticationservices/passkey-use-in-web-browsers).
+
 ## Protocol mapping
 
 Each Swift module follows the TypeScript owner it mirrors; check that owner when the protocol changes.

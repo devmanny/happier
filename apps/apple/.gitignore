@@ -6,3 +6,4 @@ xcuserdata/
 DerivedData/
 Happier/Resources/Info.plist
 Happier/Resources/Happier.entitlements
+__pycache__/

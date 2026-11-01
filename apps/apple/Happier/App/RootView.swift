@@ -4,7 +4,12 @@ import SwiftUI
 struct RootView: View {
     @Environment(HappierStore.self) private var store
     @Environment(NotificationInbox.self) private var inbox
+    @Environment(BrowserModel.self) private var browser
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var multipleWindows
     @State private var shareRequests = 0
+    // The optional iOS browser build must expose its address field on launch, even signed out.
+    @State private var showBrowser = BrowserModel.isBrowserRole
 
     var body: some View {
         Group {
@@ -20,23 +25,29 @@ struct RootView: View {
         .animation(.smooth, value: store.phase)
         .task { store.restore() }
         .onOpenURL { url in
-            // The widget's "show me what's waiting".
-            if url.scheme == "happier-native", url.host == "inbox" {
+            switch AppLink(url: url) {
+            case .inbox:
+                showBrowser = false
                 inbox.showRequested = true
-                return
-            }
-            // The "New Session" control and widget.
-            if url.scheme == "happier-native", url.host == "new" {
+            case .newSession:
+                showBrowser = false
                 store.openRequest = NewChat.id
-                return
-            }
-            // The share extension left files for a conversation (ShareInboxReceiver sends them).
-            if url.scheme == "happier-native", url.host == "share" {
+            case .share:
+                showBrowser = false
                 shareRequests += 1
-                return
+            case .session:
+                showBrowser = false
+                if store.handleSessionLink(url) { AppHaptics.light() }
+            case .website:
+                browser.show(url, forSession: nil)
+                if browser.openViews == 0 {
+                    BrowserModel.present(openWindow: openWindow, multipleWindows: multipleWindows, sheet: $showBrowser)
+                }
+            case nil:
+                break
             }
-            if store.handleSessionLink(url) { AppHaptics.light() }
         }
+        .modifier(BrowserSheet(shown: $showBrowser))
         .confirmationDialog("Open on Another Relay?", isPresented: Binding(
             get: { store.sessionLinkConfirmation != nil },
             set: { if !$0, store.sessionLinkConfirmation != nil { store.cancelSessionLink() } }

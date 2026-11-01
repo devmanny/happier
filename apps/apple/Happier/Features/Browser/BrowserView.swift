@@ -310,8 +310,11 @@ private struct BrowserPhoneBar: View {
                 .disabled(tab?.canGoForward != true)
             if let url = tab?.url {
                 ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
-                Button { BrowserModel.openInDefaultBrowser(url) } label: {
-                    Label("Open in Default Browser", systemImage: "arrow.up.forward.app")
+                // A browser build may itself be the default; avoid reopening this URL in a loop.
+                if !BrowserModel.isBrowserRole {
+                    Button { BrowserModel.openInDefaultBrowser(url) } label: {
+                        Label("Open in Default Browser", systemImage: "arrow.up.forward.app")
+                    }
                 }
             }
         }
