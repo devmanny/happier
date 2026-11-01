@@ -31,7 +31,7 @@ Passkeys stay in Apple Passwords or the user's credential provider. Happier does
 a JavaScript credential bridge or store private keys. Authentication requires the user to show
 the tab and complete the system prompt.
 
-**Status: prepared for an entitled iPhone/iPad build; device authentication still needs validation.**
+**Status: entitlement request submitted; Apple approval and physical-device authentication validation remain pending.**
 The ordinary `project.yml` does not request restricted browser capabilities. To use passkeys for
 third-party sites such as Google, GitHub and Vercel in `WKWebView`, first obtain Apple's
 `com.apple.developer.web-browser` managed entitlement for `com.devmanny.happier`:
@@ -55,8 +55,10 @@ new-session and share URLs retain their destinations.
 
 Apple ignores a browser app's Universal Link claims, so this variant omits the app's associated
 domains. A session's HTTPS link opens its landing page in the chosen browser; **Open in Happier Native**
-uses the existing `happier-native://session/...` URL. If Happier is the chosen browser, its URL
-receiver recognizes the session link directly. The usual relay-switch confirmation still applies.
+uses the existing `happier-native://session/...` URL. Happier's browser variant also renders that
+landing page for an incoming HTTPS link; opening the session natively requires that explicit
+action. The ordinary app retains direct session Universal Links. The usual relay-switch
+confirmation still applies.
 The browser variant hides **Open in Default Browser**, which could otherwise reopen the same app.
 
 Run `xcodegen generate --spec project.yml` to return to the ordinary iOS/macOS project. This
@@ -66,12 +68,16 @@ approval and is not enabled by the iOS spec.
 
 ### Apple entitlement request
 
-Use the signing identity from `project.yml`: app **Happier**, bundle ID
+Use the signing identity from `project.yml`: display name **Happier**
+(**Happier Native** in App Store Connect), bundle ID
 `com.devmanny.happier`, development team `DPF7ZLTLN2`. Confirm the same team is selected
 in Apple Developer before submitting. Request `com.apple.developer.web-browser`;
 the separate app-installation entitlement is not needed for this passkey work.
 
-Draft explanation for the request (not yet submitted):
+Apple confirmed receipt on **2026-11-01**, request ID **QHLPSLWXM8**. Receipt does not
+grant the entitlement. Wait for Apple's decision before updating provisioning.
+
+Request rationale (summary of the submitted explanation):
 
 > We are preparing an iOS/iPadOS browser configuration for our native Happier client,
 > a companion for coding-agent sessions. Its integrated, tabbed browser uses the
@@ -84,9 +90,9 @@ Draft explanation for the request (not yet submitted):
 > not implement a JavaScript passkey bridge or store passkey private keys. This
 > configuration still requires validation on a signed, entitled physical device.
 
-Apple requires a signed-in developer account to access the request form. Use the
-account's actual contact and distribution details if requested; this draft does not
-assert approval, App Store availability, or a completed device-authentication test.
+The submitted request identifies the existing app as an internal TestFlight build and
+clarifies that the browser-entitled configuration is not yet distributed. It does not
+claim App Store availability or successful passkey authentication on a physical device.
 
 ### Validation
 

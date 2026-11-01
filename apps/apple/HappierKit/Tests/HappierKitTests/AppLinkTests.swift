@@ -20,6 +20,12 @@ import Testing
         #expect(AppLink(url: URL(string: "happier-native://share")!) == .share)
     }
 
+    @Test func browserRoleLoadsSessionLandingPageBeforeOpeningNativeLink() throws {
+        let link = try #require(SessionLink(sessionId: "session-1", server: URL(string: "https://relay.example")!))
+        #expect(AppLink(url: link.webURL, isBrowserRole: true) == .website)
+        #expect(AppLink(url: link.nativeURL, isBrowserRole: true) == .session)
+    }
+
     @Test func malformedNativeSessionStillReachesSessionValidation() {
         let url = URL(string: "happier-native://session/id?server=file:///tmp/relay")!
         #expect(AppLink(url: url) == .session)

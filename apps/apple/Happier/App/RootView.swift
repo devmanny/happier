@@ -25,7 +25,7 @@ struct RootView: View {
         .animation(.smooth, value: store.phase)
         .task { store.restore() }
         .onOpenURL { url in
-            switch AppLink(url: url) {
+            switch AppLink(url: url, isBrowserRole: BrowserModel.isBrowserRole) {
             case .inbox:
                 showBrowser = false
                 inbox.showRequested = true
