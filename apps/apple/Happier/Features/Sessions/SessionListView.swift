@@ -53,6 +53,8 @@ struct SessionListView: View {
     @State private var renaming: Session?
     /// The session to put inside another one, picked from a list ("Move Into…").
     @State private var movingInto: Session?
+    /// A session started from a row's folder, with its machine preserved in the assistant.
+    @State private var newSessionDraft: NewSessionDraft?
     /// The row a dragged session is over.
     @State private var dropTarget: String?
     #if os(macOS)
@@ -167,7 +169,7 @@ struct SessionListView: View {
                 .listRowBackground(selection == session.id
                     ? RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.1)).padding(.horizontal, 8)
                     : nil)
-                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -175,7 +177,7 @@ struct SessionListView: View {
             content
                 .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                 .tag(session.id)
-                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -379,7 +381,7 @@ struct SessionListView: View {
 
 extension View {
     /// Swipe right: read / unread. Swipe left: archive. Long press: everything, plus pin and stop.
-    func rowActions(_ session: Session, store: HappierStore, openInWindow: (() -> Void)? = nil, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil) -> some View {
+    func rowActions(_ session: Session, store: HappierStore, openInWindow: (() -> Void)? = nil, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil, newSession: (() -> Void)? = nil) -> some View {
         let unread = session.unreadSince != nil
         let pinned = store.isPinned(session.id)
         return self
@@ -402,6 +404,14 @@ extension View {
                 .tint(.indigo)
             }
             .contextMenu {
+                if let newSession {
+                    Button("New Session in This Folder", systemImage: "plus.bubble") {
+                        AppHaptics.light()
+                        newSession()
+                    }
+                    .disabled(NewSessionDraft(inFolderOf: session) == nil)
+                    .accessibilityIdentifier("new-session-in-folder")
+                }
                 if let openInWindow {
                     Button("Open in New Window", systemImage: "macwindow.badge.plus") { openInWindow() }
                     Divider()
@@ -635,6 +645,9 @@ extension SessionListView {
             withAnimation(.smooth(duration: 0.2)) { _ = expanded.insert(targetId) }
         })
         .modifier(RenameSessionAlert(session: $renaming))
+        .sheet(item: $newSessionDraft) { draft in
+            NewSessionSheet(draft: draft)
+        }
         #if os(macOS)
         .task(id: springTarget) {
             guard let target = springTarget else { return }

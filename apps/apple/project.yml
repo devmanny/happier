@@ -31,6 +31,7 @@ targets:
       - package: HappierKit
       - target: HappierWidgets
       - target: HappierShare
+      - target: HappierSafari
       # The Apple Watch app rides inside the iPhone app (installed from it, TestFlight included).
       - target: HappierWatch
         destinationFilters: [iOS]
@@ -161,6 +162,39 @@ targets:
         ENABLE_HARDENED_RUNTIME: true
         SKIP_INSTALL: YES
         CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: HappierShare/HappierShare-macOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HappierSafari:
+    type: app-extension
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: HappierSafari
+        excludes: [Resources]
+      - path: HappierSafari/Resources
+        buildPhase: resources
+    dependencies:
+      - package: HappierKit
+      - sdk: SafariServices.framework
+    info:
+      path: HappierSafari/Info.plist
+      properties:
+        CFBundleDisplayName: Happier Import
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
+    entitlements:
+      path: HappierSafari/HappierSafari.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.safari
+        PRODUCT_NAME: HappierSafari
+        ENABLE_HARDENED_RUNTIME: true
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: HappierSafari/HappierSafari-macOS.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
   HappierWatch:
     type: application

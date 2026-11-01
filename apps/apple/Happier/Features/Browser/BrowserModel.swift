@@ -117,6 +117,26 @@ final class BrowserModel: NSObject {
         UserDefaults.standard.object(forKey: Self.agentAccessKey) as? Bool ?? true
     }
 
+    /// Only confirmation in the import review writes Safari cookies to our store.
+    func importSafariCookies(_ id: UUID) async throws -> (origin: URL, imported: Int, total: Int) {
+        guard let inbox = SafariCookieInbox.shared else { throw SafariCookieImport.Failure.unavailable }
+        let transfer = try inbox.load(id)
+        let cookies = try transfer.httpCookies()
+        try inbox.remove(id)
+        let cookieStore = configuration.websiteDataStore.httpCookieStore
+        for cookie in cookies { await cookieStore.setCookie(cookie) }
+        let stored = await cookieStore.allCookies()
+        let imported = cookies.filter { expected in
+            stored.contains { actual in
+                actual.name == expected.name && actual.value == expected.value && actual.domain == expected.domain &&
+                actual.path == expected.path && actual.isSecure == expected.isSecure &&
+                actual.isHTTPOnly == expected.isHTTPOnly && actual.sameSitePolicy == expected.sameSitePolicy &&
+                actual.isSessionOnly == expected.isSessionOnly && actual.expiresDate == expected.expiresDate
+            }
+        }.count
+        return (transfer.origin, imported, cookies.count)
+    }
+
     // MARK: - Tabs
 
     /// A tab the user opens; it becomes the one the browser shows.

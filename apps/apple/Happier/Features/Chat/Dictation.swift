@@ -144,6 +144,9 @@ final class Dictation {
                 }
             }
             isRecording = true
+            // One ready cue for tap and hold alike, after permission, audio startup and the
+            // recognizer are ready. Do not pause capture for it: the first words must be kept.
+            AppHaptics.listening(true)
         } catch {
             Self.log.error("dictation failed: \(String(describing: error), privacy: .public)")
             self.error = error.localizedDescription
@@ -172,6 +175,8 @@ final class Dictation {
         // Play-and-record rather than record-only: switching to record-only left the speech
         // synthesizer mute afterwards (reading aloud stopped working after the mic).
         try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+        // iOS otherwise mutes the ready tone while the microphone is active.
+        try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
         let request = SFSpeechAudioBufferRecognitionRequest()

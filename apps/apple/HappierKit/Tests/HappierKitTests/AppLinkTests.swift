@@ -36,4 +36,12 @@ import Testing
     func unsupportedURLsDoNotOpenInBrowser(_ address: String) {
         #expect(AppLink(url: URL(string: address)!) == nil)
     }
+    @Test func safariImportLinksContainOnlyATransferID() {
+        let id = UUID()
+        #expect(AppLink(url: URL(string: "happier-native://browser-import/\(id)")!) == .browserImport(id))
+        for suffix in ["/../file", "/not-a-uuid", "/\(id)?value=secret", "/\(id)#secret"] {
+            #expect(AppLink(url: URL(string: "happier-native://browser-import" + suffix)!) == nil)
+        }
+    }
+
 }

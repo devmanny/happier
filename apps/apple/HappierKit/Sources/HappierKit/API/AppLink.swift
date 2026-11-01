@@ -3,12 +3,18 @@ import Foundation
 /// Routes OS-delivered links without treating an ordinary website as a session link.
 public enum AppLink: Equatable, Sendable {
     case inbox, newSession, share, session, website
+    case browserImport(UUID)
 
     public init?(url: URL, isBrowserRole: Bool = false) {
         switch (url.scheme?.lowercased(), url.host?.lowercased()) {
         case ("happier-native", "inbox"): self = .inbox
         case ("happier-native", "new"): self = .newSession
         case ("happier-native", "share"): self = .share
+        case ("happier-native", "browser-import"):
+            guard url.user == nil, url.password == nil, url.port == nil,
+                  url.query == nil, url.fragment == nil,
+                  url.pathComponents.count == 2, let id = UUID(uuidString: url.lastPathComponent) else { return nil }
+            self = .browserImport(id)
         case ("happier-native", _): self = .session // The store owns validation and errors.
         case ("http", _), ("https", _):
             guard let host = url.host, !host.isEmpty else { return nil }

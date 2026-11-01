@@ -8,7 +8,7 @@ import AppKit
 #endif
 
 /// Integrated browser over the shared `BrowserModel`, laid out like Safari: on the iPhone a glass
-/// bar at the bottom; on the Mac and iPad the address in the toolbar and a tab strip under it.
+/// bar at the bottom; on the Mac and iPad tabs above the navigation and address bar.
 struct BrowserView: View {
     @Environment(BrowserModel.self) private var browser
     #if os(iOS)
@@ -39,46 +39,28 @@ struct BrowserView: View {
     private var desktop: some View {
         BrowserPage()
             .safeAreaInset(edge: .top, spacing: 0) {
-                if browser.tabs.count > 1 { BrowserTabStrip() }
+                BrowserNavigationBar()
             }
             .toolbar {
                 // Native placement reserves the Mac window controls and iPad's
                 // system chrome; never overlay the logo on the title bar.
                 ToolbarItem(placement: .navigation) {
-                    Color.blue
-                        .frame(width: 24, height: 24)
-                        .mask {
-                            // Keep the original smile cutout when tinting the brand asset.
-                            Image("Logo")
-                                .renderingMode(.original)
-                                .resizable()
-                                .scaledToFit()
-                                .colorInvert()
-                                .luminanceToAlpha()
-                        }
-                        .accessibilityElement()
+                    Image("BrowserIcon")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
                         .accessibilityLabel(Text("Happier"))
-                        .accessibilityAddTraits(.isImage)
                         .help("Happier")
                 }
                 .sharedBackgroundVisibility(.hidden)
                 ToolbarSpacer(.fixed, placement: .navigation)
-                ToolbarItemGroup(placement: .navigation) {
-                    BrowserBackButton()
-                    BrowserForwardButton()
-                }
                 ToolbarItem(placement: .principal) {
-                    BrowserAddressField(compact: false)
-                        .frame(minWidth: 180, idealWidth: 560, maxWidth: 720)
+                    BrowserTabStrip()
+                        .frame(minWidth: 200, idealWidth: 760, maxWidth: 1600)
                 }
+                .sharedBackgroundVisibility(.hidden)
                 if inSheet {
                     ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-                }
-                if let url = browser.selectedTab?.url {
-                    ToolbarItem(placement: .primaryAction) {
-                        ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
-                            .help("Share")
-                    }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { browser.newTab() } label: { Label("New Tab", systemImage: "plus") }
@@ -92,6 +74,48 @@ struct BrowserView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .navigationTitle(browser.selectedTab.map(browser.tabTitle) ?? "Browser")
+    }
+}
+
+/// Navigation belongs to the selected tab, below the row that selects it.
+private struct BrowserNavigationBar: View {
+    @Environment(BrowserModel.self) private var browser
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                BrowserBackButton().frame(width: controlSize, height: controlSize)
+                BrowserForwardButton().frame(width: controlSize, height: controlSize)
+            }
+            .buttonStyle(.plain)
+            .labelStyle(.iconOnly)
+            .frame(width: controlSize * 2 + 4)
+            Spacer(minLength: 0)
+            BrowserAddressField(compact: false)
+                .frame(maxWidth: 720)
+            Spacer(minLength: 0)
+            Group {
+                if let url = browser.selectedTab?.url {
+                    ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.plain)
+                        .help("Share")
+                }
+            }
+            .frame(width: controlSize * 2 + 4, height: controlSize, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var controlSize: CGFloat {
+        #if os(macOS)
+        30
+        #else
+        44
+        #endif
     }
 }
 
@@ -218,7 +242,7 @@ private struct BrowserAddressField: View {
                     focused = false
                 }
             if let tab, !focused, tab.url != nil {
-                AgentSparkle(tab: tab)
+                if compact { AgentSparkle(tab: tab) }
                 Button {
                     if tab.isLoading { tab.webView.stopLoading() } else { tab.webView.reload() }
                 } label: {
@@ -233,9 +257,12 @@ private struct BrowserAddressField: View {
             }
         }
         .padding(.horizontal, compact ? 16 : 10)
-        .frame(height: compact ? 46 : 30)
+        .frame(height: compact ? 46 : 36)
         .background {
             if !compact { Capsule().fill(.quaternary.opacity(0.6)) }
+        }
+        .overlay {
+            if compact { BrowserActivityOutline(tab: tab) }
         }
         .contentShape(.capsule)
         .onTapGesture { focused = true }
@@ -372,16 +399,27 @@ private struct BrowserTabStrip: View {
     @Environment(BrowserModel.self) private var browser
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(browser.tabs) { tab in
-                BrowserTabItem(tab: tab, selected: tab.id == browser.selectedTab?.id)
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 3) {
+                        ForEach(browser.tabs) { tab in
+                            BrowserTabItem(tab: tab, selected: tab.id == browser.selectedTab?.id)
+                                .frame(width: max(150, (geometry.size.width - CGFloat(max(0, browser.tabs.count - 1)) * 3)
+                                                  / CGFloat(max(1, browser.tabs.count))))
+                                .id(tab.id)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .onChange(of: browser.selectedTab?.id, initial: true) { _, id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
+                }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
+        .padding(3)
+        .frame(height: 38)
+        .glassEffect(.regular, in: .capsule)
     }
 }
 
@@ -390,16 +428,10 @@ private struct BrowserTabItem: View {
     let tab: BrowserTab
     let selected: Bool
     @State private var hovering = false
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(spacing: 6) {
-            BrowserTabMark(tab: tab)
-            Text(browser.tabTitle(tab))
-                .font(.callout.weight(selected ? .medium : .regular))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-            AgentSparkle(tab: tab)
             Button { browser.closeTab(tab.id) } label: {
                 Image(systemName: "xmark")
                     .font(.caption2.weight(.bold))
@@ -409,17 +441,34 @@ private struct BrowserTabItem: View {
             }
             .buttonStyle(.plain)
             .opacity(hovering || selected ? 1 : 0)
+            .allowsHitTesting(hovering || selected)
+            .accessibilityHidden(!hovering && !selected)
             .accessibilityLabel(Text("Close Tab"))
+            Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                BrowserTabMark(tab: tab)
+                Text(browser.tabTitle(tab))
+                    .font(.callout.weight(selected ? .medium : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 0)
+            AgentSparkle(tab: tab)
+                .frame(width: 16)
         }
         .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, minHeight: 28)
+        .frame(maxWidth: .infinity, minHeight: 32)
         .background {
-            if selected {
-                Capsule().fill(Color.primary.opacity(0.11))
-            } else if hovering {
-                Capsule().fill(Color.primary.opacity(0.05))
-            }
+            Capsule()
+                .fill(Color.primary.opacity(selected ? 0.13 : hovering ? 0.08 : 0.035))
+                .shadow(color: .black.opacity(selected ? 0.12 : 0), radius: 2, y: 1)
         }
+        // Every tab has a stable boundary, including inactive tabs, as in Safari's grouped bar.
+        .overlay {
+            Capsule().strokeBorder(Color.primary.opacity(contrast == .increased ? 0.5 : selected ? 0.28 : 0.16), lineWidth: 0.75)
+                .allowsHitTesting(false)
+        }
+        .overlay { BrowserActivityOutline(tab: tab) }
         .contentShape(.capsule)
         .onTapGesture { browser.selectedTabId = tab.id }
         .onHover { hovering = $0 }
@@ -449,17 +498,51 @@ private struct BrowserTabMark: View {
     }
 }
 
+/// A subtle activity tint on the tab (or the phone's address bar).
+/// The timeline lives in the decoration so animation never replaces the web view or its focus.
+private struct BrowserActivityOutline: View {
+    let tab: BrowserTab?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let until = tab?.agentActiveUntil, until > context.date {
+                if reduceMotion {
+                    outline(strength: 0.7)
+                } else {
+                    PhaseAnimator([0.5, 0.85]) { strength in
+                        outline(strength: strength)
+                    } animation: { _ in
+                        .easeInOut(duration: 2.4)
+                    }
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func outline(strength: Double) -> some View {
+        Capsule()
+            .fill(Color.blue.opacity(0.03 * strength))
+            .overlay {
+                Capsule().strokeBorder(Color.blue.opacity(0.35 * strength), lineWidth: 1)
+            }
+    }
+}
+
 /// ✨ while an agent has used this tab in the last seconds; never blocks anything.
 struct AgentSparkle: View {
     let tab: BrowserTab
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             if let until = tab.agentActiveUntil, until > context.date {
                 Image(systemName: "sparkles")
                     .font(.caption)
-                    .foregroundStyle(.tint)
-                    .symbolEffect(.pulse)
+                    .foregroundStyle(.blue.opacity(0.8))
+                    .symbolEffect(.pulse, options: .speed(0.6), isActive: !reduceMotion)
                     .help("An agent is using this tab")
                     .accessibilityLabel(Text("An agent is using this tab"))
                     .transition(.opacity)

@@ -1,9 +1,35 @@
 import Foundation
+import NaturalLanguage
 
 /// The language and voice for dictation and reading aloud. The app's own text is English only, so
 /// the system reports English as the app's language even on a Spanish phone: these go by the
 /// user's languages (`Locale.preferredLanguages`) and region instead.
 public enum SpeechLanguage {
+    /// Ordered reading languages: the first one is used when the text has no detectable language.
+    public static func readingLanguages(preferred: [String], chosen: [String] = []) -> [String] {
+        var seen = Set<String>()
+        let selected = (chosen.isEmpty ? preferred : chosen)
+            .map { languageCode($0).lowercased() }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        return selected.isEmpty ? ["en"] : selected
+    }
+
+    /// The language used by both individual-message and continuous read aloud.
+    public static func readingLanguage(for text: String, allowed: [String]) -> String {
+        let languages = readingLanguages(preferred: allowed)
+        let recognizer = NLLanguageRecognizer()
+        // Short Spanish replies can look Portuguese to Apple's unconstrained recognizer.
+        // The user's reading languages are a hard boundary, not just a statistical hint.
+        recognizer.languageConstraints = languages.flatMap { language -> [NLLanguage] in
+            language == "zh" ? [.simplifiedChinese, .traditionalChinese] : [NLLanguage(rawValue: language)]
+        }
+        recognizer.processString(text)
+        guard let detected = recognizer.dominantLanguage.map({ languageCode($0.rawValue) }), languages.contains(detected) else {
+            return languages[0]
+        }
+        return detected
+    }
+
     /// The recognizer locale for the first of the user's languages that dictation supports: that
     /// exact locale, else the language in the user's region, else the language anywhere.
     public static func dictationLocale(preferred: [String], region: String?, supported: [String]) -> String? {

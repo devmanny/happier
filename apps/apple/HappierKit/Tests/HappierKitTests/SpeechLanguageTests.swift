@@ -4,6 +4,25 @@ import Testing
 /// The app's own text is English only, so the system reports English as its language even on a
 /// Spanish phone; dictation and reading aloud go by the user's languages instead.
 @Suite struct SpeechLanguageTests {
+    @Test func readingDoesNotSwitchShortSpanishMessagesToPortuguese() {
+        // The unrestricted Apple recognizer identifies these as Portuguese on macOS 26.
+        // Exercise the actual recognizer, including English as the device's first language.
+        for text in ["Claro", "Lista", "Para importar cookies"] {
+            #expect(SpeechLanguage.readingLanguage(for: text, allowed: ["en", "es"]) == "es")
+        }
+        #expect(SpeechLanguage.readingLanguage(for: "The changes are ready for review.", allowed: ["es", "en"]) == "en")
+        #expect(SpeechLanguage.readingLanguage(for: "The changes are ready for review.", allowed: ["es"]) == "es")
+        #expect(SpeechLanguage.readingLanguage(for: "", allowed: ["es", "en"]) == "es")
+        // Voice languages are grouped by base code, but Apple's Chinese detector uses scripts.
+        #expect(SpeechLanguage.readingLanguage(for: "这是一个中文消息。现在可以阅读你的消息。", allowed: ["es", "zh"]) == "zh")
+    }
+
+    @Test func readingLanguagesFollowTheExplicitChoiceOrDevicePreferences() {
+        #expect(SpeechLanguage.readingLanguages(preferred: ["en-MX", "es-MX", "es-ES"]) == ["en", "es"])
+        #expect(SpeechLanguage.readingLanguages(preferred: ["en-MX"], chosen: ["es-MX", "en-US", "es"]) == ["es", "en"])
+        #expect(SpeechLanguage.readingLanguages(preferred: [], chosen: []) == ["en"])
+    }
+
     @Test func dictationListensInTheUsersOwnLanguage() {
         let supported = ["en-US", "en-GB", "es-ES", "es-MX", "es-US", "fr-FR"]
         #expect(SpeechLanguage.dictationLocale(preferred: ["es-MX", "en-MX"], region: "MX", supported: supported) == "es-MX")

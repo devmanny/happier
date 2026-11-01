@@ -194,7 +194,12 @@ struct ModelPickerSheet<Content: View>: View {
                 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        SheetCloseButton()
+                        // Read dismissal from the sheet's root, before its NavigationStack.
+                        // This also closes a picker presented by the new-session sheet.
+                        Button(role: .close) {
+                            AppHaptics.light()
+                            dismiss()
+                        }
                     }
                 }
         }

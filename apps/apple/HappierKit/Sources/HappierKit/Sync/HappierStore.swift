@@ -1333,7 +1333,8 @@ public final class HappierStore {
     public func createSession(machineId: String, directory: String, agentId: String, permissionMode: PermissionMode,
                               modelId: String? = nil, effort: String? = nil,
                               firstMessage: String, attachments: [AttachmentDraft] = [], goal: String? = nil,
-                              approveNewDirectory: Bool = false) async -> SpawnOutcome {
+                              approveNewDirectory: Bool = false,
+                              grouping: NewSessionGroup? = nil, title: String? = nil) async -> SpawnOutcome {
         let nonce = UUID().uuidString.lowercased()
         let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode, modelId: modelId,
                                          effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory)
@@ -1367,6 +1368,9 @@ public final class HappierStore {
             for _ in 0..<15 where sessions[sessionId] == nil {
                 await refreshSessions()
                 if sessions[sessionId] == nil { try await Task.sleep(for: .seconds(1)) }
+            }
+            if let grouping {
+                await group(grouping, under: sessionId, title: title ?? grouping.suggestedTitle)
             }
             let message = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
             // A goal chosen before starting is set first, so the first turn already pursues it.
@@ -1870,27 +1874,18 @@ public final class HappierStore {
         await editMetadata(sessionId) { MetadataEdit.setListParent(parentId, in: $0, now: $1) }
     }
 
-    /// Starts a session to hold two others and nests both under it, in the place `target` had.
-    /// It runs the target's agent in the folder both share (the target's own when they share none
-    /// or are on different machines) and waits there for a first message.
-    public func groupUnderNewSession(_ dragged: String, _ target: String, title: String) async -> SpawnOutcome {
-        guard let targetSession = sessions[target], let machineId = targetSession.machineId, let targetPath = targetSession.path else {
-            return .failed(String(localized: "This session's machine or folder isn't known."))
+    /// The normal creation path has successfully started the parent. Keep the target's place in
+    /// the tree; no nesting is attempted before the new session exists.
+    private func group(_ group: NewSessionGroup, under parentId: String, title: String) async {
+        guard sessions[parentId] != nil, let targetSession = sessions[group.targetId], sessions[group.draggedId] != nil else {
+            lastError = String(localized: "The new session started, but the sessions to group couldn't be loaded.")
+            return
         }
-        var directory = targetPath
-        if let other = sessions[dragged], other.machineId == machineId, let otherPath = other.path,
-           let shared = SessionTree.sharedFolder(targetPath, otherPath) {
-            directory = shared
-        }
-        let outcome = await createSession(machineId: machineId, directory: directory, agentId: targetSession.agentId ?? "claude",
-                                          permissionMode: PermissionMode(stored: targetSession.permissionMode), firstMessage: "")
-        guard case .created(let parentId) = outcome else { return outcome }
         let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !name.isEmpty { await editMetadata(parentId) { MetadataEdit.setTitle(name, in: $0, now: $1) } }
+        await editMetadata(parentId) { MetadataEdit.setTitle(name.isEmpty ? group.suggestedTitle : name, in: $0, now: $1) }
         if let grandparent = targetSession.parentSessionId { await nest(parentId, under: grandparent) }
-        await nest(target, under: parentId)
-        await nest(dragged, under: parentId)
-        return outcome
+        await nest(group.targetId, under: parentId)
+        await nest(group.draggedId, under: parentId)
     }
 
     /// Whether a session was archived or deleted. One the list doesn't hold is asked for, so a

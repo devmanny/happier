@@ -162,6 +162,52 @@ existing iCloud Keychain passkey** in the approved, signed Mac build. Check canc
 retry, persistence after relaunch, external HTTP/HTTPS links, and native session links. WebKit
 and the system credential interface handle these flows; no JavaScript credential bridge is needed.
 
+## Import cookies from Safari
+
+**Development implementation; signed Safari extension validation is still pending.**
+
+The app embeds **Happier Import**, a Safari web extension for Mac, iPhone and iPad.
+Enable it in Safari Extensions, open the website in Safari, choose **Prepare Import**,
+and grant access to that website. **Review in Happier** opens a local review; the same
+review is available in **Settings → Browser → Import from Safari**. Importing requires
+an explicit confirmation showing the website and cookie count. The extension reads
+only cookies that apply to the current page, including HttpOnly cookies exposed by Safari.
+It resolves the cookie store belonging to that tab, rather than falling back to another profile.
+It does not read Safari profiles from disk or export passwords, history or bookmarks.
+
+Cookies can grant signed-in access to agents already allowed to use Happier's browser.
+They do not guarantee a signed-in session: websites may require other storage, a new
+verification or device-bound credentials. Partitioned cookies and cookies whose SameSite
+policy cannot be preserved are skipped: WebKit normalizes unspecified SameSite to none,
+and SameSite=None requires Secure. The import never weakens those restrictions.
+
+The extension sends its payload through Safari native messaging to its containing app
+extension, which writes a protected App Group file. The import does not put cookie values in
+links, UserDefaults, logs or the relay. The handoff link carries only a UUID. The files have
+owner-only permissions, are excluded from backup, use complete file protection on iOS,
+and expire after 10 minutes. Accepting or dismissing the review deletes the handoff;
+app launch and inbox access remove expired files. The app writes accepted cookies to
+its existing WKHTTPCookieStore, preserving domain/host-only scope, path, expiry,
+Secure, HttpOnly and SameSite attributes. Ordinary app launches still open chats.
+
+Development checks (from the repository root, through `hstack-exec`):
+
+```sh
+swift test --package-path apps/apple/HappierKit --filter 'SafariCookieImportTests|AppLinkTests'
+node --test apps/apple/tests/safari-cookie-export.test.mjs
+```
+
+Signed-device validation remains required: enable the embedded extension in Safari,
+use a disposable test website/account, allow only that site, prepare and cancel one
+import, then accept another and verify the browser cookie store and site behavior.
+Repeat with permission denied, an expired handoff, a different Safari profile and a
+partitioned cookie. Verify cookies remain local and no values appear in the deep link.
+Unsigned compilation and synthetic-cookie tests do not prove Safari extension activation,
+App Group provisioning, profile selection or successful sign-in on a real website.
+
+References: [Safari extension permissions](https://developer.apple.com/documentation/safariservices/managing-safari-web-extension-permissions),
+[native messaging](https://developer.apple.com/documentation/safariservices/messaging-between-the-app-and-javascript-in-a-safari-web-extension).
+
 ## Protocol mapping
 
 Each Swift module follows the TypeScript owner it mirrors; check that owner when the protocol changes.
@@ -210,4 +256,25 @@ an App Shortcut on both the iPhone and the watch (Siri, Shortcuts, the Ultra's A
 Sign in by linking from another device (QR) or with the secret key; session list; chat with
 Markdown, thinking, tool calls, inline permission approval, agent questions, stop and archive;
 new sessions on a machine; attachments; dictation; push notifications.
-Not yet: voice, artifacts, file diffs.
+Not yet: live voice conversations, artifacts, file diffs.
+
+The session context menu's **New Session in This Folder** opens the normal new-session
+assistant with that session's machine and folder. **Move Into… → Group Both in a New Session**
+uses the same assistant, including agent, model, effort and permissions; the new parent starts
+in the shared folder (or the target's folder across machines). Cancelling leaves both sessions
+unchanged, and nesting happens only after the parent has started. In the assistant, hold the
+microphone to dictate, release to keep the text for review, or slide to the trash to cancel.
+Sending explicitly starts the session.
+
+On Mac and iPad the browser keeps its own window, with tabs above the navigation/address row
+and the original blue Happier icon beside the native window controls. Agent activity is a subtle
+blue tab outline and pulsing sparkles; the desktop address field stays quiet.
+
+**Settings → Read Aloud → Languages** limits automatic language detection to the languages
+enabled there. The initial selection follows the device's preferred languages; the default
+language is used when text has no detectable language. This applies to both single-message
+reading and the continuous conversation queue. Voices remain selectable per language, with
+samples and a preference for installed Enhanced/Premium voices. The list comes from Apple's
+public speech API; availability varies by OS/device, so the app does not assume a particular
+Siri voice is available or exclude one the API exposes. The microphone's ready sound plays
+after recording starts, for both tapping and holding in chat and the new-session assistant.

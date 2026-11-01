@@ -26,15 +26,13 @@ struct SessionCombine: Identifiable {
 }
 
 /// Asks what to do with two sessions dropped together: put one inside the other, or start a new
-/// session holding both (named here, in the folder they share).
+/// session holding both, through the normal assistant in the folder they share.
 struct CombineSessions: ViewModifier {
     @Binding var request: SessionCombine?
     /// The session that now holds the dropped one, to unfold it.
     let onNested: (String) -> Void
     @Environment(HappierStore.self) private var store
-    @State private var naming: SessionCombine?
-    @State private var name = ""
-    @State private var creating = false
+    @State private var draft: NewSessionDraft?
     @State private var failure: String?
 
     func body(content: Content) -> some View {
@@ -45,55 +43,24 @@ struct CombineSessions: ViewModifier {
                     onNested(combine.target.id)
                 }
                 Button("Group Both in a New Session") {
-                    name = ""
-                    naming = combine
+                    if let next = NewSessionDraft(grouping: combine.dragged, with: combine.target) {
+                        draft = next
+                    } else {
+                        failure = String(localized: "This session's machine or folder isn't known.")
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { combine in
                 Text("\u{201C}\(combine.dragged.title)\u{201D} was dropped on \u{201C}\(combine.target.title)\u{201D}.")
             }
-            .alert("New Parent Session", isPresented: present($naming), presenting: naming) { combine in
-                TextField("Name", text: $name)
-                Button("Create") { group(combine) }
-                Button("Cancel", role: .cancel) {}
-            } message: { combine in
-                Text("A new session that holds \u{201C}\(combine.target.title)\u{201D} and \u{201C}\(combine.dragged.title)\u{201D}, started in the folder they share.")
+            .sheet(item: $draft) { draft in
+                NewSessionSheet(draft: draft, onCreated: onNested)
             }
             .alert("Couldn't Group the Sessions", isPresented: present($failure), presenting: failure) { _ in
                 Button("OK") {}
             } message: { message in
                 Text(message)
             }
-            .overlay(alignment: .bottom) {
-                if creating {
-                    Label {
-                        Text("Starting the parent session…")
-                    } icon: {
-                        HappierSpinner(size: HappierSpinner.mini)
-                    }
-                    .font(.callout)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .glassEffect()
-                    .padding(.bottom, 90)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-    }
-
-    private func group(_ combine: SessionCombine) {
-        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = typed.isEmpty ? "\(combine.target.title) + \(combine.dragged.title)" : typed
-        withAnimation(.smooth) { creating = true }
-        Task {
-            let outcome = await store.groupUnderNewSession(combine.dragged.id, combine.target.id, title: title)
-            withAnimation(.smooth) { creating = false }
-            switch outcome {
-            case .created(let parentId): onNested(parentId)
-            case .failed(let message): failure = message
-            case .needsDirectoryApproval(let folder): failure = String(localized: "The folder \(folder) doesn't exist on that machine.")
-            }
-        }
     }
 
     private func present<Value>(_ value: Binding<Value?>) -> Binding<Bool> {

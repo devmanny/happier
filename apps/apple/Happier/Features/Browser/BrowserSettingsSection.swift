@@ -15,6 +15,11 @@ struct BrowserSettingsSection: View {
                 AppHaptics.light()
                 BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
             }
+            NavigationLink {
+                SafariCookieImportView()
+            } label: {
+                Label("Import from Safari", systemImage: "square.and.arrow.down")
+            }
             Toggle(isOn: $agentAccess) {
                 Label("Agents Can Use the Browser", systemImage: "safari")
             }

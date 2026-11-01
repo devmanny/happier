@@ -4,7 +4,6 @@ import HappierKit
 import ActivityKit
 import MediaPlayer
 #endif
-import NaturalLanguage
 import SwiftUI
 
 /// Reads a message aloud with the system voices (offline, the voices installed in Settings), one
@@ -293,10 +292,15 @@ final class MessageSpeaker: NSObject {
     /// The voice for the text's language: the one picked in Settings, else the most natural one
     /// installed, in the user's region when two are as good (Mexican Spanish on an es-MX phone).
     private static func voice(for text: String) -> AVSpeechSynthesisVoice? {
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(text)
-        guard let language = recognizer.dominantLanguage?.rawValue else { return nil }
+        let language = SpeechLanguage.readingLanguage(for: text, allowed: readingLanguages)
         return voice(language: language)
+    }
+
+    /// Device-local choices, shared by the settings UI and every read-aloud entry point.
+    static let languagesKey = "happier.speech.languages"
+    static var readingLanguages: [String] {
+        SpeechLanguage.readingLanguages(preferred: Locale.preferredLanguages,
+            chosen: (UserDefaults.standard.string(forKey: languagesKey) ?? "").split(separator: ",").map(String.init))
     }
 
     static func voice(language: String) -> AVSpeechSynthesisVoice? {

@@ -67,7 +67,6 @@ struct Composer: View {
         textBeforeTalking = text
         talkCancelArmed = false
         talking = true
-        AppHaptics.listening(true)
         MessageSpeaker.shared.stop()
         if MessageSpeaker.shared.autoReadSessionId != sessionId {
             MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
@@ -1041,7 +1040,7 @@ private struct GoalChip: View {
 }
 
 /// The composer's mic: a tap dictates into the field (tap again to stop); held down, it's push to
-/// talk — it listens while held and sends when let go, or cancels when slid left onto the trash.
+/// talk — it listens while held, then hands the result to the composer, or cancels on the trash.
 struct PushToTalkButton: View {
     let recording: Bool
     let talking: Bool
@@ -1049,6 +1048,7 @@ struct PushToTalkButton: View {
     /// From the mic to the trash along the row (negative: the trash is on the left); nil until
     /// the panel is laid out.
     var trashOffset: CGFloat?
+    var holdHint: LocalizedStringKey = "Hold to talk; release to send"
     let onTap: () -> Void
     let onHoldStart: () -> Void
     let onHoldEnd: (_ cancelled: Bool) -> Void
@@ -1122,7 +1122,7 @@ struct PushToTalkButton: View {
                     }
                 })
             .accessibilityLabel(recording ? "Stop dictation" : "Dictate")
-            .accessibilityHint("Hold to talk; release to send")
+            .accessibilityHint(holdHint)
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onTap() }
     }

@@ -64,12 +64,12 @@ enum AppHaptics {
         #endif
     }
 
-    /// Push to talk starting to listen, and letting go (sent or deleted). Where nothing vibrates
-    /// (iPad, Mac) a short tone says it instead: the one iOS plays when recording starts and stops.
+    /// The recorder is ready, or push to talk was released (sent or deleted). The ready tone is
+    /// audible on phones too; where nothing vibrates, a second tone also marks the release.
     static func listening(_ starts: Bool, cancelled: Bool = false) {
         guard isEnabled else { return }
         if starts { confirm() } else if cancelled { warning() } else { light() }
-        guard !vibrates else { return }
+        guard starts || !vibrates else { return }
         #if os(iOS)
         AudioServicesPlaySystemSound(starts ? 1113 : 1114)
         #else

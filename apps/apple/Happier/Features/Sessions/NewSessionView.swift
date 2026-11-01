@@ -10,7 +10,10 @@ enum NewChat {
 /// composer whose pills choose the agent and model, effort, permissions, machine and folder;
 /// sending it starts the agent there (the daemon's `spawn-happy-session`).
 struct NewSessionView: View {
+    let draft: NewSessionDraft?
+    var onCreated: ((String) -> Void)?
     @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     @State private var machineId: String?
     @State private var directory = ""
     @State private var agentId = "claude"
@@ -26,6 +29,11 @@ struct NewSessionView: View {
     @State private var showBrowser = false
     @State private var showModelPicker = false
     @State private var dictation = Dictation()
+    @State private var talking = false
+    @State private var talkCancelArmed = false
+    @State private var textBeforeTalking = ""
+    @State private var trashX: CGFloat?
+    @State private var micX: CGFloat?
     @State private var attachments: [AttachmentDraft] = []
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -40,6 +48,15 @@ struct NewSessionView: View {
     /// A goal chosen before starting; set on the session before its first message.
     @State private var goal: String?
     @State private var goalDraft: String?
+    @State private var parentName: String
+
+    init(draft: NewSessionDraft? = nil, onCreated: ((String) -> Void)? = nil) {
+        self.draft = draft
+        self.onCreated = onCreated
+        _machineId = State(initialValue: draft?.machineId)
+        _directory = State(initialValue: draft?.directory ?? "")
+        _parentName = State(initialValue: draft?.group?.suggestedTitle ?? "")
+    }
 
     private var machine: Machine? { store.machines.first { $0.id == machineId } }
 
@@ -67,28 +84,43 @@ struct NewSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 24)
-            // An empty conversation, as in ChatGPT and Claude: what you start is written below.
-            VStack(spacing: 12) {
-                // The agent's logo is also its picker: the same choices as the pill in the composer.
-                Button {
-                    AppHaptics.light()
-                    showModelPicker = true
-                } label: {
-                    AgentAvatar(agentId: agentId, size: 64, interactive: true)
+            // Keep the assistant centered when it fits; with a keyboard or a small window,
+            // its heading and parent name scroll while the composer stays reachable below.
+            ScrollView {
+                VStack(spacing: 12) {
+                    // The agent's logo is also its picker: the same choices as the composer pill.
+                    Button {
+                        AppHaptics.light()
+                        showModelPicker = true
+                    } label: {
+                        AgentAvatar(agentId: agentId, size: 64, interactive: true)
+                    }
+                    .buttonStyle(.pressable)
+                    .accessibilityLabel(Text("Agent"))
+                    Text(draft?.group == nil ? "What should we work on?" : "New Parent Session")
+                        .font(.title2.weight(.semibold))
+                    if draft?.group != nil {
+                        TextField("Name", text: $parentName)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("new-parent-session-name")
+                            .frame(maxWidth: 440)
+                        Text("Choose the agent and model for the session that will hold both conversations.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    Text(placeLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
                 }
-                .buttonStyle(.pressable)
-                .accessibilityLabel(Text("Agent"))
-                Text("What should we work on?")
-                    .font(.title2.weight(.semibold))
-                Text(placeLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 24)
             }
-            .padding(.horizontal, 24)
-            Spacer(minLength: 24)
+            .defaultScrollAnchor(.center, for: .alignment)
+            .frame(maxHeight: .infinity)
             if let error {
                 Text(error)
                     .font(.footnote)
@@ -123,7 +155,16 @@ struct NewSessionView: View {
             add(files)
             return !files.isEmpty
         }
-        .navigationTitle("New Session")
+        .navigationTitle(draft?.group == nil ? "New Session" : "New Parent Session")
+        .interactiveDismissDisabled(starting)
+        .toolbar {
+            if onCreated != nil {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(starting)
+                }
+            }
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -146,7 +187,16 @@ struct NewSessionView: View {
         }
         .onChange(of: modelId) { _, _ in fitEffort() }
         .onChange(of: dictation.error) { _, error in
-            if let error { store.lastError = error }
+            if let error {
+                talking = false
+                talkCancelArmed = false
+                AppHaptics.error()
+                store.lastError = error
+            }
+        }
+        .onDisappear {
+            // A dismissed wizard must not leave its mic running or start it after permission UI.
+            if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
         .alert("Create Folder?", isPresented: Binding(get: { folderToApprove != nil }, set: { if !$0 { folderToApprove = nil } })) {
             Button("Create and Start") { start(approve: true) }
@@ -209,10 +259,41 @@ struct NewSessionView: View {
         [machine?.name, directory.isEmpty ? nil : displayPath(directory)].compactMap { $0 }.joined(separator: " · ")
     }
 
+    private func startTalking() {
+        guard !talking, !starting else { return }
+        textBeforeTalking = firstMessage
+        talkCancelArmed = false
+        talking = true
+        MessageSpeaker.shared.stop()
+        Task {
+            guard talking else { return }
+            await dictation.begin(prefix: firstMessage) { firstMessage = $0 }
+        }
+    }
+
+    private func stopTalking(cancelled: Bool) {
+        guard talking else { return }
+        if cancelled {
+            dictation.stop()
+            firstMessage = textBeforeTalking
+            talking = false
+            talkCancelArmed = false
+            AppHaptics.listening(false, cancelled: true)
+            return
+        }
+        AppHaptics.listening(false)
+        Task {
+            await dictation.finish()
+            talking = false
+            talkCancelArmed = false
+            // Keep the first message for review. Only Send creates the session.
+        }
+    }
+
     private var canStart: Bool {
         !starting && machineId != nil && machine?.active == true
             && !directory.trimmingCharacters(in: .whitespaces).isEmpty
-            && (!firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+            && (draft?.group != nil || !firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
 
     private func add(_ drafts: [AttachmentDraft]) {
@@ -260,52 +341,71 @@ struct NewSessionView: View {
             }
             .padding(.horizontal, 6)
             HStack(spacing: 8) {
-                // The live composer's ⊕ menu: mentions and a goal, files, photos and the camera.
-                AddMenu(canMention: machineId != nil && !directory.isEmpty,
-                        canSetGoal: SessionGoal.supported(agentId: agentId, sessions: Array(store.sessions.values))) {
-                    if let draft = AttachmentLoader.clipboardImage() {
-                        add([draft])
-                    } else if let pasted = AttachmentLoader.clipboardText(), !pasted.isEmpty {
-                        firstMessage += pasted
-                        messageFocused = true
-                    }
-                } onPhotos: {
-                    showPhotos = true
-                } onCamera: {
-                    AttachmentSources.openCamera(show: $showCamera, denied: $showCameraPermission)
-                } onFiles: {
-                    showFiles = true
-                } onMention: {
-                    mentioning = true
-                } onGoal: {
-                    goalDraft = goal ?? ""
-                }
-                .equatable()
-                .sheet(isPresented: $mentioning) {
-                    if let machineId {
-                        FileMentionPicker(machineId: machineId, root: directory) { path in
-                            if !editor.insertMention(path) { firstMessage = FileMention.appending(path, to: firstMessage) }
+                HStack(spacing: 8) {
+                    // The live composer's ⊕ menu: mentions and a goal, files, photos and the camera.
+                    AddMenu(canMention: machineId != nil && !directory.isEmpty,
+                            canSetGoal: SessionGoal.supported(agentId: agentId, sessions: Array(store.sessions.values))) {
+                        if let draft = AttachmentLoader.clipboardImage() {
+                            add([draft])
+                        } else if let pasted = AttachmentLoader.clipboardText(), !pasted.isEmpty {
+                            firstMessage += pasted
                             messageFocused = true
                         }
-                        #if os(macOS)
-                        .frame(minWidth: 460, minHeight: 520)
-                        #endif
+                    } onPhotos: {
+                        showPhotos = true
+                    } onCamera: {
+                        AttachmentSources.openCamera(show: $showCamera, denied: $showCameraPermission)
+                    } onFiles: {
+                        showFiles = true
+                    } onMention: {
+                        mentioning = true
+                    } onGoal: {
+                        goalDraft = goal ?? ""
+                    }
+                    .equatable()
+                    .sheet(isPresented: $mentioning) {
+                        if let machineId {
+                            FileMentionPicker(machineId: machineId, root: directory) { path in
+                                if !editor.insertMention(path) { firstMessage = FileMention.appending(path, to: firstMessage) }
+                                messageFocused = true
+                            }
+                            #if os(macOS)
+                            .frame(minWidth: 460, minHeight: 520)
+                            #endif
+                        }
+                    }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            agentMenu
+                            permissionMenu
+                        }
+                    }
+                    .scrollClipDisabled()
+                }
+                .opacity(talking ? 0 : 1)
+                .allowsHitTesting(!talking)
+                .accessibilityHidden(talking)
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minX + TalkPanel.trashCenter } action: { trashX = $0 }
+                .overlay {
+                    if talking {
+                        TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        agentMenu
-                        permissionMenu
-                    }
-                }
-                .scrollClipDisabled()
                 // The mic while there is nothing to send, as in a live conversation's composer.
-                if firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictation.isRecording {
-                    CircleButton(systemImage: dictation.isRecording ? "waveform" : "mic", active: dictation.isRecording) {
+                if firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictation.isRecording || talking {
+                    PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
+                                     trashOffset: trashX.flatMap { trash in micX.map { trash - $0 } },
+                                     holdHint: "Hold to talk; release to keep text") {
+                        AppHaptics.light()
                         dictation.toggle(prefix: firstMessage) { firstMessage = $0 }
+                    } onHoldStart: {
+                        startTalking()
+                    } onHoldEnd: { cancelled in
+                        stopTalking(cancelled: cancelled)
                     }
-                    .symbolEffect(.variableColor.iterative, isActive: dictation.isRecording)
-                    .accessibilityLabel(dictation.isRecording ? "Stop dictation" : "Dictate")
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midX } action: { micX = $0 }
+                    .disabled(starting)
                 }
                 Button { start(approve: false) } label: {
                     Group {
@@ -323,8 +423,13 @@ struct NewSessionView: View {
                 .tint(.userBubble)
                 .disabled(!canStart)
                 .keyboardShortcut(.return, modifiers: .command)
-                .accessibilityLabel("Send")
+                .accessibilityLabel(draft?.group == nil ? "Send" : "Create Parent Session")
+                // Keep its space while held so the mic stays under the finger.
+                .opacity(talking ? 0 : 1)
+                .allowsHitTesting(!talking)
+                .accessibilityHidden(talking)
             }
+            .animation(.smooth(duration: 0.2), value: talking)
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -448,14 +553,16 @@ struct NewSessionView: View {
         Task {
             let outcome = await store.createSession(machineId: machineId, directory: path, agentId: agentId, permissionMode: permissionMode,
                                                     modelId: modelId, effort: effort, firstMessage: firstMessage,
-                                                    attachments: attachments, goal: goal, approveNewDirectory: approve)
+                                                    attachments: attachments, goal: goal, approveNewDirectory: approve,
+                                                    grouping: draft?.group, title: parentName)
             starting = false
             switch outcome {
-            case .created:
+            case .created(let sessionId):
                 AppHaptics.success()
                 firstMessage = ""
                 attachments = []
                 goal = nil
+                onCreated?(sessionId)
             case .needsDirectoryApproval(let folder):
                 AppHaptics.warning()
                 folderToApprove = folder
@@ -502,5 +609,25 @@ struct NewSessionView: View {
     private func displayPath(_ path: String) -> String {
         if let home = machine?.homeDir, path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
         return path
+    }
+}
+
+/// Contextual creation uses the complete assistant while keeping the existing conversation in
+/// place. Cancel only dismisses this draft; sending follows the same creation path as New Session.
+struct NewSessionSheet: View {
+    let draft: NewSessionDraft
+    var onCreated: ((String) -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            NewSessionView(draft: draft) { sessionId in
+                dismiss()
+                onCreated?(sessionId)
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 540, minHeight: 560)
+        #endif
     }
 }

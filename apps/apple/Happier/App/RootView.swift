@@ -9,6 +9,8 @@ struct RootView: View {
     @Environment(\.supportsMultipleWindows) private var multipleWindows
     @State private var shareRequests = 0
     @State private var showBrowser = false
+    @State private var showCookieImport = false
+    @State private var cookieImportID: UUID?
 
     var body: some View {
         Group {
@@ -24,6 +26,7 @@ struct RootView: View {
         .animation(.smooth, value: store.phase)
         .task {
             store.restore()
+            SafariCookieInbox.shared?.prune()
             // Mac and iPad use the browser's own window and native toolbar;
             // iPhone uses its sheet. Browsing is available before sign-in.
             if BrowserModel.isBrowserRole {
@@ -41,6 +44,10 @@ struct RootView: View {
             case .share:
                 showBrowser = false
                 shareRequests += 1
+            case .browserImport(let id):
+                showBrowser = false
+                cookieImportID = id
+                showCookieImport = true
             case .session:
                 showBrowser = false
                 if store.handleSessionLink(url) { AppHaptics.light() }
@@ -54,6 +61,9 @@ struct RootView: View {
             }
         }
         .modifier(BrowserSheet(shown: $showBrowser))
+        .sheet(isPresented: $showCookieImport) {
+            NavigationStack { SafariCookieImportView(requestID: cookieImportID) }
+        }
         .confirmationDialog("Open on Another Relay?", isPresented: Binding(
             get: { store.sessionLinkConfirmation != nil },
             set: { if !$0, store.sessionLinkConfirmation != nil { store.cancelSessionLink() } }
