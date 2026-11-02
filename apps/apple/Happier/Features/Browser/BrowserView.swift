@@ -228,7 +228,15 @@ private struct BrowserAddressField: View {
             }
             TextField("Search or enter website", text: $text, selection: $selection)
                 .textFieldStyle(.plain)
+                #if os(macOS)
+                // Changing alignment as focus arrives drops keyboard focus on macOS.
+                // Keep it stable while selecting the full URL.
+                .multilineTextAlignment(.center)
+                // Let the first tap focus/select the address without also placing the caret.
+                .allowsHitTesting(focused)
+                #else
                 .multilineTextAlignment(focused ? .leading : .center)
+                #endif
                 .font(compact ? .body.weight(.medium) : .callout)
                 .focused($focused)
                 .autocorrectionDisabled()
@@ -274,6 +282,10 @@ private struct BrowserAddressField: View {
             if !focused { text = display(url, editing: false) }
         }
         .onChange(of: browser.selectedTabId) { _, _ in
+            #if os(macOS)
+            // Toolbar tab buttons do not resign the address field's keyboard focus.
+            focused = false
+            #endif
             if !focused { text = display(browser.selectedTab?.url, editing: false) }
         }
     }

@@ -4,7 +4,7 @@ import WidgetKit
 
 /// Keeps the Home Screen widgets current: whenever what's waiting on you changes, it leaves them
 /// the new list in the shared App Group and asks them to redraw. It reads the sessions at most
-/// every couple of seconds, not on each update: with dozens of sessions streaming, recomputing on
+/// every five seconds, not on each update: with dozens of sessions streaming, recomputing on
 /// every change kept the CPU busy.
 struct AttentionWidgetPublisher: View {
     @Environment(HappierStore.self) private var store
@@ -83,39 +83,30 @@ struct AttentionWidgetPublisher: View {
                         continuation.resume()
                     }
                 }
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { return }
             }
             let now = (signature: signature, activity: activity, targets: targets)
-            if now.signature != last?.signature { publish() }
-            if now.activity != last?.activity { publishActivity() }
+            if now.signature != last?.signature || now.activity != last?.activity { publish() }
             if now.targets != last?.targets { ShareTargets(sessions: store.sessionList).save() }
             last = now
         }
     }
 
-    private func publishActivity() {
-        let snapshot = ActivitySnapshot(sessions: store.sessionList, usage: Array(store.providerUsage.values), server: store.server)
-        guard !snapshot.looksLike(ActivitySnapshot.load()) else { return }
-        snapshot.save()
-        WidgetCenter.shared.reloadAllTimelines()
-        publishToWatch()
-    }
-
+    /// Save both summaries before requesting one redraw for the whole batch. Publishing on
+    /// background entry remains immediate so the system can suspend the app without stale data.
     private func publish() {
-        let snapshot = AttentionSnapshot(sessions: store.sessionList, server: store.server, limit: 6, excerpts: excerpts)
-        defer { publishToWatch(attention: snapshot) }
-        guard !snapshot.looksLike(AttentionSnapshot.load()) else { return }
-        snapshot.save()
-        WidgetCenter.shared.reloadAllTimelines()
-    }
+        let sessions = store.sessionList
+        let attention = AttentionSnapshot(sessions: sessions, server: store.server, limit: 6, excerpts: excerpts)
+        let activity = ActivitySnapshot(sessions: sessions, usage: Array(store.providerUsage.values), server: store.server)
+        let attentionChanged = !attention.looksLike(AttentionSnapshot.load())
+        let activityChanged = !activity.looksLike(ActivitySnapshot.load())
+        if attentionChanged { attention.save() }
+        if activityChanged { activity.save() }
+        if attentionChanged || activityChanged { WidgetCenter.shared.reloadAllTimelines() }
 
-    /// The watch gets the same two snapshots whenever either changes (its own copy is on the phone
-    /// until the watch is awake); on the Mac there is no watch.
-    private func publishToWatch(attention: AttentionSnapshot? = nil) {
+        // Reuse this batch's summaries for the watch instead of rebuilding/sending them twice.
         #if os(iOS)
-        let attention = attention ?? AttentionSnapshot(sessions: store.sessionList, server: store.server, limit: 6, excerpts: excerpts)
-        let activity = ActivitySnapshot(sessions: store.sessionList, usage: Array(store.providerUsage.values), server: store.server)
         WatchBridge.shared.publish(WatchContext(attention: attention, activity: activity))
         #endif
     }
