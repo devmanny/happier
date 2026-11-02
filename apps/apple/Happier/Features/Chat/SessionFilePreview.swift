@@ -18,7 +18,7 @@ struct SessionFilePreview: ViewModifier {
     @Environment(BrowserModel.self) private var browser
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
-    /// A web link waiting for the user to pick where it opens.
+    /// A web link waiting for the user to choose an action.
     @State private var webLink: URL?
     @State private var browserSheet = false
     @State private var lookingAt: URL?
@@ -38,8 +38,7 @@ struct SessionFilePreview: ViewModifier {
                     requested = .remote(file)
                     return .handled
                 case .webPage(let page):
-                    // Asks every time: Happier's browser (this session's agent can then work in
-                    // that tab) or the device's default browser.
+                    // Asks every time: open in a browser, copy, or share the full link.
                     AppHaptics.light()
                     webLink = page
                     return .handled
@@ -47,15 +46,31 @@ struct SessionFilePreview: ViewModifier {
                     return .systemAction
                 }
             })
-            .confirmationDialog("Open Link", isPresented: Binding(get: { webLink != nil }, set: { if !$0 { webLink = nil } }),
-                                titleVisibility: .visible, presenting: webLink) { url in
-                Button("Happier Browser") {
-                    browser.show(url, forSession: sessionId)
-                    BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
+            // Keep ShareLink alive while its system picker is presented. A confirmation
+            // dialog dismisses its actions as soon as one is chosen.
+            .popover(isPresented: linkPresented, attachmentAnchor: .point(.center), arrowEdge: .top) {
+                if let url = webLink {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Link Options").font(.headline)
+                            Spacer()
+                            Button("Cancel", systemImage: "xmark", role: .cancel) { webLink = nil }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.plain)
+                        }
+                        Text(url.host() ?? url.absoluteString).font(.caption).foregroundStyle(.secondary)
+                        linkActions(url)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .padding(20)
+                    .frame(width: 300)
+                    .fixedSize(horizontal: false, vertical: true)
+                    #if os(iOS)
+                    .presentationCompactAdaptation(.sheet)
+                    .presentationDetents([.medium])
+                    #endif
                 }
-                Button("Default Browser") { BrowserModel.openInDefaultBrowser(url) }
-            } message: { url in
-                Text(url.host() ?? url.absoluteString)
             }
             .modifier(BrowserSheet(shown: $browserSheet))
             .quickLookPreview($lookingAt, in: previewFiles)
@@ -120,6 +135,38 @@ struct SessionFilePreview: ViewModifier {
             } message: {
                 Text(error ?? "")
             }
+    }
+
+    private var linkPresented: Binding<Bool> {
+        Binding(get: { webLink != nil }, set: { if !$0 { webLink = nil } })
+    }
+
+    @ViewBuilder private func linkActions(_ url: URL) -> some View {
+        Button {
+            webLink = nil
+            browser.show(url, forSession: sessionId)
+            BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
+        } label: {
+            Label("Happier Browser", systemImage: "safari").frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Button {
+            webLink = nil
+            BrowserModel.openInDefaultBrowser(url)
+        } label: {
+            Label("Default Browser", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity, alignment: .leading)
+        }
+        Button {
+            MessageClipboard.copy(url.absoluteString)
+            webLink = nil
+            AppHaptics.success()
+        } label: {
+            Label("Copy Link", systemImage: "doc.on.doc").frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("copy-conversation-link")
+        ShareLink(item: url) {
+            Label("Share…", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("share-conversation-link")
     }
 
     /// Keep the source alongside its formatted copy: Quick Look displays either, and the

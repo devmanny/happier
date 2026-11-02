@@ -23,7 +23,7 @@ struct ChatView: View {
             vendorSessionId: session?.vendorSessionId,
             hasBackground: store.transcripts[sessionId]?.subagents.isEmpty == false || store.delegatedRuns[sessionId]?.isEmpty == false
                 || (session?.runtimeActivityRevision ?? 0) > 0,
-            pins: pins, active: session?.active ?? false, archived: session?.archivedAt != nil, loaded: session != nil,
+            pins: pins, active: session.map { $0.status() != .offline } ?? false, archived: session?.archivedAt != nil, loaded: session != nil,
             nested: session?.parentSessionId.map { store.sessions.keys.contains($0) } ?? false,
             deletable: session?.canDelete ?? false,
             folderPath: session?.path,
@@ -953,9 +953,11 @@ private struct SessionDetailsMenu: View, Equatable {
                 }
                 // Ending things, last.
                 Section {
-                    Button("Stop Agent", systemImage: "stop.circle") { perform(.stopAgent) }
                     if details.active {
+                        Button("Stop Agent", systemImage: "stop.circle") { perform(.stopAgent) }
                         Button("Stop Session", systemImage: "power", role: .destructive) { perform(.stopSession) }
+                    } else {
+                        ResumeSessionButton(sessionId: details.sessionId)
                     }
                     if details.archived {
                         Button("Unarchive", systemImage: "tray.and.arrow.up") { perform(.unarchive) }

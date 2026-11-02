@@ -312,6 +312,10 @@ struct Composer: View {
                 + (store.delegatedRuns[sessionId]?.filter(\.isActive).count ?? 0)
         return HStack(spacing: 6) {
             SessionStatusRow(session: session)
+            ResumeSessionButton(sessionId: sessionId)
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.glass)
+                .buttonBorderShape(.capsule)
             if running > 0 {
                 BackgroundActivityPill(count: running) {
                     Self.log.notice("background pill tapped (\(running, privacy: .public) running)")

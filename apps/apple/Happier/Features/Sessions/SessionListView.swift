@@ -463,11 +463,13 @@ extension View {
                 SessionIDMenu(sessionId: session.id,
                               providerName: session.agentId.flatMap { Agent.displayNames[$0] },
                               providerSessionId: session.vendorSessionId)
-                if session.active {
+                if session.status() != .offline {
                     Button("Stop Session", systemImage: "power", role: .destructive) {
                         AppHaptics.warning()
                         store.requestStop(session.id)
                     }
+                } else {
+                    ResumeSessionButton(sessionId: session.id)
                 }
                 Button("Archive", systemImage: "archivebox") {
                     AppHaptics.confirm()
@@ -481,6 +483,25 @@ extension View {
             // The lifted row is the glass capsule below, not a white plate around the row.
             .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 22, style: .continuous))
             #endif
+    }
+}
+
+/// One action shared by the inactive status pill, conversation menu and sidebar rows.
+struct ResumeSessionButton: View {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        if let session = store.sessions[sessionId], session.archivedAt == nil, session.status() == .offline {
+            let resuming = store.resumingSessions[sessionId] == true
+            Button(resuming ? "Reactivating…" : "Reactivate Session", systemImage: "play.circle") {
+                AppHaptics.light()
+                Task { await store.resumeSession(sessionId) }
+            }
+            .disabled(resuming)
+            .accessibilityIdentifier("resume-session-\(sessionId)")
+            .help(Text("Reconnect this conversation on its computer without sending a message."))
+        }
     }
 }
 

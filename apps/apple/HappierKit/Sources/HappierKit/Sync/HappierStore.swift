@@ -41,6 +41,7 @@ public final class HappierStore {
     @ObservationIgnored private var sessionSyncReportsErrors = false
     /// Observed per session, like `sessions`.
     public let transcripts = KeyedStore<Transcript>(isSame: { _, _ in false })
+    public let resumingSessions = KeyedStore<Bool>()
     public private(set) var hasOlderMessages: [String: Bool] = [:]
     public private(set) var isLoadingSessions = false
     /// True once the session list has been fetched at least once since sign-in.
@@ -303,6 +304,7 @@ public final class HappierStore {
         uploadSessionIds = [:]
         sessions.removeAll()
         transcripts.removeAll()
+        resumingSessions.removeAll()
         hasLoadedSessions = false
         pendingQueues = [:]
         draftSeeds = [:]
@@ -1638,6 +1640,28 @@ public final class HappierStore {
                                          params: ["id": .string(requestId), "approved": true, "answers": payload])
             }
         } catch { report(error) }
+    }
+
+    /// Reconnect the existing conversation without inserting a user message or changing its agent.
+    @discardableResult
+    public func resumeSession(_ sessionId: String) async -> Bool {
+        guard let session = sessions[sessionId], session.status() == .offline,
+              session.archivedAt == nil, resumingSessions[sessionId] != true else { return false }
+        resumingSessions[sessionId] = true
+        defer { resumingSessions[sessionId] = nil }
+        do {
+            let request = try SessionResumeRequest(session: session, requestId: UUID().uuidString.lowercased())
+            // This existing RPC waits for the accepted session id, including on older daemons.
+            // Resume uses the same startup budget as creating a session.
+            let response = try await machineRPC(request.machineId, method: "spawn-happy-session",
+                                                params: request.params, timeout: .seconds(300))
+            try SessionResumeRequest.validate(response, sessionId: sessionId)
+            await refreshSessions()
+            return true
+        } catch {
+            report(error)
+            return false
+        }
     }
 
     public func abort(_ sessionId: String) async {
