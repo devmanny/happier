@@ -66,6 +66,11 @@ struct SessionListView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
 
+    /// The conversation just closed (going back from it to the list): its row lights up and fades
+    /// back over two seconds, so you see which one you were in.
+    @State private var justClosed: String?
+    @State private var justClosedGlow = false
+
     /// The sorted list, refreshed at most twice a second instead of on every message.
     @State private var listed = SessionListSnapshot()
 
@@ -178,6 +183,10 @@ struct SessionListView: View {
         } else {
             content
                 .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                .listRowBackground(justClosed == session.id
+                    ? RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.userBubble.opacity(justClosedGlow ? 0.2 : 0)).padding(.horizontal, 8)
+                    : nil)
                 .tag(session.id)
                 .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
                 #if os(iOS)
@@ -701,6 +710,18 @@ extension SessionListView {
         }
         .task { await inbox.refresh() }
         .task { await listed.follow(store) }
+        .onChange(of: selection) { closed, now in
+            guard now == nil, let closed, closed != NewChat.id else { return }
+            justClosed = closed
+            justClosedGlow = true
+            Task {
+                // Once the list is back on screen, then slowly to its usual color.
+                try? await Task.sleep(for: .milliseconds(350))
+                withAnimation(.easeOut(duration: 2)) { justClosedGlow = false }
+                try? await Task.sleep(for: .seconds(2))
+                if justClosed == closed, !justClosedGlow { justClosed = nil }
+            }
+        }
         .sheet(isPresented: $showAccount) {
             NavigationStack { SettingsView() }
                 #if os(macOS)
