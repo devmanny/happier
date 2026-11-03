@@ -15,6 +15,8 @@ type WatcherState = {
   lastSeenParentId: string | null | undefined;
   /** Serialized `listParentV1` last seen; only a change here is a manual move. */
   lastSeenListLink: string | null | undefined;
+  /** Moves older than this runner's watch start are catch-up metadata, not new announcements. */
+  startedAt: number;
   detach: () => void;
 };
 
@@ -52,7 +54,9 @@ function readChildState(session: ParentLinkWatchedSession): ChildSessionState {
 /**
  * Watch this session's own metadata for a manual move in the app (`listParentV1`) that
  * changes the direct parent, and announce it. The parent seen when the watcher starts is
- * the baseline and is not announced. The spawn link (`spawnedBySessionV1`) is written by
+ * the baseline and is not announced. A move stamped before the watcher started also
+ * only updates the baseline: a resumed runner may receive its old nesting late.
+ * The spawn link (`spawnedBySessionV1`) is written by
  * the spawner and may land after startup; it is creation, not a move, so it only updates
  * the baseline.
  */
@@ -75,6 +79,7 @@ export function startParentLinkWatcher(session: ParentLinkWatchedSession): void 
       : initialMetadata
         ? serializeListLink(initialMetadata)
         : undefined,
+    startedAt: previous ? previous.startedAt : Date.now(),
     detach: () => undefined,
   };
 
@@ -88,11 +93,13 @@ export function startParentLinkWatcher(session: ParentLinkWatchedSession): void 
     state.lastSeenListLink = nextListLink;
     state.lastSeenParentId = nextParentId;
     if (!listLinkChanged || previousParentId === undefined || nextParentId === previousParentId) return;
+    const updatedAt = readListParentLink(metadata)?.updatedAt ?? null;
+    if (updatedAt !== null && updatedAt < state.startedAt) return;
     void notifyParentLinkChangeBestEffort({
       session,
       previousParentSessionId: previousParentId,
       nextParentSessionId: nextParentId,
-      updatedAt: readListParentLink(metadata)?.updatedAt ?? null,
+      updatedAt,
       childState: readChildState(session),
     }).catch(() => undefined);
   };
