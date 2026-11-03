@@ -64,14 +64,17 @@ struct Composer: View {
     /// Push to talk: what's being read stops so you can speak, and from now on the agent's
     /// answers in this conversation are read aloud.
     private func startTalking() {
+        guard !talking else { return }
         textBeforeTalking = text
         talkCancelArmed = false
         talking = true
-        MessageSpeaker.shared.stop()
         if MessageSpeaker.shared.autoReadSessionId != sessionId {
             MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
         }
-        Task { await dictation.begin(prefix: text) { text = $0 } }
+        Task {
+            guard talking else { return }
+            await dictation.begin(prefix: text) { text = $0 }
+        }
     }
 
     /// Released: the last words come in, then it's sent; slid onto the trash, nothing is sent
@@ -88,6 +91,7 @@ struct Composer: View {
         AppHaptics.listening(false)
         Task {
             await dictation.finish()
+            guard talking else { return }
             talking = false
             if canSend { send() }
         }
@@ -151,6 +155,9 @@ struct Composer: View {
                 statusRow(session)
             }
             card
+        }
+        .onDisappear {
+            if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
         .padding(.horizontal, 12)
         .padding(.top, 6)

@@ -36,7 +36,15 @@ final class Dictation {
 
     /// Starts or stops dictation. `onText` receives `prefix + transcript` as it updates.
     func toggle(prefix: String, onText: @escaping @MainActor (String) -> Void) {
-        if isRecording || starting { stop() } else { Task { await start(prefix: prefix, onText: onText) } }
+        if isRecording || starting {
+            stop()
+        } else {
+            let current = take
+            Task {
+                guard take == current else { return }
+                await start(prefix: prefix, onText: onText)
+            }
+        }
     }
 
     /// Starts listening if it isn't already (push to talk).
@@ -69,9 +77,11 @@ final class Dictation {
     }
 
     func stop() {
+        let usedMicrophone = isRecording || starting || engine != nil
         finishing?.resume()
         finishing = nil
-        defer { MessageSpeaker.shared.renewAfterRecording() }
+        // An in-flight microphone startup releases ownership when it has actually unwound.
+        defer { if !starting { MessageSpeaker.shared.endRecording(self) } }
         take += 1
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
@@ -82,7 +92,9 @@ final class Dictation {
         task = nil
         isRecording = false
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if usedMicrophone {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         #endif
     }
 
@@ -90,7 +102,11 @@ final class Dictation {
         error = nil
         let current = take
         starting = true
-        defer { starting = false }
+        MessageSpeaker.shared.beginRecording(self)
+        defer {
+            starting = false
+            if !isRecording { MessageSpeaker.shared.endRecording(self) }
+        }
         guard await Self.authorize() else {
             error = String(localized: "Allow microphone and speech recognition in Settings to dictate.")
             return

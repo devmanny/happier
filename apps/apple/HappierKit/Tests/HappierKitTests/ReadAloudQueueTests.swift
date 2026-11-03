@@ -75,6 +75,27 @@ struct ReadAloudQueueTests {
 /// Which agent messages auto read takes: only ones that arrived after it was turned on, and only
 /// once complete (followed by something else, or the turn over), never the thinking.
 struct AutoReadCursorTests {
+    @Test func recordingDiscardsAnUnfinishedPreviousReplyAndReadsTheNextAnswer() {
+        var cursor = AutoReadCursor(existing: [])
+        let unfinished = agent("old", "Earlier reply")
+        #expect(cursor.take([unfinished], turnActive: true).isEmpty)
+        #expect(cursor.take([unfinished], turnActive: true, recording: true).isEmpty)
+        let afterSending = [agent("old", "Earlier reply finished."), user("voice"), agent("new", "Your new answer.")]
+        #expect(cursor.take(afterSending, turnActive: false) == [.new(.init(id: "new", text: "Your new answer."))])
+    }
+
+    @Test func repliesArrivingDuringRecordingNeitherSpeakNorReturnAsBacklog() {
+        var cursor = AutoReadCursor(existing: [])
+        #expect(cursor.take([agent("before", "Reading now.")], turnActive: false).count == 1)
+        #expect(cursor.take([agent("before", "Reading now. More."), agent("during", "Arrived during recording.")],
+                            turnActive: false, recording: true).isEmpty)
+        // The transcript can be paged; skipped message identities must survive a smaller window.
+        #expect(cursor.take([agent("during", "Arrived during recording.")], turnActive: false, recording: true).isEmpty)
+        #expect(cursor.take([agent("before", "Reading now. More. Late."), agent("during", "Arrived during recording."),
+                             user("voice"), agent("answer", "Latest answer.")], turnActive: false)
+            == [.new(.init(id: "answer", text: "Latest answer."))])
+    }
+
     /// Agent messages stream in: one already taken keeps growing, and only the new part is read.
     @Test func aMessageThatKeepsGrowingHandsOverOnlyTheNewPart() {
         var cursor = AutoReadCursor(existing: [])

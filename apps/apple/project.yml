@@ -19,7 +19,26 @@ settings:
 packages:
   HappierKit:
     path: HappierKit
+schemes:
+  Happier:
+    build:
+      targets:
+        Happier: all
+    test:
+      targets: [HappierTests]
 targets:
+  HappierTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [HappierTests]
+    dependencies:
+      - target: Happier
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.tests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Happier.app/Happier
+        BUNDLE_LOADER: $(TEST_HOST)
   Happier:
     type: application
     supportedDestinations: [iOS, macOS]

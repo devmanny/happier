@@ -115,7 +115,13 @@ public struct AutoReadCursor: Equatable, Sendable {
         skipped = Set(items.map(\.id))
     }
 
-    public mutating func take(_ items: [ChatItem], turnActive: Bool) -> [Change] {
+    public mutating func take(_ items: [ChatItem], turnActive: Bool, recording: Bool = false) -> [Change] {
+        // Speaking to the agent interrupts the old reply, including text still streaming or
+        // arriving during microphone use. Remember identities across transcript window changes.
+        if recording {
+            skipped.formUnion(items.map(\.id))
+            return []
+        }
         var changes: [Change] = []
         for (offset, item) in items.enumerated() {
             guard case .agentText(let message) = item, !message.isThinking, !skipped.contains(message.id) else { continue }

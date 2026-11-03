@@ -36,6 +36,10 @@ final class MessageSpeaker: NSObject {
     /// What the Live Activity calls the reading: the auto-read conversation's title.
     @ObservationIgnored private var readingTitle = String(localized: "Reading aloud")
     @ObservationIgnored private weak var autoReadStore: HappierStore?
+    /// Dictation owns audio through permission/startup, capture and its final transcription.
+    /// Multiple composer windows must not release another recorder's suspension.
+    @ObservationIgnored private var recordingOwners: Set<ObjectIdentifier> = []
+    @ObservationIgnored private var isInBackground = false
     #if os(iOS)
     @ObservationIgnored private var activity: Activity<ReadAloudAttributes>?
     #endif
@@ -64,6 +68,7 @@ final class MessageSpeaker: NSObject {
     func isSpeaking(_ markdown: String) -> Bool { speakingText == markdown }
 
     func toggle(_ markdown: String) {
+        guard recordingOwners.isEmpty else { return }
         if speakingText == markdown {
             stop()
         } else {
@@ -75,16 +80,33 @@ final class MessageSpeaker: NSObject {
 
     // MARK: Auto read
 
-    /// Turns reading new agent messages of `sessionId` on or off; what's already there isn't read.
-    /// After the microphone used the audio session (dictation, push to talk) the system's speech
-    /// synthesizer can stay silent for good; a fresh one speaks again. Only while nothing is read.
-    func renewAfterRecording() {
-        guard speakingText == nil else { return }
+    func beginRecording(_ owner: AnyObject) {
+        guard recordingOwners.insert(ObjectIdentifier(owner)).inserted else { return }
+        setKeepAlive(false)
+        stop()
+        skipRecordingBacklog()
+    }
+
+    func endRecording(_ owner: AnyObject) {
+        guard recordingOwners.contains(ObjectIdentifier(owner)) else { return }
+        // Capture the final store state even if its observation callback hasn't run yet.
+        skipRecordingBacklog()
+        recordingOwners.remove(ObjectIdentifier(owner))
+        guard recordingOwners.isEmpty else { return }
+        // The microphone can leave the old synthesizer silent; recreate it before the next reply.
         synthesizer.delegate = nil
         synthesizer = AVSpeechSynthesizer()
         synthesizer.delegate = self
+        if autoReadSessionId != nil { mixWithOthers() }
+        setKeepAlive(isInBackground && autoReadSessionId != nil)
     }
 
+    private func skipRecordingBacklog() {
+        guard let sessionId = autoReadSessionId, let store = autoReadStore else { return }
+        _ = autoReadCursor?.take(store.transcripts[sessionId]?.items ?? [], turnActive: false, recording: true)
+    }
+
+    /// Turns reading new agent messages of `sessionId` on or off; what's already there isn't read.
     func toggleAutoRead(_ sessionId: String, store: HappierStore) {
         followTask?.cancel()
         followTask = nil
@@ -124,13 +146,14 @@ final class MessageSpeaker: NSObject {
     /// The app went to the background (or came back): while auto read waits for the next
     /// message, silence keeps iOS from suspending it.
     func appMovedToBackground(_ background: Bool) {
+        isInBackground = background
         setKeepAlive(background && autoReadSessionId != nil)
     }
 
     /// The conversation changed: its newly completed agent messages join the queue.
     func feed(_ sessionId: String, items: [ChatItem], turnActive: Bool) {
         guard autoReadSessionId == sessionId, var cursor = autoReadCursor else { return }
-        let changes = cursor.take(items, turnActive: turnActive)
+        let changes = cursor.take(items, turnActive: turnActive, recording: !recordingOwners.isEmpty)
         autoReadCursor = cursor
         defer { if !changes.isEmpty { refreshActivity() } }
         for change in changes {
@@ -231,6 +254,7 @@ final class MessageSpeaker: NSObject {
     private var position: Int { utteranceStart + wordInUtterance }
 
     private func start(_ markdown: String) {
+        guard recordingOwners.isEmpty else { return }
         let parts = SpokenText.sentences(markdown: markdown)
         guard !parts.isEmpty else { return }
         currentUtterance = nil
@@ -331,6 +355,7 @@ final class MessageSpeaker: NSObject {
 
     /// Plays a short sample in a voice, for picking one.
     func preview(_ voice: AVSpeechSynthesisVoice?, language: String) {
+        guard recordingOwners.isEmpty else { return }
         if speakingText != nil { stop() }
         synthesizer.stopSpeaking(at: .immediate)
         let sample = language == "es" ? "Hola, así sueno cuando leo tus mensajes." : "Hi, this is how I sound reading your messages."
@@ -414,12 +439,14 @@ final class MessageSpeaker: NSObject {
     }
 
     private func deactivateAudio() {
+        guard recordingOwners.isEmpty else { return }
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
     }
 
     private func mixWithOthers() {
+        guard recordingOwners.isEmpty else { return }
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -429,7 +456,7 @@ final class MessageSpeaker: NSObject {
     /// Silent audio while waiting in the background: iOS keeps an app running only while it plays.
     private func setKeepAlive(_ on: Bool) {
         #if os(iOS)
-        if !on {
+        if !on || !recordingOwners.isEmpty {
             keepAlive?.stop()
             keepAlive = nil
             return

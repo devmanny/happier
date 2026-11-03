@@ -264,7 +264,6 @@ struct NewSessionView: View {
         textBeforeTalking = firstMessage
         talkCancelArmed = false
         talking = true
-        MessageSpeaker.shared.stop()
         Task {
             guard talking else { return }
             await dictation.begin(prefix: firstMessage) { firstMessage = $0 }
