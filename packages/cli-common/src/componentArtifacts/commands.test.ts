@@ -1,5 +1,6 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +13,9 @@ vi.mock('node:child_process', () => ({
     spawnSync: spawnSyncMock,
 }));
 
-import { compileBunBinary, execOrThrow, resolveBunCommand } from './commands.js';
+import { REQUIRED_BUN_VERSION, compileBunBinary, execOrThrow, resolveBunCommand } from './commands.js';
+
+const pinnedBun = () => REQUIRED_BUN_VERSION;
 
 describe('resolveBunCommand', () => {
     it('expands ~/ explicit bun overrides against HOME', () => {
@@ -159,6 +162,7 @@ describe('compileBunBinary', () => {
                 bunTarget: 'bun-linux-x64-baseline',
                 outfile,
                 bunCommand: 'bun',
+                readBunVersion: pinnedBun,
                 autoloadDotenv: false,
                 defines: { 'process.env.NODE_ENV': '"production"' },
                 runCommand: async (cmd, args) => {
@@ -187,6 +191,7 @@ describe('compileBunBinary', () => {
                 bunTarget: 'bun-windows-x64',
                 outfile,
                 bunCommand: 'bun',
+                readBunVersion: pinnedBun,
                 runCommand: async (cmd, args, options) => {
                     calls.push({ cmd, args, cwd: options?.cwd });
                     writeFileSync(outfile, 'compiled', 'utf8');
@@ -220,6 +225,7 @@ describe('compileBunBinary', () => {
                 outfile,
                 externals: ['redis'],
                 bunCommand: 'bun',
+                readBunVersion: pinnedBun,
                 buildRunnerEntrypoint,
                 autoloadDotenv: false,
                 runCommand: async (cmd, args) => {
@@ -258,6 +264,7 @@ describe('compileBunBinary', () => {
                 bunTarget: 'bun-darwin-x64',
                 outfile,
                 bunCommand: 'bun',
+                readBunVersion: pinnedBun,
                 runCommand: (cmd, args) => {
                     calls.push({ cmd, args });
                     if (calls.length === 1) {
@@ -272,5 +279,41 @@ describe('compileBunBinary', () => {
         } finally {
             rmSync(tempRoot, { recursive: true, force: true });
         }
+    });
+});
+
+describe('Bun compiler version', () => {
+    // A binary carries the Bun that compiled it as its runtime. One compiled by another Bun
+    // behaved differently: 1.3.10 broke Codex's Unix-socket WebSocket and HTTP/2 to APNs.
+    it('refuses to compile with a Bun other than the pinned release', async () => {
+        const tempRoot = mkdtempSync(join(tmpdir(), 'cli-common-bun-version-'));
+        try {
+            const entrypoint = join(tempRoot, 'index.mjs');
+            const outfile = join(tempRoot, 'happier');
+            writeFileSync(entrypoint, 'console.log("ok");\n', 'utf8');
+            const runCommand = vi.fn();
+
+            await expect(compileBunBinary({
+                entrypoint,
+                bunTarget: 'bun-darwin-arm64',
+                outfile,
+                bunCommand: '/usr/local/bin/bun',
+                readBunVersion: () => '1.3.10',
+                runCommand,
+            })).rejects.toThrow(new RegExp(`Bun ${REQUIRED_BUN_VERSION.replaceAll('.', '\\.')}.*1\\.3\\.10.*HAPPIER_BUN_PATH`, 's'));
+            expect(runCommand).not.toHaveBeenCalled();
+        } finally {
+            rmSync(tempRoot, { recursive: true, force: true });
+        }
+    });
+
+    it('is the Bun release CI pins', () => {
+        const workflows = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.github/workflows');
+        const pins = readdirSync(workflows)
+            .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+            .flatMap((name) => [...readFileSync(join(workflows, name), 'utf8').matchAll(/bun-version:\s*['"]?([^\s'"]+)/g)]
+                .map((match) => `${name}: ${match[1]}`));
+        expect(pins.length).toBeGreaterThan(0);
+        expect(pins.filter((pin) => !pin.endsWith(`: ${REQUIRED_BUN_VERSION}`))).toEqual([]);
     });
 });

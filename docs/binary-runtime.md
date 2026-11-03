@@ -535,6 +535,13 @@ disabled. The canonical Bun compiler defaults disable bunfig autoloading for sta
 migration executables, so a working directory cannot inject a preload before startup.
 Both custom Bun build adapters consume the same defaults.
 
+A compiled executable runs on the Bun release that compiled it, so `compileBunBinary`
+(`packages/cli-common/src/componentArtifacts/commands.ts`) refuses to compile with any Bun but
+`REQUIRED_BUN_VERSION`, the release every `bun-version` pin in `.github/workflows` uses (a test
+keeps the two equal). A local build picks `HAPPIER_BUN_PATH`, then `bun` on `PATH`; when that
+Bun differs, point `HAPPIER_BUN_PATH` at the pinned release instead. A CLI compiled with Bun
+1.3.10 could not reach Codex's Unix-socket WebSocket nor speak HTTP/2 to APNs.
+
 Binary artifact finalization projects native dependencies from the requested artifact target,
 not the build host: ONNX Runtime Node retains its target OS/architecture directory with all
 support libraries, and PTY packages retain target prebuilds plus source-built Release/Debug
