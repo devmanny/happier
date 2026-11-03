@@ -27,11 +27,22 @@ export type AcpClientConnectionHandlers = Readonly<{
   writeTextFile?: (params: WriteTextFileRequest) => WriteTextFileResponse | Promise<WriteTextFileResponse>;
 }>;
 
+/** A negotiated provider-owned notification is admitted through the normal ACP update owner. */
+export type AcpProviderInitiatedTurnEvent = Readonly<{ sessionId: string; turnId: string }> & (
+  | Readonly<{ event: 'started' }>
+  | Readonly<{ event: 'update'; update: Readonly<Record<string, unknown>> }>
+  | Readonly<{ event: 'ended'; stopReason: PromptResponse['stopReason']; error?: string }>
+);
+
 export type AcpExtensionHandlerContext = Readonly<{
   method: string;
   sessionId: string | null;
   signal: AbortSignal;
   agentName: string;
+  agentCapabilitiesMeta?: Readonly<Record<string, unknown>>;
+  providerInitiatedTurn?: Readonly<{
+    apply: (event: AcpProviderInitiatedTurnEvent) => Promise<void>;
+  }>;
   turnId?: string;
   plans?: Pick<AcpPlanProjection, 'project'>;
   toolCalls?: Pick<AcpToolCallTracker, 'enrich'>;

@@ -20,6 +20,48 @@ import { SessionMutationJournalAdmissionBlockedError } from '@/api/session/mutat
  * as working in Happier clients, mirroring the claude session hook lifecycle.
  */
 describe('createAcpRuntime (provider-initiated turns)', () => {
+  it('surfaces an autonomous segment failure without aborting the pending host answer', async () => {
+    const response = createDeferred<AcpTurnOutcome>();
+    let waiting = false;
+    const backend = createFakeAcpRuntimeBackend({ waitForResponseComplete: () => {
+      waiting = true;
+      return response.promise;
+    } });
+    const mutations: SessionTurnMutationV1[] = [];
+    const messages: ACPMessageData[] = [];
+    const committed = new Map<string, ACPMessageData>();
+    const notices: unknown[] = [];
+    const lifecycle = createSessionTurnLifecycle({ sessionId: 'auto-failure-host', enqueueSessionTurn: async mutation => { mutations.push(mutation); } });
+    const runtime = createAcpRuntime({
+      provider: 'pi', directory: '/tmp', messageBuffer: new MessageBuffer(), mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(), onThinkingChange: () => {}, ensureBackend: async () => backend,
+      session: createBasicSessionClientWithOverrides({
+        sessionTurnLifecycle: lifecycle,
+        sendAgentMessage: (provider, body) => { if (body.type !== 'message') messages.push(body); void lifecycle.observeAcpLifecycleMarker({ provider, body }).pendingWrite; },
+        sendAgentMessageCommitted: async (_provider, body, opts) => { committed.set(opts.localId, body); },
+        sendSessionEvent: event => { notices.push(event); },
+      }),
+    });
+    await runtime.startOrLoad({});
+    backend.emit({ type: 'status', status: 'running' });
+    backend.emit({ type: 'model-output', fullText: 'autonomous partial', fullTextScope: 'segment' });
+    runtime.beginTurn();
+    const hostPrompt = runtime.sendPrompt('new user prompt');
+    await expect.poll(() => waiting).toBe(true);
+    backend.emit({ type: 'event', name: 'provider-initiated-turn-error', payload: { error: 'Autonomous turn failed' } });
+    backend.emit({ type: 'status', status: 'running' });
+    await expect.poll(() => notices.length).toBe(1);
+    expect(notices).toEqual([expect.objectContaining({ type: 'message' })]);
+    backend.emit({ type: 'model-output', fullText: 'host answer survives', fullTextScope: 'segment' });
+    response.resolve({ kind: 'completed', stopReason: 'end_turn' });
+    backend.emit({ type: 'status', status: 'idle', turnFinished: true });
+    await hostPrompt;
+    await runtime.flushTurn();
+    expect([...committed.values()].filter(body => body.type === 'message').map(body => body.message)).toEqual(['autonomous partial', 'host answer survives']);
+    expect(mutations.map(mutation => mutation.action)).toEqual(['begin', 'complete']);
+    expect(messages.some(body => body.type === 'turn_failed')).toBe(false);
+  });
+
   it.each([
     { output: 'user', beforeStart: false, cancelWhileIdle: false },
     { output: 'user', beforeStart: true, cancelWhileIdle: false },

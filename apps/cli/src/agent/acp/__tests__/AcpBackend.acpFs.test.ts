@@ -2,13 +2,16 @@ import { describe, expect, it, afterEach } from 'vitest';
 
 import { writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 
-import { buildInitializeRequest, createAcpClientFsMethods } from '../AcpBackend';
+import { AcpBackend, buildInitializeRequest, createAcpClientFsMethods } from '../AcpBackend';
 import type { AcpPermissionHandler } from '../AcpBackend';
+import { writeAcpTestAgentScript } from '../testkit/subprocessHarness';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir } from '@/testkit/fs/tempDir';
 
-const envScope = createEnvKeyScope(['HAPPIER_ACP_FS']);
+const envScope = createEnvKeyScope(['HAPPIER_ACP_FS', 'HAPPIER_MACHINE_RPC_WORKING_DIRECTORY']);
 
 describe('AcpBackend ACP FS capability experiment', () => {
   afterEach(() => {
@@ -86,7 +89,153 @@ describe('AcpBackend ACP FS capability experiment', () => {
     });
   });
 
-  it('does not treat missing files under a symlinked cwd as path traversal (reports ENOENT instead)', async () => {
+  it('uses OS-user access by default for files outside cwd and still checks write approval', async () => {
+    envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: undefined });
+
+    await withTempDir('happier-acp-fs-', async (root) => {
+      const workspace = join(root, 'workspace');
+      const plan = join(root, 'session', 'plans', 'active.md');
+      mkdirSync(workspace);
+      mkdirSync(join(root, 'session', 'plans'), { recursive: true });
+      writeFileSync(plan, 'original', 'utf8');
+      let approved = false;
+      const clientFs = createAcpClientFsMethods({
+        cwd: workspace,
+        permissionHandler: {
+          async handleToolCall() {
+            return { decision: approved ? 'approved' : 'denied' };
+          },
+        },
+      });
+
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: plan })).resolves.toEqual({ content: 'original' });
+      const newFile = join(root, 'session', 'new-directory', 'new.md');
+      await expect(clientFs.writeTextFile!({ sessionId: 's', path: newFile, content: 'updated' })).rejects.toThrow(/denied/i);
+      expect(existsSync(join(root, 'session', 'new-directory'))).toBe(false);
+
+      approved = true;
+      await clientFs.writeTextFile!({ sessionId: 's', path: newFile, content: 'updated' });
+      expect(readFileSync(newFile, 'utf8')).toBe('updated');
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: '../session/new-directory/new.md' }))
+        .resolves.toEqual({ content: 'updated' });
+    });
+  });
+
+  it('honors configured roots without changing cwd as the base for relative paths', async () => {
+    await withTempDir('happier-acp-fs-', async (root) => {
+      const firstRoot = join(root, 'first');
+      const workspace = join(root, 'workspace');
+      const outside = join(root, 'outside.md');
+      mkdirSync(firstRoot);
+      mkdirSync(workspace);
+      writeFileSync(join(firstRoot, 'same.md'), 'first root', 'utf8');
+      writeFileSync(join(workspace, 'same.md'), 'workspace', 'utf8');
+      writeFileSync(outside, 'outside', 'utf8');
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: `${firstRoot},${workspace}` });
+      const clientFs = createAcpClientFsMethods({ cwd: workspace });
+
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: 'same.md' })).resolves.toEqual({ content: 'workspace' });
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: join(firstRoot, 'same.md') }))
+        .resolves.toEqual({ content: 'first root' });
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: outside })).rejects.toThrow(/denied/i);
+    });
+  });
+
+  it('fails closed for an invalid configured filesystem policy', async () => {
+    envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: 'relative/root' });
+    await withTempDir('happier-acp-fs-', async (workspace) => {
+      expect(() => createAcpClientFsMethods({ cwd: workspace })).toThrow(/absolute directories/i);
+    });
+  });
+
+  it.each([
+    { policy: 'OS-user', restricted: false, approved: true },
+    { policy: 'restricted roots', restricted: true, approved: true },
+    { policy: 'write denied', restricted: false, approved: false },
+  ])('enforces $policy through the spawned ACP process', async ({ restricted, approved }) => {
+    await withTempDir('happier-acp-fs-process-', async (root) => {
+      const workspace = join(root, 'workspace');
+      const plan = join(root, 'session', 'plans', 'active.md');
+      const missing = join(root, 'session', 'plans', 'missing.md');
+      const newFile = join(root, 'session', 'new-directory', 'new.md');
+      const resultFile = join(root, 'responses.json');
+      mkdirSync(workspace);
+      mkdirSync(join(root, 'session', 'plans'), { recursive: true });
+      writeFileSync(plan, 'existing plan', 'utf8');
+      envScope.patch({
+        HAPPIER_ACP_FS: '1',
+        HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: restricted ? workspace : undefined,
+      });
+      const sdkUrl = pathToFileURL(createRequire(import.meta.url).resolve('@agentclientprotocol/sdk')).href;
+      const scriptPath = writeAcpTestAgentScript({
+        dir: root,
+        fileName: 'filesystem-agent.mjs',
+        source: `
+          import { agent, ndJsonStream } from ${JSON.stringify(sdkUrl)};
+          import { Readable, Writable } from 'node:stream';
+          import { writeFile } from 'node:fs/promises';
+          const app = agent({ name: 'filesystem-process-contract' })
+            .onRequest('initialize', () => ({ protocolVersion: 1, agentCapabilities: {}, authMethods: [] }))
+            .onRequest('session/new', () => ({ sessionId: 'filesystem-session' }))
+            .onRequest('session/prompt', async (context) => {
+              const responses = [];
+              const requests = [
+                ['fs/read_text_file', { path: ${JSON.stringify(plan)} }],
+                ['fs/read_text_file', { path: ${JSON.stringify(missing)} }],
+                ['fs/write_text_file', { path: ${JSON.stringify(newFile)}, content: 'new plan' }],
+              ];
+              for (const [method, params] of requests) {
+                try {
+                  const result = await context.client.request(method, { sessionId: 'filesystem-session', ...params });
+                  responses.push({ result });
+                } catch (error) {
+                  responses.push({ error: { code: error.code, message: error.message, data: error.data } });
+                }
+              }
+              await writeFile(${JSON.stringify(resultFile)}, JSON.stringify(responses));
+              return { stopReason: 'end_turn' };
+            });
+          const connection = app.connect(ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
+          await connection.closed;
+        `,
+      });
+      const backend = new AcpBackend({
+        agentName: 'filesystem-process-contract',
+        cwd: workspace,
+        command: process.execPath,
+        args: [scriptPath],
+        // A provider's environment cannot relax the host's restricted roots.
+        env: { HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: '' },
+        permissionHandler: { async handleToolCall() { return { decision: approved ? 'approved' : 'denied' }; } },
+      });
+      try {
+        const { sessionId } = await backend.startSession();
+        await backend.sendPrompt(sessionId, 'exercise filesystem');
+        await backend.waitForResponseComplete();
+        const responses: unknown = JSON.parse(readFileSync(resultFile, 'utf8'));
+        if (restricted) {
+          expect(responses).toEqual([
+            expect.objectContaining({ error: expect.objectContaining({ code: -32603, data: { code: 'EACCES', path: plan } }) }),
+            expect.objectContaining({ error: expect.objectContaining({ code: -32603, data: { code: 'EACCES', path: missing } }) }),
+            expect.objectContaining({ error: expect.objectContaining({ code: -32603, data: { code: 'EACCES', path: newFile } }) }),
+          ]);
+        } else {
+          expect(responses).toEqual([
+            { result: { content: 'existing plan' } },
+            { error: expect.objectContaining({ code: -32002 }) },
+            approved ? { result: {} } : { error: expect.objectContaining({ data: { code: 'EACCES', path: newFile } }) },
+          ]);
+        }
+        expect(existsSync(join(root, 'session', 'new-directory'))).toBe(!restricted && approved);
+        if (!restricted && approved) expect(readFileSync(newFile, 'utf8')).toBe('new plan');
+        expect(readFileSync(plan, 'utf8')).toBe('existing plan');
+      } finally {
+        await backend.dispose();
+      }
+    });
+  });
+
+  it('reports missing files under a symlinked cwd as ACP resource-not-found', async () => {
     envScope.patch({ HAPPIER_ACP_FS: '1' });
 
     await withTempDir('happier-acp-fs-root-', async (root) => {
@@ -95,14 +244,15 @@ describe('AcpBackend ACP FS capability experiment', () => {
       mkdirSync(workspaceReal, { recursive: true });
       symlinkSync(workspaceReal, workspaceLink);
 
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: workspaceLink });
       const clientFs = createAcpClientFsMethods({ cwd: workspaceLink });
       const missing = join(workspaceLink, 'missing.txt');
 
-      await expect(clientFs.readTextFile!({ sessionId: 's', path: missing })).rejects.toThrow(/ENOENT/i);
+      await expect(clientFs.readTextFile!({ sessionId: 's', path: missing })).rejects.toMatchObject({ code: -32002 });
     });
   });
 
-  it('readTextFile rejects paths that escape cwd', async () => {
+  it('readTextFile rejects paths outside configured roots', async () => {
     envScope.patch({ HAPPIER_ACP_FS: '1' });
 
     await withTempDir('happier-acp-fs-root-', async (root) => {
@@ -114,13 +264,16 @@ describe('AcpBackend ACP FS capability experiment', () => {
       mkdirSync(outside, { recursive: true });
       writeFileSync(outsideFile, 'nope', 'utf8');
 
-      const clientFs = createAcpClientFsMethods({ cwd: workspace });
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: workspace });
+      const clientFs = createAcpClientFsMethods({
+        cwd: workspace,
+      });
       await expect(clientFs.readTextFile!({ sessionId: 's', path: outsideFile })).rejects.toThrow(/permission denied|traversal/i);
       await expect(clientFs.readTextFile!({ sessionId: 's', path: '../outside/outside.txt' })).rejects.toThrow(/permission denied|traversal/i);
     });
   });
 
-  it('writeTextFile rejects paths that escape cwd even when approved', async () => {
+  it('writeTextFile rejects paths outside configured roots even when approved', async () => {
     envScope.patch({ HAPPIER_ACP_FS: '1' });
 
     await withTempDir('happier-acp-fs-root-', async (root) => {
@@ -130,6 +283,7 @@ describe('AcpBackend ACP FS capability experiment', () => {
       mkdirSync(workspace, { recursive: true });
       mkdirSync(outside, { recursive: true });
 
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: workspace });
       const clientFs = createAcpClientFsMethods({
         cwd: workspace,
         permissionHandler: {
@@ -146,7 +300,7 @@ describe('AcpBackend ACP FS capability experiment', () => {
     });
   });
 
-  it('writeTextFile rejects writes through symlinks that point outside cwd', async () => {
+  it.each([true, false])('writeTextFile rejects writes through symlinks outside configured roots (target exists=%s)', async (targetExists) => {
     envScope.patch({ HAPPIER_ACP_FS: '1' });
 
     await withTempDir('happier-acp-fs-root-', async (root) => {
@@ -156,9 +310,10 @@ describe('AcpBackend ACP FS capability experiment', () => {
       const linkPath = join(workspace, 'link.txt');
       mkdirSync(workspace, { recursive: true });
       mkdirSync(outside, { recursive: true });
-      writeFileSync(outsideFile, 'original', 'utf8');
+      if (targetExists) writeFileSync(outsideFile, 'original', 'utf8');
       symlinkSync(outsideFile, linkPath);
 
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: workspace });
       const clientFs = createAcpClientFsMethods({
         cwd: workspace,
         permissionHandler: {
@@ -169,7 +324,8 @@ describe('AcpBackend ACP FS capability experiment', () => {
       });
 
       await expect(clientFs.writeTextFile!({ sessionId: 's', path: linkPath, content: 'nope' })).rejects.toThrow(/permission denied|traversal/i);
-      expect(readFileSync(outsideFile, 'utf8')).toBe('original');
+      expect(existsSync(outsideFile)).toBe(targetExists);
+      if (targetExists) expect(readFileSync(outsideFile, 'utf8')).toBe('original');
     });
   });
 
@@ -185,6 +341,7 @@ describe('AcpBackend ACP FS capability experiment', () => {
       mkdirSync(outside, { recursive: true });
       symlinkSync(outside, linkDir);
 
+      envScope.patch({ HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: workspace });
       const clientFs = createAcpClientFsMethods({
         cwd: workspace,
         permissionHandler: {

@@ -1,6 +1,6 @@
-import { realpathSync } from 'node:fs';
-import { realpath } from 'node:fs/promises';
-import { basename, dirname, posix, win32 } from 'node:path';
+import { readlinkSync, realpathSync } from 'node:fs';
+import { readlink, realpath } from 'node:fs/promises';
+import { posix, win32 } from 'node:path';
 
 import {
   filesystemPathComparisonKey,
@@ -29,7 +29,16 @@ function pathApi(platform: NodeJS.Platform) {
   return platform === 'win32' ? win32 : posix;
 }
 
-function resolveRealPathForAuthorization(pathValue: string, platform: NodeJS.Platform): string {
+function isMissingOrNonSymlink(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'EINVAL';
+}
+
+function resolveRealPathForAuthorization(
+  pathValue: string,
+  platform: NodeJS.Platform,
+  visitedSymlinks = new Set<string>(),
+): string | null {
   const resolved = normalizeFilesystemPathForPolicy(pathValue, platform);
   if (platform !== process.platform) {
     return resolved;
@@ -40,25 +49,52 @@ function resolveRealPathForAuthorization(pathValue: string, platform: NodeJS.Pla
   let candidate = resolved;
   while (true) {
     try {
-      const realAncestor = realpathSync(candidate);
+      // Node's JavaScript realpath implementation can collapse '..' inside a
+      // symlink destination before following an intermediate symlink.
+      const realAncestor = realpathSync.native(candidate);
       return normalizeFilesystemPathForPolicy(
         api.join(realAncestor, ...missingSegments.reverse()),
         platform,
       );
     } catch {
-      const parent = dirname(candidate);
-      if (parent === candidate) return resolved;
-      missingSegments.push(basename(candidate));
+      // ENOENT may describe a dangling symlink, not a missing path segment.
+      // Resolve its destination before deciding which root authorizes a future write.
+      try {
+        const link = readlinkSync(candidate);
+        const key = filesystemPathComparisonKey(candidate, platform);
+        if (visitedSymlinks.has(key)) return null;
+        visitedSymlinks.add(key);
+        const root = api.parse(link).root;
+        let destination = api.isAbsolute(link) ? root : api.dirname(candidate);
+        for (const segment of link.slice(root.length).split(platform === 'win32' ? /[\\/]+/ : '/')) {
+          if (segment === '..') {
+            // Canonicalize the prefix before consuming '..': path.resolve() (and
+            // some realpath implementations) would collapse it before following symlinks.
+            const prefix = resolveRealPathForAuthorization(destination, platform, new Set(visitedSymlinks));
+            if (prefix === null) return null;
+            destination = api.dirname(prefix);
+          } else if (segment && segment !== '.') {
+            destination = api.join(destination, segment);
+          }
+        }
+        candidate = destination;
+        continue;
+      } catch (error) {
+        if (!isMissingOrNonSymlink(error)) return null;
+      }
+      const parent = api.dirname(candidate);
+      if (parent === candidate) return null;
+      missingSegments.push(api.basename(candidate));
       candidate = parent;
     }
   }
 }
 
-function resolveAllowedRootForAuthorization(pathValue: string, platform: NodeJS.Platform): string {
-  return resolveRealPathForAuthorization(pathValue, platform);
-}
-
-async function resolveRealPathForAuthorizationAsync(pathValue: string, platform: NodeJS.Platform): Promise<string> {
+async function resolveRealPathForAuthorizationAsync(
+  pathValue: string,
+  platform: NodeJS.Platform,
+  visitedSymlinks = new Set<string>(),
+): Promise<string | null> {
   const resolved = normalizeFilesystemPathForPolicy(pathValue, platform);
   if (platform !== process.platform) {
     return resolved;
@@ -75,9 +111,30 @@ async function resolveRealPathForAuthorizationAsync(pathValue: string, platform:
         platform,
       );
     } catch {
-      const parent = dirname(candidate);
-      if (parent === candidate) return resolved;
-      missingSegments.push(basename(candidate));
+      try {
+        const link = await readlink(candidate);
+        const key = filesystemPathComparisonKey(candidate, platform);
+        if (visitedSymlinks.has(key)) return null;
+        visitedSymlinks.add(key);
+        const root = api.parse(link).root;
+        let destination = api.isAbsolute(link) ? root : api.dirname(candidate);
+        for (const segment of link.slice(root.length).split(platform === 'win32' ? /[\\/]+/ : '/')) {
+          if (segment === '..') {
+            const prefix = await resolveRealPathForAuthorizationAsync(destination, platform, new Set(visitedSymlinks));
+            if (prefix === null) return null;
+            destination = api.dirname(prefix);
+          } else if (segment && segment !== '.') {
+            destination = api.join(destination, segment);
+          }
+        }
+        candidate = destination;
+        continue;
+      } catch (error) {
+        if (!isMissingOrNonSymlink(error)) return null;
+      }
+      const parent = api.dirname(candidate);
+      if (parent === candidate) return null;
+      missingSegments.push(api.basename(candidate));
       candidate = parent;
     }
   }
@@ -91,8 +148,11 @@ function isWithinResolvedRoot(targetPath: string, rootPath: string, platform: No
 }
 
 function isWithinRoot(targetPath: string, rootPath: string, platform: NodeJS.Platform): boolean {
-  const target = filesystemPathComparisonKey(resolveRealPathForAuthorization(targetPath, platform), platform);
-  const root = filesystemPathComparisonKey(resolveAllowedRootForAuthorization(rootPath, platform), platform);
+  const resolvedTarget = resolveRealPathForAuthorization(targetPath, platform);
+  const resolvedRoot = resolveRealPathForAuthorization(rootPath, platform);
+  if (resolvedTarget === null || resolvedRoot === null) return false;
+  const target = filesystemPathComparisonKey(resolvedTarget, platform);
+  const root = filesystemPathComparisonKey(resolvedRoot, platform);
   return isWithinResolvedRoot(target, root, platform);
 }
 
@@ -184,9 +244,10 @@ export async function prepareFilesystemPathAuthorizer(
     ...input.accessPolicy.roots,
     ...normalizeAdditionalAllowedDirs(input.additionalAllowedDirs, platform),
   ];
-  const resolvedRootKeys = await Promise.all(allowedRoots.map(async (root) => (
-    filesystemPathComparisonKey(await resolveRealPathForAuthorizationAsync(root, platform), platform)
-  )));
+  const resolvedRootKeys = (await Promise.all(allowedRoots.map(async (root) => {
+    const resolvedRoot = await resolveRealPathForAuthorizationAsync(root, platform);
+    return resolvedRoot === null ? null : filesystemPathComparisonKey(resolvedRoot, platform);
+  }))).filter((root): root is string => root !== null);
 
   return async (targetPath) => {
     const resolved = resolveFilesystemTargetPath({
@@ -196,13 +257,13 @@ export async function prepareFilesystemPathAuthorizer(
     });
     if (!resolved.valid) return resolved;
 
-    const resolvedTargetKey = filesystemPathComparisonKey(
-      await resolveRealPathForAuthorizationAsync(resolved.resolvedPath, platform),
-      platform,
-    );
-    for (const root of resolvedRootKeys) {
-      if (isWithinResolvedRoot(resolvedTargetKey, root, platform)) {
-        return resolved;
+    const resolvedTarget = await resolveRealPathForAuthorizationAsync(resolved.resolvedPath, platform);
+    if (resolvedTarget !== null) {
+      const resolvedTargetKey = filesystemPathComparisonKey(resolvedTarget, platform);
+      for (const root of resolvedRootKeys) {
+        if (isWithinResolvedRoot(resolvedTargetKey, root, platform)) {
+          return resolved;
+        }
       }
     }
 

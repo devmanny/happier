@@ -1862,6 +1862,18 @@ export function createAcpRuntime(params: {
 
           case 'event': {
             const name = msg.name;
+            if (name === 'provider-initiated-turn-error') {
+              // A queued host prompt still owns this runtime turn. Surface the failed
+              // autonomous segment without terminalizing that pending user request.
+              const payload = asRecord(msg.payload);
+              const issue = classifyPrimarySessionRuntimeIssue({
+                cause: 'status_error', provider: params.provider, error: payload?.error,
+              });
+              params.session.sendSessionEvent?.({
+                type: 'message', message: issue.sanitizedPreview ?? 'Provider-initiated turn failed',
+              });
+              return;
+            }
             if (name === 'connected-service-runtime-auth-recovery') {
               const recoveryEvent = parseConnectedServiceRuntimeAuthRecoveryEvent(msg.payload);
               if (recoveryEvent) {
