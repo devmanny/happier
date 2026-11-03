@@ -86,6 +86,24 @@ import Testing
         #expect(session.applying(activity: ["active": false, "activeAt": .number(nowMs + 1_000)])?.active == false)
     }
 
+    /// The turn's end and the last "thinking" heartbeat race. When the completed turn lands
+    /// first, the heartbeat is ignored (the turn is over), and `thinking` stayed true: auto read
+    /// then held the last message until something else arrived.
+    @Test func aFinishedTurnIsNotThinking() throws {
+        var session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["active": true, "activeAt": .number(nowMs)]), keys: keys)
+        session.apply(activity: ["active": true, "thinking": true, "activeAt": .number(nowMs)])
+        #expect(session.thinking)
+        try session.apply(update: ["t": "update-session", "id": .string(session.id), "latestTurnStatus": "completed",
+                                   "latestTurnStatusObservedAt": .number(nowMs + 1_000)])
+        #expect(!session.thinking)
+        // A late "thinking" heartbeat from the finished turn doesn't bring it back.
+        session.apply(activity: ["active": true, "thinking": true, "activeAt": .number(nowMs + 2_000)])
+        #expect(!session.thinking)
+        // A row read with a finished turn isn't thinking either.
+        let row = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["thinking": true, "latestTurnStatus": "completed"]), keys: keys)
+        #expect(!row.thinking)
+    }
+
     @Test func statusFollowsUIPrecedence() throws {
         var session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["pendingPermissionRequestCount": 1]), keys: keys)
         #expect(session.status(at: now) == .permissionRequired)

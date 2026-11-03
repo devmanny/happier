@@ -90,9 +90,10 @@ public struct Session: Identifiable, Sendable, Equatable {
         active = row["active"]?.boolValue ?? false
         activeAt = Self.date(row["activeAt"])
         archivedAt = Self.date(row["archivedAt"])
-        thinking = row["thinking"]?.boolValue ?? false
-        thinkingAt = Self.date(row["thinkingAt"])
         latestTurnStatus = row["latestTurnStatus"]?.stringValue
+        // A finished turn isn't thinking, whatever its last heartbeat said.
+        thinking = (row["thinking"]?.boolValue ?? false) && !Self.isTerminal(latestTurnStatus)
+        thinkingAt = Self.date(row["thinkingAt"])
         latestTurnStatusObservedAt = Self.date(row["latestTurnStatusObservedAt"])
         pendingPermissionRequestCount = row["pendingPermissionRequestCount"]?.intValue ?? 0
         pendingUserActionRequestCount = row["pendingUserActionRequestCount"]?.intValue ?? 0
@@ -126,7 +127,12 @@ public struct Session: Identifiable, Sendable, Equatable {
         if let v = Self.date(body["activeAt"]) { activeAt = v }
         if let v = body["pendingPermissionRequestCount"]?.intValue { pendingPermissionRequestCount = v }
         if let v = body["pendingUserActionRequestCount"]?.intValue { pendingUserActionRequestCount = v }
-        if let v = body["latestTurnStatus"] { latestTurnStatus = v.stringValue }
+        if let v = body["latestTurnStatus"] {
+            latestTurnStatus = v.stringValue
+            // The turn's end can land before its last "thinking" heartbeat, which is then
+            // ignored (the turn is over): it must not stay thinking (auto read waits on it).
+            if isTurnTerminal { thinking = false }
+        }
         if let v = Self.date(body["latestTurnStatusObservedAt"]) { latestTurnStatusObservedAt = v }
         if let v = body["lastViewedSessionSeq"]?.intValue { lastViewedSessionSeq = v }
         if let v = Self.date(body["meaningfulActivityAt"]) { meaningfulActivityAt = v }
@@ -229,7 +235,9 @@ public struct Session: Identifiable, Sendable, Equatable {
         return policy["retired"]?.boolValue != true
     }
 
-    private var isTurnTerminal: Bool { ["completed", "cancelled", "failed"].contains(latestTurnStatus ?? "") }
+    private var isTurnTerminal: Bool { Self.isTerminal(latestTurnStatus) }
+
+    private static func isTerminal(_ turnStatus: String?) -> Bool { ["completed", "cancelled", "failed"].contains(turnStatus ?? "") }
 
     /// Simplified `getSessionStatus` + `deriveSessionRuntimePresentationState` (120 s freshness window).
     public func status(at now: Date = .now) -> Status {
