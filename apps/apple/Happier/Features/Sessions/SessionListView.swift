@@ -70,6 +70,11 @@ struct SessionListView: View {
     /// back over two seconds, so you see which one you were in.
     @State private var justClosed: String?
     @State private var justClosedGlow = false
+    #if os(iOS)
+    private static let rowBackground = Color(uiColor: .secondarySystemGroupedBackground)
+    #else
+    private static let rowBackground = Color.clear
+    #endif
 
     /// The sorted list, refreshed at most twice a second instead of on every message.
     @State private var listed = SessionListSnapshot()
@@ -183,9 +188,10 @@ struct SessionListView: View {
         } else {
             content
                 .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                // The row's own background with the tint over it, so the list keeps its shape (the
+                // section's rounded corners) while the glow fades.
                 .listRowBackground(justClosed == session.id
-                    ? RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.userBubble.opacity(justClosedGlow ? 0.2 : 0)).padding(.horizontal, 8)
+                    ? Self.rowBackground.overlay(Color.userBubble.opacity(justClosedGlow ? 0.2 : 0))
                     : nil)
                 .tag(session.id)
                 .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
