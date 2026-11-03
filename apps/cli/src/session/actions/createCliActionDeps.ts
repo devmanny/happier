@@ -608,6 +608,8 @@ export function createCliActionInventoryDeps(params: Readonly<{
 
 export function createCliActionDeps(params: Readonly<{
   token: string;
+  /** Explicit calling-session identity; sessionId may instead be a selected target. */
+  messageSenderSessionId?: string | null;
   credentials?: Credentials;
   sessionId: string;
   ctx: SessionEncryptionContext;
@@ -1687,6 +1689,7 @@ export function createCliActionDeps(params: Readonly<{
         credentials: params.credentials,
         idOrPrefix: sessionId,
         message: String(message ?? ''),
+        ...(params.messageSenderSessionId ? { senderSessionId: params.messageSenderSessionId } : {}),
         ...(localId ? { localId } : {}),
         requestedAction,
         wait: normalizedWait,

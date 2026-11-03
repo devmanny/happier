@@ -151,6 +151,7 @@ export function createHappierMcpServer(
       token: credentials?.token ?? '',
       ...(credentials ? { credentials } : {}),
       sessionId: client.sessionId,
+      messageSenderSessionId: client.sessionId,
       ctx,
       rawSession,
       getCallerPermissionMode: () => resolveLiveClientPermissionMode(client, sessionMetadataSnapshot),

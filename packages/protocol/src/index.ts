@@ -2940,6 +2940,8 @@ export {
   type SessionSummaryShardV1,
 } from './structuredMessages/sessionSummaryShardV1.js';
 
+export { SessionMessageV1Schema, parseSessionMessageV1, type SessionMessageV1 } from './structuredMessages/sessionMessageV1.js';
+
 export {
   ParticipantRecipientV1Schema,
   ParticipantMessageV1Schema,

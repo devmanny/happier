@@ -1,3 +1,4 @@
+import { readCurrentHappierSessionIdFromEnv } from '@/agent/runtime/session/currentSessionIdEnv';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 
@@ -80,6 +81,7 @@ export async function cmdSessionActionsExecute(
     token: credentials.token,
     credentials,
     sessionId: sessionTarget.sessionId,
+    messageSenderSessionId: readCurrentHappierSessionIdFromEnv(),
     ctx: sessionTarget.ctx,
     mode: sessionTarget.mode,
     rawSession: sessionTarget.rawSession,
