@@ -44,6 +44,21 @@ describe('AcpBackend sendPrompt usage telemetry', () => {
     });
   });
 
+  it('assigns distinct report identities to usage from successive prompt turns', async () => {
+    const backend = new AcpBackend({ agentName: 'test', cwd: process.cwd(), command: 'noop' });
+    const emitted: any[] = [];
+    backend.onMessage((message) => emitted.push(message));
+    (backend as any).acpSessionId = 'sess_1';
+    (backend as any).connection = { peer: { prompt: async () => ({
+      stopReason: 'end_turn', usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }) } };
+    await backend.sendPrompt('sess_1', 'first');
+    await backend.sendPrompt('sess_1', 'second');
+    const reports = emitted.filter((message) => message.type === 'token-count');
+    expect(reports).toHaveLength(2);
+    expect(new Set(reports.map((report) => report.key)).size).toBe(2);
+  });
+
   it('reads the ACP metadata usage envelope through the provider-owned usage projector', async () => {
     const backend = new AcpBackend({
       agentName: 'test',
@@ -86,7 +101,7 @@ describe('AcpBackend sendPrompt usage telemetry', () => {
     await backend.sendPrompt('sess_1', 'hello');
 
     expect(emitted.find((message) => message?.type === 'token-count')).toMatchObject({
-      key: 'acp-prompt-usage',
+      key: expect.stringMatching(/^acp-prompt-usage:/),
       tokens: { total: 10, input: 7, output: 3 },
       cost: { total: 0.25 },
       source: 'acp-prompt-usage',

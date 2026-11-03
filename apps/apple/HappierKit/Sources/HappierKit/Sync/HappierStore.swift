@@ -302,6 +302,12 @@ public final class HappierStore {
         for localId in uploadProgress.keys { uploadObserver?.uploadDidFinish(localId: localId, success: false) }
         uploadProgress = [:]
         uploadSessionIds = [:]
+        tokenUsageGeneration = UUID()
+        tokenUsageTask?.cancel()
+        tokenUsageTask = nil
+        tokenUsageQueue = []
+        tokenUsageInFlight = nil
+        sessionTokenUsage.removeAll()
         sessions.removeAll()
         transcripts.removeAll()
         resumingSessions.removeAll()
@@ -631,6 +637,8 @@ public final class HappierStore {
                 try await socket.connect()
                 connection = .online
                 backoff = .seconds(1)
+                tokenUsageQueue.formUnion(sessionTokenUsage.keys)
+                Task { await drainTokenUsageQueue() }
                 await syncDeviceBrowserRegistrations()
                 await refreshSessions()
                 for id in openSessionIds {
@@ -660,7 +668,11 @@ public final class HappierStore {
         case "update":
             await handleUpdate(payload["body"] ?? .null)
         case "ephemeral":
-            if payload["type"]?.stringValue == "session-draft-updated" || payload["sessionDraft"]?.boolValue == true {
+            if payload["type"]?.stringValue == "usage", let id = payload["id"]?.stringValue,
+               sessionTokenUsage[id] != nil || tokenUsageInFlight == id || tokenUsageQueue.contains(id) {
+                tokenUsageQueue.insert(id)
+                Task { await drainTokenUsageQueue() }
+            } else if payload["type"]?.stringValue == "session-draft-updated" || payload["sessionDraft"]?.boolValue == true {
                 handleDraftHint(payload)
             } else if payload["type"]?.stringValue == "machine-activity", let id = payload["id"]?.stringValue {
                 if let index = machines.firstIndex(where: { $0.id == id }) { machines[index].apply(activity: payload) }
@@ -2197,6 +2209,56 @@ public final class HappierStore {
             let rows = page.rows.compactMap { try? TranscriptMessage(row: $0, session: session) }
             if !rows.isEmpty { applyTranscript(rows, to: sessionId) }
         }
+    }
+
+    /// Cached aggregate reports, fetched only for visible sessions and their known descendants.
+    public let sessionTokenUsage = KeyedStore<SessionTokenUsage>()
+    @ObservationIgnored private var tokenUsageQueue: Set<String> = []
+    @ObservationIgnored private var tokenUsageInFlight: String?
+    @ObservationIgnored private var tokenUsageTask: Task<Void, Never>?
+    @ObservationIgnored private var tokenUsageGeneration = UUID()
+
+    public var sessionUsageParents: [String: String] {
+        Dictionary(uniqueKeysWithValues: sessions.values.compactMap { session in
+            session.parentSessionId.map { (session.id, $0) }
+        })
+    }
+
+    public func tokenSummary(_ sessionId: String, parents: [String: String]? = nil) -> SessionTokenSummary {
+        let parents = parents ?? sessionUsageParents
+        let members = SessionTokenSummary.memberIds(sessionId, parents: parents)
+        let reports = Dictionary(uniqueKeysWithValues: members.compactMap { id in
+            sessionTokenUsage[id].map { (id, $0) }
+        })
+        return SessionTokenSummary(sessionId: sessionId, parents: parents, usage: reports)
+    }
+
+    public func loadSessionTokenUsage(_ sessionId: String, refresh: Bool = false) async {
+        let members = SessionTokenSummary.memberIds(sessionId, parents: sessionUsageParents)
+        for id in members where refresh || (sessionTokenUsage[id] == nil && tokenUsageInFlight != id) { tokenUsageQueue.insert(id) }
+        await drainTokenUsageQueue()
+    }
+
+    /// A single queue bounds network work even when many sidebar rows appear together. Usage
+    /// hints invalidate aggregates; adding a report's total would double-count replacement keys.
+    private func drainTokenUsageQueue() async {
+        if let tokenUsageTask { await tokenUsageTask.value; return }
+        guard let api, !tokenUsageQueue.isEmpty else { return }
+        let generation = tokenUsageGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, let id = self.tokenUsageQueue.first {
+                self.tokenUsageQueue.remove(id)
+                self.tokenUsageInFlight = id
+                let report = try? await api.sessionTokenUsage(sessionId: id)
+                guard !Task.isCancelled, self.tokenUsageGeneration == generation else { return }
+                self.sessionTokenUsage[id] = report ?? SessionTokenUsage(response: .null)
+                self.tokenUsageInFlight = nil
+            }
+            if self.tokenUsageGeneration == generation { self.tokenUsageTask = nil }
+        }
+        tokenUsageTask = task
+        await task.value
     }
 
     /// Usage limits left on the provider account each open session runs on.

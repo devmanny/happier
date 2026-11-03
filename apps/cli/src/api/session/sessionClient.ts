@@ -4178,16 +4178,27 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+    private reportClaudeSessionMessageUsage(body: RawJSONLines): void {
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
             try {
-                this.sendUsageData(body.message.usage, body.message.model);
+                // Claude can split one API response into several transcript records.
+                // The provider response ID, unlike the JSONL UUID, identifies the usage snapshot.
+                const responseId = readNonBlankOpaqueIdentifier(body.message.id);
+                const messageKey = buildClaudeJsonlMessageKey(body);
+                if (!responseId && !messageKey) return;
+                const reportKey = responseId
+                    ? `claude-response:${responseId}`
+                    : `claude-message:${messageKey}`;
+                this.sendUsageData(body.message.usage, body.message.model, reportKey);
             } catch (error) {
                 logger.debug('[SOCKET] Failed to send usage data:', serializeAxiosErrorForLog(error));
             }
         }
+    }
 
+    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+        this.reportClaudeSessionMessageUsage(body);
         // Update metadata with summary if this is a summary message
         if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
             updateMetadataBestEffort(
@@ -4287,7 +4298,7 @@ export class ApiSessionClient extends EventEmitter {
         requireExactCommitLocalId(localId);
 
         this.logSendWhileDisconnected('Claude session message', { type: body.type });
-        return await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+        const result = await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
             sessionId: this.sessionId,
             localId,
             content: this.buildOutboundSessionMessagePayload(content),
@@ -4297,6 +4308,8 @@ export class ApiSessionClient extends EventEmitter {
             updatedAt: opts.updatedAt ?? opts.createdAt,
             provenance: opts.provenance,
         }));
+        this.reportClaudeSessionMessageUsage(body);
+        return result;
     }
 
     recordClaudeJsonlMessageConsumed(body: RawJSONLines, meta?: Record<string, unknown>): void {
@@ -5421,7 +5434,7 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send usage data to the server
      */
-    sendUsageData(usage: Usage, model?: string) {
+    sendUsageData(usage: Usage, model?: string, key = 'claude-session') {
         // Calculate total tokens
         const totalTokens = usage.input_tokens + usage.output_tokens + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
 
@@ -5429,7 +5442,7 @@ export class ApiSessionClient extends EventEmitter {
 
         // Transform Claude usage format to backend expected format
         const usageReport = {
-            key: 'claude-session',
+            key,
             sessionId: this.sessionId,
             tokens: {
                 total: totalTokens,

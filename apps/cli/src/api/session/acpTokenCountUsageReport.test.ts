@@ -3,6 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { buildUsageReportFromAcpTokenCount } from './acpTokenCountUsageReport';
 
 describe('acp token_count -> usage-report', () => {
+  it('reports ACP cumulative cost without counting context occupancy as consumed tokens', () => {
+    const report = buildUsageReportFromAcpTokenCount({
+      provider: 'kimi', sessionId: 'sess-context',
+      body: { type: 'token_count', key: 'acp-usage-update', tokens: { total: 500, used: 500, size: 1000 }, cost: { total: 0.25 } },
+    });
+    expect(report).toEqual({
+      key: 'acp-usage-update', sessionId: 'sess-context', tokens: { total: 0, used: 500, size: 1000 }, cost: { total: 0.25 },
+    });
+  });
+
   it('uses provided key when present and sets cost.total=0', () => {
     const report = buildUsageReportFromAcpTokenCount({
       provider: 'qwen',

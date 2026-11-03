@@ -8,12 +8,14 @@ import SwiftUI
 private final class SessionListSnapshot {
     /// Nil until the first read; the list then reads the store directly.
     private(set) var sessions: [Session]?
+    private(set) var usageParents: [String: String] = [:]
 
     func follow(_ store: HappierStore) async {
         while !Task.isCancelled {
             await withCheckedContinuation { continuation in
-                let next = withObservationTracking { store.sessionList } onChange: { continuation.resume() }
-                if next != sessions { sessions = next }
+                let next = withObservationTracking { (store.sessionList, store.sessionUsageParents) } onChange: { continuation.resume() }
+                if next.0 != sessions { sessions = next.0 }
+                if next.1 != usageParents { usageParents = next.1 }
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
@@ -113,13 +115,13 @@ struct SessionListView: View {
                     AppHaptics.selection()
                     onOpen(session.id)
                 } label: {
-                    SessionRow(session: session).equatable()
+                    SessionRow(session: session, usageParents: listed.usageParents).equatable()
                         .contentShape(Rectangle())
                 }
                 // The row style of the list itself: it highlights the whole row on touch.
                 .buttonStyle(.plain)
             } else {
-                SessionRow(session: session).equatable()
+                SessionRow(session: session, usageParents: listed.usageParents).equatable()
             }
             if childCount > 0 { subSessionsButton(session.id, count: childCount) }
         }
@@ -332,7 +334,7 @@ struct SessionListView: View {
                         AppHaptics.selection()
                         openArchived(session)
                     } label: {
-                        SessionRow(session: session).equatable()
+                        SessionRow(session: session, usageParents: listed.usageParents).equatable()
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -719,12 +721,13 @@ extension SessionListView {
 /// pickers): the agent icon carrying the unread dot, the title, and the folder underneath.
 struct SessionRow: View, Equatable {
     let session: Session
+    var usageParents: [String: String] = [:]
     @Environment(HappierStore.self) private var store
     @State private var speaker = MessageSpeaker.shared
 
     /// Redrawn when its own session changes, not every time any session in the list does.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.session == rhs.session
+        lhs.session == rhs.session && lhs.usageParents == rhs.usageParents
     }
 
     var body: some View {
@@ -782,6 +785,7 @@ struct SessionRow: View, Equatable {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.head)
+                SessionTokenIndicator(sessionId: session.id, parents: usageParents)
             }
         }
         .padding(.vertical, 2)

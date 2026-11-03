@@ -5,6 +5,13 @@ import { log } from "@/utils/logging/log";
 import { recordUsageReportForAccount } from "@/app/usage/usageReportWriteService";
 import { type Fastify } from "../../types";
 
+// These fixed keys held only the latest response before response identities were recorded.
+const responseUsageKeys = [
+    { prefix: 'claude-response:', legacy: 'claude-session' },
+    { prefix: 'claude-message:', legacy: 'claude-session' },
+    { prefix: 'acp-prompt-usage:', legacy: 'acp-prompt-usage' },
+] as const;
+
 export function registerAccountUsageRoutes(app: Fastify): void {
     app.post('/v1/usage/query', {
         schema: {
@@ -66,6 +73,35 @@ export function registerAccountUsageRoutes(app: Fastify): void {
                 }
             });
 
+            // An old latest-response snapshot has no identity to reconcile with replayed
+            // responses. Prefer identified observations, never add both or rewrite history.
+            // Check outside the requested dates so narrower queries cannot revive the overlap.
+            const legacySessionIds = [...new Set(reports
+                .filter((report) => responseUsageKeys.some(({ legacy }) => report.key === legacy))
+                .map((report) => report.sessionId)
+                .filter((id): id is string => id !== null))];
+            const responseReports = legacySessionIds.length > 0
+                ? await db.usageReport.findMany({
+                    where: {
+                        accountId: userId,
+                        sessionId: { in: legacySessionIds },
+                        OR: responseUsageKeys.map(({ prefix }) => ({ key: { startsWith: prefix } })),
+                    },
+                    select: { sessionId: true, key: true, data: true },
+                })
+                : [];
+            const supersededSnapshots = new Map<string, { hasCost: boolean }>();
+            for (const report of responseReports) {
+                const legacyKey = responseUsageKeys.find(({ prefix }) => report.key.startsWith(prefix))?.legacy;
+                if (!legacyKey || !report.sessionId) continue;
+                const identity = `${report.sessionId}\0${legacyKey}`;
+                const data = report.data as PrismaJson.UsageReportData;
+                const hasCost = Object.values(data.cost).some((value) => typeof value === 'number' && value > 0);
+                supersededSnapshots.set(identity, {
+                    hasCost: hasCost || supersededSnapshots.get(identity)?.hasCost === true,
+                });
+            }
+
             // Aggregate data by time period
             const aggregated = new Map<string, {
                 tokens: Record<string, number>;
@@ -76,6 +112,13 @@ export function registerAccountUsageRoutes(app: Fastify): void {
 
             for (const report of reports) {
                 const data = report.data as PrismaJson.UsageReportData;
+                const superseded = supersededSnapshots.get(`${report.sessionId}\0${report.key}`);
+                const contextOnly = report.key === 'acp-usage-update'
+                    && (data.tokens.used != null || data.tokens.size != null);
+                // Empty maps mean unobserved consumption, not a known zero. Costs from
+                // context updates remain valid; legacy costs survive until replacements exist.
+                const tokens = superseded || contextOnly ? {} : data.tokens;
+                const cost = superseded?.hasCost ? {} : data.cost;
                 const date = new Date(report.createdAt);
 
                 // Calculate timestamp based on groupBy
@@ -105,14 +148,14 @@ export function registerAccountUsageRoutes(app: Fastify): void {
                 agg.count++;
 
                 // Aggregate tokens
-                for (const [tokenKey, tokenValue] of Object.entries(data.tokens)) {
+                for (const [tokenKey, tokenValue] of Object.entries(tokens)) {
                     if (typeof tokenValue === 'number') {
                         agg.tokens[tokenKey] = (agg.tokens[tokenKey] || 0) + tokenValue;
                     }
                 }
 
                 // Aggregate costs
-                for (const [costKey, costValue] of Object.entries(data.cost)) {
+                for (const [costKey, costValue] of Object.entries(cost)) {
                     if (typeof costValue === 'number') {
                         agg.cost[costKey] = (agg.cost[costKey] || 0) + costValue;
                     }

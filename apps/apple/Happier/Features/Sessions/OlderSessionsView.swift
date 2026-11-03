@@ -190,7 +190,7 @@ struct OlderSessionsView: View {
             dismiss()
             onOpen(session)
         } label: {
-            SessionRow(session: session)
+            SessionRow(session: session, usageParents: store.sessionUsageParents)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
         }

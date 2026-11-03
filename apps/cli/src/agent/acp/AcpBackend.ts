@@ -3254,6 +3254,9 @@ export class AcpBackend implements AgentBackend {
           : {}),
       };
 
+      // PromptResponse.usage is per turn. Keep one identity across retries of this
+      // request, while allowing subsequent prompts to contribute distinct reports.
+      const promptUsageKey = `acp-prompt-usage:${randomUUID()}`;
       const emitPromptUsage = (promptResponse: PromptResponse | unknown): void => {
         const promptResponseRecord =
           promptResponse && typeof promptResponse === 'object'
@@ -3275,7 +3278,7 @@ export class AcpBackend implements AgentBackend {
           if (!projected) return;
           this.emit({
             type: 'token-count',
-            key: 'acp-prompt-usage',
+            key: promptUsageKey,
             tokens: projected.tokens,
             ...(projected.cost ? { cost: projected.cost } : {}),
             ...(projected.modelId ? { modelId: projected.modelId } : {}),
@@ -3318,7 +3321,7 @@ export class AcpBackend implements AgentBackend {
 
         this.emit({
           type: 'token-count',
-          key: 'acp-prompt-usage',
+          key: promptUsageKey,
           tokens,
           ...(modelId ? { modelId } : null),
           source: 'acp-prompt-usage',

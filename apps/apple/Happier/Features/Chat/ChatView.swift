@@ -715,9 +715,9 @@ private struct SessionUsageToolbar: ToolbarContent {
         let context = store.transcripts[sessionId]?.contextUsage
         let controls = store.controls(for: sessionId)
         let modelId = controls.flatMap { $0.selectedModelId != "default" ? $0.selectedModelId : $0.appliedModelId }
-        if usage != nil || context != nil {
+        if session != nil {
             ToolbarItem(placement: .primaryAction) {
-                SessionUsageButton(context: context,
+                SessionUsageButton(sessionId: sessionId, context: context,
                                    window: context.flatMap { controls?.contextWindow(for: $0) },
                                    usage: usage, modelId: modelId,
                                    agentName: session?.agentId.flatMap { Agent.displayNames[$0] })

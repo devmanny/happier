@@ -72,6 +72,12 @@ public struct HappierAPI: Sendable {
         return rows.filter { seen.insert($0["id"]?.stringValue ?? "").inserted }
     }
 
+    /// The server's aggregate reports; no transcript paging or provider quota inference.
+    public func sessionTokenUsage(sessionId: String) async throws -> SessionTokenUsage {
+        let response = try await http.post("/v1/usage/query", ["sessionId": .string(sessionId)])
+        return SessionTokenUsage(response: response)
+    }
+
     public func session(id: String) async throws -> JSONValue? {
         try await http.get("/v2/sessions/\(id)")["session"]
     }

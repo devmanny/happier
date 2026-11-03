@@ -71,12 +71,17 @@ export function buildUsageReportFromAcpTokenCount(params: {
   // If the provider supplies a key, use it; otherwise fall back to a per-provider session key.
   const key = extracted.key ?? `${params.provider}-session`;
 
-  const total = typeof extracted.tokens.total === 'number' ? extracted.tokens.total : 0;
+  // ACP usage_update.used/size describe context occupancy, not tokens consumed.
+  // Keep the report (and its cumulative cost) so an existing miscounted row is corrected.
+  const isContextWindowSnapshot = key === 'acp-usage-update'
+    && (extracted.tokens.used != null || extracted.tokens.size != null);
+  const tokens = isContextWindowSnapshot ? { ...extracted.tokens, total: 0 } : extracted.tokens;
+  const total = typeof tokens.total === 'number' ? tokens.total : 0;
   const cost = normalizeCostMap((params.body as any)?.cost);
   return {
     key,
     sessionId: params.sessionId,
-    tokens: { total, ...extracted.tokens },
+    tokens: { total, ...tokens },
     cost,
   };
 }

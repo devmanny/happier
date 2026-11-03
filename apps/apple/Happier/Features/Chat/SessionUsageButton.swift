@@ -3,6 +3,8 @@ import SwiftUI
 
 /// One toolbar control: session context outside, the provider's weekly limit inside.
 struct SessionUsageButton: View {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
     let context: ContextUsage?
     let window: Int?
     let usage: ProviderUsage?
@@ -33,10 +35,12 @@ struct SessionUsageButton: View {
         }
         .accessibilityLabel(Text("Usage statistics"))
         .accessibilityValue(accessibilityValue)
-        .help(Text("Session context and weekly usage"))
+        .help(Text("Recorded tokens, session context and account usage"))
         .popover(isPresented: $showDetails) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    SessionTokenDetails(sessionId: sessionId)
+                    Divider()
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Session Context", systemImage: "circle")
                             .font(.headline)
@@ -130,5 +134,69 @@ struct SessionUsageButton: View {
         let context = contextFraction.map { String(localized: "Session context \(Int(($0 * 100).rounded()))% used") }
         let weekly = weekly.map { String(localized: "\($0.label): \(Int($0.usedPercent.rounded()))% used") }
         return Text([context, weekly].compactMap { $0 }.joined(separator: ", "))
+    }
+}
+
+
+/// Shared by the sidebar and the chat details. The cache never reads transcript history.
+struct SessionTokenIndicator: View {
+    let sessionId: String
+    let parents: [String: String]
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        let summary = store.tokenSummary(sessionId, parents: parents)
+        Text(label(summary))
+            .font(.caption2)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .help(Text("Recorded tokens; tree totals include known descendants. Open usage statistics for details."))
+            .task(id: SessionTokenSummary.memberIds(sessionId, parents: parents)) {
+                await store.loadSessionTokenUsage(sessionId)
+            }
+    }
+
+    private func label(_ summary: SessionTokenSummary) -> String {
+        let own = summary.own.map { $0.formatted(.number.notation(.compactName)) } ?? "—"
+        guard summary.descendantCount > 0 else { return String(localized: "\(own) tokens") }
+        let total = summary.total.map { $0.formatted(.number.notation(.compactName)) } ?? "—"
+        let partial = summary.missingCount > 0 ? "+" : ""
+        return String(localized: "\(own) own · \(total)\(partial) tree tokens")
+    }
+}
+
+private struct SessionTokenDetails: View {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        let summary = store.tokenSummary(sessionId)
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Recorded Tokens", systemImage: "number.circle").font(.headline)
+            LabeledContent("This session", value: count(summary.own))
+            if summary.descendantCount > 0 {
+                LabeledContent("Descendants (\(summary.descendantCount))", value: count(summary.descendants))
+                LabeledContent("Tree total", value: count(summary.total))
+            }
+            if summary.missingCount > 0 {
+                Text("Reports unavailable for \(summary.missingCount) sessions. Totals are partial.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Text("Input, output and cached tokens reported by agents. Older or unsupported agents may omit usage. Includes known descendants only; these counts do not measure context size or a share of your provider quota.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button("Refresh token reports", systemImage: "arrow.clockwise") {
+                Task { await store.loadSessionTokenUsage(sessionId, refresh: true) }
+            }
+            .font(.footnote)
+        }
+        .monospacedDigit()
+        .task(id: SessionTokenSummary.memberIds(sessionId, parents: store.sessionUsageParents)) {
+            await store.loadSessionTokenUsage(sessionId)
+        }
+    }
+
+    private func count(_ value: Int?) -> String {
+        value.map { $0.formatted() } ?? String(localized: "Unavailable")
     }
 }
