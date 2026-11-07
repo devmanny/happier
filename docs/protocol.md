@@ -46,7 +46,8 @@ auth: {
   token: "<bearer token>",
   clientType: "user-scoped" | "session-scoped" | "machine-scoped",
   sessionId?: "<session id>",
-  machineId?: "<machine id>"
+  machineId?: "<machine id>",
+  capabilities?: ["updates-lean-v1"]
 }
 ```
 
@@ -59,6 +60,23 @@ Rules enforced server-side:
 - `user-scoped`: receives account-wide updates.
 - `session-scoped`: receives updates for a specific session only.
 - `machine-scoped`: used by daemons; receives machine updates and emits machine state.
+
+### Lean updates (`updates-lean-v1`)
+A `user-scoped` client that declares `capabilities: ["updates-lean-v1"]` in its handshake is a lean
+reader (`apps/server/sources/app/api/socketRooms.ts`, decision in `planLeanDelivery`,
+`apps/server/sources/app/events/connectionEventRouter.ts`). Clients that don't declare it receive
+everything as before.
+- It sends `client-open-sessions {sessionIds: string[]}` (acked `{ok: true, count, truncated?}`)
+  with the sessions it shows, replacing the previous list; at most 64 are kept per socket.
+- It is not sent publisher heartbeats that only refresh `active: true` + `activeAt`; state changes
+  still arrive (`active: false` when a publisher stops signalling or closes, turn status, pending
+  requests, metadata, agent state). A lean reader therefore can't judge "working" by `activeAt`.
+- `new-message` / `message-updated` arrive in full only for its open sessions; for the others the
+  same envelope and cursor with the message's `content` removed and `contentOmitted: true`.
+- `transcript-stream-segment` / `transcript-stream-segment-delta` arrive only for open sessions.
+- No ack to `client-open-sessions` means the relay doesn't support lean updates.
+
+Heartbeats also no longer schedule account badge pushes (they change no badge).
 
 ### Server -> client events
 The server emits two event types:
@@ -260,6 +278,11 @@ See `api.md` for the full HTTP endpoint catalog and auth flows.
 - `UpdatePayload.seq` is the per-user update sequence (monotonic) used for sync ordering.
 - Sessions, machines, and artifacts have their own `seq` fields used by clients for ordering.
 - Versioned fields (metadata, agentState, daemonState, artifact header/body, access keys, KV) use optimistic concurrency with `expectedVersion` and return a version-mismatch response containing the current version/data.
+- Account KV changes in `/v2/changes` are coalesced in one row per key family (`entityId`:
+  `presence`, `task`, `agentprofile`, `agent`, or `self` for any other key; `accountKvChangeFamily`
+  in `packages/protocol/src/changes.ts`). A row's `hint.keys` names only that row's last write, so
+  readers use the family to decide what to read again; before this, one `self` row let a presence
+  write hide an earlier task write. Readers that only check `kind: "kv"` behave as before.
 
 ### Transcript catch-up and reading position
 

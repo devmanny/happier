@@ -60,6 +60,17 @@ describe("publishSessionPublisherLifecycleUpdate", () => {
         ]);
     });
 
+    it("marks a heartbeat so lean readers skip it, and a state change not", async () => {
+        await publishSessionPublisherLifecycleUpdate({
+            sessionId: "s1", participantCursors: [{ accountId: "owner", cursor: 1 }], active: true, activeAt: 5, heartbeat: true,
+        });
+        await publishSessionPublisherLifecycleUpdate({
+            sessionId: "s1", participantCursors: [{ accountId: "owner", cursor: 2 }], active: false, activeAt: 6,
+        });
+        expect(emitUpdate.mock.calls[0]![0]).toMatchObject({ leanReaders: "skip", payload: { body: { active: true, activeAt: 5 } } });
+        expect(emitUpdate.mock.calls[1]![0]).not.toHaveProperty("leanReaders");
+    });
+
     it("preserves the explicit inactive transition", async () => {
         await publishSessionPublisherLifecycleUpdate({
             sessionId: "session-1",

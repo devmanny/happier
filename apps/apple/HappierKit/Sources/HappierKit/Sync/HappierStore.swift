@@ -527,15 +527,15 @@ public final class HappierStore {
         }
         do {
             var after = cursor
-            var touched = false
+            var refresh = AccountKVSync.Refresh.none
             while true {
                 guard let response = try await api.changes(after: after, limit: 500) else {
-                    touched = true // The cursor is gone: read what is shown again.
+                    refresh = .all // The cursor is gone: read what is shown again.
                     after = (try? await api.changesCursor()) ?? after
                     break
                 }
                 let page = AccountKVSync.page(response)
-                touched = touched || page.touchedKV
+                refresh = refresh.union(page.refresh)
                 let next = page.nextCursor ?? after
                 guard page.count == 500, next > after else {
                     after = max(next, after)
@@ -544,10 +544,10 @@ public final class HappierStore {
                 after = next
             }
             kvCursor = after
-            guard touched else { return }
-            await refreshTasks()
-            await refreshAgentProfiles()
-            for agentId in agentMemories.keys { await refreshAgentMemory(agentId: agentId) }
+            // Only the families that changed (presence alone reads nothing again).
+            if refresh.tasks { await refreshTasks() }
+            if refresh.profiles { await refreshAgentProfiles() }
+            if refresh.memory { for agentId in agentMemories.keys { await refreshAgentMemory(agentId: agentId) } }
         } catch {
             logBackground(error, "account kv catch-up")
         }
@@ -1306,7 +1306,9 @@ public final class HappierStore {
             connection = .connecting
             let socket = SocketIOClient(
                 serverURL: server, path: "/v1/updates",
-                auth: ["token": .string(token), "clientType": "user-scoped", "clientPurpose": "sync"])
+                auth: ["token": .string(token), "clientType": "user-scoped", "clientPurpose": "sync",
+                       // Lean updates: no heartbeats, full messages only for the sessions open here.
+                       "capabilities": ["updates-lean-v1"]])
             self.socket = socket
             registeredBrowserMethods = []
             await socket.setRequestHandler { [weak self] name, args in
@@ -1323,6 +1325,7 @@ public final class HappierStore {
                 await refreshSessions()
                 // Tasks, agents and memory changed while offline arrive through the change cursor.
                 Task { await catchUpAccountKV() }
+                await declareOpenSessions()
                 for id in openSessionIds {
                     startLoading(id)
                     refreshRunnerStatus(id)
@@ -1374,6 +1377,17 @@ public final class HappierStore {
         switch body["t"]?.stringValue {
         case "new-message", "message-updated":
             guard let sid = body["sid"]?.stringValue, let session = sessions[sid], let row = body["message"] else { return }
+            if row["contentOmitted"]?.boolValue == true {
+                // Lean notice for a session not open here: the list learns of it; the conversation
+                // reads it when opened (a cached transcript catches up by seq; an edit to a message
+                // it already has is read with a fresh load).
+                var updated = session
+                if let seq = row["seq"]?.intValue { updated.seq = max(session.seq, seq) }
+                if let at = Session.date(row["createdAt"]), body["t"]?.stringValue == "new-message" { updated.meaningfulActivityAt = at }
+                if updated != session { sessions[sid] = updated }
+                if body["t"]?.stringValue == "message-updated", !openSessionIds.contains(sid) { transcripts[sid] = nil }
+                return
+            }
             do {
                 let message = try TranscriptMessage(row: row, session: session)
                 // One write: every reader of the session list redraws once per message, not twice.
@@ -1424,7 +1438,9 @@ public final class HappierStore {
     /// Starts loading a transcript. The load is owned by the store, not by the calling view, so a
     /// view that SwiftUI recreates or dismisses mid-flight cannot leave the transcript half-loaded.
     public func open(_ id: String) {
+        let wasOpen = openSessionIds.contains(id)
         openSessionIds.open(id)
+        if !wasOpen { Task { await declareOpenSessions() } }
         refreshRunnerStatus(id)
         Task { await loadDraft(id) }
         startLoading(id)
@@ -1475,6 +1491,28 @@ public final class HappierStore {
 
     public func close(_ id: String) {
         openSessionIds.close(id)
+        if !openSessionIds.contains(id) { Task { await declareOpenSessions() } }
+    }
+
+    /// Tells the relay which sessions are open here (`client-open-sessions`): with lean updates it
+    /// sends full messages and streams only for those. A relay without lean updates doesn't answer;
+    /// then heartbeats keep arriving and "working" is judged by their freshness, as before.
+    private func declareOpenSessions() async {
+        guard let socket, connection == .online else { return }
+        let ids = Array(openSessionIds).sorted()
+        do {
+            let reply = try await socket.emitWithAck("client-open-sessions", ["sessionIds": .array(ids.map(JSONValue.string))],
+                                                     timeout: .seconds(10))
+            let lean = reply.first?["ok"]?.boolValue == true
+            if Session.heartbeatsArrive == lean { Session.heartbeatsArrive = !lean }
+            if reply.first?["truncated"]?.boolValue == true {
+                log.notice("open sessions: the relay kept only the first \(reply.first?["count"]?.intValue ?? 0, privacy: .public)")
+            }
+        } catch {
+            // No answer: an older relay (or the socket dropped); it sends everything as before.
+            Session.heartbeatsArrive = true
+            log.notice("open sessions not acknowledged: \(String(describing: error), privacy: .public)")
+        }
     }
 
     public func loadOlder(_ id: String) async {

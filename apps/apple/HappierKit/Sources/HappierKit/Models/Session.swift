@@ -251,12 +251,19 @@ public struct Session: Identifiable, Sendable, Equatable {
 
     private static func isTerminal(_ turnStatus: String?) -> Bool { ["completed", "cancelled", "failed"].contains(turnStatus ?? "") }
 
-    /// Simplified `getSessionStatus` + `deriveSessionRuntimePresentationState` (120 s freshness window).
-    public func status(at now: Date = .now) -> Status {
+    /// Whether the relay keeps sending publisher heartbeats (`activeAt`). A relay that accepted the
+    /// lean updates (`updates-lean-v1`) sends only state changes, including `active: false` when a
+    /// publisher stops signalling, so a turn's freshness can't be judged by `activeAt`. Set by the
+    /// store once per connection.
+    nonisolated(unsafe) public static var heartbeatsArrive = true
+
+    /// Simplified `getSessionStatus` + `deriveSessionRuntimePresentationState` (120 s freshness
+    /// window, while heartbeats arrive).
+    public func status(at now: Date = .now, heartbeats: Bool = Session.heartbeatsArrive) -> Status {
         guard active else { return .offline }
         if pendingPermissionRequestCount > 0 { return .permissionRequired }
         if pendingUserActionRequestCount > 0 { return .actionRequired }
-        let fresh: (Date?) -> Bool = { date in date.map { now.timeIntervalSince($0) <= 120 } ?? false }
+        let fresh: (Date?) -> Bool = { date in !heartbeats || (date.map { now.timeIntervalSince($0) <= 120 } ?? false) }
         if latestTurnStatus == "in_progress", fresh(latestTurnStatusObservedAt) || fresh(activeAt) { return .working }
         if thinking, !isTurnTerminal, fresh(thinkingAt ?? activeAt) { return .working }
         if latestTurnStatus == "failed" { return .failed }

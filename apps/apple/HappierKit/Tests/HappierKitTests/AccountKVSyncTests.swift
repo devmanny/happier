@@ -32,6 +32,22 @@ import Testing
         #expect(!AccountKVSync.page(["changes": [["cursor": 3, "kind": "session", "entityId": "s1"]], "nextCursor": 3]).touchedKV)
     }
 
+    @Test func aPageSaysWhichKeyFamiliesChangedSoOnlyThoseAreReadAgain() {
+        let page = AccountKVSync.page(["changes": [
+            ["cursor": 10, "kind": "kv", "entityId": "presence", "hint": ["keys": ["presence/s1"]]],
+            ["cursor": 11, "kind": "kv", "entityId": "task", "hint": ["keys": ["task/t1"]]],
+        ], "nextCursor": 11])
+        #expect(page.refresh == AccountKVSync.Refresh(tasks: true, profiles: false, memory: false))
+        // Presence alone: nothing to read again.
+        #expect(AccountKVSync.page(["changes": [["cursor": 3, "kind": "kv", "entityId": "presence"]], "nextCursor": 3]).refresh == .none)
+        // Agent memory and legacy profile keys share the agent family.
+        #expect(AccountKVSync.page(["changes": [["cursor": 4, "kind": "kv", "entityId": "agent"]], "nextCursor": 4]).refresh
+            == AccountKVSync.Refresh(tasks: false, profiles: true, memory: true))
+        // The historical single row (older relays) or an unknown family: everything, as before.
+        #expect(AccountKVSync.page(["changes": [["cursor": 5, "kind": "kv", "entityId": "self"]], "nextCursor": 5]).refresh == .all)
+        #expect(AccountKVSync.page(["changes": [["cursor": 6, "kind": "kv", "entityId": "later"]], "nextCursor": 6]).refresh == .all)
+    }
+
     @MainActor @Test func appliesTaskChangesInPlaceAndIgnoresOlderVersions() throws {
         let store = HappierStore(server: URL(string: "http://127.0.0.1:1")!)
         store.applyKVChanges([

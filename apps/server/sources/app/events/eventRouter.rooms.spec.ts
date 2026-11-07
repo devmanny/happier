@@ -207,7 +207,9 @@ describe("eventRouter (rooms)", () => {
         vi.spyOn(Math, "random").mockReturnValue(0.99);
         const ioTo = vi.fn();
         const emit = vi.fn();
-        ioTo.mockReturnValue({ emit });
+        // Socket.IO broadcast operators chain `except` (lean readers are excluded that way).
+        const operator: any = { emit, except: () => operator };
+        ioTo.mockReturnValue(operator);
         eventRouter.setIo({ to: ioTo } as any);
 
         eventRouter.emitEphemeral({

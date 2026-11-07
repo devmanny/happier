@@ -66,6 +66,8 @@ export type PublishRuntimeActivitySnapshotProjection = (params: Readonly<{
     latestTurnStatusObservedAt?: number | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
     badgeAttentionChanged?: boolean;
+    /** Only refreshes the publisher's `activeAt` (nothing about the session changed). */
+    heartbeat?: boolean;
     participantCursor: SessionParticipantCursor;
 }>) => Promise<void>;
 
@@ -90,6 +92,7 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
         latestTurnStatusObservedAt?: number | null;
         lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
         badgeAttentionChanged?: boolean;
+        heartbeat?: boolean;
     }>): Promise<void> => {
         await Promise.all(published.participantCursors.map(async (participantCursor) => {
             await params.publish({
@@ -107,6 +110,7 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
                 ...(typeof published.badgeAttentionChanged === 'boolean'
                     ? { badgeAttentionChanged: published.badgeAttentionChanged }
                     : {}),
+                ...(published.heartbeat ? { heartbeat: true } : {}),
             });
         }));
     };
@@ -297,6 +301,7 @@ export function registerSessionRuntimeActivitySnapshotSocketEvent(params: Readon
                     participantCursors: persisted.touched.participantCursors,
                     active: true,
                     activeAt: persisted.touched.activeAt,
+                    heartbeat: true,
                 });
             } else if (persisted.status === 'registered') {
                 await publishTransitionOnce('registration', {

@@ -1,6 +1,6 @@
 import { Server } from "socket.io";
 import { RELEASED_CONNECTED_SERVICE_IDS, readConnectedServiceReaderSupport } from "@happier-dev/protocol";
-import { CURRENT_CONNECTED_SERVICE_READER_ROOM, RELEASED_CONNECTED_SERVICE_READER_ROOM } from "../api/socketRooms";
+import { CURRENT_CONNECTED_SERVICE_READER_ROOM, RELEASED_CONNECTED_SERVICE_READER_ROOM, leanReaderRoom, openSessionRoom } from "../api/socketRooms";
 import { projectConnectedServiceUpdateForReader } from "./projectConnectedServiceUpdateForReader";
 import { type HappierSocketData } from "../api/socket/socketData";
 import {
@@ -113,13 +113,16 @@ class EventRouter {
         payload: UpdatePayload;
         recipientFilter?: RecipientFilter;
         skipSenderConnection?: ClientConnection;
+        /** `skip`: lean readers don't get it (a publisher heartbeat that only refreshes activeAt). */
+        leanReaders?: 'skip';
     }): void {
         this.emit({
             userId: params.userId,
             eventName: 'update',
             payload: params.payload,
             recipientFilter: params.recipientFilter || { type: 'all-user-authenticated-connections' },
-            skipSenderConnection: params.skipSenderConnection
+            skipSenderConnection: params.skipSenderConnection,
+            leanReaders: params.leanReaders,
         });
     }
 
@@ -191,6 +194,7 @@ class EventRouter {
         payload: any;
         recipientFilter: RecipientFilter;
         skipSenderConnection?: ClientConnection;
+        leanReaders?: 'skip';
     }): void {
         const emissionLabels = {
             event_name: params.eventName,
@@ -202,9 +206,21 @@ class EventRouter {
             socketEmissionPayloadBytesHistogram.observe(emissionLabels, estimateSocketPayloadBytes(params.payload));
         }
 
+        const lean = planLeanDelivery(params);
+
         if (this.io) {
             const skipSocketId = params.skipSenderConnection?.socket?.id;
-            const emitter = this.getEmitterForFilter(params.userId, params.recipientFilter);
+            let emitter = this.getEmitterForFilter(params.userId, params.recipientFilter);
+            if (lean) {
+                // Lean readers are user-scoped sockets in these rooms: everyone else gets the event
+                // as before, lean readers what the plan gives them.
+                const leanRoom = leanReaderRoom(params.userId);
+                emitter = emitter.except(leanRoom);
+                const skip = (target: any) => (skipSocketId ? target.except(skipSocketId) : target);
+                const openRoom = lean.sessionId ? openSessionRoom(params.userId, lean.sessionId) : null;
+                if (openRoom && lean.open) skip(this.io.to(openRoom)).emit(params.eventName, lean.open);
+                if (lean.other) skip(openRoom ? this.io.to(leanRoom).except(openRoom) : this.io.to(leanRoom)).emit(params.eventName, lean.other);
+            }
             if (params.eventName === "update") {
                 const legacyPayload = projectConnectedServiceUpdateForReader(params.payload, RELEASED_CONNECTED_SERVICE_IDS);
                 if (legacyPayload !== params.payload) {
@@ -252,9 +268,15 @@ class EventRouter {
                 continue;
             }
 
-            const payload = params.eventName === "update"
-                ? projectConnectedServiceUpdateForReader(params.payload, readConnectedServiceReaderSupport((connection.socket.data as HappierSocketData).connectedServiceIds))
+            const data = connection.socket.data as HappierSocketData;
+            let payload = params.eventName === "update"
+                ? projectConnectedServiceUpdateForReader(params.payload, readConnectedServiceReaderSupport(data.connectedServiceIds))
                 : params.payload;
+            if (lean && connection.socket.rooms?.has?.(leanReaderRoom(params.userId))) {
+                const open = lean.sessionId ? data.openSessionIds?.has(lean.sessionId) === true : false;
+                payload = open ? lean.open : lean.other;
+                if (!payload) continue;
+            }
             connection.socket.emit(params.eventName, payload);
         }
     }
@@ -287,6 +309,44 @@ class EventRouter {
                 return this.io.to(`user:${userId}`);
         }
     }
+}
+
+/** What lean readers get instead of the event: for the session they have open, and otherwise (null: nothing). */
+type LeanDelivery = Readonly<{ sessionId: string | null; open: unknown; other: unknown }>;
+
+const LEAN_RECIPIENT_FILTERS = new Set<RecipientFilter['type']>([
+    'all-interested-in-session', 'all-user-authenticated-connections', 'user-scoped-only',
+]);
+const STREAM_EPHEMERALS = new Set(['transcript-stream-segment', 'transcript-stream-segment-delta']);
+const MESSAGE_UPDATES = new Set(['new-message', 'message-updated']);
+
+/**
+ * The one decision of what lean readers (`UPDATES_LEAN_V1_CAPABILITY`) receive; null when they get
+ * the event like everyone else. Heartbeats: nothing. Messages: in full for an open session, else a
+ * light notice (same envelope and cursor, the message without its content). Transcript streams:
+ * only for an open session.
+ */
+export function planLeanDelivery(params: Readonly<{
+    eventName: 'update' | 'ephemeral';
+    payload: any;
+    recipientFilter: RecipientFilter;
+    leanReaders?: 'skip';
+}>): LeanDelivery | null {
+    if (!LEAN_RECIPIENT_FILTERS.has(params.recipientFilter.type)) return null;
+    if (params.eventName === 'update') {
+        if (params.leanReaders === 'skip') return { sessionId: null, open: null, other: null };
+        const body = params.payload?.body;
+        if (!MESSAGE_UPDATES.has(body?.t) || typeof body?.sid !== 'string' || !body.message) return null;
+        const { content: _content, ...rest } = body.message;
+        return {
+            sessionId: body.sid,
+            open: params.payload,
+            other: { ...params.payload, body: { ...body, message: { ...rest, contentOmitted: true } } },
+        };
+    }
+    const type = params.payload?.type;
+    if (!STREAM_EPHEMERALS.has(type) || typeof params.payload?.sessionId !== 'string') return null;
+    return { sessionId: params.payload.sessionId, open: params.payload, other: null };
 }
 
 export const eventRouter = new EventRouter();

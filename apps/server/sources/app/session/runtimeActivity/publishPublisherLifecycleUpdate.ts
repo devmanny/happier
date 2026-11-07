@@ -25,6 +25,11 @@ export async function publishSessionPublisherLifecycleUpdate(params: Readonly<{
     latestTurnStatusObservedAt?: number | null;
     lastRuntimeIssue?: SessionRuntimeIssueV1 | null;
     badgeAttentionChanged?: boolean;
+    /**
+     * Only refreshes `activeAt` (a publisher heartbeat): lean readers skip it, and it changes no
+     * badge, so it schedules no badge refresh.
+     */
+    heartbeat?: boolean;
     skipSenderAccountId?: string;
     skipSenderConnection?: ClientConnection;
 }>): Promise<void> {
@@ -55,13 +60,14 @@ export async function publishSessionPublisherLifecycleUpdate(params: Readonly<{
                 },
             ),
             recipientFilter: { type: "all-interested-in-session", sessionId: params.sessionId },
+            ...(params.heartbeat ? { leanReaders: "skip" as const } : {}),
             ...(params.skipSenderConnection && accountId === params.skipSenderAccountId
                 ? { skipSenderConnection: params.skipSenderConnection }
                 : {}),
         });
     }));
     // Reachability changes badge eligibility independently of turn or Runtime Activity updates.
-    if (params.badgeAttentionChanged === true || typeof params.active === "boolean") {
+    if (params.badgeAttentionChanged === true || (typeof params.active === "boolean" && !params.heartbeat)) {
         await refreshSessionParticipantBadgePushes({
             badgeAttentionChanged: true,
             participantCursors: params.participantCursors,

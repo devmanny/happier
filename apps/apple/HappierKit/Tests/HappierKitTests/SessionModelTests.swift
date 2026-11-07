@@ -137,4 +137,17 @@ import Testing
         #expect(plain.record == record)
         #expect(throws: (any Error).self) { try TranscriptMessage(row: ["id": "m", "seq": 6, "createdAt": 1, "content": ["t": "weird"]], session: session) }
     }
+
+    @Test func withoutHeartbeatsATurnStaysWorkingUntilTheRelaySaysOtherwise() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let stale = now.timeIntervalSince1970 * 1000 - 600_000
+        var session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["activeAt": .number(stale)]), keys: keys)
+        session.latestTurnStatus = "in_progress"
+        // A relay that sends heartbeats: a turn silent for 10 minutes isn't shown working.
+        #expect(session.status(at: now, heartbeats: true) == .idle)
+        // A lean relay sends no heartbeats, only state changes: the turn is still running.
+        #expect(session.status(at: now, heartbeats: false) == .working)
+        session.latestTurnStatus = "completed"
+        #expect(session.status(at: now, heartbeats: false) == .idle)
+    }
 }

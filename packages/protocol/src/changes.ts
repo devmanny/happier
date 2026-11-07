@@ -47,3 +47,19 @@ export const CursorGoneErrorSchema = z.object({
 }).strict();
 
 export type CursorGoneError = z.infer<typeof CursorGoneErrorSchema>;
+
+/**
+ * Account KV changes are recorded in one coalesced row per key family (`entityId`), so a reader
+ * catching up can tell which families changed since its cursor: the hint of a row only names the
+ * keys of that row's last write, and a single row let a presence write hide an earlier task write.
+ * Keys of other families keep the historical `self` row.
+ */
+export const ACCOUNT_KV_CHANGE_FAMILIES = ['presence', 'task', 'agentprofile', 'agent'] as const;
+export type AccountKvChangeFamily = (typeof ACCOUNT_KV_CHANGE_FAMILIES)[number] | 'self';
+
+export function accountKvChangeFamily(key: string): AccountKvChangeFamily {
+  const head = key.split('/', 1)[0] ?? '';
+  return (ACCOUNT_KV_CHANGE_FAMILIES as readonly string[]).includes(head) && key.includes('/')
+    ? head as AccountKvChangeFamily
+    : 'self';
+}

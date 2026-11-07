@@ -18,7 +18,7 @@ import { machineUpdateHandler } from "./socket/machineUpdateHandler";
 import { machineTransferHandler } from "./socket/machineTransferHandler";
 import { artifactUpdateHandler } from "./socket/artifactUpdateHandler";
 import { accessKeyHandler } from "./socket/accessKeyHandler";
-import { getSocketRooms } from "./socketRooms";
+import { getSocketRooms, readsLeanUpdates, registerOpenSessionsEvent } from "./socketRooms";
 import { CONNECTED_SERVICE_READER_SUPPORT_SOCKET_AUTH_FIELD, readConnectedServiceReaderSupport } from "@happier-dev/protocol";
 import { createAdapter } from "@socket.io/redis-streams-adapter";
 import { getRedisClient } from "@/storage/redis/redis";
@@ -320,7 +320,11 @@ export function startSocket(app: Fastify) {
             sessionId,
             machineId,
             connectedServiceIds: socketData.connectedServiceIds,
+            capabilities: socket.handshake.auth.capabilities,
         }));
+        // Lean readers declare the sessions they show (see `UPDATES_LEAN_V1_CAPABILITY`).
+        registerOpenSessionsEvent(socket, userId,
+            metadata.clientType === 'user-scoped' && readsLeanUpdates(socket.handshake.auth.capabilities));
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
@@ -466,6 +470,7 @@ export function startSocket(app: Fastify) {
                             latestTurnStatusObservedAt,
                             lastRuntimeIssue,
                             badgeAttentionChanged,
+                            heartbeat,
                             participantCursor,
                         }) => {
                             await publishSessionPublisherLifecycleUpdate({
@@ -479,6 +484,7 @@ export function startSocket(app: Fastify) {
                                 ...(latestTurnStatusObservedAt !== undefined ? { latestTurnStatusObservedAt } : {}),
                                 ...(lastRuntimeIssue !== undefined ? { lastRuntimeIssue } : {}),
                                 ...(typeof badgeAttentionChanged === 'boolean' ? { badgeAttentionChanged } : {}),
+                                ...(heartbeat ? { heartbeat: true } : {}),
                                 skipSenderAccountId: userId,
                                 skipSenderConnection: connection,
                             });

@@ -31,18 +31,56 @@ public enum AccountKVSync {
         }
     }
 
+    /// What a catch-up must read again.
+    public struct Refresh: Equatable, Sendable {
+        public var tasks: Bool
+        public var profiles: Bool
+        /// Agent memory (only the agents open here).
+        public var memory: Bool
+
+        public init(tasks: Bool, profiles: Bool, memory: Bool) {
+            self.tasks = tasks
+            self.profiles = profiles
+            self.memory = memory
+        }
+
+        public static let none = Refresh(tasks: false, profiles: false, memory: false)
+        public static let all = Refresh(tasks: true, profiles: true, memory: true)
+
+        public var isEmpty: Bool { self == .none }
+
+        func union(_ other: Refresh) -> Refresh {
+            Refresh(tasks: tasks || other.tasks, profiles: profiles || other.profiles, memory: memory || other.memory)
+        }
+
+        /// A KV change row's family (`accountKvChangeFamily` in the protocol): presence is never
+        /// read again; the historical `self` row (older relays) or an unknown family reads all.
+        static func family(_ entityId: String?) -> Refresh {
+            switch entityId {
+            case "presence": .none
+            case "task": Refresh(tasks: true, profiles: false, memory: false)
+            case "agentprofile": Refresh(tasks: false, profiles: true, memory: false)
+            case "agent": Refresh(tasks: false, profiles: true, memory: true)
+            default: .all
+            }
+        }
+    }
+
     public struct Page: Equatable, Sendable {
-        public let touchedKV: Bool
+        public let refresh: Refresh
         public let nextCursor: Int?
         /// Entries of every kind, to tell a full page from the last one.
         public let count: Int
+
+        public var touchedKV: Bool { !refresh.isEmpty }
     }
 
-    /// A `/v2/changes` page, reduced to whether the KV store changed.
+    /// A `/v2/changes` page, reduced to what of the KV store must be read again.
     public static func page(_ response: JSONValue) -> Page {
         let changes = response["changes"]?.arrayValue ?? []
-        return Page(touchedKV: changes.contains { $0["kind"]?.stringValue == "kv" },
-                    nextCursor: response["nextCursor"]?.intValue, count: changes.count)
+        let refresh = changes.filter { $0["kind"]?.stringValue == "kv" }
+            .reduce(Refresh.none) { $0.union(.family($1["entityId"]?.stringValue)) }
+        return Page(refresh: refresh, nextCursor: response["nextCursor"]?.intValue, count: changes.count)
     }
 }
 
