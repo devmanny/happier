@@ -443,6 +443,115 @@ public final class HappierStore {
         return tasks.first { $0.id == id }
     }
 
+    // MARK: - Live KV updates (tasks, agents, memory)
+
+    /// The account change cursor the KV state shown here is current up to; nil until the first catch-up.
+    @ObservationIgnored private var kvCursor: Int?
+    @ObservationIgnored private var pendingKVChanges: [AccountKVSync.Change] = []
+    @ObservationIgnored private var kvFlush: Task<Void, Never>?
+
+    /// A `kv-batch-update` from the socket: applied in place shortly after, so a burst (an agent
+    /// writing its journal and its now) redraws once.
+    private func receiveKVUpdate(_ payload: JSONValue) {
+        let changes = AccountKVSync.changes(fromUpdate: payload["body"] ?? .null)
+        guard !changes.isEmpty else { return }
+        if let seq = payload["seq"]?.intValue, let cursor = kvCursor { kvCursor = max(cursor, seq) }
+        pendingKVChanges += changes
+        guard kvFlush == nil else { return }
+        kvFlush = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, !Task.isCancelled else { return }
+            let changes = self.pendingKVChanges
+            self.pendingKVChanges = []
+            self.kvFlush = nil
+            if let machineKey = self.keys?.content.secretKey { self.applyKVChanges(changes, machineKey: machineKey) }
+        }
+    }
+
+    /// Applies changed keys to what is loaded: tasks, agent profiles, and agent memories already open.
+    /// A change older than what is shown (an echo of an earlier write) is ignored.
+    func applyKVChanges(_ changes: [AccountKVSync.Change], machineKey: Data) {
+        var tasks = self.tasks
+        var tasksChanged = false
+        for change in changes {
+            if change.key.hasPrefix(AgentTask.kvPrefix) {
+                let id = String(change.key.dropFirst(AgentTask.kvPrefix.count))
+                let current = tasks.firstIndex { $0.id == id }
+                if let current, tasks[current].version >= change.version { continue }
+                if let value = change.value, var task = AgentTask.open(value, machineKey: machineKey), task.id == id {
+                    task.version = change.version
+                    if let current { tasks[current] = task } else { tasks.append(task) }
+                } else if let current {
+                    tasks.remove(at: current)
+                }
+                tasksChanged = true
+            } else if let id = AgentProfile.id(fromKey: change.key) {
+                let legacy = change.key.hasPrefix(AgentProfile.legacyKvPrefix)
+                if legacy {
+                    legacyAgentProfileVersions[id] = change.value == nil ? nil : change.version
+                    // Only an older build's agent this app doesn't have yet is shown from the old key.
+                    guard agentProfiles.contains(where: { $0.id == id }) == false else { continue }
+                } else if let known = agentProfileVersions[id], known >= change.version {
+                    continue
+                }
+                agentProfiles.removeAll { $0.id == id }
+                if let value = change.value, let profile = AgentProfile.open(value, machineKey: machineKey), profile.id == id {
+                    agentProfiles.append(profile)
+                    agentProfiles.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                    if !legacy { agentProfileVersions[id] = change.version }
+                } else if !legacy {
+                    agentProfileVersions[id] = nil
+                }
+            } else if change.key.hasPrefix("agent/") {
+                let agentId = change.key.split(separator: "/").dropFirst().first.map(String.init) ?? ""
+                guard let memory = agentMemories[agentId] else { continue }
+                agentMemories[agentId] = memory.applying(change, machineKey: machineKey)
+            }
+        }
+        if tasksChanged { self.tasks = tasks }
+    }
+
+    func setAgentMemoryForTests(_ memory: AgentMemory, agentId: String) {
+        agentMemories[agentId] = memory
+    }
+
+    /// After a reconnect or coming back to the foreground: nothing to read when the KV store didn't
+    /// change since `kvCursor`; otherwise only the prefixes shown here are read again.
+    public func catchUpAccountKV() async {
+        guard let api else { return }
+        guard let cursor = kvCursor else {
+            // First time: the lists are read when shown; start following changes from now.
+            kvCursor = try? await api.changesCursor()
+            return
+        }
+        do {
+            var after = cursor
+            var touched = false
+            while true {
+                guard let response = try await api.changes(after: after, limit: 500) else {
+                    touched = true // The cursor is gone: read what is shown again.
+                    after = (try? await api.changesCursor()) ?? after
+                    break
+                }
+                let page = AccountKVSync.page(response)
+                touched = touched || page.touchedKV
+                let next = page.nextCursor ?? after
+                guard page.count == 500, next > after else {
+                    after = max(next, after)
+                    break
+                }
+                after = next
+            }
+            kvCursor = after
+            guard touched else { return }
+            await refreshTasks()
+            await refreshAgentProfiles()
+            for agentId in agentMemories.keys { await refreshAgentMemory(agentId: agentId) }
+        } catch {
+            logBackground(error, "account kv catch-up")
+        }
+    }
+
     public func refreshTasks() async {
         guard let api else { return }
         guard let machineKey = keys?.content.secretKey else {
@@ -736,6 +845,10 @@ public final class HappierStore {
         agentProfilesError = nil
         agentProfileVersions = [:]
         legacyAgentProfileVersions = [:]
+        kvCursor = nil
+        pendingKVChanges = []
+        kvFlush?.cancel()
+        kvFlush = nil
         agentMemories = [:]
         agentMemoryError = nil
         tasks = []
@@ -1061,6 +1174,8 @@ public final class HappierStore {
                 Task { await drainTokenUsageQueue() }
                 await syncDeviceBrowserRegistrations()
                 await refreshSessions()
+                // Tasks, agents and memory changed while offline arrive through the change cursor.
+                Task { await catchUpAccountKV() }
                 for id in openSessionIds {
                     startLoading(id)
                     refreshRunnerStatus(id)
@@ -1086,6 +1201,7 @@ public final class HappierStore {
         guard case .event(let name, let args) = event, let payload = args.first else { return }
         switch name {
         case "update":
+            receiveKVUpdate(payload)
             await handleUpdate(payload["body"] ?? .null)
         case "ephemeral":
             if payload["type"]?.stringValue == "usage", let id = payload["id"]?.stringValue,

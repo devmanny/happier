@@ -61,11 +61,12 @@ struct AttentionWidgetPublisher: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
             .task { await follow() }
-            // Tasks have no live updates: read them when the app opens or comes back.
+            // Tasks are read once at launch; after that they arrive live from the socket, and coming
+            // back to the foreground catches up through the account's change cursor.
             .task { await store.refreshTasks() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { publish() }
-                if phase == .active { Task { await store.refreshTasks() } }
+                if phase == .active { Task { await store.catchUpAccountKV() } }
             }
             .onDisappear {
                 // Signed out: the widgets forget this account's sessions.

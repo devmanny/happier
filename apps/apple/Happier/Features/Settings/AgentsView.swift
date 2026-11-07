@@ -831,10 +831,16 @@ private struct TaskDetailView: View {
     @State private var alert: String?
     @State private var approveFolder: (agent: AgentProfile, machineId: String, directory: String)?
 
+    /// The task as it was when these edits started: what "changes" are measured against, so a
+    /// change made elsewhere meanwhile is kept, not reverted, when this screen saves.
+    @State private var base: AgentTask?
+    /// The task changed elsewhere (an agent, another device) while this screen has unsaved edits.
+    @State private var changedElsewhere = false
+
     private var stored: AgentTask? { store.task(id: taskId) }
     private var changes: AgentTask.Update? {
-        guard let stored, let draft else { return nil }
-        let update = AgentTask.Update(from: stored, to: draft)
+        guard let base = base ?? stored, let draft else { return nil }
+        let update = AgentTask.Update(from: base, to: draft)
         return update.isEmpty ? nil : update
     }
 
@@ -847,10 +853,40 @@ private struct TaskDetailView: View {
                                        description: Text("It may have been deleted on another device."))
             }
         }
-        .onAppear { if draft == nil { draft = stored } }
+        .onAppear {
+            if draft == nil {
+                draft = stored
+                base = stored
+            }
+        }
         .onChange(of: stored) { _, latest in
-            // Someone else's change shows up here unless this screen has unsaved edits.
-            if changes == nil { draft = latest }
+            // Someone else's change shows up at once, unless this screen has unsaved edits: then it
+            // says so and lets you choose, instead of overwriting what you're writing.
+            if changes == nil {
+                draft = latest
+                base = latest
+            } else if latest?.version != base?.version {
+                changedElsewhere = true
+            }
+        }
+        .safeAreaInset(edge: .top) {
+            if changedElsewhere {
+                HStack(spacing: 10) {
+                    Label("This task changed while you were editing.", systemImage: "exclamationmark.arrow.circlepath")
+                        .font(.subheadline)
+                    Spacer(minLength: 0)
+                    Button("Keep My Edits") { changedElsewhere = false }
+                    Button("Load Changes") {
+                        draft = stored
+                        base = stored
+                        changedElsewhere = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(10)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal)
+            }
         }
         .navigationTitle(draft?.title ?? "Task")
         #if os(iOS)
@@ -860,7 +896,13 @@ private struct TaskDetailView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button("Save") {
                     guard let changes else { return }
-                    Task { if let saved = await store.updateTask(id: taskId, changes) { draft = saved } }
+                    Task {
+                        if let saved = await store.updateTask(id: taskId, changes) {
+                            draft = saved
+                            base = saved
+                            changedElsewhere = false
+                        }
+                    }
                 }
                 .disabled(changes == nil)
             }
@@ -940,7 +982,13 @@ private struct TaskDetailView: View {
                 Button("Add Comment") {
                     let text = comment
                     comment = ""
-                    Task { if let saved = await store.updateTask(id: taskId, AgentTask.Update(comment: text)) { draft = saved } }
+                    Task {
+                        if let saved = await store.updateTask(id: taskId, AgentTask.Update(comment: text)) {
+                            // Keep any unsaved edits; the comment is already stored.
+                            if changes == nil { draft = saved }
+                            base = saved
+                        }
+                    }
                 }
                 .disabled(comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -1091,7 +1139,8 @@ private struct TaskRepeatSections: View {
             if !task.occurrences.isEmpty { occurrencesSection }
         }
         .onAppear { draft = stored }
-        .onChange(of: stored) { _, latest in if !saving { draft = latest } }
+        // A change from elsewhere (e.g. an occurrence recorded) only replaces rules you haven't edited.
+        .onChange(of: stored) { previous, latest in if !saving, draft == previous { draft = latest } }
         .sheet(item: $editingRule) { rule in
             NavigationStack {
                 TaskRuleEditor(rule: rule) { edited in
