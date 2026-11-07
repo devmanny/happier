@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { parseSessionPermissionModeAlias, SESSION_PERMISSION_INTENT_INPUTS, type SessionPermissionMode } from '../sessionMetadata/sessionPermissionModes.js';
 import { TaskOccurrenceSchema, TaskRecurrenceV1Schema, TaskScheduledStartV1Schema } from './agentTaskRecurrence.js';
 
 /**
@@ -81,6 +82,13 @@ export const AgentTaskV1Schema = z.object({
   occurrences: z.array(TaskOccurrenceSchema).optional(),
   /** When the user was already told it was due soon / overdue, so every machine tells once. */
   notifiedV1: z.object({ dueSoonAt: z.number().optional(), overdueAt: z.number().optional() }).strip().optional(),
+  /**
+   * How every start of this task runs ("Start now", "Schedule…", each occurrence), for an agent or a
+   * session. Absent means YOLO, the default for new tasks and for tasks written before the field.
+   */
+  permissionMode: z.enum(SESSION_PERMISSION_INTENT_INPUTS).optional(),
+  /** Set when the user archived it (not going to do it): hidden by default, never deleted. */
+  archivedAt: z.number().optional(),
 }).strip();
 export type AgentTaskV1 = z.infer<typeof AgentTaskV1Schema>;
 
@@ -90,7 +98,18 @@ export function parseAgentTaskV1(value: unknown): AgentTaskV1 | null {
 }
 
 export function isAgentTaskOpen(task: AgentTaskV1): boolean {
-  return task.status !== 'done';
+  return task.status !== 'done' && task.archivedAt === undefined;
+}
+
+export type AgentTaskPermissionIntent = (typeof SESSION_PERMISSION_INTENT_INPUTS)[number];
+
+export function taskPermissionIntent(task: AgentTaskV1): AgentTaskPermissionIntent {
+  return task.permissionMode ?? 'yolo';
+}
+
+/** The task's permission mode as sessions carry it (spawn option, or a message's intent). */
+export function taskSessionPermissionMode(task: AgentTaskV1): SessionPermissionMode {
+  return parseSessionPermissionModeAlias(taskPermissionIntent(task)) ?? 'yolo';
 }
 
 export type AgentTaskUpdate = Readonly<{
@@ -107,6 +126,9 @@ export type AgentTaskUpdate = Readonly<{
   by?: AgentTaskActor;
   /** The session doing the update, linked to the task once. */
   threadSessionId?: string;
+  permissionMode?: AgentTaskPermissionIntent;
+  /** Archives (true) or restores (false) the task. */
+  archived?: boolean;
 }>;
 
 /** The task after `update`; `null` clears an optional field. A status change or comment is logged. */
@@ -119,6 +141,9 @@ export function applyAgentTaskUpdate(task: AgentTaskV1, update: AgentTaskUpdate,
   }
   if (update.title?.trim()) next.title = update.title.trim();
   if (update.assignee) next.assignee = update.assignee;
+  if (update.permissionMode) next.permissionMode = update.permissionMode;
+  if (update.archived === true && task.archivedAt === undefined) next.archivedAt = now;
+  if (update.archived === false) delete next.archivedAt;
   const statusChanged = update.status !== undefined && update.status !== task.status;
   if (update.status) next.status = update.status;
   if (update.threadSessionId && !task.threads.includes(update.threadSessionId)) {

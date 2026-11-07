@@ -8536,7 +8536,6 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   credentials,
                   spawnSession,
                   resolveSpawnSessionByNonce: resolveDaemonSpawnSessionByNonce,
-                  getAccountSettings: () => getActiveAccountSettingsSnapshot()?.settings ?? null,
                 }) ?? undefined,
               });
             }

@@ -8,6 +8,8 @@ import {
   isAgentTaskOpen,
   parseAgentTaskV1,
   taskDueNotices,
+  taskPermissionIntent,
+  taskSessionPermissionMode,
   type AgentTaskV1,
 } from './agentTask.js';
 
@@ -40,6 +42,22 @@ describe('agent tasks', () => {
   it('rejects a task without a title or with an unknown status', () => {
     expect(parseAgentTaskV1({ ...task(), title: ' ' })).toBeNull();
     expect(parseAgentTaskV1({ ...task(), status: 'later' })).toBeNull();
+  });
+
+  it('keeps each task\'s permission mode, YOLO when it has none, and its archive mark', () => {
+    expect(taskPermissionIntent(task())).toBe('yolo');
+    expect(taskSessionPermissionMode(task())).toBe('yolo');
+    const asking = applyAgentTaskUpdate(task(), { permissionMode: 'default' }, 5);
+    expect(parseAgentTaskV1(asking)).toMatchObject({ permissionMode: 'default' });
+    expect(taskSessionPermissionMode(asking)).toBe('default');
+    expect(taskSessionPermissionMode(task({ permissionMode: 'read_only' }))).toBe('read-only');
+    expect(taskSessionPermissionMode(task({ permissionMode: 'auto' }))).toBe('safe-yolo');
+    expect(parseAgentTaskV1({ ...task(), permissionMode: 'sometimes' })).toBeNull();
+
+    const archived = applyAgentTaskUpdate(task(), { archived: true }, 7);
+    expect(archived).toMatchObject({ archivedAt: 7, status: 'todo' });
+    expect(isAgentTaskOpen(archived)).toBe(false);
+    expect(applyAgentTaskUpdate(archived, { archived: false }, 8)).not.toHaveProperty('archivedAt');
   });
 
   it('applies an update: status, fields, a comment in the log and the thread that worked on it', () => {

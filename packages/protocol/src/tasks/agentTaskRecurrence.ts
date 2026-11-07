@@ -121,6 +121,7 @@ export function decideTaskOccurrence(params: Readonly<{
   const recurrence = task.recurrence;
   if (!recurrence || recurrence.paused) return { kind: 'skip', record: false, reason: 'recurrence paused or removed' };
   if (task.status === 'done') return { kind: 'skip', record: false, reason: 'task is done' };
+  if (task.archivedAt !== undefined) return { kind: 'skip', record: false, reason: 'task is archived' };
   const rule = recurrence.rules.find((entry) => entry.id === params.ruleId);
   if (!rule) return { kind: 'skip', record: false, reason: 'rule removed' };
   if (!isRecurrenceOccurrenceDay(rule, params.now, recurrence.timezone)) {
@@ -188,6 +189,7 @@ export function decideScheduledStart(params: Readonly<{ task: AgentTaskV1; autom
   const { task } = params;
   if (task.scheduledStartV1?.automationId !== params.automationId) return { kind: 'skip', reason: 'schedule cancelled or moved' };
   if (task.status === 'done') return { kind: 'skip', reason: 'task is done' };
+  if (task.archivedAt !== undefined) return { kind: 'skip', reason: 'task is archived' };
   if (task.assignee.kind === 'user') return { kind: 'skip', reason: 'task is assigned to the user' };
   return { kind: 'start' };
 }

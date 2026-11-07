@@ -1,6 +1,7 @@
 import {
   buildTaskStartPrompt,
   decideScheduledStart,
+  taskSessionPermissionMode,
   type AgentProfileV1,
   type AgentTaskV1,
 } from '@happier-dev/protocol';
@@ -9,7 +10,7 @@ import type { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
 
 import { spawnForTask, type TaskOccurrenceDeps, type TaskOccurrenceResult } from './runTaskOccurrence';
 
-export type ScheduledStartDeps = Pick<TaskOccurrenceDeps, 'readAgentProfile' | 'startNewThread' | 'continueThread' | 'defaultPermissionMode'> & Readonly<{
+export type ScheduledStartDeps = Pick<TaskOccurrenceDeps, 'readAgentProfile' | 'startNewThread' | 'continueThread'> & Readonly<{
   store: AgentTaskStore;
   /** Removes the one-time Automation once it has fired (`DELETE /v2/automations/:id`). */
   deleteAutomation: (automationId: string) => Promise<void>;
@@ -46,12 +47,12 @@ export async function runScheduledTaskStart(
   let started: Readonly<{ ok: true; sessionId: string }> | Readonly<{ ok: false; code: string; message: string }>;
   if (task.assignee.kind === 'session') {
     const sessionId = task.assignee.sessionId;
-    const sent = await deps.continueThread(sessionId, prompt, run.runId);
+    const sent = await deps.continueThread(sessionId, prompt, run.runId, taskSessionPermissionMode(task));
     started = sent.ok ? { ok: true, sessionId } : { ok: false, code: sent.code, message: `could not send the task to ${sessionId}` };
   } else if (task.assignee.kind === 'agent' && task.directory) {
     const profile: AgentProfileV1 | null = await deps.readAgentProfile(task.assignee.agentId);
     started = profile
-      ? await deps.startNewThread(spawnForTask(task, profile, deps.defaultPermissionMode(profile.providerId)), prompt, run.runId)
+      ? await deps.startNewThread(spawnForTask(task, profile), prompt, run.runId)
       : { ok: false, code: 'agent_profile_missing', message: `agent ${task.assignee.agentId} not found` };
   } else {
     started = { ok: false, code: 'task_not_runnable', message: 'the task needs an agent with a folder, or a session' };

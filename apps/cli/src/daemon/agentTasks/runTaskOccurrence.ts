@@ -2,6 +2,7 @@ import {
   agentIdentityFromProfile,
   buildTaskOccurrencePrompt,
   decideTaskOccurrence,
+  taskSessionPermissionMode,
   type AgentIdentityV1,
   type AgentProfileV1,
   type AgentTaskV1,
@@ -30,11 +31,13 @@ export type TaskOccurrenceDeps = Readonly<{
   startNewThread: (spawn: TaskOccurrenceSpawn, firstMessage: string, occurrenceId: string) => Promise<
     Readonly<{ ok: true; sessionId: string }> | Readonly<{ ok: false; code: string; message: string }>
   >;
-  continueThread: (sessionId: string, message: string, occurrenceId: string) => Promise<
+  /**
+   * Sends the message to an existing session through the canonical send path; `permissionMode` is
+   * the message's permission intent (the task's), the session's own mode is not changed.
+   */
+  continueThread: (sessionId: string, message: string, occurrenceId: string, permissionMode: string) => Promise<
     Readonly<{ ok: true }> | Readonly<{ ok: false; code: string }>
   >;
-  /** The account's default permission mode for new sessions with this provider, as the apps use it. */
-  defaultPermissionMode: (providerId: string) => string | undefined;
 }>;
 
 export type TaskOccurrenceResult =
@@ -65,7 +68,8 @@ function recordOccurrence(
   };
 }
 
-export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1, permissionMode: string | undefined): TaskOccurrenceSpawn {
+/** A new thread for the task, as its agent and with the task's permission mode. */
+export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1): TaskOccurrenceSpawn {
   const configDir = profile.account.configDir?.trim();
   return {
     directory: task.directory!,
@@ -74,7 +78,7 @@ export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1, permiss
     ...(profile.providerId === 'claude' && configDir ? { environmentVariables: { CLAUDE_CONFIG_DIR: configDir } } : {}),
     ...(profile.modelId && profile.modelId !== 'default' ? { modelId: profile.modelId } : {}),
     ...(profile.effort ? { effort: profile.effort } : {}),
-    ...(permissionMode ? { permissionMode } : {}),
+    permissionMode: taskSessionPermissionMode(task),
   };
 }
 
@@ -108,7 +112,7 @@ export async function runTaskOccurrence(
   // A session assignee: every occurrence is sent to that session (no agent profile or folder needed).
   if (task.assignee.kind === 'session' && decision.thread.kind === 'existing') {
     const sessionId = decision.thread.sessionId;
-    const sent = await deps.continueThread(sessionId, buildTaskOccurrencePrompt({ task, occurrenceId: run.runId }), run.runId);
+    const sent = await deps.continueThread(sessionId, buildTaskOccurrencePrompt({ task, occurrenceId: run.runId }), run.runId, taskSessionPermissionMode(task));
     if (!sent.ok) {
       await save({ ...base, sessionId, status: 'failed', finishedAt: now, note: `could not send it to ${sessionId} (${sent.code})` }, decision.closePrevious);
       return { type: 'failed', errorCode: sent.code, errorMessage: `could not send the occurrence to session ${sessionId}` };
@@ -129,7 +133,7 @@ export async function runTaskOccurrence(
   const prompt = buildTaskOccurrencePrompt({ task, occurrenceId: run.runId });
   let note: string | undefined;
   if (decision.thread.kind === 'existing') {
-    const continued = await deps.continueThread(decision.thread.sessionId, prompt, run.runId);
+    const continued = await deps.continueThread(decision.thread.sessionId, prompt, run.runId, taskSessionPermissionMode(task));
     if (continued.ok) {
       await save({ ...base, sessionId: decision.thread.sessionId, status: 'running' }, decision.closePrevious);
       return { type: 'success', sessionId: decision.thread.sessionId };
@@ -137,7 +141,7 @@ export async function runTaskOccurrence(
     note = `could not continue ${decision.thread.sessionId} (${continued.code}); opened a new thread`;
   }
 
-  const started = await deps.startNewThread(spawnForTask(task, profile, deps.defaultPermissionMode(profile.providerId)), prompt, run.runId);
+  const started = await deps.startNewThread(spawnForTask(task, profile), prompt, run.runId);
   if (!started.ok) {
     await save({ ...base, status: 'failed', finishedAt: now, note: `${started.code}: ${started.message}` }, decision.closePrevious);
     return { type: 'failed', errorCode: started.code, errorMessage: started.message };

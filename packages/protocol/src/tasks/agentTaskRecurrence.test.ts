@@ -85,6 +85,7 @@ describe('deciding an occurrence', () => {
     const quiet = (t: AgentTaskV1, ruleId = 'r1') => decideTaskOccurrence({ task: t, ruleId, now, isThreadWorking: () => false });
     expect(quiet(task({ recurrence: { ...task().recurrence!, paused: true } }))).toMatchObject({ kind: 'skip', record: false });
     expect(quiet(task({ status: 'done' }))).toMatchObject({ kind: 'skip', record: false });
+    expect(quiet(task({ archivedAt: 1 }))).toMatchObject({ kind: 'skip', record: false });
     expect(quiet(task(), 'gone')).toMatchObject({ kind: 'skip', record: false });
     expect(quiet(task({ assignee: { kind: 'user' } }))).toMatchObject({ kind: 'skip', record: true });
     const everyThird = task({ recurrence: { ...task().recurrence!, rules: [{ id: 'r9', kind: 'every_n_days', everyDays: 3, anchorDate: '2026-11-07', time: '09:00' }] } });
@@ -112,6 +113,7 @@ describe('scheduled start', () => {
     expect(decideScheduledStart({ task: scheduled, automationId: 'auto-old' })).toMatchObject({ kind: 'skip' });
     expect(decideScheduledStart({ task: task({ recurrence: undefined }), automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
     expect(decideScheduledStart({ task: { ...scheduled, status: 'done' }, automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
+    expect(decideScheduledStart({ task: { ...scheduled, archivedAt: 1 }, automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
     expect(decideScheduledStart({ task: { ...scheduled, assignee: { kind: 'user' } }, automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
     expect(decideScheduledStart({ task: { ...scheduled, assignee: { kind: 'session', sessionId: 's1' } }, automationId: 'auto-1' })).toEqual({ kind: 'start' });
   });

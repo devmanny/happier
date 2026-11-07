@@ -139,6 +139,14 @@ prefixes:
   When it fires the daemon opens the agent's thread, or sends the assigned session the task through
   the canonical send path (resuming it), links the thread, clears the schedule and deletes the
   Automation; a later yearly firing finds no schedule and does nothing.
+  Each task keeps its permission mode (`permissionMode`: `read_only`, `default`, `auto`, `yolo`;
+  absent means `yolo`, for new tasks and for tasks written before the field). "Start now",
+  "Schedule…" and every occurrence use it: a new thread is spawned with it, and a message to an
+  existing session carries it as that message's permission intent (`sendSessionMessage`
+  `permissionModeOverride`, as `session send --permission-mode`) without changing the session's
+  mode. `archivedAt` marks a task the user is not going to do: hidden by default, never deleted,
+  off every board, and its repetitions and scheduled start do nothing. Both fields are optional;
+  builds before 2026-11-07 parse such tasks but drop the two fields if they rewrite one.
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

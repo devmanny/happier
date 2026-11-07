@@ -32,7 +32,6 @@ async function setup(overrides: Partial<AgentTaskV1> = {}) {
     liveThreadIds: vi.fn(async () => new Set<string>()),
     startNewThread: vi.fn(async () => ({ ok: true as const, sessionId: 's-new' })),
     continueThread: vi.fn(async () => ({ ok: true as const })),
-    defaultPermissionMode: () => 'yolo',
   };
   return { store, deps };
 }
@@ -59,13 +58,23 @@ describe('runTaskOccurrence', () => {
     expect((await store.get('t1'))!.task.occurrences).toHaveLength(1);
   });
 
+  it('runs each occurrence with the task\'s own permission mode, for a new thread or a session', async () => {
+    const { deps } = await setup({ permissionMode: 'default' });
+    await runTaskOccurrence({ runId: 'run1', taskId: 't1', ruleId: 'r1' }, deps);
+    expect(deps.startNewThread).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'default' }), expect.any(String), 'run1');
+
+    const session = await setup({ assignee: { kind: 'session', sessionId: 's-chat' }, permissionMode: 'read_only' });
+    await runTaskOccurrence({ runId: 'run2', taskId: 't1', ruleId: 'r1' }, session.deps);
+    expect(session.deps.continueThread).toHaveBeenCalledWith('s-chat', expect.any(String), 'run2', 'read-only');
+  });
+
   it('continues the last thread when the task asks for it, and opens a new one if that fails', async () => {
     const { store, deps } = await setup({
       recurrence: { v: 1, timezone: 'UTC', continuity: 'same_thread', paused: false, rules: [{ id: 'r1', kind: 'weekly', weekdays: [1], time: '09:00' }] },
       occurrences: [{ id: 'run0', ruleId: 'r1', startedAt: 1, finishedAt: 2, sessionId: 's-prev', status: 'completed' }],
     });
     expect(await runTaskOccurrence({ runId: 'run1', taskId: 't1', ruleId: 'r1' }, deps)).toEqual({ type: 'success', sessionId: 's-prev' });
-    expect(deps.continueThread).toHaveBeenCalledWith('s-prev', expect.stringContaining('Revisión diaria'), 'run1');
+    expect(deps.continueThread).toHaveBeenCalledWith('s-prev', expect.stringContaining('Revisión diaria'), 'run1', 'yolo');
     expect(deps.startNewThread).not.toHaveBeenCalled();
 
     vi.mocked(deps.continueThread).mockResolvedValueOnce({ ok: false, code: 'session_archived' });
@@ -76,7 +85,7 @@ describe('runTaskOccurrence', () => {
   it('sends each occurrence of a session-assigned task to that session, and fails without opening another thread', async () => {
     const { store, deps } = await setup({ assignee: { kind: 'session', sessionId: 's-chat', title: 'Navegador' }, directory: undefined });
     expect(await runTaskOccurrence({ runId: 'run1', taskId: 't1', ruleId: 'r1' }, deps)).toEqual({ type: 'success', sessionId: 's-chat' });
-    expect(deps.continueThread).toHaveBeenCalledWith('s-chat', expect.stringContaining('Revisión diaria'), 'run1');
+    expect(deps.continueThread).toHaveBeenCalledWith('s-chat', expect.stringContaining('Revisión diaria'), 'run1', 'yolo');
     expect(deps.readAgentProfile).not.toHaveBeenCalled();
     expect((await store.get('t1'))!.task.occurrences?.at(-1)).toMatchObject({ id: 'run1', sessionId: 's-chat', status: 'running' });
 

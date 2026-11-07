@@ -23,7 +23,6 @@ async function setup(overrides: Partial<AgentTaskV1> = {}) {
     startNewThread: vi.fn(async () => ({ ok: true as const, sessionId: 's-new' })),
     continueThread: vi.fn(async () => ({ ok: true as const })),
     deleteAutomation: vi.fn(async () => {}),
-    defaultPermissionMode: () => undefined,
   };
   return { store, deps };
 }
@@ -32,13 +31,19 @@ describe('runScheduledTaskStart', () => {
   it('starts the agent on the task once, clears the schedule and removes its Automation', async () => {
     const { store, deps } = await setup();
     expect(await runScheduledTaskStart({ runId: 'run1', automationId: 'auto-1', taskId: 't1' }, deps)).toEqual({ type: 'success', sessionId: 's-new' });
-    expect(deps.startNewThread).toHaveBeenCalledWith(expect.objectContaining({ directory: '/repo', backendTarget: { kind: 'builtInAgent', agentId: 'codex' } }),
+    expect(deps.startNewThread).toHaveBeenCalledWith(expect.objectContaining({ directory: '/repo', backendTarget: { kind: 'builtInAgent', agentId: 'codex' }, permissionMode: 'yolo' }),
       expect.stringContaining('Revisar la propuesta'), 'run1');
     const { task } = (await store.get('t1'))!;
     expect(task).toMatchObject({ status: 'in_progress', threads: ['s-new'] });
     expect(task).not.toHaveProperty('scheduledStartV1');
     expect(task.log.at(-1)?.text).toContain('Scheduled start');
     expect(deps.deleteAutomation).toHaveBeenCalledWith('auto-1');
+  });
+
+  it('opens the agent\'s thread with the task\'s permission mode', async () => {
+    const { deps } = await setup({ permissionMode: 'auto' });
+    await runScheduledTaskStart({ runId: 'run5', automationId: 'auto-1', taskId: 't1' }, deps);
+    expect(deps.startNewThread).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'safe-yolo' }), expect.any(String), 'run5');
   });
 
   it('does nothing for a cancelled or moved schedule, but still removes the stray Automation', async () => {
@@ -59,9 +64,9 @@ describe('runScheduledTaskStart', () => {
   });
 
   it('sends a session-assigned task to that session instead of opening a new one', async () => {
-    const { store, deps } = await setup({ assignee: { kind: 'session', sessionId: 's-chat', title: 'Navegador' } });
+    const { store, deps } = await setup({ assignee: { kind: 'session', sessionId: 's-chat', title: 'Navegador' }, permissionMode: 'default' });
     expect(await runScheduledTaskStart({ runId: 'run4', automationId: 'auto-1', taskId: 't1' }, deps)).toEqual({ type: 'success', sessionId: 's-chat' });
-    expect(deps.continueThread).toHaveBeenCalledWith('s-chat', expect.stringContaining('Revisar la propuesta'), 'run4');
+    expect(deps.continueThread).toHaveBeenCalledWith('s-chat', expect.stringContaining('Revisar la propuesta'), 'run4', 'default');
     expect(deps.startNewThread).not.toHaveBeenCalled();
     expect((await store.get('t1'))!.task).toMatchObject({ status: 'in_progress', threads: ['s-chat'] });
   });

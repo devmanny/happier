@@ -7,7 +7,6 @@ import {
   parseAgentPresenceV1,
   parseAgentProfileV1,
   type AccountScopedCryptoMaterial,
-  type AccountSettings,
   type AgentProfileV1,
 } from '@happier-dev/protocol';
 
@@ -105,7 +104,6 @@ export function createTaskOccurrenceRunner(params: Readonly<{
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   /** Settles a spawn the daemon accepted before it knew the session id (`daemon.spawnSession.resolve`). */
   resolveSpawnSessionByNonce: SpawnSessionNonceResolver;
-  getAccountSettings: () => AccountSettings | null | undefined;
 }>): ((run: Readonly<{ runId: string; automationId: string; dueAt?: number; taskId: string; ruleId?: string; kind: 'recurrence' | 'scheduled_start' }>) => Promise<TaskOccurrenceResult>) | null {
   const credentials = params.credentials;
   if (!credentials.encryption) return null;
@@ -128,10 +126,10 @@ export function createTaskOccurrenceRunner(params: Readonly<{
     const common = {
       store,
       readAgentProfile: (agentId: string) => readAgentProfileFromKv(transport, material, agentId),
-      defaultPermissionMode: (providerId: string) => readDefaultPermissionMode(params.getAccountSettings(), providerId),
       startNewThread: (spawn: TaskOccurrenceSpawn, firstMessage: string, occurrenceId: string) =>
         startOccurrenceThread({ spawnSession: params.spawnSession, resolveSpawnSessionByNonce: params.resolveSpawnSessionByNonce }, spawn, firstMessage, occurrenceId),
-      continueThread: (sessionId: string, message: string, occurrenceId: string) => continueThread(credentials, sessionId, message, occurrenceId),
+      continueThread: (sessionId: string, message: string, occurrenceId: string, permissionMode: string) =>
+        continueThread(credentials, sessionId, message, occurrenceId, permissionMode),
     };
     if (run.kind === 'scheduled_start') {
       return await runScheduledTaskStart({ runId: run.runId, automationId: run.automationId, taskId: run.taskId }, { ...common, deleteAutomation });
@@ -144,14 +142,8 @@ export function createTaskOccurrenceRunner(params: Readonly<{
   };
 }
 
-function readDefaultPermissionMode(settings: AccountSettings | null | undefined, providerId: string): string | undefined {
-  const modes = (settings as Record<string, unknown> | null | undefined)?.sessionDefaultPermissionModeByTargetKey;
-  const mode = modes && typeof modes === 'object' ? (modes as Record<string, unknown>)[`agent:${providerId}`] : undefined;
-  return typeof mode === 'string' ? mode : undefined;
-}
-
 /** Sends the session a message (resuming it if inactive), through the canonical send path. */
-async function continueThread(credentials: Credentials, sessionId: string, message: string, occurrenceId: string) {
+async function continueThread(credentials: Credentials, sessionId: string, message: string, occurrenceId: string, permissionMode: string) {
   const result = await sendSessionMessage({
     credentials,
     idOrPrefix: sessionId,
@@ -160,6 +152,7 @@ async function continueThread(credentials: Credentials, sessionId: string, messa
     timeoutMs: 60_000,
     localId: `task-occurrence:${occurrenceId}`,
     resumeInactiveSession: true,
+    permissionModeOverride: permissionMode,
   });
   return result.ok ? { ok: true as const } : { ok: false as const, code: result.code };
 }
