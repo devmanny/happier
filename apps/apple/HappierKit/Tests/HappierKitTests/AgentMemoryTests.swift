@@ -42,6 +42,21 @@ import Testing
         #expect(memory.notes.first?.version == 2)
     }
 
+    @Test func aFullListingIsReportedInsteadOfCutSilently() throws {
+        let full: JSONValue = ["items": .array((0..<KVListing.maxRows).map { i in
+            ["key": .string("agent/a1/journal/2026-11-07/e\(i)"), "value": "bm90IHNlYWxlZA==", "version": 0]
+        })]
+        let note: JSONValue = ["items": [
+            ["key": "agent/a1/note/n1", "value": .string(try Self.sealed(["v": 1, "id": "n1", "title": "Manny", "markdown": "Hola", "updatedAt": 9])), "version": 2],
+        ]]
+        // Each kind is its own listing, so a crowded journal doesn't hide the notes.
+        let memory = AgentMemory(listings: [note, full], machineKey: Self.machineKey)
+        #expect(memory.notes.map(\.id) == ["n1"])
+        #expect(memory.complete == false)
+        #expect(AgentMemory(listings: [note], machineKey: Self.machineKey).complete)
+        #expect(KVListing.isComplete(full) == false)
+    }
+
     @Test func obsidianExportKeepsLinksAndGivesEveryNoteItsOwnFile() throws {
         let utc = TimeZone(identifier: "UTC")!
         let memory = AgentMemory(

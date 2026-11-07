@@ -166,7 +166,7 @@ extension HappierAPI {
     }
 
     func kvList(prefix: String) async throws -> JSONValue {
-        try await http.get("/v1/kv", query: ["prefix": prefix, "limit": "1000"])
+        try await http.get("/v1/kv", query: ["prefix": prefix, "limit": String(KVListing.maxRows)])
     }
 
     /// One key, written only if it is still at `version` (-1 for a new key); nil deletes it.
@@ -181,5 +181,15 @@ extension HappierAPI {
                   conflict["error"]?.stringValue == "version-mismatch" else { throw error }
             return .conflict(version: conflict["version"]?.intValue ?? -1, value: conflict["value"]?.stringValue)
         }
+    }
+}
+
+/// `GET /v1/kv` returns at most `maxRows` rows and has no cursor: a listing that comes back this full
+/// may have left rows out, and the app says so instead of cutting silently.
+public enum KVListing {
+    public static let maxRows = 1000
+
+    public static func isComplete(_ response: JSONValue) -> Bool {
+        (response["items"]?.arrayValue?.count ?? 0) < maxRows
     }
 }

@@ -247,6 +247,8 @@ public final class HappierStore {
     /// The user's agents by name; empty until loaded.
     public private(set) var agentProfiles: [AgentProfile] = []
     public private(set) var agentProfilesError: String?
+    /// False when the agents listing came back full: some agents may be missing from it.
+    public private(set) var agentProfilesComplete = true
     @ObservationIgnored private var agentProfileVersions: [String: Int] = [:]
 
     public func agentProfile(id: String?) -> AgentProfile? {
@@ -261,7 +263,10 @@ public final class HappierStore {
             return
         }
         do {
-            let records = AgentProfile.records(fromList: try await api.kvList(prefix: AgentProfile.kvPrefix), machineKey: machineKey)
+            let listing = try await api.kvList(prefix: AgentProfile.kvPrefix)
+            // Profiles share the `agent/` prefix with the agents' memory, so a full listing can leave agents out.
+            agentProfilesComplete = KVListing.isComplete(listing)
+            let records = AgentProfile.records(fromList: listing, machineKey: machineKey)
             agentProfileVersions = Dictionary(records.map { ($0.profile.id, $0.version) }, uniquingKeysWith: { $1 })
             agentProfiles = records.map(\.profile).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             agentProfilesError = nil
@@ -332,7 +337,9 @@ public final class HappierStore {
             return
         }
         do {
-            agentMemories[agentId] = AgentMemory(fromList: try await api.kvList(prefix: AgentMemory.prefix(agentId: agentId)), machineKey: machineKey)
+            var listings: [JSONValue] = []
+            for prefix in AgentMemory.prefixes(agentId: agentId) { listings.append(try await api.kvList(prefix: prefix)) }
+            agentMemories[agentId] = AgentMemory(listings: listings, machineKey: machineKey)
             agentMemoryError = nil
         } catch {
             agentMemoryError = UserFacingError.message(for: error)

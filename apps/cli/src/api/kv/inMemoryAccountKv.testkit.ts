@@ -1,4 +1,4 @@
-import type { AccountKvTransport } from './accountKvHttpTransport';
+import { ACCOUNT_KV_LIST_MAX_ROWS, type AccountKvTransport } from './accountKvHttpTransport';
 
 /** The relay's UserKVStore version rules, in memory: the boundary fake for account-scoped records. */
 export function createInMemoryAccountKv() {
@@ -7,6 +7,8 @@ export function createInMemoryAccountKv() {
     async list(prefix) {
       return [...rows.entries()]
         .filter(([key, row]) => key.startsWith(prefix) && row.value !== null)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .slice(0, ACCOUNT_KV_LIST_MAX_ROWS)
         .map(([key, row]) => ({ key, value: row.value!, version: row.version }));
     },
     async mutate(mutations) {

@@ -1,5 +1,7 @@
 import { describeAgo, type AgentMemoryRecord } from '@happier-dev/protocol';
 
+import { ACCOUNT_KV_LIST_MAX_ROWS } from '@/api/kv/accountKvHttpTransport';
+
 import type { AgentMemory } from './agentMemory';
 
 export type AgentMemoryToolOperation = 'read' | 'search' | 'write' | 'now' | 'threads';
@@ -16,6 +18,14 @@ function readString(input: Record<string, unknown>, key: string): string | null 
 function readLimit(input: Record<string, unknown>): number | undefined {
   const value = input.limit;
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/** The route has no cursor: a full listing is said out loud, never cut silently. */
+function completeness(complete: boolean, prefixLabel: string) {
+  return complete ? {} : {
+    incomplete: true,
+    note: `Only the first ${ACCOUNT_KV_LIST_MAX_ROWS} ${prefixLabel} records could be read (the store has no paging yet); results may be missing older entries.`,
+  };
 }
 
 /** What the model sees for a record: its content, where it lives, and how old it is. */
@@ -46,19 +56,19 @@ export async function runAgentMemoryTool(params: Readonly<{
         return { ok: false, error: 'kind must be now, journal, notes or note' };
       }
       if (kind === 'note' && !readString(input, 'noteId')) return { ok: false, error: 'noteId is required to read one note' };
-      const records = await memory.read({
+      const listing = await memory.read({
         kind,
         ...(readString(input, 'day') ? { day: readString(input, 'day')! } : {}),
         ...(readString(input, 'noteId') ? { noteId: readString(input, 'noteId')! } : {}),
         ...(readLimit(input) ? { limit: readLimit(input)! } : {}),
       });
-      return { ok: true, records: records.map((record) => project(record, now)) };
+      return { ok: true, records: listing.items.map((record) => project(record, now)), ...completeness(listing.complete, kind) };
     }
     case 'search': {
       const query = readString(input, 'query');
       if (!query) return { ok: false, error: 'query is required' };
-      const records = await memory.search(query, readLimit(input));
-      return { ok: true, records: records.map((record) => project(record, now)) };
+      const listing = await memory.search(query, readLimit(input));
+      return { ok: true, records: listing.items.map((record) => project(record, now)), ...completeness(listing.complete, 'memory') };
     }
     case 'write': {
       if (input.kind === 'journal') {
@@ -85,7 +95,8 @@ export async function runAgentMemoryTool(params: Readonly<{
       return { ok: true, now: record.text };
     }
     case 'threads': {
-      const threads = await memory.threads();
+      const listing = await memory.threads();
+      const threads = listing.items;
       const threadSessionId = readString(input, 'threadSessionId');
       if (!threadSessionId) {
         return {
@@ -99,6 +110,7 @@ export async function runAgentMemoryTool(params: Readonly<{
             updated: describeAgo(now - thread.updatedAt),
           })),
           hint: 'Pass threadSessionId to read a thread\'s recent messages, or ask it with session_message_send.',
+          ...completeness(listing.complete, 'thread'),
         };
       }
       // Only this agent's own threads: a thread is one that wrote a `now` for this agent.

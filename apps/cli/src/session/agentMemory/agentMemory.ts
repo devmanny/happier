@@ -15,7 +15,7 @@ import {
   type AgentNowV1,
 } from '@happier-dev/protocol';
 
-import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
+import { ACCOUNT_KV_LIST_MAX_ROWS, type AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
 
 export type AgentMemorySelfDescription = Readonly<{ title?: string; directory?: string; host?: string }>;
 
@@ -26,9 +26,11 @@ const TURN_CONTEXT_CACHE_MS = 30_000;
  * One agent thread's view of the agent's shared memory (`packages/protocol/src/agentProfiles/agentMemory.ts`).
  * It owns this thread's `now` record; journal entries and notes are shared by every thread.
  *
- * Reads list one prefix of the UserKVStore, which returns at most 1000 rows; past that the
- * oldest journal entries of a single listing are not seen (the journal is read per day).
+ * Reads list one prefix of the UserKVStore. The route returns at most 1000 rows and has no cursor,
+ * so every read reports `complete: false` when a listing came back full instead of cutting silently.
  */
+export type MemoryListing<T> = Readonly<{ items: T[]; complete: boolean }>;
+
 export class AgentMemory {
   private nowText: string | null = null;
   private nowVersion = -1;
@@ -94,28 +96,32 @@ export class AgentMemory {
     throw new Error('note kept changing while writing it');
   }
 
-  async read(params: Readonly<{ kind: 'now' | 'journal' | 'notes' | 'note'; day?: string; noteId?: string; limit?: number }>): Promise<AgentMemoryRecord[]> {
+  async read(params: Readonly<{ kind: 'now' | 'journal' | 'notes' | 'note'; day?: string; noteId?: string; limit?: number }>): Promise<MemoryListing<AgentMemoryRecord>> {
     const prefix = params.kind === 'note' && params.noteId
       ? agentNoteKvKey(this.deps.agentId, params.noteId)
       : agentMemoryKvPrefix(this.deps.agentId, params.kind === 'notes' || params.kind === 'note' ? 'note' : params.kind,
         params.kind === 'journal' ? (params.day ?? this.today()) : undefined);
-    const records = await this.list(prefix);
+    const { items, complete } = await this.list(prefix);
     const time = (record: AgentMemoryRecord) => (record.kind === 'journal' ? record.value.at : record.value.updatedAt);
-    const sorted = records.sort((a, b) => time(b) - time(a));
-    return params.limit ? sorted.slice(0, params.limit) : sorted;
+    const sorted = items.sort((a, b) => time(b) - time(a));
+    return { items: params.limit ? sorted.slice(0, params.limit) : sorted, complete };
   }
 
-  async search(query: string, limit = 20): Promise<AgentMemoryRecord[]> {
-    const records = await this.list(`agent/${this.deps.agentId}/`);
-    return searchAgentMemory(records, query).slice(0, limit);
+  /** Searches each kind's own listing, so one crowded kind can't hide the others. */
+  async search(query: string, limit = 20): Promise<MemoryListing<AgentMemoryRecord>> {
+    const listings = await Promise.all((['now', 'note', 'journal'] as const)
+      .map((kind) => this.list(agentMemoryKvPrefix(this.deps.agentId, kind))));
+    const records = listings.flatMap((listing) => listing.items);
+    return { items: searchAgentMemory(records, query).slice(0, limit), complete: listings.every((listing) => listing.complete) };
   }
 
   /** Every thread's `now`, newest first (this one included). */
-  async threads(): Promise<AgentNowV1[]> {
-    const records = await this.list(agentMemoryKvPrefix(this.deps.agentId, 'now'));
-    return records
-      .flatMap((record) => (record.kind === 'now' ? [record.value] : []))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+  async threads(): Promise<MemoryListing<AgentNowV1>> {
+    const { items, complete } = await this.list(agentMemoryKvPrefix(this.deps.agentId, 'now'));
+    return {
+      items: items.flatMap((record) => (record.kind === 'now' ? [record.value] : [])).sort((a, b) => b.updatedAt - a.updatedAt),
+      complete,
+    };
   }
 
   invalidateTurnContext(): void {
@@ -126,7 +132,9 @@ export class AgentMemory {
   async turnContextBlock(): Promise<string | null> {
     const now = this.now();
     if (this.turnContext && now - this.turnContext.at < TURN_CONTEXT_CACHE_MS) return this.turnContext.block;
-    const summary = buildOtherThreadsSummary({ selfSessionId: this.deps.sessionId, nows: await this.threads(), now });
+    const threads = await this.threads();
+    const summary = buildOtherThreadsSummary({ selfSessionId: this.deps.sessionId, nows: threads.items, now })
+      + (threads.complete ? '' : `\n- (more threads than one listing holds; use mis_hilos)`);
     const block = summary
       ? [
           '[Happier · your other threads right now. You are one agent across them: check memoria_buscar or mis_hilos before answering about their work.]',
@@ -166,7 +174,7 @@ export class AgentMemory {
     return rows.find((row) => row.key === key)?.version ?? -1;
   }
 
-  private async list(prefix: string): Promise<AgentMemoryRecord[]> {
+  private async list(prefix: string): Promise<MemoryListing<AgentMemoryRecord>> {
     const rows = await this.deps.transport.list(prefix);
     const records: AgentMemoryRecord[] = [];
     for (const row of rows) {
@@ -174,7 +182,7 @@ export class AgentMemory {
       const record = opened ? parseAgentMemoryRecord(row.key, opened.value) : null;
       if (record) records.push(record);
     }
-    return records;
+    return { items: records, complete: rows.length < ACCOUNT_KV_LIST_MAX_ROWS };
   }
 
   private seal(payload: unknown): string {

@@ -37,7 +37,12 @@ struct AgentsView: View {
                         }
                     }
                 } footer: {
-                    Text("Shared with Happier on your other devices.")
+                    if store.agentProfilesComplete {
+                        Text("Shared with Happier on your other devices.")
+                    } else {
+                        Text("Only the first \(KVListing.maxRows) stored records could be read, so some agents may be missing here.")
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
         }
@@ -286,6 +291,10 @@ struct AgentMemoryView: View {
         Form {
             if let error = store.agentMemoryError, store.agentMemories[agent.id] == nil {
                 Text(error).foregroundStyle(.secondary)
+            }
+            if !memory.complete {
+                Text("Only the first \(KVListing.maxRows) records of a kind could be read, so older entries aren't shown here or in the export.")
+                    .foregroundStyle(.orange)
             }
             Section {
                 if memory.now.isEmpty {

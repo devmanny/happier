@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { ACCOUNT_KV_LIST_MAX_ROWS } from '@/api/kv/accountKvHttpTransport';
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 
 import { AgentMemory } from './agentMemory';
@@ -28,6 +29,20 @@ describe('runAgentMemoryTool', () => {
     expect(journal.records.map((r: any) => r.text)).toEqual(['Subí el build']);
     const found = await runAgentMemoryTool({ memory, operation: 'search', input: { query: 'happier' } }) as any;
     expect(found.records.map((r: any) => r.title)).toEqual(['Manny']);
+  });
+
+  it('says the result is incomplete when a listing comes back full, instead of cutting it silently', async () => {
+    const { memory, kv } = memoryFor('s1');
+    for (let i = 0; i < ACCOUNT_KV_LIST_MAX_ROWS; i += 1) {
+      kv.rows.set(`agent/a1/journal/2026-11-07/e${String(i).padStart(4, '0')}`, { value: 'not-a-sealed-value', version: 0 });
+    }
+    const read = await runAgentMemoryTool({ memory, operation: 'read', input: { kind: 'journal' } }) as any;
+    expect(read).toMatchObject({ ok: true, incomplete: true, note: expect.stringContaining('1000') });
+    const search = await runAgentMemoryTool({ memory, operation: 'search', input: { query: 'x' } }) as any;
+    expect(search.incomplete).toBe(true);
+
+    const small = memoryFor('s2');
+    expect(await runAgentMemoryTool({ memory: small.memory, operation: 'read', input: { kind: 'journal' } })).not.toHaveProperty('incomplete');
   });
 
   it('explains what is missing instead of writing an empty record', async () => {

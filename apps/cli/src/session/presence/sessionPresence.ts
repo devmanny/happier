@@ -13,7 +13,7 @@ import {
   type AgentPresenceV1,
 } from '@happier-dev/protocol';
 
-import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
+import { ACCOUNT_KV_LIST_MAX_ROWS, type AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
 
 
 /** What this thread is, read fresh on every write (title and folder can change mid-session). */
@@ -25,6 +25,8 @@ export type WhoIsHereReport = Readonly<{
   others: AgentPresenceV1[];
   /** One line per file/resource this thread holds that another live thread also holds. */
   conflicts: string[];
+  /** False when the presence listing came back full (the store has no paging): some threads may be missing. */
+  complete: boolean;
 }>;
 
 /** Reads of the other threads are shared for this long, so a burst of edits costs one list. */
@@ -41,7 +43,7 @@ export class SessionPresence {
   private published = false;
   private version = -1;
   private writes: Promise<void> = Promise.resolve();
-  private othersCache: { at: number; records: AgentPresenceV1[] } | null = null;
+  private othersCache: { at: number; records: AgentPresenceV1[]; complete: boolean } | null = null;
 
   constructor(private readonly deps: Readonly<{
     sessionId: string;
@@ -123,7 +125,7 @@ export class SessionPresence {
     ].map((conflict) => describePresenceConflict(conflict, now));
     const directory = self.directory;
     const sorted = [...others].sort((a, b) => Number(b.directory === directory) - Number(a.directory === directory));
-    return { self: this.published ? self : null, others: sorted, conflicts };
+    return { self: this.published ? self : null, others: sorted, conflicts, complete: this.othersCache?.complete ?? true };
   }
 
   private now(): number {
@@ -191,7 +193,7 @@ export class SessionPresence {
       const record = opened ? parseAgentPresenceV1(opened.value) : null;
       if (record && isAgentPresenceLive(record, now)) records.push(record);
     }
-    this.othersCache = { at: now, records };
+    this.othersCache = { at: now, records, complete: items.length < ACCOUNT_KV_LIST_MAX_ROWS };
     return records;
   }
 }
@@ -222,5 +224,9 @@ export function toWhoIsHereResult(report: WhoIsHereReport, now: number = Date.no
     you: report.self ? projectRecord(report.self, now) : null,
     others: report.others.map((record) => projectRecord(record, now)),
     conflicts: report.conflicts,
+    ...(report.complete ? {} : {
+      incomplete: true,
+      note: `Only the first ${ACCOUNT_KV_LIST_MAX_ROWS} presence records could be read (the store has no paging yet); some threads may be missing.`,
+    }),
   };
 }

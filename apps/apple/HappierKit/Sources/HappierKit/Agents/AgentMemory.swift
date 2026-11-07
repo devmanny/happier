@@ -84,6 +84,8 @@ public struct AgentMemory: Sendable, Equatable {
     public var now: [Now]
     public var journal: [JournalEntry]
     public var notes: [Note]
+    /// False when one of the listings came back full (see `KVListing`): some records aren't shown.
+    public var complete = true
 
     public init(now: [Now] = [], journal: [JournalEntry] = [], notes: [Note] = []) {
         self.now = now
@@ -93,8 +95,16 @@ public struct AgentMemory: Sendable, Equatable {
 
     public static func prefix(agentId: String) -> String { "agent/\(agentId)/" }
 
-    /// A `GET /v1/kv?prefix=agent/<id>/` response split by key shape. The relay returns at most
-    /// 1000 rows per listing and has no cursor, so a very long journal shows only its first 1000 rows.
+    /// One listing per kind (`now/`, `note/`, `journal/`), so a crowded journal can't hide the notes.
+    public static func prefixes(agentId: String) -> [String] { ["now", "note", "journal"].map { "agent/\(agentId)/\($0)/" } }
+
+    init(listings: [JSONValue], machineKey: Data) {
+        let items = listings.flatMap { $0["items"]?.arrayValue ?? [] }
+        self.init(fromList: ["items": .array(items)], machineKey: machineKey)
+        complete = listings.allSatisfy(KVListing.isComplete)
+    }
+
+    /// A `GET /v1/kv?prefix=agent/<id>/…` response split by key shape.
     init(fromList response: JSONValue, machineKey: Data) {
         var now: [Now] = [], journal: [JournalEntry] = [], notes: [Note] = []
         for item in response["items"]?.arrayValue ?? [] {

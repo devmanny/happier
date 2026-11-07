@@ -80,7 +80,7 @@ describe('AgentMemory', () => {
     await memory.appendJournal('Subí el build 202611070147 a TestFlight');
     await memory.writeNote({ title: 'Happier', markdown: 'Fork nativo de Apple' });
     const hits = await memory.search('testflight');
-    expect(hits.map((hit) => hit.kind)).toEqual(['journal']);
-    expect((await memory.read({ kind: 'notes' })).map((record) => record.kind)).toEqual(['note']);
+    expect(hits.items.map((hit) => hit.kind)).toEqual(['journal']);
+    expect((await memory.read({ kind: 'notes' })).items.map((record) => record.kind)).toEqual(['note']);
   });
 });

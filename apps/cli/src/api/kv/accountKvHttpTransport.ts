@@ -3,6 +3,12 @@ import axios from 'axios';
 import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
 
 
+/**
+ * Most rows one `GET /v1/kv` returns (the route's `limit` maximum). The route has no cursor, so a
+ * listing that comes back this full may have left rows out; callers must say so.
+ */
+export const ACCOUNT_KV_LIST_MAX_ROWS = 1000;
+
 /** Same budget as the other account-scoped document calls (`/v2/account/settings`). */
 const KV_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -26,7 +32,7 @@ export function createAccountKvHttpTransport(params: Readonly<{ token: string; b
     async list(prefix) {
       const response = await axios.get(`${baseUrl}/v1/kv`, {
         headers,
-        params: { prefix, limit: 1000 },
+        params: { prefix, limit: ACCOUNT_KV_LIST_MAX_ROWS },
         timeout: KV_REQUEST_TIMEOUT_MS,
         validateStatus: () => true,
       });

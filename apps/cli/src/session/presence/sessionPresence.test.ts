@@ -7,6 +7,7 @@ import {
   type AgentPresenceV1,
 } from '@happier-dev/protocol';
 
+import { ACCOUNT_KV_LIST_MAX_ROWS } from '@/api/kv/accountKvHttpTransport';
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 import { SessionPresence, toWhoIsHereResult } from './sessionPresence';
 
@@ -117,6 +118,15 @@ describe('SessionPresence', () => {
       files: [{ path: '/repo/Composer.swift', since: '4 min ago' }],
       lastSignal: '10s ago',
     });
+  });
+
+  it('says so when the presence listing came back full', async () => {
+    const store = createKvStore();
+    const clock = { now: 1_000_000 };
+    for (let i = 0; i < ACCOUNT_KV_LIST_MAX_ROWS; i += 1) store.rows.set(`presence/x${String(i).padStart(4, '0')}`, { value: 'stale', version: 0 });
+    const report = await createPresence(store, clock).whoIsHere();
+    expect(report.complete).toBe(false);
+    expect(toWhoIsHereResult(report, clock.now)).toMatchObject({ incomplete: true });
   });
 
   it('recovers when its own record changed under it', async () => {
