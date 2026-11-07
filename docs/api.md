@@ -126,7 +126,11 @@ prefixes:
   its anchor at run time. Occurrences never overlap: while the previous occurrence's thread has a
   live presence record the new firing is recorded as skipped (waiting would hold the run past its
   lease, and the next firing comes anyway). Each occurrence (running, completed at its turn end,
-  skipped, failed, interrupted) is kept in the task's history with its thread.
+  skipped, failed, interrupted) is kept in the task's history with its thread. A repeating task
+  stays open: an agent's `tarea_actualizar` with status done records the result of the occurrence
+  its thread is working (and is refused with a clear message when it has none); only the user
+  closes or pauses the task, and closing it from the app pauses its Automations so they stop
+  firing (the daemon also skips firings on a closed task without recording them).
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

@@ -2691,7 +2691,7 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
   {
     id: 'task.update',
     title: 'Update a task',
-    description: 'Update a task: status (todo, in_progress, blocked, in_review, done), a progress comment, or its fields. Your thread is linked to the task. Your open tasks are listed at the start of each turn with their ids.',
+    description: 'Update a task: status (todo, in_progress, blocked, in_review, done), a progress comment, or its fields. Your thread is linked to the task. Your open tasks are listed at the start of each turn with their ids. A repeating task stays open: status done records the result of the occurrence your thread is working, and only the user closes or pauses the task.',
     safety: 'safe',
     approval: APPROVAL_RESULT_REQUIRED,
     contextualDefaults: { sessionId: 'current_session' },

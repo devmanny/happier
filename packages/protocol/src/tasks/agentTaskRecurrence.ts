@@ -151,6 +151,6 @@ export function buildTaskOccurrencePrompt(params: Readonly<{ task: AgentTaskV1; 
     `Recurring task "${task.title}" is due now (task id ${task.id}, occurrence ${params.occurrenceId}).`,
     task.description ? `\n${task.description}` : '',
     task.source?.url || task.source?.label ? `\nSource: ${[task.source.label, task.source.url].filter(Boolean).join(' — ')}` : '',
-    `\nWork on it now. When you finish, report the result with tarea_actualizar (taskId ${task.id}) and a short comment.`,
+    `\nWork on it now. When you finish, report the result with tarea_actualizar (taskId ${task.id}) and a short comment. The task repeats, so it stays open for the next occurrence; marking it done only records this occurrence's result.`,
   ].join('');
 }

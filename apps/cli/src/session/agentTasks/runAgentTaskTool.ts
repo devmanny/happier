@@ -1,5 +1,6 @@
 import {
   AGENT_TASK_STATUSES,
+  applyAgentTaskUpdate,
   type AgentIdentityV1,
   type AgentTaskActor,
   type AgentTaskAssignee,
@@ -124,6 +125,39 @@ export async function runAgentTaskTool(params: Readonly<{
       by: actor(caller),
       threadSessionId: caller.sessionId,
     };
+    const current = await store.get(taskId);
+    if (!current) return { ok: false, error: `task ${taskId} not found` };
+
+    // A repeating task stays open for its next occurrence: only the user closes or pauses it.
+    // An agent's "done" is the result of the occurrence its thread is working.
+    if (status === 'done' && current.task.recurrence && !current.task.recurrence.paused) {
+      const occurrence = (current.task.occurrences ?? []).find((entry) => entry.status === 'running' && entry.sessionId === caller.sessionId);
+      if (!occurrence) {
+        return {
+          ok: false,
+          error: 'This task repeats, so only the user can close or pause it. Report the result of your occurrence with a comment instead.',
+        };
+      }
+      const { status: _done, ...rest } = update;
+      const task = await store.update(taskId, (latest, now) => {
+        const updated = applyAgentTaskUpdate(latest, rest, now);
+        return {
+          ...updated,
+          occurrences: (updated.occurrences ?? []).map((entry) => (entry.id === occurrence.id && entry.status === 'running'
+            ? { ...entry, status: 'completed' as const, finishedAt: now, ...(comment ? { note: comment } : {}) }
+            : entry)),
+        };
+      });
+      if (!task) return { ok: false, error: `task ${taskId} not found` };
+      return {
+        ok: true,
+        taskId: task.id,
+        status: task.status,
+        occurrence: { id: occurrence.id, status: 'completed' },
+        message: 'This task repeats: your result was recorded on this occurrence and the task stays open for the next one. Only the user closes or pauses it.',
+      };
+    }
+
     const task = await store.applyUpdate(taskId, update);
     if (!task) return { ok: false, error: `task ${taskId} not found` };
     return { ok: true, taskId: task.id, status: task.status };

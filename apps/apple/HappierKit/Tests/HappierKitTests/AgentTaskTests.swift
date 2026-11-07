@@ -18,6 +18,19 @@ import Testing
         return AgentTask(json: .object(json))!
     }
 
+    @Test func closingARepeatingTaskPausesItsRepetition() {
+        var task = Self.task()
+        task.recurrence = TaskRecurrence(timezone: "UTC", rules: [.init(kind: .weekly([1]), hour: 9, minute: 0)])
+        let paused = task.recurrenceToPause(closingWith: AgentTask.Update(status: .done))
+        #expect(paused?.paused == true)
+        #expect(paused?.rules.count == 1)
+        // Anything but closing it, an already paused repetition, or no repetition: nothing to pause.
+        #expect(task.recurrenceToPause(closingWith: AgentTask.Update(status: .inReview)) == nil)
+        task.recurrence?.paused = true
+        #expect(task.recurrenceToPause(closingWith: AgentTask.Update(status: .done)) == nil)
+        #expect(Self.task().recurrenceToPause(closingWith: AgentTask.Update(status: .done)) == nil)
+    }
+
     @Test func sealsUnderItsOwnKindAndKeepsKeysOtherWritersOwn() throws {
         let task = Self.task(["notifiedV1": ["dueSoonAt": 5], "createdBy": ["kind": "user"]])
         let sealed = try task.sealed(machineKey: Self.machineKey)

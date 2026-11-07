@@ -467,6 +467,10 @@ public final class HappierStore {
     public func updateTask(id: String, _ update: AgentTask.Update) async -> AgentTask? {
         guard let current = task(id: id), !update.isEmpty else { return task(id: id) }
         guard let saved = await writeTask(current, update: update) else { return nil }
+        // Closing a repeating task pauses its Automations: they must not keep firing on a closed task.
+        if let paused = current.recurrenceToPause(closingWith: update) {
+            return await saveRecurrence(taskId: id, paused) ?? saved
+        }
         // A repeating task's Automations carry its machine, folder and agent: keep them in step.
         if let recurrence = saved.recurrence, update.machineId != nil || update.directory != nil || update.assignee != nil {
             do {

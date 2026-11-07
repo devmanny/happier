@@ -61,6 +61,25 @@ describe('runAgentTaskTool', () => {
       .toMatchObject({ ok: false });
   });
 
+  it('keeps a repeating task open: an agent\'s "done" becomes its occurrence\'s result, or is refused', async () => {
+    const { store, read } = setup();
+    const recurrence = { v: 1 as const, timezone: 'UTC', continuity: 'new_thread' as const, paused: false, rules: [{ id: 'r1', kind: 'weekly' as const, weekdays: [1], time: '09:00' }] };
+    await store.create({ title: 'Revisión diaria', assignee: { kind: 'agent', agentId: 'a-mateo' }, status: 'in_progress', threads: ['s1'], recurrence,
+      occurrences: [{ id: 'run1', startedAt: 1, sessionId: 's1', status: 'running' }] });
+
+    const done = await runAgentTaskTool({ store, caller: mateo, operation: 'update', input: { taskId: 't1', status: 'done', comment: 'Sin errores hoy' } });
+    expect(done).toMatchObject({ ok: true, status: 'in_progress', occurrence: { id: 'run1', status: 'completed' } });
+    expect(done.message).toContain('repeats');
+    expect(read('t1')).toMatchObject({ status: 'in_progress' });
+    expect(read('t1')?.occurrences?.[0]).toMatchObject({ status: 'completed', note: 'Sin errores hoy' });
+    expect(read('t1')?.log.at(-1)).toMatchObject({ text: 'Sin errores hoy' });
+
+    // No occurrence of its own running: refused, task untouched.
+    const refused = await runAgentTaskTool({ store, caller: { ...mateo, sessionId: 's9' }, operation: 'update', input: { taskId: 't1', status: 'done' } });
+    expect(refused).toMatchObject({ ok: false, error: expect.stringContaining('only the user') });
+    expect(read('t1')?.status).toBe('in_progress');
+  });
+
   it('builds the calling agent\'s board from its open tasks', async () => {
     const { store } = setup();
     await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Login', assignee: 'me' } });

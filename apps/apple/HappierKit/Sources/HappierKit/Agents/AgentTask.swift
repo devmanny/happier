@@ -245,6 +245,14 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     // MARK: Updates (`applyAgentTaskUpdate`)
 
     /// A change to a task. Optional fields that can be cleared use `.some(nil)`.
+    /// Closing a task that still repeats pauses its repetition, so its Automations stop firing on
+    /// a closed task; the user resumes it from the app if they reopen it. Nil when nothing to pause.
+    public func recurrenceToPause(closingWith update: Update) -> TaskRecurrence? {
+        guard update.status == .done, status != .done, var recurrence, !recurrence.paused else { return nil }
+        recurrence.paused = true
+        return recurrence
+    }
+
     public struct Update: Sendable, Equatable {
         public var title: String?
         public var description: String??
