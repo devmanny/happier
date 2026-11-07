@@ -25,6 +25,8 @@ struct Composer: View {
     @State private var statusPillWidth: CGFloat = 0
     @State private var statusRowWidth: CGFloat = 0
     @State private var droppedSide: AccountSettings.StatusPosition?
+    /// The agent card, opened by tapping the status pill.
+    @State private var showAgentCard = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
     @State private var showPhotos = false
@@ -363,6 +365,16 @@ struct Composer: View {
                 + (store.delegatedRuns[sessionId]?.filter(\.isActive).count ?? 0)
         return HStack(spacing: 6) {
             SessionStatusRow(session: session, agent: session.agentIdentity)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(Text(session.agentIdentity == nil ? "Shows the session's details" : "Shows the agent's card"))
+                .accessibilityAction { openAgentCard() }
+                // A sheet on the iPhone; on iPad and Mac a popover beside the pill.
+                .popover(isPresented: $showAgentCard, arrowEdge: .top) {
+                    AgentCardView(sessionId: sessionId)
+                        .presentationCompactAdaptation(.sheet)
+                        .presentationDragIndicator(.visible)
+                }
             ResumeSessionButton(sessionId: sessionId)
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.glass)
@@ -379,7 +391,8 @@ struct Composer: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { statusPillWidth = $0 }
         .scaleEffect(statusGrabbed ? 1.04 : 1)
         .offset(x: statusDragX)
-        .gesture(statusDrag)
+        // A plain tap opens the card; held 0.3 s, the pill drags instead.
+        .gesture(statusDrag.exclusively(before: TapGesture().onEnded { openAgentCard() }))
         .animation(.smooth(duration: 0.15), value: statusGrabbed)
         // Left (as "Online" always was) or right above the mic, as the account's settings say.
         .padding(statusOnRight ? .trailing : .leading, 4)
@@ -389,6 +402,11 @@ struct Composer: View {
             if saved == droppedSide { droppedSide = nil }
         }
         .animation(.smooth(duration: 0.25), value: running > 0)
+    }
+
+    private func openAgentCard() {
+        AppHaptics.light()
+        showAgentCard = true
     }
 
     @ViewBuilder private var mentionPicker: some View {
@@ -537,7 +555,7 @@ struct Composer: View {
 /// How the session is doing, just above the composer like the official app: a pill colored by the
 /// state (green online, blue working, orange waiting on you, red failed, brown archived, gray
 /// inactive), as wide as what it says.
-private struct SessionStatusRow: View {
+struct SessionStatusRow: View {
     let session: Session
     /// Who works in the session: its name leads, and the state follows it.
     var agent: AgentIdentity?

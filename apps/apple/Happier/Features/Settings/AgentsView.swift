@@ -126,7 +126,7 @@ enum AgentProfileText {
 }
 
 /// Create or edit one agent. Nothing is saved until Save.
-private struct AgentEditor: View {
+struct AgentEditor: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State var profile: AgentProfile
@@ -517,7 +517,7 @@ struct TasksView: View {
     var onlyThisSession = false
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var assignee: AgentTask.AssigneeFilter = .all
+    @State private var assignee: AgentTask.AssigneeFilter
     @State private var status: AgentTask.StatusFilter = .open
     @State private var scope: AgentTask.Scope = .all
     @State private var showCompleted = false
@@ -536,6 +536,15 @@ struct TasksView: View {
     @State private var taskSearch = TaskSearch()
     /// The task whose detail is open, when one is, with where it was opened from.
     @State private var path: [TaskRoute] = []
+
+    /// `assignee` starts the list filtered to who the tasks are for (an agent's card opens its own).
+    init(presentation: TasksPresentation = .sheet, openSessionId: String? = nil, onlyThisSession: Bool = false,
+         assignee: AgentTask.AssigneeFilter = .all) {
+        self.presentation = presentation
+        self.openSessionId = openSessionId
+        self.onlyThisSession = onlyThisSession
+        _assignee = State(initialValue: assignee)
+    }
 
     private var sections: [AgentTask.Section] {
         let shown = AgentTask.filter(store.tasks, assignee: assignee, status: status,
