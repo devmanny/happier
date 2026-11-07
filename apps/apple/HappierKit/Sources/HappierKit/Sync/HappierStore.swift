@@ -609,12 +609,32 @@ public final class HappierStore {
 
     /// What a recurring task needs before its rules can fire: an agent, a machine and a folder.
     public func recurrenceProblem(for task: AgentTask) -> String? {
+        if case .session(let id, _) = task.assignee {
+            return recurrenceTarget(for: task) == nil
+                ? String(localized: "This session isn't available here; open it once so its machine is known.")
+                : nil
+        }
         guard let agentId = task.assignee.agentId, agentProfile(id: agentId) != nil else {
-            return String(localized: "Assign the task to one of your agents first: an agent works each occurrence.")
+            return String(localized: "Assign the task to an agent or a session first: it works each occurrence.")
         }
         guard task.machineId?.isEmpty == false else { return String(localized: "Choose the machine the task runs on.") }
         guard task.directory?.isEmpty == false else { return String(localized: "Choose the folder the agent works in.") }
         return nil
+    }
+
+    /// Where a repeating task's Automations run: the task's machine and folder for an agent, or the
+    /// assigned session's own machine and folder (the daemon sends each occurrence to that session).
+    func recurrenceTarget(for task: AgentTask) -> (machineId: String, directory: String, providerId: String)? {
+        switch task.assignee {
+        case .session(let id, _):
+            guard let session = sessions[id], let machineId = session.machineId, let path = session.path else { return nil }
+            return (machineId, path, session.agentId ?? "claude")
+        case .agent(let id, _, _):
+            guard let agent = agentProfile(id: id), let machineId = task.machineId, let directory = task.directory else { return nil }
+            return (machineId, directory, agent.providerId)
+        case .user:
+            return nil
+        }
     }
 
     /// Saves the task's recurrence (nil removes it), creating, updating, pausing or deleting one
@@ -674,16 +694,16 @@ public final class HappierStore {
         guard let api, let machineKey = keys?.content.secretKey else {
             throw RPCError(message: String(localized: "Tasks need an end-to-end encrypted account."), code: nil)
         }
-        guard let agentId = task.assignee.agentId, let agent = agentProfile(id: agentId),
-              let machineId = task.machineId, let directory = task.directory else {
+        guard let target = recurrenceTarget(for: task) else {
             throw RPCError(message: recurrenceProblem(for: task) ?? "", code: nil)
         }
+        let machineId = target.machineId, directory = target.directory
         var next = recurrence
         var created: [String] = []
         for index in next.rules.indices {
             let rule = next.rules[index]
             let template = try TaskRecurrence.automationTemplateCiphertext(taskId: task.id, ruleId: rule.id, directory: directory,
-                                                                          providerId: agent.providerId, machineKey: machineKey)
+                                                                          providerId: target.providerId, machineKey: machineKey)
             if let id = rule.automationId {
                 try await api.updateTaskAutomation(id: id, rule: rule, timezone: next.timezone, machineId: machineId, templateCiphertext: template)
                 if (previous?.paused ?? false) != next.paused { try await api.setTaskAutomation(id: id, paused: next.paused) }

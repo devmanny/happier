@@ -105,6 +105,17 @@ export async function runTaskOccurrence(
     if (decision.record) await save({ ...base, status: 'skipped', finishedAt: now, note: decision.reason });
     return { type: 'success' };
   }
+  // A session assignee: every occurrence is sent to that session (no agent profile or folder needed).
+  if (task.assignee.kind === 'session' && decision.thread.kind === 'existing') {
+    const sessionId = decision.thread.sessionId;
+    const sent = await deps.continueThread(sessionId, buildTaskOccurrencePrompt({ task, occurrenceId: run.runId }), run.runId);
+    if (!sent.ok) {
+      await save({ ...base, sessionId, status: 'failed', finishedAt: now, note: `could not send it to ${sessionId} (${sent.code})` }, decision.closePrevious);
+      return { type: 'failed', errorCode: sent.code, errorMessage: `could not send the occurrence to session ${sessionId}` };
+    }
+    await save({ ...base, sessionId, status: 'running' }, decision.closePrevious);
+    return { type: 'success', sessionId };
+  }
   if (task.assignee.kind !== 'agent' || !task.directory) {
     await save({ ...base, status: 'failed', finishedAt: now, note: 'the task needs an agent and a folder to repeat' });
     return { type: 'failed', errorCode: 'task_not_runnable', errorMessage: 'recurring task needs an agent assignee and a folder' };

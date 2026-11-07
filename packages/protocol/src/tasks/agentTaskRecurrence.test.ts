@@ -72,6 +72,15 @@ describe('deciding an occurrence', () => {
       .toEqual({ kind: 'start', thread: { kind: 'new' }, closePrevious: 'run0' });
   });
 
+  it('sends each occurrence of a session-assigned task to that session, skipping while it still works', () => {
+    const forSession = task({ assignee: { kind: 'session', sessionId: 's-chat' } });
+    expect(decideTaskOccurrence({ task: forSession, ruleId: 'r1', now, isThreadWorking: () => false }))
+      .toEqual({ kind: 'start', thread: { kind: 'existing', sessionId: 's-chat' } });
+    const busy = task({ assignee: { kind: 'session', sessionId: 's-chat' }, occurrences: [{ id: 'run0', ruleId: 'r1', startedAt: 1, sessionId: 's-chat', status: 'running' }] });
+    expect(decideTaskOccurrence({ task: busy, ruleId: 'r1', now, isThreadWorking: (id) => id === 's-chat' }))
+      .toMatchObject({ kind: 'skip', record: true });
+  });
+
   it('does nothing for a paused, finished, deleted-rule or user-assigned task, or an off day', () => {
     const quiet = (t: AgentTaskV1, ruleId = 'r1') => decideTaskOccurrence({ task: t, ruleId, now, isThreadWorking: () => false });
     expect(quiet(task({ recurrence: { ...task().recurrence!, paused: true } }))).toMatchObject({ kind: 'skip', record: false });

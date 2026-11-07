@@ -126,7 +126,7 @@ export function decideTaskOccurrence(params: Readonly<{
   if (!isRecurrenceOccurrenceDay(rule, params.now, recurrence.timezone)) {
     return { kind: 'skip', record: false, reason: 'not an occurrence day' };
   }
-  if (task.assignee.kind !== 'agent') return { kind: 'skip', record: true, reason: 'assigned to the user; only agents work recurring tasks' };
+  if (task.assignee.kind === 'user') return { kind: 'skip', record: true, reason: 'assigned to the user; only agents and sessions work recurring tasks' };
 
   const previous = [...(task.occurrences ?? [])].reverse().find((entry) => entry.status === 'running');
   let closePrevious: string | undefined;
@@ -137,6 +137,10 @@ export function decideTaskOccurrence(params: Readonly<{
     closePrevious = previous.id;
   }
 
+  // A session assignee works every occurrence itself.
+  if (task.assignee.kind === 'session') {
+    return { kind: 'start', thread: { kind: 'existing', sessionId: task.assignee.sessionId }, ...(closePrevious ? { closePrevious } : {}) };
+  }
   const lastThread = [...(task.occurrences ?? [])].reverse().find((entry) => entry.sessionId)?.sessionId ?? task.threads.at(-1);
   const thread = recurrence.continuity === 'same_thread' && lastThread
     ? { kind: 'existing' as const, sessionId: lastThread }

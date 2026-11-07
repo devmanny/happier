@@ -73,6 +73,19 @@ describe('runTaskOccurrence', () => {
     expect((await store.get('t1'))!.task.occurrences?.at(-1)).toMatchObject({ id: 'run2', sessionId: 's-new', note: expect.stringContaining('session_archived') });
   });
 
+  it('sends each occurrence of a session-assigned task to that session, and fails without opening another thread', async () => {
+    const { store, deps } = await setup({ assignee: { kind: 'session', sessionId: 's-chat', title: 'Navegador' }, directory: undefined });
+    expect(await runTaskOccurrence({ runId: 'run1', taskId: 't1', ruleId: 'r1' }, deps)).toEqual({ type: 'success', sessionId: 's-chat' });
+    expect(deps.continueThread).toHaveBeenCalledWith('s-chat', expect.stringContaining('Revisión diaria'), 'run1');
+    expect(deps.readAgentProfile).not.toHaveBeenCalled();
+    expect((await store.get('t1'))!.task.occurrences?.at(-1)).toMatchObject({ id: 'run1', sessionId: 's-chat', status: 'running' });
+
+    vi.mocked(deps.continueThread).mockResolvedValueOnce({ ok: false, code: 'session_archived' });
+    expect(await runTaskOccurrence({ runId: 'run2', taskId: 't1', ruleId: 'r1' }, deps)).toMatchObject({ type: 'failed' });
+    expect(deps.startNewThread).not.toHaveBeenCalled();
+    expect((await store.get('t1'))!.task.occurrences?.at(-1)).toMatchObject({ id: 'run2', status: 'failed' });
+  });
+
   it('records a skip instead of starting on top of an occurrence that is still working', async () => {
     const { store, deps } = await setup({ occurrences: [{ id: 'run0', ruleId: 'r1', startedAt: 1, sessionId: 's-busy', status: 'running' }] });
     vi.mocked(deps.liveThreadIds).mockResolvedValue(new Set(['s-busy']));

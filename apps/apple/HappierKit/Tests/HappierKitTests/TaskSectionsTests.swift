@@ -50,4 +50,21 @@ import Testing
         #expect(AgentTask.sections(tasks, scope: .thisSession, openSessionId: "open", status: .open).flatMap(\.tasks).map(\.id) == ["a"])
         #expect(AgentTask.sections(tasks, scope: .thisSession, openSessionId: nil, status: .all).isEmpty)
     }
+
+    @MainActor @Test func aRepeatingTaskForASessionRunsOnThatSessionsMachineAndFolder() throws {
+        let store = HappierStore(server: URL(string: "http://127.0.0.1:1")!)
+        let session = try Session(row: ["id": "s-chat", "seq": 1, "createdAt": 1, "updatedAt": 1, "active": false, "encryptionMode": "plain",
+                                        "metadata": .string(#"{"path":"/repo","machineId":"m1","flavor":"codex"}"#), "metadataVersion": 1], keys: nil)
+        store.sessions["s-chat"] = session
+        var task = Self.task("t")
+        task.assignee = .session(id: "s-chat", title: nil)
+        #expect(store.recurrenceProblem(for: task) == nil)
+        let target = try #require(store.recurrenceTarget(for: task))
+        #expect(target.machineId == "m1")
+        #expect(target.directory == "/repo")
+        #expect(target.providerId == "codex")
+
+        task.assignee = .session(id: "unknown", title: nil)
+        #expect(store.recurrenceProblem(for: task) != nil)
+    }
 }
