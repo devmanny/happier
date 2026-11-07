@@ -46,8 +46,9 @@ export function startAgentTasks(
     },
     settled: () => pending,
   };
-  // An agent thread working a recurring task's occurrence completes it when its turn ends.
-  if (identity && session.on) {
+  // A thread working a recurring task's occurrence (an agent's, or a session it was assigned to)
+  // completes it when its turn ends.
+  if (session.on) {
     let working = false;
     session.on('local-presence', (presence) => {
       const next = presence.thinking === true;

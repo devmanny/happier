@@ -29,4 +29,18 @@ describe('startAgentTasks', () => {
     expect(occurrences.map((o) => [o.id, o.status])).toEqual([['run1', 'completed'], ['run0', 'running']]);
     expect(occurrences[0]!.finishedAt).toEqual(expect.any(Number));
   });
+
+  it('also completes it in a session without an agent', async () => {
+    const kv = createInMemoryAccountKv();
+    const session = Object.assign(new EventEmitter(), { sessionId: 's-plain' });
+    const tasks = startAgentTasks(session, credentials, { transport: kv.transport, env: {} })!;
+    const task = await tasks.store.create({
+      title: 'Revisión', assignee: { kind: 'session', sessionId: 's-plain' }, status: 'in_progress', threads: ['s-plain'],
+      occurrences: [{ id: 'run1', startedAt: 1, sessionId: 's-plain', status: 'running' }],
+    });
+    session.emit('local-presence', { thinking: true });
+    session.emit('local-presence', { thinking: false });
+    await tasks.settled();
+    expect((await tasks.store.get(task.id))!.task.occurrences?.[0]?.status).toBe('completed');
+  });
 });
