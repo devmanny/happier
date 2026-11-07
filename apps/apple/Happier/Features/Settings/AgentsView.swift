@@ -520,11 +520,13 @@ struct TasksView: View {
     @State private var assignee: AgentTask.AssigneeFilter = .all
     @State private var status: AgentTask.StatusFilter = .open
     @State private var creating = false
+    /// The task whose detail is open, when one is.
+    @State private var path: [String] = []
 
     private var visible: [AgentTask] { AgentTask.filter(store.tasks, assignee: assignee, status: status) }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if !store.tasksComplete {
                     Text("Only the first \(KVListing.maxRows) stored tasks could be read, so some may be missing here.")
@@ -552,6 +554,15 @@ struct TasksView: View {
             }
             .refreshable { await refresh() }
             .task { await refresh() }
+            // A request from the My Tasks widget or a link: show that task, or the list.
+            .onChange(of: store.tasksRequest, initial: true) { _, request in
+                guard let request else { return }
+                switch request {
+                case .list: path = []
+                case .task(let id): path = [id]
+                }
+                store.tasksRequest = nil
+            }
             .navigationTitle("Tasks")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

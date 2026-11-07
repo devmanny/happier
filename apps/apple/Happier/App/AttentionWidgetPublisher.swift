@@ -44,6 +44,13 @@ struct AttentionWidgetPublisher: View {
         return (sessions + usage).sorted()
     }
 
+    /// What My Tasks shows: the user's tasks, by status, title and due date.
+    private var tasks: [String] {
+        store.tasks.filter { $0.assignee == .user }
+            .map { "\($0.id)|\($0.status.rawValue)|\($0.title)|\($0.dueAt ?? 0)" }
+            .sorted()
+    }
+
     /// The conversations the share extension offers, as listed here.
     private var targets: [String] {
         store.sessionList.prefix(100).map { "\($0.id)|\($0.title)" }
@@ -54,12 +61,18 @@ struct AttentionWidgetPublisher: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
             .task { await follow() }
-            .onChange(of: scenePhase) { _, phase in if phase == .background { publish() } }
+            // Tasks have no live updates: read them when the app opens or comes back.
+            .task { await store.refreshTasks() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { publish() }
+                if phase == .active { Task { await store.refreshTasks() } }
+            }
             .onDisappear {
                 // Signed out: the widgets forget this account's sessions.
                 AttentionSnapshot(total: 0, items: [], updatedAt: .now).save()
                 ShareTargets(sessions: []).save()
                 ActivitySnapshot(working: [], recent: [], usage: [], updatedAt: .now).save()
+                TaskWidgetSnapshot(total: 0, overdue: 0, items: [], updatedAt: .now).save()
                 WidgetCenter.shared.reloadAllTimelines()
                 #if os(iOS)
                 WatchBridge.shared.publish(WatchContext(attention: AttentionSnapshot(total: 0, items: [], updatedAt: .now),
@@ -70,7 +83,7 @@ struct AttentionWidgetPublisher: View {
 
     /// Waits for the sessions to change, lets the burst settle, then publishes what differs.
     private func follow() async {
-        var last: (signature: [String], activity: [String], targets: [String])?
+        var last: (signature: [String], activity: [String], targets: [String], tasks: [String])?
         while !Task.isCancelled {
             if last != nil {
                 await withCheckedContinuation { continuation in
@@ -79,6 +92,7 @@ struct AttentionWidgetPublisher: View {
                         _ = store.sessions.values
                         _ = store.transcripts.values
                         _ = store.providerUsage
+                        _ = store.tasks
                     } onChange: {
                         continuation.resume()
                     }
@@ -86,11 +100,20 @@ struct AttentionWidgetPublisher: View {
                 try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { return }
             }
-            let now = (signature: signature, activity: activity, targets: targets)
+            let now = (signature: signature, activity: activity, targets: targets, tasks: tasks)
             if now.signature != last?.signature || now.activity != last?.activity { publish() }
+            if now.tasks != last?.tasks { publishTasks() }
             if now.targets != last?.targets { ShareTargets(sessions: store.sessionList).save() }
             last = now
         }
+    }
+
+    /// My Tasks only redraws when what it shows changed.
+    private func publishTasks() {
+        let snapshot = TaskWidgetSnapshot(tasks: store.tasks, limit: 6)
+        guard !snapshot.looksLike(TaskWidgetSnapshot.load()) else { return }
+        snapshot.save()
+        WidgetCenter.shared.reloadTimelines(ofKind: "happier.tasks")
     }
 
     /// Save both summaries before requesting one redraw for the whole batch. Publishing on

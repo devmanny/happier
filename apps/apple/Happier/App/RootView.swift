@@ -41,6 +41,12 @@ struct RootView: View {
             case .newSession:
                 showBrowser = false
                 store.openRequest = NewChat.id
+            case .tasks:
+                showBrowser = false
+                store.tasksRequest = .list
+            case .task(let id):
+                showBrowser = false
+                store.tasksRequest = .task(id)
             case .share:
                 showBrowser = false
                 shareRequests += 1
@@ -169,6 +175,10 @@ struct MainView: View {
             detailWithTasksPanel
         }
         .environment(\.tasksPanelAvailable, tasksPanelAvailable)
+        // The My Tasks widget (or a link) asks for Tasks: open the panel, which shows what was asked.
+        .onChange(of: store.tasksRequest) { _, request in
+            if request != nil, tasksPanelAvailable { tasksPanelOpen = true }
+        }
     }
 
     /// iPad (regular width) and Mac get the Tasks panel on the right; the iPhone keeps its sheet.
@@ -197,6 +207,7 @@ struct MainView: View {
                             Label(tasksPanelOpen ? "Hide Tasks" : "Show Tasks", systemImage: "checklist")
                         }
                         .help(Text(tasksPanelOpen ? "Hide Tasks" : "Show Tasks"))
+                        .keyboardShortcut("t", modifiers: [.command, .option])
                     }
                 }
         } else {

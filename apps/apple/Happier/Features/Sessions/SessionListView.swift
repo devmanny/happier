@@ -733,6 +733,10 @@ extension SessionListView {
                 .frame(minWidth: 420, minHeight: 480)
                 #endif
         }
+        // Where there's no Tasks panel (iPhone), a widget's or link's request opens the sheet.
+        .onChange(of: store.tasksRequest, initial: true) { _, request in
+            if request != nil, !tasksPanelAvailable { showTasks = true }
+        }
         .sheet(isPresented: $showTasks) {
             TasksView()
                 #if os(macOS)

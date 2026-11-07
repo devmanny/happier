@@ -56,6 +56,10 @@ public final class HappierStore {
     public var draftSeeds: [String: String] = [:]
     /// A session the UI should navigate to (e.g. a freshly created fork).
     public var openRequest: String?
+    /// The Tasks list (or one task's detail) to show, e.g. from the My Tasks widget; the Tasks view
+    /// consumes it once it is on screen.
+    public enum TasksRequest: Equatable, Sendable { case list, task(String) }
+    public var tasksRequest: TasksRequest?
     /// An incoming link survives the signed-out screen and account teardown during relay switch.
     public private(set) var pendingSessionLink: SessionLink?
     public private(set) var sessionLinkConfirmation: SessionLink?

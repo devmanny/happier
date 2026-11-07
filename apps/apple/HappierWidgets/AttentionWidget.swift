@@ -6,6 +6,7 @@ import WidgetKit
 struct HappierWidgets: WidgetBundle {
     var body: some Widget {
         AttentionWidget()
+        TasksWidget()
         WorkingWidget()
         RecentWidget()
         UsageWidget()
@@ -260,5 +261,161 @@ extension AttentionSnapshot {
             Item(sessionId: "b", title: "Fix the flaky test", agentId: "codex", reason: .unread, date: now.addingTimeInterval(-900), link: nil),
             Item(sessionId: "c", title: "Write the changelog", agentId: "claude", reason: .unread, date: now.addingTimeInterval(-3600), link: nil),
         ], updatedAt: now)
+    }
+}
+
+
+// MARK: - My Tasks
+
+/// "My Tasks": the user's open tasks, overdue first, then by due date. Tapping a task opens its
+/// detail in the app; tapping elsewhere opens the Tasks list. Read-only for now.
+struct TasksWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "happier.tasks", provider: TasksProvider()) { entry in
+            TasksWidgetView(entry: entry)
+        }
+        .configurationDisplayName("My Tasks")
+        .description("Your open tasks: overdue first, then by due date.")
+        #if os(iOS)
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .accessoryCircular, .accessoryRectangular])
+        #else
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        #endif
+    }
+}
+
+struct TasksEntry: TimelineEntry {
+    let date: Date
+    /// Nil until the app has published tasks on this device.
+    let snapshot: TaskWidgetSnapshot?
+}
+
+struct TasksProvider: TimelineProvider {
+    func placeholder(in context: Context) -> TasksEntry { TasksEntry(date: .now, snapshot: .preview) }
+
+    func getSnapshot(in context: Context, completion: @escaping (TasksEntry) -> Void) {
+        completion(TasksEntry(date: .now, snapshot: context.isPreview ? .preview : TaskWidgetSnapshot.load() ?? .preview))
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<TasksEntry>) -> Void) {
+        // The app reloads the widget when the tasks change; this redraws when the next one falls due
+        // (so it shows as overdue on time) and otherwise re-reads now and then.
+        let snapshot = TaskWidgetSnapshot.load()
+        let nextDue = snapshot?.items.compactMap(\.dueAt).filter { $0 > .now }.min()
+        let refresh = min(nextDue ?? .distantFuture, Date.now.addingTimeInterval(30 * 60))
+        completion(Timeline(entries: [TasksEntry(date: .now, snapshot: snapshot)], policy: .after(refresh)))
+    }
+}
+
+extension TaskWidgetSnapshot {
+    static let preview = TaskWidgetSnapshot(total: 3, overdue: 1, items: [
+        Item(id: "1", title: "Comprar el cable USB-C", status: "To do", dueAt: .now.addingTimeInterval(-3_600),
+             link: TaskWidgetSnapshot.taskURL(id: "1")),
+        Item(id: "2", title: "Revisar la propuesta", status: "In progress", dueAt: .now.addingTimeInterval(86_400),
+             link: TaskWidgetSnapshot.taskURL(id: "2")),
+    ], updatedAt: .now)
+}
+
+struct TasksWidgetView: View {
+    let entry: TasksEntry
+    @Environment(\.widgetFamily) private var family
+
+    private var items: [TaskWidgetSnapshot.Item] { entry.snapshot?.items ?? [] }
+    private var total: Int { entry.snapshot?.total ?? 0 }
+    private var overdue: Int { items.filter { $0.isOverdue(at: entry.date) }.count }
+
+    var body: some View {
+        content
+            .widgetURL(TaskWidgetSnapshot.tasksURL)
+            .containerBackground(for: .widget) {
+                LinearGradient(colors: [(overdue > 0 ? Color.red : Color.green).opacity(0.18), Color.clear],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .background(.background)
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch family {
+        case .systemMedium: list(limit: 3)
+        case .systemLarge: list(limit: 6)
+        #if os(iOS)
+        case .accessoryCircular:
+            Gauge(value: Double(min(total, 9)), in: 0...9) {
+                Image(systemName: "checklist")
+            } currentValueLabel: {
+                Text("\(total)").monospacedDigit()
+            }
+            .gaugeStyle(.accessoryCircular)
+        case .accessoryRectangular:
+            VStack(alignment: .leading, spacing: 1) {
+                Label(total == 0 ? "No tasks" : "\(total) open", systemImage: "checklist")
+                    .font(.caption.weight(.semibold))
+                if let next = items.first {
+                    Text(next.title).font(.caption).lineLimit(1)
+                    if let due = next.dueAt { dueText(due, overdue: next.isOverdue(at: entry.date)).font(.caption2) }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        #endif
+        default: small
+        }
+    }
+
+    private var header: some View {
+        Label("My Tasks", systemImage: "checklist")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+    }
+
+    private var small: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            header
+            Spacer(minLength: 0)
+            Text("\(total)")
+                .font(.largeTitle.weight(.bold).monospacedDigit())
+                .widgetAccentable()
+            if overdue > 0 {
+                Text("\(overdue) overdue").font(.caption2.weight(.semibold)).foregroundStyle(.red)
+            }
+            if let first = items.first {
+                Text(first.title).font(.caption2.weight(.medium)).lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    private func list(limit: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                header
+                Spacer()
+                Text("\(total)").font(.title3.weight(.bold).monospacedDigit()).widgetAccentable()
+            }
+            if items.isEmpty {
+                Text("Nothing pending").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                ForEach(items.prefix(limit)) { item in
+                    Link(destination: item.link) { row(item) }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func row(_ item: TaskWidgetSnapshot.Item) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(item.title).font(.subheadline.weight(.medium)).lineLimit(1)
+            HStack(spacing: 6) {
+                Text(item.status)
+                if let due = item.dueAt { dueText(due, overdue: item.isOverdue(at: entry.date)) }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func dueText(_ due: Date, overdue: Bool) -> some View {
+        Text(overdue ? "Overdue · \(due.formatted(.relative(presentation: .named)))" : "Due \(due.formatted(.relative(presentation: .named)))")
+            .foregroundStyle(overdue ? Color.red : Color.secondary)
     }
 }
