@@ -5,6 +5,7 @@ import SwiftUI
 struct ChatView: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store
+    @Environment(\.tasksPanelAvailable) private var tasksPanelAvailable
 
     var body: some View {
         SessionChatHost(sessionId: sessionId, details: details).equatable()
@@ -27,7 +28,15 @@ struct ChatView: View {
             nested: session?.parentSessionId.map { store.sessions.keys.contains($0) } ?? false,
             deletable: session?.canDelete ?? false,
             folderPath: session?.path,
-            folderColor: store.folderColor(of: session))
+            folderColor: store.folderColor(of: session),
+            // Where there's no Tasks panel (iPhone), the session's own tasks are one tap away.
+            sessionTasks: tasksPanelAvailable ? nil : sessionTaskCount)
+    }
+
+    /// Open tasks linked to this session, or nil when none is linked at all.
+    private var sessionTaskCount: Int? {
+        let linked = store.tasks.filter { $0.isLinked(to: sessionId) }
+        return linked.isEmpty ? nil : linked.filter { $0.status != .done }.count
     }
 
 }
@@ -585,6 +594,8 @@ private struct ChatConversationView: View {
 private struct SessionToolbar: ViewModifier {
     let sessionId: String
     let details: SessionDetailsMenu.Details
+    /// The tasks linked to this session (iPhone, from the ⓘ menu).
+    @State private var showSessionTasks = false
     @Binding var showActivity: Bool
     @Binding var finding: Bool
     @Binding var pinnedToEnd: Bool
@@ -620,6 +631,9 @@ private struct SessionToolbar: ViewModifier {
                 }
             }
             .modifier(RenameSessionAlert(session: $renaming))
+            .sheet(isPresented: $showSessionTasks) {
+                TasksView(openSessionId: sessionId, onlyThisSession: true)
+            }
             .sheet(isPresented: $showActivity) {
                 AgentActivitySheet(sessionId: sessionId)
                     #if os(macOS)
@@ -658,6 +672,7 @@ private struct SessionToolbar: ViewModifier {
         case .info: AppHaptics.light(); showInfo = true
         case .search: startFinding()
         case .background: AppHaptics.light(); showActivity = true
+        case .sessionTasks: AppHaptics.light(); showSessionTasks = true
         case .openInWindow: openWindow(id: SessionWindow.id, value: sessionId)
         case .browser: openBrowser()
         case .folderColor(let color):
@@ -901,10 +916,12 @@ private struct SessionDetailsMenu: View, Equatable {
         let deletable: Bool
         let folderPath: String?
         let folderColor: AccountSettings.FolderColor?
+        /// Open tasks linked to this session; nil hides the entry (none linked, or a Tasks panel exists).
+        var sessionTasks: Int? = nil
     }
 
     enum Action {
-        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete
+        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete, sessionTasks
         case folderColor(AccountSettings.FolderColor?)
     }
 
@@ -932,6 +949,11 @@ private struct SessionDetailsMenu: View, Equatable {
                 }
                 if details.hasBackground {
                     Button("Subagents & Tasks", systemImage: "square.stack.3d.down.right") { perform(.background) }
+                }
+                if let open = details.sessionTasks {
+                    Button(open == 0 ? "Session Tasks" : "Session Tasks · \(open) open", systemImage: "checklist") {
+                        perform(.sessionTasks)
+                    }
                 }
                 // This session's tab in the integrated browser, where its agent browses.
                 Button("Browser", systemImage: "safari") { perform(.browser) }

@@ -518,6 +518,8 @@ struct TasksView: View {
     /// The conversation open beside the list (nil on the iPhone's sheet or with none open). Tasks
     /// belong to the account; this only decides what is shown as linked to it.
     var openSessionId: String?
+    /// Only this session's tasks (the iPhone chat's ⓘ menu): no scope picker, no other groups.
+    var onlyThisSession = false
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var assignee: AgentTask.AssigneeFilter = .all
@@ -529,14 +531,15 @@ struct TasksView: View {
 
     private var sections: [AgentTask.Section] {
         AgentTask.sections(AgentTask.filter(store.tasks, assignee: assignee, status: .all),
-                           scope: openSessionId == nil ? .all : scope, openSessionId: openSessionId, status: status)
+                           scope: onlyThisSession ? .thisSession : openSessionId == nil ? .all : scope,
+                           openSessionId: openSessionId, status: status)
     }
 
     var body: some View {
         let sections = sections
         NavigationStack(path: $path) {
             List {
-                if openSessionId != nil {
+                if openSessionId != nil, !onlyThisSession {
                     Picker("Show", selection: $scope) {
                         Text("All").tag(AgentTask.Scope.all)
                         Text("This Session").tag(AgentTask.Scope.thisSession)
@@ -569,7 +572,10 @@ struct TasksView: View {
             #endif
             .overlay {
                 if sections.isEmpty, store.tasksError == nil {
-                    if scope == .thisSession, openSessionId != nil {
+                    if onlyThisSession {
+                        ContentUnavailableView("No Open Tasks Here", systemImage: "link",
+                                               description: Text("Tasks linked to this session show up here; all your tasks are in Tasks."))
+                    } else if scope == .thisSession, openSessionId != nil {
                         ContentUnavailableView {
                             Label("No Tasks Linked to This Session", systemImage: "link")
                         } description: {
@@ -598,7 +604,7 @@ struct TasksView: View {
                 }
                 store.tasksRequest = nil
             }
-            .navigationTitle("Tasks")
+            .navigationTitle(onlyThisSession ? "Session Tasks" : "Tasks")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
