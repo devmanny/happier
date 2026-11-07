@@ -19,6 +19,13 @@ struct Composer: View {
     private static let log = Logger(subsystem: "dev.happier.apple", category: "composer")
     @Environment(HappierStore.self) private var store
     @State private var sheet: SheetKind?
+    /// Dragging the status line (see `statusDrag`).
+    @State private var statusGrabbed = false
+    @State private var statusDragX: CGFloat = 0
+    @State private var statusPillWidth: CGFloat = 0
+    @State private var statusRowWidth: CGFloat = 0
+    @State private var droppedSide: AccountSettings.StatusPosition?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -310,7 +317,42 @@ struct Composer: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
-    private var statusOnRight: Bool { store.accountSettings?.statusPosition == .right }
+    /// The side the pill sits on: the one just dropped on (until the account setting has it), else the setting.
+    private var statusOnRight: Bool { (droppedSide ?? store.accountSettings?.statusPosition) == .right }
+
+    /// Press and hold the status line (0.3 s), then drag it sideways; released, it springs to the
+    /// side its projected position falls on and that becomes the account's Status Position.
+    /// Holding first keeps the drag from fighting the conversation's scroll and the text field.
+    private var statusDrag: some Gesture {
+        LongPressGesture(minimumDuration: 0.3)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if !statusGrabbed {
+                    statusGrabbed = true
+                    AppHaptics.light()
+                }
+                statusDragX = drag?.translation.width ?? 0
+            }
+            .onEnded { value in
+                defer { statusGrabbed = false }
+                guard case .second(true, let drag?) = value else {
+                    statusDragX = 0
+                    return
+                }
+                let start = statusOnRight ? statusRowWidth - statusPillWidth / 2 - 4 : statusPillWidth / 2 + 4
+                let side = StatusSideSnap.side(center: start + drag.translation.width, velocity: drag.velocity.width,
+                                               width: statusRowWidth)
+                withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 0.72)) {
+                    droppedSide = side
+                    statusDragX = 0
+                }
+                AppHaptics.light()
+                if side != store.accountSettings?.statusPosition {
+                    Task { await store.updateAccountSettings { $0.delta(statusPosition: side) } }
+                }
+            }
+    }
 
     /// The status pill, and beside it what runs in the background.
     private func statusRow(_ session: Session) -> some View {
@@ -334,9 +376,18 @@ struct Composer: View {
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { statusPillWidth = $0 }
+        .scaleEffect(statusGrabbed ? 1.04 : 1)
+        .offset(x: statusDragX)
+        .gesture(statusDrag)
+        .animation(.smooth(duration: 0.15), value: statusGrabbed)
         // Left (as "Online" always was) or right above the mic, as the account's settings say.
         .padding(statusOnRight ? .trailing : .leading, 4)
         .frame(maxWidth: .infinity, alignment: statusOnRight ? .trailing : .leading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { statusRowWidth = $0 }
+        .onChange(of: store.accountSettings?.statusPosition) { _, saved in
+            if saved == droppedSide { droppedSide = nil }
+        }
         .animation(.smooth(duration: 0.25), value: running > 0)
     }
 
