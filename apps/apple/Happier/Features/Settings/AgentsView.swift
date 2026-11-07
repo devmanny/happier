@@ -1036,7 +1036,7 @@ private struct TaskRow: View {
 }
 
 /// How every start of the task runs ("Start Now", "Schedule…", each repeat), with the composer's
-/// single permission symbol (YOLO in amber).
+/// single permission symbol.
 private struct TaskPermissionPicker: View {
     @Binding var mode: PermissionMode
     let agentId: String?

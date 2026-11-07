@@ -176,10 +176,10 @@ struct AgentCardView: View {
         let mode = controls.permissionMode
         let label = mode.label(agentId: controls.agentId)
         return HStack(spacing: 4) {
-            PermissionSymbol(mode: mode).font(.footnote).frame(width: 16, height: 16)
+            PermissionSymbol(mode: mode, textStyle: .footnote, side: 16)
             Text(label).lineLimit(1)
         }
-        .foregroundStyle(mode == .yolo ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
+        .foregroundStyle(.primary)
         .modifier(Chip())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Permission mode: \(label)"))

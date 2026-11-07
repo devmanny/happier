@@ -643,24 +643,29 @@ struct EffortBarsMark: View {
     }
 }
 
-/// The permission mode as one symbol: read only, ask, automatic, or YOLO (the only one in color:
-/// amber, it's the risky one).
+/// The permission mode as one symbol, everywhere it's shown (composer, menus, task detail, agent
+/// card): one family, the circled outline of each, same weight and scale, monochrome in the text
+/// color. No mode is colored: having every permission is the normal case, not an alert.
 struct PermissionSymbol: View {
     let mode: PermissionMode
+    var textStyle: Font.TextStyle = .body
+    var side: CGFloat = 22
 
     var body: some View {
         Image(systemName: Self.name(mode))
-            .font(.body.weight(.medium))
-            .foregroundStyle(mode == .yolo ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
-            .frame(width: 22, height: 22)
+            .font(.system(textStyle, weight: .regular))
+            .imageScale(.medium)
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(.primary)
+            .frame(width: side, height: side)
     }
 
     static func name(_ mode: PermissionMode) -> String {
         switch mode {
-        case .readOnly: "eye"
-        case .default: "hand.raised"
-        case .safeYolo: "checkmark.shield"
-        case .yolo: "bolt.fill"
+        case .readOnly: "eye.circle"
+        case .default: "questionmark.circle"
+        case .safeYolo: "bolt.circle"
+        case .yolo: "checkmark.circle"
         }
     }
 }
@@ -897,7 +902,8 @@ private struct PermissionMenu: View, Equatable {
         Menu {
             Picker("Permissions", selection: Binding(get: { mode }, set: { onSelect($0) })) {
                 ForEach(PermissionMode.allCases, id: \.self) { mode in
-                    Text(mode.label(agentId: agentId)).tag(mode)
+                    Label { Text(mode.label(agentId: agentId)) } icon: { Image(systemName: PermissionSymbol.name(mode)) }
+                        .tag(mode)
                 }
             }
             .pickerStyle(.inline)
