@@ -138,34 +138,6 @@ struct SessionUsageButton: View {
 }
 
 
-/// Shared by the sidebar and the chat details. The cache never reads transcript history.
-struct SessionTokenIndicator: View {
-    let sessionId: String
-    let parents: [String: String]
-    @Environment(HappierStore.self) private var store
-
-    var body: some View {
-        let summary = store.tokenSummary(sessionId, parents: parents)
-        Text(label(summary))
-            .font(.caption2)
-            .monospacedDigit()
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .help(Text("Recorded tokens; tree totals include known descendants. Open usage statistics for details."))
-            .task(id: SessionTokenSummary.memberIds(sessionId, parents: parents)) {
-                await store.loadSessionTokenUsage(sessionId)
-            }
-    }
-
-    private func label(_ summary: SessionTokenSummary) -> String {
-        let own = summary.own.map { $0.formatted(.number.notation(.compactName)) } ?? "—"
-        guard summary.descendantCount > 0 else { return String(localized: "\(own) tokens") }
-        let total = summary.total.map { $0.formatted(.number.notation(.compactName)) } ?? "—"
-        let partial = summary.missingCount > 0 ? "+" : ""
-        return String(localized: "\(own) own · \(total)\(partial) tree tokens")
-    }
-}
-
 private struct SessionTokenDetails: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store

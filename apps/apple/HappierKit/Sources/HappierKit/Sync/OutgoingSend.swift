@@ -12,6 +12,8 @@ final class OutgoingSend {
     let sessionId: String
     let text: String
     let attachments: [AttachmentDraft]
+    /// The message's own permission intent (a task's), instead of the session's current one.
+    let permissionMode: PermissionMode?
     var isCancelled = false
     var isSending = false
     private var isAcknowledged = false
@@ -23,11 +25,13 @@ final class OutgoingSend {
     /// activity or composer controls changed after the server accepted a request with a lost ACK.
     private var prepared: (content: JSONValue, action: PendingAction)?
 
-    init(localId: String = UUID().uuidString.lowercased(), sessionId: String, text: String, attachments: [AttachmentDraft]) {
+    init(localId: String = UUID().uuidString.lowercased(), sessionId: String, text: String, attachments: [AttachmentDraft],
+         permissionMode: PermissionMode? = nil) {
         self.localId = localId
         self.sessionId = sessionId
         self.text = text
         self.attachments = attachments
+        self.permissionMode = permissionMode
     }
 
     /// The canonical transcript is also a delivery acknowledgement when the HTTP ACK was lost.

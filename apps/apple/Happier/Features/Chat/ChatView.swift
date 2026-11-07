@@ -39,7 +39,7 @@ struct ChatView: View {
     /// Open tasks linked to this session, or nil when none is linked at all.
     private var sessionTaskCount: Int? {
         let linked = store.tasks.filter { $0.isLinked(to: sessionId) }
-        return linked.isEmpty ? nil : linked.filter { $0.status != .done }.count
+        return linked.isEmpty ? nil : linked.filter(\.isOpen).count
     }
 
 }

@@ -52,7 +52,7 @@ struct AgentsView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button("New Agent", systemImage: "plus") {
                     AppHaptics.light()
-                    editing = AgentProfile(name: "", emoji: "🤖", providerId: "claude", account: .init(label: ""))
+                    editing = AgentProfile(name: "", providerId: "claude", account: .init(label: ""))
                 }
                 .disabled(store.agentProfilesError != nil && store.agentProfiles.isEmpty)
             }
@@ -70,7 +70,7 @@ struct AgentsView: View {
     }
 }
 
-/// "🤖 Julián", its engine, and the account it's tied to.
+/// "Julián", its engine, and the account it's tied to; the engine's logo in place of an avatar.
 struct AgentProfileRow: View {
     let profile: AgentProfile
     var selected = false
@@ -78,8 +78,7 @@ struct AgentProfileRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(profile.emoji ?? "🤖")
-                .font(.title2)
+            ProviderLogo(providerId: profile.providerId)
                 .frame(width: 36, height: 36)
                 .glassEffect(.regular, in: Circle())
             VStack(alignment: .leading, spacing: 2) {
@@ -90,7 +89,6 @@ struct AgentProfileRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
-            ProviderLogo(providerId: profile.providerId)
             if selected { Image(systemName: "checkmark").foregroundStyle(Color.userBubble).fontWeight(.semibold) }
         }
         .contentShape(Rectangle())
@@ -158,14 +156,10 @@ private struct AgentEditor: View {
 
     var body: some View {
         Form {
-            Section("Name and Emoji") {
-                HStack {
-                    TextField("Emoji", text: optional(\.emoji))
-                        .frame(width: 44)
-                        .multilineTextAlignment(.center)
-                    TextField("Name", text: $profile.name)
-                        .accessibilityIdentifier("agent-name")
-                }
+            // The emoji an agent may carry stays in its identity, unedited and never drawn here.
+            Section("Name") {
+                TextField("Name", text: $profile.name)
+                    .accessibilityIdentifier("agent-name")
             }
             Section {
                 TextField("Who it is and how it works", text: optional(\.description), axis: .vertical)
@@ -526,21 +520,35 @@ struct TasksView: View {
     @State private var assignee: AgentTask.AssigneeFilter = .all
     @State private var status: AgentTask.StatusFilter = .open
     @State private var scope: AgentTask.Scope = .all
+    @State private var showCompleted = false
+    @State private var showArchived = false
+    /// Completed with the circle moments ago: still shown, struck through, and can be undone.
+    @State private var completions = TaskCompletions()
+    @State private var selecting = false
+    @State private var selection = Set<String>()
+    /// The tasks "Assign…" (a swipe) is choosing for, and those "Other Session…" is picking for.
+    @State private var assigning: [String] = []
+    @State private var pickingSessionFor: [String] = []
     @State private var creating: AgentTask.Assignee?
     @State private var assigningExisting = false
-    /// The task whose detail is open, when one is.
-    @State private var path: [String] = []
+    /// The task whose detail is open, when one is, with where it was opened from.
+    @State private var path: [TaskRoute] = []
 
     private var sections: [AgentTask.Section] {
-        AgentTask.sections(AgentTask.filter(store.tasks, assignee: assignee, status: .all),
-                           scope: onlyThisSession ? .thisSession : openSessionId == nil ? .all : scope,
-                           openSessionId: openSessionId, status: status)
+        let shown = AgentTask.filter(store.tasks, assignee: assignee, status: status,
+                                     showCompleted: showCompleted, showArchived: showArchived)
+        // What the circle just completed stays until its time to undo passes.
+        let shownIds = Set(shown.map(\.id)), lingering = completions.lingeringIds
+        let completedHere = store.tasks.filter { lingering.contains($0.id) && !shownIds.contains($0.id) }
+        return AgentTask.sections(shown + completedHere,
+                                  scope: onlyThisSession ? .thisSession : openSessionId == nil ? .all : scope,
+                                  openSessionId: openSessionId, status: .all, showCompleted: true, showArchived: true)
     }
 
     var body: some View {
         let sections = sections
         NavigationStack(path: $path) {
-            List {
+            List(selection: selecting ? $selection : nil) {
                 if openSessionId != nil, !onlyThisSession {
                     Picker("Show", selection: $scope) {
                         Text("All").tag(AgentTask.Scope.all)
@@ -560,9 +568,25 @@ struct TasksView: View {
                 ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                     Section {
                         ForEach(section.tasks) { task in
-                            NavigationLink(value: task.id) {
-                                TaskRow(task: task, openSessionId: openSessionId) { open($0) }
+                            NavigationLink(value: TaskRoute(id: task.id, origin: listOrigin)) {
+                                TaskRow(task: task, openSessionId: openSessionId,
+                                        completedHere: completions.lingeringIds.contains(task.id),
+                                        toggleDone: selecting ? nil : { toggleDone(task) }) { open($0) }
                             }
+                            .tag(task.id)
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                if task.completesFromList {
+                                    Button("Complete", systemImage: "checkmark") { toggleDone(task) }
+                                        .tint(.gray)
+                                }
+                            }
+                            .swipeActions(edge: .trailing) {
+                                archiveButton([task.id], archived: task.isArchived)
+                                    .tint(.gray)
+                                Button("Assign…", systemImage: "person.crop.circle.badge.plus") { assigning = [task.id] }
+                                    .tint(Color(white: 0.6))
+                            }
+                            .contextMenu { rowMenu(task) }
                         }
                     } header: {
                         header(section, isFirstGroup: sections.firstIndex { $0.kind != .linkedToOpenSession } == index)
@@ -571,7 +595,27 @@ struct TasksView: View {
             }
             #if os(iOS)
             .listStyle(.plain)
+            .environment(\.editMode, .constant(selecting ? .active : .inactive))
             #endif
+            .safeAreaInset(edge: .bottom) {
+                if selecting { selectionBar }
+            }
+            .confirmationDialog("Assign to…", isPresented: Binding(get: { !assigning.isEmpty }, set: { if !$0 { assigning = [] } }),
+                                titleVisibility: .visible) {
+                let ids = assigning
+                ForEach(store.agentProfiles) { profile in
+                    Button(profile.label) { assign(ids, .agent(profile)) }
+                }
+                if let openSessionId, let session = store.sessions[openSessionId] {
+                    Button("This Session · \(session.title)") { assign(ids, .session(id: session.id, title: session.title)) }
+                }
+                Button("Other Session…") { pickingSessionFor = ids }
+                Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: Binding(get: { !pickingSessionFor.isEmpty }, set: { if !$0 { pickingSessionFor = [] } })) {
+                let ids = pickingSessionFor
+                TaskSessionPicker(excluding: nil) { session in assign(ids, .session(id: session.id, title: session.title)) }
+            }
             .overlay {
                 if sections.isEmpty, store.tasksError == nil {
                     if onlyThisSession {
@@ -591,9 +635,9 @@ struct TasksView: View {
                     }
                 }
             }
-            .navigationDestination(for: String.self) { id in
+            .navigationDestination(for: TaskRoute.self) { route in
                 // In the panel an opened session shows in the middle while the task stays here.
-                TaskDetailView(taskId: id, openSessionId: openSessionId) { if presentation == .sheet { dismiss() } }
+                TaskDetailView(taskId: route.id, origin: route.origin) { if presentation == .sheet { dismiss() } }
             }
             .refreshable { await refresh() }
             .task { await refresh() }
@@ -602,7 +646,7 @@ struct TasksView: View {
                 guard let request else { return }
                 switch request {
                 case .list: path = []
-                case .task(let id): path = [id]
+                case .task(let id): path = [TaskRoute(id: id, origin: .link)]
                 }
                 store.tasksRequest = nil
             }
@@ -617,6 +661,14 @@ struct TasksView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) { filterMenu }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(selecting ? "Done" : "Select") {
+                        AppHaptics.light()
+                        withAnimation(.smooth) { selecting.toggle() }
+                        selection = []
+                    }
+                    .disabled(!selecting && sections.isEmpty)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     if let thisSession {
                         Menu {
@@ -642,6 +694,12 @@ struct TasksView: View {
                 if let thisSession { TaskPickerSheet(assignee: thisSession) }
             }
         }
+    }
+
+    /// A task opened from this list: from inside the open session (its tasks, or the panel beside
+    /// it), else from the account's list.
+    private var listOrigin: AgentTask.Origin {
+        openSessionId.map(AgentTask.Origin.session) ?? .list
     }
 
     /// The open session as an assignee, while the list shows this session's tasks.
@@ -684,6 +742,106 @@ struct TasksView: View {
         return store.tasks.compactMap(\.assignee.sessionId).filter { seen.insert($0).inserted }
     }
 
+    // MARK: Quick actions (as in Reminders)
+
+    /// The circle: completes the task (it stays struck through for a moment), or undoes that.
+    private func toggleDone(_ task: AgentTask) {
+        if completions.lingeringIds.contains(task.id) {
+            guard let undo = completions.undo(task.id) else { return }
+            AppHaptics.light()
+            Task { await store.updateTask(id: task.id, undo) }
+            return
+        }
+        guard let done = completions.complete(task, now: ServerClock.nowMs()) else { return }
+        AppHaptics.success()
+        Task { await store.updateTask(id: task.id, done) }
+        Task {
+            try? await Task.sleep(for: .milliseconds(Int(TaskCompletions.lingerMs) + 100))
+            withAnimation(.smooth) { completions.expire(now: ServerClock.nowMs()) }
+        }
+    }
+
+    private func archiveButton(_ ids: [String], archived: Bool) -> some View {
+        Button(archived ? "Unarchive" : "Archive", systemImage: archived ? "tray.and.arrow.up" : "archivebox") {
+            AppHaptics.light()
+            selection = []
+            Task { await store.updateTasks(ids: ids, .archiving(!archived)) }
+        }
+    }
+
+    private func assign(_ ids: [String], _ assignee: AgentTask.Assignee) {
+        AppHaptics.selection()
+        selection = []
+        Task { await store.updateTasks(ids: ids, .assigning(assignee)) }
+    }
+
+    /// "Assign to…": the same agents and sessions as the task's detail; it only assigns.
+    @ViewBuilder private func assignItems(_ ids: [String]) -> some View {
+        if !store.agentProfiles.isEmpty {
+            Section("Agents") {
+                ForEach(store.agentProfiles) { profile in
+                    Button { assign(ids, .agent(profile)) } label: {
+                        Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
+                    }
+                }
+            }
+        }
+        Section("Sessions") {
+            if let openSessionId, let session = store.sessions[openSessionId] {
+                Button("This Session · \(session.title)") { assign(ids, .session(id: session.id, title: session.title)) }
+            }
+            Button("Other Session…", systemImage: "magnifyingglass") { pickingSessionFor = ids }
+        }
+    }
+
+    @ViewBuilder private func rowMenu(_ task: AgentTask) -> some View {
+        if task.completesFromList {
+            Button("Complete", systemImage: "checkmark.circle") { toggleDone(task) }
+        }
+        Menu {
+            assignItems([task.id])
+        } label: {
+            Label("Assign to…", systemImage: "person.crop.circle.badge.plus")
+        }
+        archiveButton([task.id], archived: task.isArchived)
+        Divider()
+        Button("Open", systemImage: "arrow.up.forward.square") {
+            path.append(TaskRoute(id: task.id, origin: listOrigin))
+        }
+    }
+
+    /// While selecting: complete, assign or archive the chosen tasks together.
+    private var selectionBar: some View {
+        let chosen = store.tasks.filter { selection.contains($0.id) }
+        let completable = chosen.filter(\.completesFromList).map(\.id)
+        return HStack(spacing: 12) {
+            Button("Complete", systemImage: "checkmark.circle") {
+                AppHaptics.success()
+                selection = []
+                Task { await store.updateTasks(ids: completable, AgentTask.Update(status: .done)) }
+            }
+            .disabled(completable.isEmpty)
+            Spacer()
+            Text("\(chosen.count) selected").font(.footnote).foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                assignItems(chosen.map(\.id))
+            } label: {
+                Label("Assign", systemImage: "person.crop.circle.badge.plus")
+            }
+            .disabled(chosen.isEmpty)
+            archiveButton(chosen.map(\.id), archived: !chosen.isEmpty && chosen.allSatisfy(\.isArchived))
+                .disabled(chosen.isEmpty)
+        }
+        .labelStyle(.iconOnly)
+        .font(.title3)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .glassEffect(.regular, in: Capsule())
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
     private var filterMenu: some View {
         Menu {
             Picker("For", selection: $assignee) {
@@ -703,8 +861,12 @@ struct TasksView: View {
                 }
                 Text("All").tag(AgentTask.StatusFilter.all)
             }
+            Section {
+                Toggle("Show Completed", isOn: $showCompleted)
+                Toggle("Show Archived", isOn: $showArchived)
+            }
         } label: {
-            Label("Filter", systemImage: assignee == .all && status == .open
+            Label("Filter", systemImage: assignee == .all && status == .open && !showCompleted && !showArchived
                   ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
         }
     }
@@ -713,6 +875,10 @@ struct TasksView: View {
 private struct TaskRow: View {
     let task: AgentTask
     var openSessionId: String?
+    /// Completed with the circle moments ago (can be undone).
+    var completedHere = false
+    /// The circle's action; nil while selecting.
+    var toggleDone: (() -> Void)?
     var openSession: (String) -> Void = { _ in }
     @Environment(HappierStore.self) private var store
 
@@ -747,10 +913,40 @@ private struct TaskRow: View {
         title.count > 22 ? String(title.prefix(21)) + "…" : title
     }
 
+    /// The leading circle: completes an open task; a repeating or archived task shows why it doesn't.
+    @ViewBuilder private var circle: some View {
+        let done = task.status == .done || completedHere
+        if task.isArchived {
+            Image(systemName: "archivebox").foregroundStyle(.tertiary)
+                .accessibilityLabel("Archived")
+        } else if task.recurrence != nil, !done {
+            Image(systemName: "repeat.circle").foregroundStyle(.tertiary)
+                .accessibilityLabel("Repeats; archive or pause it instead")
+        } else if let toggleDone, task.completesFromList || completedHere {
+            Button(action: toggleDone) {
+                Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(done ? "Mark as not done" : "Complete")
+        } else {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle").foregroundStyle(.tertiary)
+        }
+    }
+
     var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            circle.font(.title3)
+            details
+        }
+    }
+
+    private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(task.title)
-                .strikethrough(task.status == .done)
+                .strikethrough(task.status == .done || completedHere)
+                .foregroundStyle(completedHere ? .secondary : .primary)
                 .lineLimit(2)
             HStack(spacing: 6) {
                 if task.assignee.sessionId != nil {
@@ -779,28 +975,70 @@ private struct TaskRow: View {
     }
 }
 
+/// How every start of the task runs ("Start Now", "Schedule…", each repeat), with the composer's
+/// single permission symbol (YOLO in amber).
+private struct TaskPermissionPicker: View {
+    @Binding var mode: PermissionMode
+    let agentId: String?
+
+    var body: some View {
+        LabeledContent("Permissions") {
+            Menu {
+                Picker("Permissions", selection: $mode) {
+                    ForEach(PermissionMode.allCases, id: \.self) { option in
+                        Label { Text(option.label(agentId: agentId)) } icon: { Image(systemName: PermissionSymbol.name(option)) }
+                            .tag(option)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                HStack(spacing: 6) {
+                    PermissionSymbol(mode: mode)
+                    Text(mode.label(agentId: agentId)).foregroundStyle(.secondary)
+                }
+            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Permissions: \(mode.label(agentId: agentId))")
+        }
+    }
+}
+
 /// Who a task can be for: you or one of your agents.
 private struct TaskAssigneePicker: View {
     @Binding var assignee: AgentTask.Assignee
     let agents: [AgentProfile]
     /// The session open beside the list, offered as an assignee.
     var openSessionId: String?
+    /// The task is already worked in the open session: it isn't offered again, and who it is for
+    /// reads "Mateo · this session".
+    var worksInOpenSession = false
+    /// The open session as somewhere new for it: not when the task is linked to it already.
+    var offersOpenSession = true
     @Environment(HappierStore.self) private var store
+
+    /// The current assignee's name, with where it works when that is the open session.
+    private func name(_ candidate: AgentTask.Assignee, _ name: String) -> String {
+        guard worksInOpenSession, candidate == assignee else { return name }
+        return String(localized: "\(name) · this session")
+    }
 
     var body: some View {
         Picker("For", selection: $assignee) {
-            Text("Me").tag(AgentTask.Assignee.user)
+            Text(name(.user, String(localized: "Me"))).tag(AgentTask.Assignee.user)
             ForEach(agents) { profile in
-                Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
-                    .tag(AgentTask.Assignee.agent(profile))
+                let tag = assignee.agentId == profile.id ? assignee : AgentTask.Assignee.agent(profile)
+                Label { Text(name(tag, profile.label)) } icon: { ProviderLogo.menuImage(profile.providerId) }
+                    .tag(tag)
             }
             // An agent this device doesn't know (deleted or not loaded yet) stays selectable as it is.
             if case .agent(let id, _, _) = assignee, !agents.contains(where: { $0.id == id }) {
-                Text(assignee.label.isEmpty ? id : assignee.label).tag(assignee)
+                Text(name(assignee, assignee.label.isEmpty ? id : assignee.label)).tag(assignee)
             }
-            if let openSessionId {
-                // The stored assignee itself when it is this session, so the picker shows it selected.
-                let tag = assignee.sessionId == openSessionId ? assignee : .session(id: openSessionId, title: store.sessions[openSessionId]?.title)
+            if let openSessionId, assignee.sessionId == openSessionId {
+                Text("This Session").tag(assignee)
+            } else if let openSessionId, offersOpenSession {
+                let tag = AgentTask.Assignee.session(id: openSessionId, title: store.sessions[openSessionId]?.title)
                 Text("This Session · \(store.taskAssigneeName(tag))").tag(tag)
             }
             if let id = assignee.sessionId, id != openSessionId {
@@ -816,6 +1054,12 @@ extension HappierStore {
         if let id = assignee.sessionId, let title = sessions[id]?.title { return title }
         return assignee.label
     }
+}
+
+/// A task's detail in the Tasks navigation, and where it was opened from.
+private struct TaskRoute: Hashable {
+    let id: String
+    let origin: AgentTask.Origin
 }
 
 /// So a "New Task" sheet can be presented with who it is for already chosen.
@@ -1002,8 +1246,10 @@ private struct NewTaskSheet: View {
 /// "Schedule…" (a one-time start on the relay's Automations).
 private struct TaskDetailView: View {
     let taskId: String
-    /// The session open beside the list, offered first in "Assign to…".
-    var openSessionId: String?
+    /// Where it was opened from: inside a session, it shows what the task already does there
+    /// instead of offering it again.
+    var origin: AgentTask.Origin = .list
+    private var openSessionId: String? { origin.sessionId }
     /// Leaves the Tasks sheet, so an opened session is on screen.
     let close: () -> Void
     @Environment(HappierStore.self) private var store
@@ -1026,6 +1272,7 @@ private struct TaskDetailView: View {
     @State private var changedElsewhere = false
 
     private var stored: AgentTask? { store.task(id: taskId) }
+    private var actions: AgentTask.Actions? { stored?.availableActions(from: origin) }
     private var changes: AgentTask.Update? {
         guard let base = base ?? stored, let draft else { return nil }
         let update = AgentTask.Update(from: base, to: draft)
@@ -1099,15 +1346,21 @@ private struct TaskDetailView: View {
                     if !store.agentProfiles.isEmpty {
                         Section("Agents") {
                             ForEach(store.agentProfiles) { profile in
+                                // Who it is for already: checked, not something to choose again.
                                 Toggle(isOn: assigned(.agent(profile))) {
                                     Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
                                 }
+                                .disabled(actions?.offers(.agent(profile)) == false)
                             }
                         }
                     }
                     Section("Sessions") {
                         if let openSessionId, let session = store.sessions[openSessionId] {
-                            Toggle("This Session · \(session.title)", isOn: assigned(.session(id: session.id, title: session.title)))
+                            if actions?.offersThisSession == true {
+                                Toggle("This Session · \(session.title)", isOn: assigned(.session(id: session.id, title: session.title)))
+                            } else if actions?.worksHere == true {
+                                Label("Working in this session", systemImage: "checkmark.circle")
+                            }
                         }
                         Button("Other Session…", systemImage: "magnifyingglass") { pickingSession = true }
                     }
@@ -1166,9 +1419,14 @@ private struct TaskDetailView: View {
                     .lineLimit(3...12)
             }
             Section {
-                TaskAssigneePicker(assignee: task.assignee, agents: store.agentProfiles, openSessionId: openSessionId)
+                TaskAssigneePicker(assignee: task.assignee, agents: store.agentProfiles, openSessionId: openSessionId,
+                                   worksInOpenSession: actions?.worksHere == true,
+                                   offersOpenSession: actions?.offersThisSession == true)
                 Picker("Status", selection: task.status) {
                     ForEach(AgentTask.Status.allCases) { Text($0.label).tag($0) }
+                }
+                if task.wrappedValue.assignee != .user {
+                    TaskPermissionPicker(mode: task.permissionMode, agentId: permissionAgentId(task.wrappedValue))
                 }
                 if let due = task.wrappedValue.due(), task.wrappedValue.status != .done {
                     Text(due.text).foregroundStyle(due.overdue ? Color.red : Color.secondary)
@@ -1193,7 +1451,10 @@ private struct TaskDetailView: View {
             } footer: {
                 Text("Start Now starts the agent here; without a folder it uses the machine's latest folder. A scheduled start needs both.")
             }
-            if let stored, stored.assignee != .user { startSection(stored) }
+            if let stored, let actions, stored.assignee != .user,
+               actions.offersStartNow || actions.pendingStart != nil || actions.runningSessionId != nil {
+                startSection(stored, actions)
+            }
             sourceSection(task)
             TaskRepeatSections(task: task.wrappedValue, close: close)
             Section("Comment") {
@@ -1295,6 +1556,12 @@ private struct TaskDetailView: View {
         return String(localized: "A session")
     }
 
+    /// The engine the task's permission names follow: its agent's, or its session's.
+    private func permissionAgentId(_ task: AgentTask) -> String? {
+        if let id = task.assignee.agentId { return store.agentProfile(id: id)?.providerId }
+        return task.assignee.sessionId.flatMap { store.sessions[$0]?.agentId }
+    }
+
     // MARK: Assign, start, schedule
 
     /// "Assign to…" item state: checked for who the task is for; choosing another only assigns it.
@@ -1319,10 +1586,22 @@ private struct TaskDetailView: View {
         }
     }
 
-    /// "Start Now", "Schedule…", or the pending start with "Change…" and "Cancel".
-    private func startSection(_ task: AgentTask) -> some View {
+    /// "Start Now", "Schedule…", the pending start with "Change…" and "Cancel", or where it runs:
+    /// only what would change something is offered.
+    private func startSection(_ task: AgentTask, _ actions: AgentTask.Actions) -> some View {
         Section {
-            if let start = task.scheduledStart {
+            if actions.runsHere {
+                Label("Running here", systemImage: "play.circle.fill")
+                    .foregroundStyle(Color.userBubble)
+            } else if let running = actions.runningSessionId {
+                Button {
+                    Task { await store.openRelatedSession(running) }
+                    close()
+                } label: {
+                    LabeledContent("Running in", value: store.sessions[running]?.title ?? String(localized: "another session"))
+                }
+            }
+            if let start = actions.pendingStart {
                 LabeledContent("Starts", value: start.date.formatted(date: .abbreviated, time: .shortened))
                 Button("Change…") { scheduling = ScheduleDraft(date: max(start.date, .now), isChange: true) }
                     .disabled(working)
@@ -1335,9 +1614,11 @@ private struct TaskDetailView: View {
                 }
                 .disabled(working)
             }
-            Button("Start Now", systemImage: "play.fill") { startNow() }
-                .disabled(working || changes != nil || task.status == .done)
-            if task.scheduledStart == nil {
+            if actions.offersStartNow {
+                Button("Start Now", systemImage: "play.fill") { startNow() }
+                    .disabled(working || changes != nil)
+            }
+            if actions.offersSchedule {
                 Button("Schedule…", systemImage: "calendar.badge.clock") {
                     if let problem = store.scheduleProblem(for: task) {
                         alert = problem
@@ -1345,13 +1626,15 @@ private struct TaskDetailView: View {
                         scheduling = ScheduleDraft(date: .now.addingTimeInterval(3600), isChange: false)
                     }
                 }
-                .disabled(working || changes != nil || task.status == .done)
+                .disabled(working || changes != nil)
             }
         } header: {
             Text("Start")
         } footer: {
             if changes != nil {
                 Text("Save your edits first.")
+            } else if !actions.offersStartNow {
+                EmptyView()
             } else if task.assignee.sessionId != nil {
                 Text("Starting sends the task to \(store.taskAssigneeName(task.assignee)).")
             } else if task.scheduledStart == nil, let problem = store.scheduleProblem(for: task) {

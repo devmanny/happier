@@ -263,7 +263,6 @@ struct Composer: View {
                     .equatable()
                     .sheet(isPresented: $mentioning) { mentionPicker }
                     if let controls {
-                        if let agent = store.sessions[sessionId]?.agentIdentity { agentChip(agent) }
                         modelPill(controls)
                         permissionPill(controls)
                     }
@@ -319,7 +318,7 @@ struct Composer: View {
             : (store.transcripts[sessionId]?.subagents.filter { $0.status == .running }.count ?? 0)
                 + (store.delegatedRuns[sessionId]?.filter(\.isActive).count ?? 0)
         return HStack(spacing: 6) {
-            SessionStatusRow(session: session)
+            SessionStatusRow(session: session, agent: session.agentIdentity)
             ResumeSessionButton(sessionId: sessionId)
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.glass)
@@ -333,8 +332,9 @@ struct Composer: View {
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
         }
-        .padding(.leading, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // On the right, above the mic.
+        .padding(.trailing, 4)
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .animation(.smooth(duration: 0.25), value: running > 0)
     }
 
@@ -351,18 +351,6 @@ struct Composer: View {
         }
     }
 
-    /// Who works in this session. The identity is fixed when the session starts; the model pill
-    /// next to it still changes this session's model and effort.
-    private func agentChip(_ agent: AgentIdentity) -> some View {
-        Text(agent.label)
-            .lineLimit(1)
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .glassEffect(.regular, in: Capsule())
-            .accessibilityLabel("Agent \(agent.label)")
-    }
-
     private func modelPill(_ controls: SessionControls) -> some View {
         Button {
             AppHaptics.light()
@@ -376,7 +364,10 @@ struct Composer: View {
                 } else {
                     Text(controls.displayModelName).lineLimit(1)
                     if let effort = controls.displayEffort {
-                        Text(EffortSlider.name(effort)).foregroundStyle(.secondary)
+                        // The level as signal bars, filled up to it.
+                        Image(systemName: "cellularbars", variableValue: EffortSlider.fraction(effort, of: controls.effortModel?.effortLevels ?? []))
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(Text("Effort \(EffortSlider.name(effort))"))
                     }
                 }
                 #if os(macOS)
@@ -404,18 +395,15 @@ struct Composer: View {
         // A Mac menu flattens its label (its own image placement, no background), so the pill is a
         // glass button like the model's, opening the choices beside it.
         Button { showPermissions = true } label: {
-            HStack(spacing: 5) {
-                Text(label).lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .font(.subheadline.weight(.medium))
+            PermissionSymbol(mode: controls.permissionMode)
         }
         .buttonStyle(.glass)
         .glassHover()
+        .buttonBorderShape(.circle)
         .fixedSize()
+        .help(Text(label))
         .accessibilityLabel("Permission mode")
+        .accessibilityValue(Text(label))
         .popover(isPresented: $showPermissions, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(PermissionMode.allCases, id: \.self) { mode in
@@ -496,6 +484,8 @@ struct Composer: View {
 /// inactive), as wide as what it says.
 private struct SessionStatusRow: View {
     let session: Session
+    /// Who works in the session: its name leads, and the state follows it.
+    var agent: AgentIdentity?
 
     private struct Look {
         let text: LocalizedStringKey
@@ -520,10 +510,19 @@ private struct SessionStatusRow: View {
                     }
                 }
                 .foregroundStyle(look.tint ?? .secondary)
-                Text(look.text)
-                    .foregroundStyle(look.tint == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                if let detail = look.detail {
-                    detail.foregroundStyle(.secondary)
+                if let agent {
+                    // "Mateo", then what isn't plain from the mark ("· needs your approval").
+                    Text(verbatim: agent.name)
+                        .foregroundStyle(look.tint == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    if look.icon != nil || look.tint == nil {
+                        Text("· \(Text(look.text))").foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text(look.text)
+                        .foregroundStyle(look.tint == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    if let detail = look.detail {
+                        detail.foregroundStyle(.secondary)
+                    }
                 }
             }
             .font(.caption.weight(.semibold))
@@ -543,11 +542,33 @@ private struct SessionStatusRow: View {
         switch status {
         case .working: return Look(text: "Working", tint: .userBubble, spinning: true)
         case .permissionRequired: return Look(text: "Needs your approval", icon: "hand.raised.fill", tint: .orange)
-        case .actionRequired: return Look(text: "Waiting for your answer", icon: "questionmark.bubble.fill", tint: .orange)
+        case .actionRequired: return Look(text: "Waiting for your answer", icon: "hand.raised.fill", tint: .orange)
         case .failed: return Look(text: "Turn failed", icon: "exclamationmark.triangle.fill", tint: .red)
         case .idle: return Look(text: "Online", tint: .green)
         case .offline:
             return Look(text: "Inactive", detail: session.activeAt.map { Text("· active \($0, format: .relative(presentation: .named))") })
+        }
+    }
+}
+
+/// The permission mode as one symbol: read only, ask, automatic, or YOLO (the only one in color:
+/// amber, it's the risky one).
+struct PermissionSymbol: View {
+    let mode: PermissionMode
+
+    var body: some View {
+        Image(systemName: Self.name(mode))
+            .font(.body.weight(.medium))
+            .foregroundStyle(mode == .yolo ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary))
+            .frame(width: 22, height: 22)
+    }
+
+    static func name(_ mode: PermissionMode) -> String {
+        switch mode {
+        case .readOnly: "eye"
+        case .default: "hand.raised"
+        case .safeYolo: "checkmark.shield"
+        case .yolo: "bolt.fill"
         }
     }
 }
@@ -789,16 +810,17 @@ private struct PermissionMenu: View, Equatable {
             }
             .pickerStyle(.inline)
         } label: {
-            Text(label)
-                .lineLimit(1)
-                .font(.subheadline.weight(.medium))
+            PermissionSymbol(mode: mode)
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
         .glassHover()
+        .buttonBorderShape(.circle)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Permission mode")
+        .accessibilityValue(Text(label))
+        .accessibilityIdentifier("composer-permission")
     }
 }
 #endif
@@ -810,6 +832,12 @@ struct EffortSlider: View {
     let selection: String
     let onCommit: (String) -> Void
     @State private var dragIndex: Int?
+
+    /// How far up its model's levels `level` is (0…1), for a filled-bars mark.
+    static func fraction(_ level: String, of levels: [String]) -> Double {
+        guard let index = levels.firstIndex(of: level), levels.count > 0 else { return 1 }
+        return Double(index + 1) / Double(levels.count)
+    }
 
     static func name(_ level: String) -> String {
         switch level {

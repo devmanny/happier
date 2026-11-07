@@ -211,8 +211,18 @@ public struct Session: Identifiable, Sendable, Equatable {
     public var title: String {
         if let summary = metadata["summary"]?["text"]?.stringValue, !summary.isEmpty { return summary }
         if let name = metadata["name"]?.stringValue, !name.isEmpty { return name }
-        if let path, let last = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last { return String(last) }
+        if let folderName { return folderName }
         return "Unknown"
+    }
+
+    /// The project folder's own name ("manny-agenda" for `~/Projects/manny-agenda`).
+    public var folderName: String? {
+        path?.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init)
+    }
+
+    /// A list row's second line: the agent it works as, then its folder (else its machine).
+    public var listDetail: String {
+        [agentIdentity?.name, folderName ?? host].compactMap { $0 }.joined(separator: " · ")
     }
 
     public var displayPath: String? {

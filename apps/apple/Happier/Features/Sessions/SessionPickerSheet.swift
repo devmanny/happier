@@ -24,7 +24,7 @@ struct SessionPickerSheet: View {
                     dismiss()
                     onPick(session)
                 } label: {
-                    SessionRow(session: session, usageParents: store.sessionUsageParents)
+                    SessionRow(session: session)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.pressable)

@@ -8,14 +8,12 @@ import SwiftUI
 private final class SessionListSnapshot {
     /// Nil until the first read; the list then reads the store directly.
     private(set) var sessions: [Session]?
-    private(set) var usageParents: [String: String] = [:]
 
     func follow(_ store: HappierStore) async {
         while !Task.isCancelled {
             await withCheckedContinuation { continuation in
-                let next = withObservationTracking { (store.sessionList, store.sessionUsageParents) } onChange: { continuation.resume() }
-                if next.0 != sessions { sessions = next.0 }
-                if next.1 != usageParents { usageParents = next.1 }
+                let next = withObservationTracking { store.sessionList } onChange: { continuation.resume() }
+                if next != sessions { sessions = next }
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
@@ -45,10 +43,11 @@ struct SessionListView: View {
     @State private var showRelay = false
     /// Stopped and archived sessions open in their own window, at this section.
     @State private var olderSessions: OlderSessionsSection?
-    /// The archive, loaded only while a search is running.
+    /// The archive, loaded only while a search runs or the filter shows archived sessions.
     @State private var archivedSearch: ArchivedSessions?
-    /// Every conversation with something new, stopped ones included, in one list.
-    @State private var unreadOnly = false
+    /// Which sessions the list shows, kept on this device ("" is the default list).
+    @AppStorage("happier.sessionListFilter") private var storedFilter = ""
+    @State private var showFilter = false
     /// Sessions whose sub-sessions are unfolded.
     @State private var expanded: Set<String> = []
     /// A session dropped on another, waiting for what to do with the two.
@@ -88,12 +87,30 @@ struct SessionListView: View {
     }
 
     private var archivedMatches: [Session] {
-        archivedSearch?.items.filter {
-            $0.matches(query) && (!unreadOnly || $0.unreadSince != nil) && !store.deletedSessionIds.contains($0.id)
-        } ?? []
+        archivedSearch?.items.filter { $0.matches(query) && !store.deletedSessionIds.contains($0.id) } ?? []
     }
 
-    private var unreadSessions: [Session] { sessions.filter { $0.unreadSince != nil } }
+    private var filter: SessionListFilter { SessionListFilter(stored: storedFilter) }
+
+    private func setFilter(_ next: SessionListFilter) {
+        withAnimation(.smooth(duration: 0.2)) { storedFilter = next.isDefault ? "" : next.stored }
+    }
+
+    private var filterContext: SessionListFilter.Context { SessionListFilter.Context(tasks: store.tasks) }
+
+    /// The list as the filter leaves it, the archive included when the filter asks for it.
+    private var filteredSessions: [Session] {
+        let filter = filter, context = filterContext
+        var all = sessions
+        if filter.includesArchived {
+            let known = Set(all.map(\.id))
+            all += (archivedSearch?.items ?? []).filter { !known.contains($0.id) && !store.deletedSessionIds.contains($0.id) }
+        }
+        return all.filter { filter.includes($0, context: context) }
+    }
+
+    /// The archive is fetched for a search, or for a filter that shows it.
+    private var needsArchive: Bool { !query.isEmpty || filter.includesArchived }
 
     private var isDrawer: Bool { onOpen != nil }
 
@@ -127,19 +144,21 @@ struct SessionListView: View {
                     AppHaptics.selection()
                     onOpen(session.id)
                 } label: {
-                    SessionRow(session: session, usageParents: listed.usageParents).equatable()
+                    SessionRow(session: session).equatable()
                         .contentShape(Rectangle())
                 }
                 // The row style of the list itself: it highlights the whole row on touch.
                 .buttonStyle(.plain)
             } else {
-                SessionRow(session: session, usageParents: listed.usageParents).equatable()
+                SessionRow(session: session).equatable()
             }
             if childCount > 0 { subSessionsButton(session.id, count: childCount) }
         }
         .padding(.leading, CGFloat(depth) * indent)
         // The row's breathing room sits inside it, so tree lines run on into the next row.
-        .padding(.vertical, isDrawer ? 8 : 6)
+        .padding(.vertical, isDrawer ? 5 : 4)
+        // Two compact lines, still a full touch target.
+        .frame(minHeight: 44)
         // Lights up under the Apple Pencil or pointer on iPad, like a system list row.
         .pointerHoverRow()
         .background(alignment: .leading) {
@@ -271,7 +290,7 @@ struct SessionListView: View {
     static let drawerIndent: CGFloat = 22
     /// Hairlines just off the background: they order the list without drawing the eye.
     static let separatorTint = Color.primary.opacity(0.08)
-    static let drawerAvatar: CGFloat = 26
+    static let drawerAvatar: CGFloat = 24
 
     struct TreeRow: Identifiable {
         let session: Session
@@ -301,10 +320,11 @@ struct SessionListView: View {
         ForEach(treeRows(nodes)) { tree in row(tree.session, tree: tree) }
     }
 
+    /// The usual list (the default filter, which leaves out the sessions tasks started).
     @ViewBuilder
     private func groupedList() -> some View {
         let now = Date.now
-        let groups = SessionSidebar.groups(sessions, pinned: store.pinnedSessionIds) { store.listDate($0, now: now) }
+        let groups = SessionSidebar.groups(filteredSessions, pinned: store.pinnedSessionIds) { store.listDate($0, now: now) }
         if !groups.pinned.isEmpty {
             Section("Pinned") { outline(groups.pinned) }
         }
@@ -340,23 +360,14 @@ struct SessionListView: View {
         }
     }
 
+    /// A search looks through every session, whatever the filter: it's how you find one.
     @ViewBuilder
     private func searchResults() -> some View {
-        ForEach(unreadOnly ? unreadSessions : sessions) { session in row(session) }
+        ForEach(sessions) { session in row(session) }
         let archived = archivedMatches
         if !archived.isEmpty || archivedSearch?.isLoading == true {
             Section("Archived") {
-                ForEach(archived) { session in
-                    Button {
-                        AppHaptics.selection()
-                        openArchived(session)
-                    } label: {
-                        SessionRow(session: session, usageParents: listed.usageParents).equatable()
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .archivedActions(session, store: store) { archivedSearch?.remove(session.id) }
-                }
+                ForEach(archived) { session in archivedRow(session) }
                 if archivedSearch?.isLoading == true {
                     Label {
                         Text("Searching the archive…").foregroundStyle(.secondary)
@@ -368,6 +379,59 @@ struct SessionListView: View {
                 }
             }
         }
+    }
+
+    private func archivedRow(_ session: Session) -> some View {
+        Button {
+            AppHaptics.selection()
+            openArchived(session)
+        } label: {
+            SessionRow(session: session).equatable()
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .archivedActions(session, store: store) { archivedSearch?.remove(session.id) }
+    }
+
+    /// A filter other than the usual one: what it keeps, one flat list, newest first.
+    @ViewBuilder
+    private func filteredList() -> some View {
+        let names = agentNames
+        if let summary = filter.summary(agentName: { names[$0] }) {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease")
+                Text("Filtered: \(summary)").lineLimit(1)
+                Text(verbatim: "·")
+                Button("Clear") {
+                    AppHaptics.light()
+                    setFilter(.default)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Color.userBubble)
+                .fontWeight(.semibold)
+                .accessibilityIdentifier("session-filter-clear")
+                Spacer(minLength: 0)
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .listRowSeparator(.hidden)
+            .accessibilityIdentifier("session-filter-summary")
+        }
+        let now = Date.now
+        ForEach(filteredSessions.sorted { store.listDate($0, now: now) > store.listDate($1, now: now) }) { session in
+            if session.archivedAt != nil { archivedRow(session) } else { row(session) }
+        }
+        if filter.includesArchived, archivedSearch?.isLoading == true {
+            HappierSpinner(size: HappierSpinner.mini).listRowSeparator(.hidden)
+        }
+    }
+
+    /// Every agent a session can be filtered by: yours, and any a session works as.
+    private var agentNames: [String: String] {
+        var names: [String: String] = [:]
+        for session in sessions { if let agent = session.agentIdentity { names[agent.id] = agent.name } }
+        for profile in store.agentProfiles { names[profile.id] = profile.name }
+        return names
     }
 
     /// The Inactive and Archived rows: an icon, a count, and a chevron to their window.
@@ -573,10 +637,10 @@ extension SessionListView {
             }
             if !query.isEmpty {
                 searchResults()
-            } else if unreadOnly {
-                ForEach(unreadSessions) { session in row(session) }
-            } else {
+            } else if filter.isDefault {
                 groupedList()
+            } else {
+                filteredList()
             }
         }
         #if os(macOS)
@@ -622,9 +686,14 @@ extension SessionListView {
             .padding(.vertical, 8)
         }
         .overlay {
-            if unreadOnly, query.isEmpty, unreadSessions.isEmpty {
-                ContentUnavailableView("No Unread Sessions", systemImage: "checkmark.message",
-                                       description: Text("You're all caught up."))
+            if !filter.isDefault, query.isEmpty, filteredSessions.isEmpty, archivedSearch?.isLoading != true {
+                ContentUnavailableView {
+                    Label("No Matching Sessions", systemImage: "line.3.horizontal.decrease.circle")
+                } description: {
+                    Text("Nothing in your sessions matches this filter.")
+                } actions: {
+                    Button("Clear Filter") { setFilter(.default) }
+                }
             } else if sessions.isEmpty, query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true) {
                 if store.isLoadingSessions {
                     HappierSpinner(size: HappierSpinner.hero)
@@ -646,9 +715,10 @@ extension SessionListView {
         .searchable(text: $query, placement: .sidebar, prompt: "Search Sessions")
         #endif
         .refreshable { await store.refreshSessions(userInitiated: true) }
-        .task(id: query.isEmpty) {
-            // Searching looks in the archive too; it is fetched for the search and let go after.
-            guard !query.isEmpty else {
+        .task(id: needsArchive) {
+            // Searching (or a filter showing archived sessions) looks in the archive too; it is
+            // fetched for that and let go after.
+            guard needsArchive else {
                 archivedSearch = nil
                 return
             }
@@ -689,7 +759,25 @@ extension SessionListView {
                     .help(Text("Tasks for you and your agents"))
                 }
             }
-            ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    AppHaptics.light()
+                    showFilter = true
+                } label: {
+                    Label("Filter", systemImage: filter.isDefault
+                          ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                }
+                .tint(filter.isDefault ? nil : Color.userBubble)
+                .accessibilityValue(filter.isDefault ? Text("Default") : Text("Filtered"))
+                .accessibilityIdentifier("session-filter-button")
+                .help(Text("Choose which sessions show"))
+                .popover(isPresented: $showFilter) {
+                    SessionFilterView(filter: Binding(get: { filter }, set: { setFilter($0) }), agents: agentNames)
+                        #if os(macOS)
+                        .frame(width: 340, height: 520)
+                        #endif
+                }
+            }
 
         }
         .sheet(item: $olderSessions) { section in
@@ -774,16 +862,16 @@ extension SessionListView {
 }
 
 /// The one-glance session row, the same in every list (drawer, sidebar, the older-sessions window,
-/// pickers): the agent icon carrying the unread dot, the title, and the folder underneath.
+/// pickers), in two lines: the title with the time (or what the agent is up to), then who works in
+/// it and its folder. The agent icon carries the unread dot. Token counts are in Session Info.
 struct SessionRow: View, Equatable {
     let session: Session
-    var usageParents: [String: String] = [:]
     @Environment(HappierStore.self) private var store
     @State private var speaker = MessageSpeaker.shared
 
     /// Redrawn when its own session changes, not every time any session in the list does.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.session == rhs.session && lhs.usageParents == rhs.usageParents
+        lhs.session == rhs.session
     }
 
     var body: some View {
@@ -811,7 +899,7 @@ struct SessionRow: View, Equatable {
                     if store.isPinned(session.id) {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.secondary)
                             .accessibilityLabel(Text("Pinned"))
                     }
                     if session.notificationsMuted {
@@ -835,28 +923,18 @@ struct SessionRow: View, Equatable {
                             .accessibilityLabel(Text("Reading new messages aloud"))
                     }
                     Text(session.title)
-                        .font(.subheadline.weight(session.unreadSince != nil ? .semibold : .regular))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     RowTrailing(session: session, now: now)
                 }
-                // The session's project folder (or machine), always readable under the title. Its
-                // color, if it has one, is the avatar's disc.
-                // The agent it works as leads, so a long path never cuts its name.
-                HStack(spacing: 0) {
-                    if let agent = session.agentIdentity {
-                        Text(verbatim: "\(agent.label) · ").layoutPriority(1)
-                    }
-                    Text(session.displayPath ?? session.host ?? "")
-                        .truncationMode(.head)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                SessionTokenIndicator(sessionId: session.id, parents: usageParents)
+                // "Mateo · manny-agenda": the agent it works as, then the folder's own name.
+                Text(session.listDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-        .padding(.vertical, 2)
     }
 }
 

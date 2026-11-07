@@ -605,6 +605,11 @@ public final class HappierStore {
         return saved
     }
 
+    /// The same change to several tasks (the list's Select): each is written as `updateTask` does.
+    public func updateTasks(ids: [String], _ update: AgentTask.Update) async {
+        for id in ids { await updateTask(id: id, update) }
+    }
+
     // MARK: Recurring tasks (one Automation per rule, `/v2/automations`)
 
     /// What a recurring task needs before its rules can fire: an agent, a machine and a folder.
@@ -752,8 +757,8 @@ public final class HappierStore {
         guard let current = task(id: id), let agentId = current.assignee.agentId, let agent = agentProfile(id: agentId) else {
             return .failed(String(localized: "Assign the task to one of your agents first."))
         }
-        let mode = accountSettings?.defaultPermissionMode(for: agent.providerId) ?? .yolo
-        let outcome = await createSession(machineId: machineId, directory: directory, agentId: agent.providerId, permissionMode: mode,
+        // Every start of a task runs with the task's own mode (YOLO unless it says otherwise).
+        let outcome = await createSession(machineId: machineId, directory: directory, agentId: agent.providerId, permissionMode: current.permissionMode,
                                           modelId: agent.modelId, effort: agent.effort, agent: agent,
                                           firstMessage: current.assignmentMessage(agentName: agent.name),
                                           approveNewDirectory: approveNewDirectory)
@@ -769,7 +774,8 @@ public final class HappierStore {
     /// in progress. False after reporting why not.
     public func startTaskInSession(id: String) async -> Bool {
         guard let current = task(id: id), let sessionId = current.assignee.sessionId else { return false }
-        guard sessions[sessionId] != nil, await send(current.assignmentMessage(agentName: nil), to: sessionId) else { return false }
+        guard sessions[sessionId] != nil,
+              await send(current.assignmentMessage(agentName: nil), to: sessionId, permissionMode: current.permissionMode) else { return false }
         await markStarted(id: id, sessionId: sessionId)
         return true
     }
@@ -1618,7 +1624,9 @@ public final class HappierStore {
 
     /// Sends a message as typed in the conversation; false when it couldn't be (the error is reported).
     @discardableResult
-    public func send(_ text: String, attachments: [AttachmentDraft] = [], to id: String) async -> Bool {
+    /// `permissionMode` sends the message with that permission intent (a task's) instead of the
+    /// composer's, as `session send --permission-mode` does; the session's own mode isn't edited here.
+    public func send(_ text: String, attachments: [AttachmentDraft] = [], to id: String, permissionMode: PermissionMode? = nil) async -> Bool {
         guard sessions[id] != nil, let api else {
             log.error("send: unknown session or signed out")
             return false
@@ -1630,7 +1638,7 @@ public final class HappierStore {
             }
             return await switchAgent(id, to: armed, text: text)
         }
-        let send = OutgoingSend(sessionId: id, text: text, attachments: attachments)
+        let send = OutgoingSend(sessionId: id, text: text, attachments: attachments, permissionMode: permissionMode)
         outgoingSends[send.localId] = send
         if transcripts[id] == nil { transcripts[id] = Transcript() }
         transcripts[id]?.addPending(localId: send.localId, text: text, attachments: attachments.map(\.name))
@@ -1681,6 +1689,7 @@ public final class HappierStore {
             try await send.deliver(context: { [self] in
                 guard let session = sessions[id] else { throw CancellationError() }
                 var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
+                if let mode = send.permissionMode { meta["permissionMode"] = .string(mode.rawValue) }
                 meta["source"] = "ui"
                 meta["sentFrom"] = .string(sentFrom)
                 return (session, meta)

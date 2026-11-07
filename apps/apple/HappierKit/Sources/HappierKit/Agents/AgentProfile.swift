@@ -42,8 +42,9 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
         self.updatedAt = updatedAt
     }
 
-    /// "🤖 Julián", or just the name.
-    public var label: String { [emoji, name].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " ") }
+    /// What the app shows: the name. The emoji is part of the identity the agent is told
+    /// (`identityJSON`), never drawn in the UI.
+    public var label: String { name }
 
     /// The Claude Code folder this agent signs in with, when it has its own.
     public var claudeConfigDir: String? {
@@ -182,8 +183,8 @@ public struct AgentIdentity: Sendable, Equatable {
         self.init(id: id, name: name, emoji: json["emoji"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    /// "🤖 Julián", or just the name.
-    public var label: String { emoji.map { "\($0) \(name)" } ?? name }
+    /// What the app shows: the name (the emoji stays in the session's identity, unrendered).
+    public var label: String { name }
 }
 
 extension Session {

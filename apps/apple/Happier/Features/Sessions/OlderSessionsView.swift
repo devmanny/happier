@@ -190,7 +190,7 @@ struct OlderSessionsView: View {
             dismiss()
             onOpen(session)
         } label: {
-            SessionRow(session: session, usageParents: store.sessionUsageParents)
+            SessionRow(session: session)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
         }
@@ -252,7 +252,7 @@ extension View {
     }
 }
 
-/// The toolbar's unread filter, the same in the sidebar and the older-sessions window: a funnel
+/// The older-sessions window's unread filter: a funnel
 /// that fills and turns the bubble blue while only conversations with something new are shown.
 struct UnreadFilterButton: View {
     @Binding var isOn: Bool

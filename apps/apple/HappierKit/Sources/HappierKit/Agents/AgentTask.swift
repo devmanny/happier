@@ -49,7 +49,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         public var label: String {
             switch self {
             case .user: String(localized: "Me")
-            case .agent(_, let name, let emoji): [emoji, name].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " ")
+            // The name only: the emoji is kept in the task for the agent's identity, not shown.
+            case .agent(_, let name, _): name ?? ""
             case .session(let id, let title): title?.isEmpty == false ? title! : id
             }
         }
@@ -193,6 +194,44 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         set { extra["scheduledStartV1"] = newValue?.json }
     }
 
+    /// How every start of the task runs ("Start now", "Schedule…", each occurrence), for an agent or
+    /// a session. YOLO when the task has none (new tasks, and those written before the field).
+    /// Stored with the protocol's intent names (`read_only`, `default`, `auto`, `yolo`).
+    public var permissionMode: PermissionMode {
+        get {
+            switch extra["permissionMode"]?.stringValue {
+            case "read_only": .readOnly
+            case "default": .default
+            case "auto": .safeYolo
+            default: .yolo
+            }
+        }
+        set {
+            let intent = switch newValue {
+            case .readOnly: "read_only"
+            case .default: "default"
+            case .safeYolo: "auto"
+            case .yolo: "yolo"
+            }
+            extra["permissionMode"] = .string(intent)
+        }
+    }
+
+    /// When the user archived it (not going to do it): hidden by default, never deleted.
+    public var archivedAt: Double? {
+        get { extra["archivedAt"]?.doubleValue }
+        set { extra["archivedAt"] = newValue.map(JSONValue.number) }
+    }
+
+    public var isArchived: Bool { archivedAt != nil }
+
+    /// Still to do: not done and not archived (`isAgentTaskOpen`).
+    public var isOpen: Bool { status != .done && !isArchived }
+
+    /// Whether the list's circle completes it: an open task that doesn't repeat (a repeating one is
+    /// archived or paused instead; its occurrences report their own results).
+    public var completesFromList: Bool { isOpen && recurrence == nil }
+
     /// Each firing of a rule, oldest first, as the CLI wrote it. Read-only here: the stored copy is kept.
     public var occurrences: [TaskOccurrence] {
         extra["occurrences"]?.arrayValue?.compactMap(TaskOccurrence.init(json:)) ?? []
@@ -287,7 +326,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     /// Closing a task that still repeats pauses its repetition, so its Automations stop firing on
     /// a closed task; the user resumes it from the app if they reopen it. Nil when nothing to pause.
     public func recurrenceToPause(closingWith update: Update) -> TaskRecurrence? {
-        guard update.status == .done, status != .done, var recurrence, !recurrence.paused else { return nil }
+        let closing = (update.status == .done && status != .done) || (update.archived == true && !isArchived)
+        guard closing, var recurrence, !recurrence.paused else { return nil }
         recurrence.paused = true
         return recurrence
     }
@@ -309,11 +349,14 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         public var threadSessionId: String?
         /// The pending one-time start (`.some(nil)` removes it).
         public var scheduledStart: TaskScheduledStart??
+        public var permissionMode: PermissionMode?
+        /// Archives (true) or restores (false) it.
+        public var archived: Bool?
 
         public init(title: String? = nil, description: String?? = nil, assignee: Assignee? = nil, status: Status? = nil,
                     startAt: Double?? = nil, dueAt: Double?? = nil, machineId: String?? = nil, directory: String?? = nil,
                     source: Source?? = nil, comment: String? = nil, recurrence: TaskRecurrence?? = nil, threadSessionId: String? = nil,
-                    scheduledStart: TaskScheduledStart?? = nil) {
+                    scheduledStart: TaskScheduledStart?? = nil, permissionMode: PermissionMode? = nil, archived: Bool? = nil) {
             self.title = title
             self.description = description
             self.assignee = assignee
@@ -327,7 +370,12 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             self.recurrence = recurrence
             self.threadSessionId = threadSessionId
             self.scheduledStart = scheduledStart
+            self.permissionMode = permissionMode
+            self.archived = archived
         }
+
+        /// "Archive" / "Unarchive".
+        public static func archiving(_ archived: Bool) -> Update { Update(archived: archived) }
 
         /// "Assign to…": only who it's for; the status stays and nothing starts.
         public static func assigning(_ assignee: Assignee) -> Update { Update(assignee: assignee) }
@@ -349,6 +397,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             if edited.source != original.source { source = .some(edited.source) }
             if edited.recurrence != original.recurrence { recurrence = .some(edited.recurrence) }
             if edited.scheduledStart != original.scheduledStart { scheduledStart = .some(edited.scheduledStart) }
+            if edited.permissionMode != original.permissionMode { permissionMode = edited.permissionMode }
+            if edited.isArchived != original.isArchived { archived = edited.isArchived }
         }
 
         public var isEmpty: Bool { self == Update() }
@@ -370,6 +420,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         if let source = update.source { next.source = source }
         if let recurrence = update.recurrence { next.recurrence = recurrence }
         if let scheduledStart = update.scheduledStart { next.scheduledStart = scheduledStart }
+        if let permissionMode = update.permissionMode { next.permissionMode = permissionMode }
+        if update.archived == true, !isArchived { next.archivedAt = now }
+        if update.archived == false { next.archivedAt = nil }
         if let thread = update.threadSessionId, !thread.isEmpty, !threads.contains(thread) { next.threads.append(thread) }
         let comment = update.comment?.trimmingCharacters(in: .whitespacesAndNewlines)
         if (comment?.isEmpty == false) || statusChanged {
@@ -443,8 +496,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
 
     /// "All": the tasks linked to the open session first (when there are any), then every task
     /// grouped by who it's for (you first, then agents by name). "This session": only the linked ones.
-    public static func sections(_ tasks: [AgentTask], scope: Scope, openSessionId: String?, status: StatusFilter) -> [Section] {
-        let visible = filter(tasks, assignee: .all, status: status)
+    public static func sections(_ tasks: [AgentTask], scope: Scope, openSessionId: String?, status: StatusFilter,
+                                showCompleted: Bool = false, showArchived: Bool = false) -> [Section] {
+        let visible = filter(tasks, assignee: .all, status: status, showCompleted: showCompleted, showArchived: showArchived)
         let linked = openSessionId.map { id in visible.filter { $0.isLinked(to: id) } } ?? []
         switch scope {
         case .thisSession:
@@ -477,9 +531,12 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case only(Status)
     }
 
-    /// The matching tasks, soonest due first (no due date last), then oldest first.
-    public static func filter(_ tasks: [AgentTask], assignee: AssigneeFilter, status: StatusFilter) -> [AgentTask] {
+    /// The matching tasks, soonest due first (no due date last), then oldest first. Archived tasks
+    /// only with `showArchived`; "Open" adds the completed ones with `showCompleted`.
+    public static func filter(_ tasks: [AgentTask], assignee: AssigneeFilter, status: StatusFilter,
+                              showCompleted: Bool = false, showArchived: Bool = false) -> [AgentTask] {
         tasks.filter { task in
+            if task.isArchived, !showArchived { return false }
             switch assignee {
             case .all: break
             case .me: if task.assignee != .user { return false }
@@ -488,7 +545,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             }
             switch status {
             case .all: return true
-            case .open: return task.status != .done
+            case .open: return task.status != .done || showCompleted
             case .only(let only): return task.status == only
             }
         }

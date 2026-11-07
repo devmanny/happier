@@ -48,7 +48,7 @@ public struct TaskWidgetSnapshot: Codable, Equatable, Sendable {
 
     public init(tasks: [AgentTask], limit: Int, now: Date = .now) {
         let nowMs = now.timeIntervalSince1970 * 1000
-        let open = tasks.filter { $0.assignee == .user && $0.status != .done }
+        let open = tasks.filter { $0.assignee == .user && $0.isOpen }
         let ordered = open.sorted { a, b in
             let aLate = (a.dueAt ?? .infinity) <= nowMs, bLate = (b.dueAt ?? .infinity) <= nowMs
             if aLate != bLate { return aLate }

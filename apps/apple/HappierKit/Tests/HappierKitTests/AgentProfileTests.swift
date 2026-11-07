@@ -101,7 +101,10 @@ import Testing
         }
         let withAgent = try session(["path": "/p", "agentIdentityV1": ["v": 1, "id": "0f1e", "name": "Julián", "emoji": "🤖"]])
         #expect(withAgent.agentIdentity == AgentIdentity(id: "0f1e", name: "Julián", emoji: "🤖"))
-        #expect(withAgent.agentIdentity?.label == "🤖 Julián")
+        // The UI shows the name only; the emoji stays in the identity the agent is told.
+        #expect(withAgent.agentIdentity?.label == "Julián")
+        #expect(AgentProfile(name: "Julián", emoji: "🤖", providerId: "claude", account: .init(label: "")).label == "Julián")
+        #expect(AgentTask.Assignee.agent(id: "0f1e", name: "Julián", emoji: "🤖").label == "Julián")
         #expect(try session(["path": "/p"]).agentIdentity == nil)
         #expect(try session(["agentIdentityV1": ["v": 1, "id": "x", "name": "  "]]).agentIdentity == nil)
     }
