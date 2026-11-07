@@ -21,6 +21,7 @@ import { EventEmitter } from 'node:events';
 import { sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 import { resetAgentMemoryForTests, startAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { resetAgentTasksForTests, startAgentTasks } from '@/session/agentTasks/startAgentTasks';
 
 /**
  * D-27's total bound, at the one prompt-finalization owner.
@@ -420,16 +421,19 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         });
         const { session } = createSession();
         const agentSession = Object.assign(new EventEmitter(), session, { sessionId: 'sess-self' });
-        startAgentMemory(agentSession, { token: 't', encryption: { type: 'dataKey', publicKey: new Uint8Array(32), machineKey: material.machineKey } }, {
-            transport: kv.transport,
-            env: { HAPPIER_AGENT_IDENTITY_JSON: JSON.stringify({ v: 1, id: 'a1', name: 'Julián' }) },
-        });
+        const credentials = { token: 't', encryption: { type: 'dataKey' as const, publicKey: new Uint8Array(32), machineKey: material.machineKey } };
+        const env = { HAPPIER_AGENT_IDENTITY_JSON: JSON.stringify({ v: 1, id: 'a1', name: 'Julián' }) };
+        startAgentMemory(agentSession, credentials, { transport: kv.transport, env });
+        const tasks = startAgentTasks(agentSession, credentials, { transport: kv.transport, env })!;
+        await tasks.store.create({ title: 'Revisar login', assignee: { kind: 'agent', agentId: 'a1' }, status: 'in_progress', threads: [] });
         try {
             const resolution = await resolveProviderPromptForDispatch({
                 session: agentSession, userText: 'do the thing', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
             });
             expect(resolution.providerPrompt.startsWith('do the thing\n\n[Happier · your other threads')).toBe(true);
             expect(resolution.providerPrompt).toContain('sess-other: Revisando TestFlight (3 min ago)');
+            // Its board: the agent's open tasks, with ids it can update.
+            expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Revisar login · In progress/);
 
             const plain = await resolveProviderPromptForDispatch({
                 session, userText: 'do the thing', allowSeed: false, localId: 'l2', nowMs: 1, refreshMetadataBeforeRead: false,
@@ -437,6 +441,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
             expect(plain.providerPrompt).toBe('do the thing');
         } finally {
             resetAgentMemoryForTests();
+            resetAgentTasksForTests();
         }
     });
 

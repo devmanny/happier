@@ -17,6 +17,7 @@ import { startParentLinkWatcher } from '@/session/lineage/parentLinkWatcher';
 import { startSessionPresence } from '@/session/presence/startSessionPresence';
 import { trackSessionNotificationMute } from '@/session/notifications/sessionNotificationMute';
 import { startAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { startAgentTasks } from '@/session/agentTasks/startAgentTasks';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
@@ -789,6 +790,8 @@ export class ApiClient {
     trackSessionNotificationMute(client);
     // A runner working as an agent shares that agent's memory with its other threads.
     startAgentMemory(client, this.credential);
+    // Any runner can leave tasks; an agent's open tasks become its board each turn.
+    startAgentTasks(client, this.credential);
     return client;
   }
 

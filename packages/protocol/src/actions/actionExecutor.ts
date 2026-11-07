@@ -300,6 +300,12 @@ export type ActionExecutorDeps = Readonly<{
     serverId?: string | null;
   }>) => Promise<unknown>;
   sessionGoalClear?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<unknown>;
+  /** The task tools, run in the calling session's runner (it knows which agent is asking). */
+  agentTasks?: (args: Readonly<{
+    sessionId: string;
+    operation: 'create' | 'update';
+    input: Record<string, unknown>;
+  }>) => Promise<unknown>;
   /** The agent memory tools; like presence, they run in the session's own runner. */
   agentMemory?: (args: Readonly<{
     sessionId: string;
@@ -2401,6 +2407,17 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionWorkStateGet({ sessionId, ...(serverId ? { serverId } : {}) });
           return { ok: true, result: res };
+        }
+
+        const taskOperation = ({ 'task.create': 'create', 'task.update': 'update' } as const)[actionId as 'task.create'];
+        if (taskOperation) {
+          const { sessionId: rawSessionId, ...input } = parsed.data as Record<string, unknown>;
+          const sessionId = normalizeId(rawSessionId);
+          if (!sessionId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.agentTasks) {
+            return { ok: false, errorCode: 'unsupported_action', error: `unsupported_action:${actionId}` };
+          }
+          return { ok: true, result: await deps.agentTasks({ sessionId, operation: taskOperation, input }) };
         }
 
         const agentMemoryOperation = ({

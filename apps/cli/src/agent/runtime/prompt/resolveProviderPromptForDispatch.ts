@@ -18,6 +18,7 @@ import {
 import { buildSessionReferenceBlockV1 } from '@/agent/runtime/prompt/sessionReferenceBlock';
 import { logger } from '@/ui/logger';
 import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { getAgentTasks } from '@/session/agentTasks/startAgentTasks';
 
 /**
  * Prompt finalization: the one place a queued user message becomes the exact prompt and
@@ -95,18 +96,31 @@ export type ResolvedProviderPromptForDispatch = Readonly<{
     settleReplaySeedOnProviderAcceptance: () => Promise<ReplaySeedSettlementResultV1>;
 }>;
 
-/** Advisory context: a memory read failure never blocks the send, but it is logged. */
-async function readAgentTurnContext(sessionId: string | undefined): Promise<string | null> {
-    const memory = getAgentMemory(sessionId);
-    if (!memory) return null;
+/** Advisory context: a read failure never blocks the send, but it is logged. */
+async function readAdvisory(label: string, read: () => Promise<string | null>): Promise<string | null> {
     try {
-        return await memory.turnContextBlock();
+        return await read();
     } catch (error) {
-        logger.warn('[PromptDispatch] Agent thread context unavailable (non-fatal)', {
+        logger.warn(`[PromptDispatch] Agent ${label} unavailable (non-fatal)`, {
             error: error instanceof Error ? error.message : String(error),
         });
         return null;
     }
+}
+
+/** What an agent thread hears at each turn start: its other threads, then its open tasks. */
+async function readAgentTurnContext(sessionId: string | undefined): Promise<string | null> {
+    const memory = getAgentMemory(sessionId);
+    const tasks = getAgentTasks(sessionId);
+    const agentId = tasks?.caller.agent?.id;
+    const [threads, board] = await Promise.all([
+        memory ? readAdvisory('thread context', () => memory.turnContextBlock()) : null,
+        tasks && agentId ? readAdvisory('task board', () => tasks.store.boardFor(agentId)) : null,
+    ]);
+    const boardBlock = board
+        ? `[Happier · your open tasks (update them with tarea_actualizar and their id).]\n${board}`
+        : null;
+    return [threads, boardBlock].filter(Boolean).join('\n\n') || null;
 }
 
 export async function resolveProviderPromptForDispatch(params: Readonly<{

@@ -1,0 +1,134 @@
+import {
+  AGENT_TASK_STATUSES,
+  type AgentIdentityV1,
+  type AgentTaskActor,
+  type AgentTaskAssignee,
+  type AgentTaskSource,
+  type AgentTaskStatus,
+  type AgentTaskUpdate,
+} from '@happier-dev/protocol';
+
+import type { AgentTaskStore } from './agentTaskStore';
+
+export type AgentTaskCaller = Readonly<{
+  agent: Pick<AgentIdentityV1, 'id' | 'name' | 'emoji'> | null;
+  sessionId: string;
+}>;
+
+class TaskInputError extends Error {}
+
+function readString(input: Record<string, unknown>, key: string): string | undefined {
+  const value = input[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function readStatus(input: Record<string, unknown>): AgentTaskStatus | undefined {
+  const status = readString(input, 'status');
+  if (status === undefined) return undefined;
+  if (!(AGENT_TASK_STATUSES as readonly string[]).includes(status)) {
+    throw new TaskInputError(`status must be one of ${AGENT_TASK_STATUSES.join(', ')}`);
+  }
+  return status as AgentTaskStatus;
+}
+
+/** An ISO 8601 date (or epoch ms); undefined when absent, null when given empty (to clear it). */
+function readDate(input: Record<string, unknown>, key: 'startAt' | 'dueAt'): number | null | undefined {
+  const raw = input[key];
+  if (raw === undefined) return undefined;
+  if (raw === '' || raw === null) return null;
+  const parsed = typeof raw === 'number' ? raw : typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  if (!Number.isFinite(parsed)) throw new TaskInputError(`${key} must be an ISO 8601 date such as 2026-11-10T18:00:00-06:00`);
+  return parsed;
+}
+
+function readAssignee(input: Record<string, unknown>, caller: AgentTaskCaller): AgentTaskAssignee | undefined {
+  const raw = readString(input, 'assignee');
+  if (raw === undefined) return undefined;
+  const lowered = raw.toLowerCase();
+  if (lowered === 'user' || lowered === 'manny') return { kind: 'user' };
+  if (lowered === 'me') {
+    if (!caller.agent) throw new TaskInputError('"me" needs a session working as an agent; use "user" or an agent id');
+    return { kind: 'agent', agentId: caller.agent.id, name: caller.agent.name, ...(caller.agent.emoji ? { emoji: caller.agent.emoji } : {}) };
+  }
+  return { kind: 'agent', agentId: raw };
+}
+
+function readSource(input: Record<string, unknown>): AgentTaskSource | undefined {
+  const kind = readString(input, 'sourceKind');
+  const label = readString(input, 'sourceLabel');
+  const url = readString(input, 'sourceUrl');
+  if (!kind && !label && !url) return undefined;
+  const sourceKind = (['chat', 'email', 'session', 'other'] as const).find((value) => value === kind) ?? 'other';
+  return { kind: sourceKind, ...(label ? { label } : {}), ...(url ? { url } : {}) };
+}
+
+function actor(caller: AgentTaskCaller): AgentTaskActor {
+  return caller.agent
+    ? { kind: 'agent', agentId: caller.agent.id, sessionId: caller.sessionId }
+    : { kind: 'session', sessionId: caller.sessionId };
+}
+
+/** `tarea_crear` and `tarea_actualizar`, run in the calling session's runner. */
+export async function runAgentTaskTool(params: Readonly<{
+  store: AgentTaskStore;
+  caller: AgentTaskCaller;
+  operation: 'create' | 'update';
+  input: Record<string, unknown>;
+}>): Promise<Record<string, unknown>> {
+  const { store, caller, input } = params;
+  try {
+    if (params.operation === 'create') {
+      const title = readString(input, 'title');
+      if (!title) return { ok: false, error: 'title is required' };
+      const assignee = readAssignee(input, caller)
+        ?? (caller.agent ? readAssignee({ assignee: 'me' }, caller)! : { kind: 'user' as const });
+      const startAt = readDate(input, 'startAt');
+      const dueAt = readDate(input, 'dueAt');
+      const description = readString(input, 'description');
+      const directory = readString(input, 'directory');
+      const machineId = readString(input, 'machineId');
+      const source = readSource(input);
+      const task = await store.create({
+        title,
+        assignee,
+        status: readStatus(input) ?? 'todo',
+        threads: [caller.sessionId],
+        createdBy: actor(caller),
+        ...(description ? { description } : {}),
+        ...(typeof startAt === 'number' ? { startAt } : {}),
+        ...(typeof dueAt === 'number' ? { dueAt } : {}),
+        ...(directory ? { directory } : {}),
+        ...(machineId ? { machineId } : {}),
+        ...(source ? { source } : {}),
+      });
+      return { ok: true, taskId: task.id, assignee: task.assignee, status: task.status };
+    }
+
+    const taskId = readString(input, 'taskId');
+    if (!taskId) return { ok: false, error: 'taskId is required' };
+    const startAt = readDate(input, 'startAt');
+    const dueAt = readDate(input, 'dueAt');
+    const assignee = readAssignee(input, caller);
+    const status = readStatus(input);
+    const title = readString(input, 'title');
+    const comment = readString(input, 'comment');
+    const update: AgentTaskUpdate = {
+      ...(status ? { status } : {}),
+      ...(title ? { title } : {}),
+      ...(comment ? { comment } : {}),
+      ...(assignee ? { assignee } : {}),
+      ...(startAt !== undefined ? { startAt } : {}),
+      ...(dueAt !== undefined ? { dueAt } : {}),
+      ...(typeof input.description === 'string' ? { description: input.description.trim() || null } : {}),
+      ...(typeof input.directory === 'string' ? { directory: input.directory.trim() || null } : {}),
+      by: actor(caller),
+      threadSessionId: caller.sessionId,
+    };
+    const task = await store.applyUpdate(taskId, update);
+    if (!task) return { ok: false, error: `task ${taskId} not found` };
+    return { ok: true, taskId: task.id, status: task.status };
+  } catch (error) {
+    if (error instanceof TaskInputError) return { ok: false, error: error.message };
+    throw error;
+  }
+}

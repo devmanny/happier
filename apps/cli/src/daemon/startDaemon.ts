@@ -83,6 +83,7 @@ import {
   clearDaemonState,
   readCredentials,
   readSettings,
+  resolveAccountScopedCryptoMaterial,
 } from '@/persistence';
 import type { Credentials } from '@/persistence';
 import { abandonSpawnedSessionUntilCompleted } from '@/session/services/awaitSpawnedSessionId';
@@ -463,6 +464,9 @@ import { normalizeAccountSettingsVersionHint } from '@/settings/accountSettings/
 import { refreshAccountSettingsForMinimumVersion } from '@/settings/accountSettings/refreshAccountSettingsForMinimumVersion';
 import { warmActiveAccountSettingsSnapshotBestEffort } from '@/settings/accountSettings/warmActiveAccountSettingsSnapshot';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
+import { startTaskDueNotifier } from '@/daemon/agentTasks/taskDueNotifier';
+import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
+import { createAccountKvHttpTransport } from '@/api/kv/accountKvHttpTransport';
 import { isBackendEnabledByAccountSettings } from '@/settings/backendEnabled';
 import { resolveConfiguredAcpBackendFromAccountSettings } from '@/agent/acp/catalog/configured/resolveConfiguredAcpBackendFromAccountSettings';
 import { fetchSessionByIdCompat, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
@@ -2070,6 +2074,17 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         warn: (message, data) => logger.warn(message, data),
       });
       eventLoopStallMonitor.start();
+      // The user's tasks that became due soon or overdue reach their devices once (any machine).
+      const taskDueNotifier = credentials.encryption
+        ? startTaskDueNotifier({
+            store: new AgentTaskStore({
+              transport: createAccountKvHttpTransport({ token: credentials.token }),
+              material: resolveAccountScopedCryptoMaterial(credentials),
+            }),
+            push: api.push(),
+            pushEnabled: () => getActiveAccountSettingsSnapshot()?.settings?.notificationsSettingsV1?.pushEnabled !== false,
+          })
+        : null;
 	      let machineConnectionStateCleanup: (() => void) | null = null;
 	      let shutdownInitiated = false;
 	      let connectedServiceQuotaProducersQuiesced = false;
@@ -9043,6 +9058,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 const cleanupAndShutdown = async (source: 'happier-app' | 'happier-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
           shutdownInitiated = true;
           eventLoopStallMonitor.stop();
+          taskDueNotifier?.stop();
           connectedServiceTurnDeferralQueue.cancelAll('daemon_shutdown');
           // Lane F: stop exposing turn-in-flight state once the queue is torn down so a tearing-down
           // daemon never reports a stale in-flight turn to the managed-server release path.

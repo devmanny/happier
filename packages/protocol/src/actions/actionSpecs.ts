@@ -258,6 +258,36 @@ const SessionIdRequiredInputSchema = z.object({
   sessionId: z.string().min(1),
 }).passthrough();
 
+const TaskStatusInputSchema = z.enum(['todo', 'in_progress', 'blocked', 'in_review', 'done']);
+
+const TaskCreateInputSchema = z.object({
+  sessionId: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().optional(),
+  assignee: z.string().min(1).optional(),
+  status: TaskStatusInputSchema.optional(),
+  startAt: z.string().min(1).optional(),
+  dueAt: z.string().min(1).optional(),
+  directory: z.string().min(1).optional(),
+  machineId: z.string().min(1).optional(),
+  sourceKind: z.enum(['chat', 'email', 'session', 'other']).optional(),
+  sourceLabel: z.string().min(1).optional(),
+  sourceUrl: z.string().min(1).optional(),
+}).passthrough();
+
+const TaskUpdateInputSchema = z.object({
+  sessionId: z.string().min(1),
+  taskId: z.string().min(1),
+  status: TaskStatusInputSchema.optional(),
+  comment: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  description: z.string().optional(),
+  assignee: z.string().min(1).optional(),
+  startAt: z.string().optional(),
+  dueAt: z.string().optional(),
+  directory: z.string().optional(),
+}).passthrough();
+
 const AgentMemoryReadInputSchema = z.object({
   sessionId: z.string().min(1),
   kind: z.enum(['now', 'journal', 'notes', 'note']),
@@ -2624,6 +2654,72 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: SessionGoalSetInputSchema,
+  },
+  {
+    id: 'task.create',
+    title: 'Create a task',
+    description: 'Create a task for the user (assignee "user") or for an agent ("me" for yourself, or an agent id). Dates are ISO 8601 (startAt, dueAt). Give the source (sourceKind chat/email/session/other, sourceLabel, sourceUrl link to the message) when the task came from somewhere. The user is told when their tasks are due soon or overdue.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'tarea_crear' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","title":"Buy the USB-C cable","assignee":"user","dueAt":"2026-11-10T18:00:00-06:00","sourceKind":"chat","sourceUrl":"https://..."}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Create a task',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'title', title: 'Title', widget: 'text', required: true },
+        { path: 'assignee', title: 'Assignee (user, me or agent id)', widget: 'text' },
+        { path: 'dueAt', title: 'Due (ISO 8601)', widget: 'text' },
+      ],
+    },
+    inputSchema: TaskCreateInputSchema,
+  },
+  {
+    id: 'task.update',
+    title: 'Update a task',
+    description: 'Update a task: status (todo, in_progress, blocked, in_review, done), a progress comment, or its fields. Your thread is linked to the task. Your open tasks are listed at the start of each turn with their ids.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'tarea_actualizar' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","taskId":"...","status":"in_progress","comment":"Started"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Update a task',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'taskId', title: 'Task id', widget: 'text', required: true },
+        { path: 'status', title: 'Status', widget: 'text' },
+        { path: 'comment', title: 'Comment', widget: 'textarea' },
+      ],
+    },
+    inputSchema: TaskUpdateInputSchema,
   },
   {
     id: 'agent.memory.read',

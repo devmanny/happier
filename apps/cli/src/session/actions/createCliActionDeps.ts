@@ -124,6 +124,8 @@ import { toWhoIsHereResult } from '@/session/presence/sessionPresence';
 import { getSessionPresence } from '@/session/presence/startSessionPresence';
 import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
 import { runAgentMemoryTool } from '@/session/agentMemory/runAgentMemoryTool';
+import { getAgentTasks } from '@/session/agentTasks/startAgentTasks';
+import { runAgentTaskTool } from '@/session/agentTasks/runAgentTaskTool';
 
 export type ResumeInactiveSessionWhenUsageLimitReady = (input: Readonly<{
   sessionId: string;
@@ -1841,6 +1843,14 @@ export function createCliActionDeps(params: Readonly<{
 
     sessionGoalClear: async ({ sessionId }) => {
       return await callRoutedSessionGoalControl(sessionId, 'clear', {});
+    },
+
+    agentTasks: async ({ sessionId, operation, input }) => {
+      const tasks = getAgentTasks(sessionId);
+      if (!tasks) {
+        return { ok: false, error: 'Tasks are available to running sessions of an encrypted account only.' };
+      }
+      return await runAgentTaskTool({ store: tasks.store, caller: tasks.caller, operation, input });
     },
 
     agentMemory: async ({ sessionId, operation, input }) => {

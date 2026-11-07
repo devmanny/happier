@@ -516,6 +516,17 @@ describe('createActionExecutor (session control)', () => {
     ]);
   });
 
+  it('routes the task tools to the session runner with their operation and input', async () => {
+    const agentTasks = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentTasks });
+    await executor.execute('task.create' as any, { sessionId: 's1', title: 'Comprar el cable USB-C', assignee: 'user' }, { surface: 'session_agent' as any });
+    await executor.execute('task.update' as any, { sessionId: 's1', taskId: 't1', status: 'done' }, { surface: 'session_agent' as any });
+    expect(agentTasks.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'create', input: { title: 'Comprar el cable USB-C', assignee: 'user' } },
+      { sessionId: 's1', operation: 'update', input: { taskId: 't1', status: 'done' } },
+    ]);
+  });
+
   it('asks the current session who else is here, passing declared resources', async () => {
     const sessionPresenceWho = vi.fn(async () => ({ others: [] }));
     const executor = createExecutor({ sessionPresenceWho });

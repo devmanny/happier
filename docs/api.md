@@ -103,6 +103,19 @@ prefixes:
   provider-only text). Tools: `memoria_leer`, `memoria_buscar` (searched in the CLI after
   decrypting), `memoria_anotar`, `ahora_actualizar`, `mis_hilos`. One listing returns at most
   1000 rows, so reads go per kind and the journal per day.
+- `task/<uuid>` — a task for the user or one of their agents, kind `agent_task`
+  (`packages/protocol/src/tasks/agentTask.ts`): title, description, assignee, status (todo,
+  in_progress, blocked, in_review, done), start/due dates, optional machine and folder, source with
+  link, linked threads and a comment/status log. Any thread (`tarea_crear`, `tarea_actualizar`) or
+  the native app edits it with CAS, re-applying the change on a version conflict. An agent thread's
+  provider prompt ends with its open tasks (its board). Each daemon checks every 5 minutes for the
+  user's open tasks due within a day or overdue; it records `notifiedV1` with a versioned write
+  before pushing, so only one machine notifies. Repetition is not part of a task yet.
+
+`GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Every client reports a full
+listing as possibly incomplete instead of cutting it silently. Agent profiles share the `agent/`
+prefix with agent memory, so a large memory can push profiles out of that listing; paging the
+route (or a profile-only prefix) is the pending fix.
 
 ### Account and usage
 - `GET /v1/account/profile`
