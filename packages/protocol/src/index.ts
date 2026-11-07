@@ -3744,3 +3744,23 @@ export {
   SESSION_NOTIFICATIONS_MUTED_METADATA_KEY,
   isSessionNotificationsMuted,
 } from './sessionMetadata/sessionNotificationsMutedV1.js';
+export {
+  AgentJournalEntryV1Schema,
+  AgentNoteV1Schema,
+  AgentNowV1Schema,
+  agentJournalKvKey,
+  agentMemoryKvPrefix,
+  agentNoteKvKey,
+  agentNowKvKey,
+  buildOtherThreadsSummary,
+  describeAgo,
+  extractNoteLinks,
+  parseAgentMemoryKvKey,
+  parseAgentMemoryRecord,
+  searchAgentMemory,
+  type AgentJournalEntryV1,
+  type AgentMemoryKvKey,
+  type AgentMemoryRecord,
+  type AgentNoteV1,
+  type AgentNowV1,
+} from './agentProfiles/agentMemory.js';

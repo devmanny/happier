@@ -300,6 +300,12 @@ export type ActionExecutorDeps = Readonly<{
     serverId?: string | null;
   }>) => Promise<unknown>;
   sessionGoalClear?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<unknown>;
+  /** The agent memory tools; like presence, they run in the session's own runner. */
+  agentMemory?: (args: Readonly<{
+    sessionId: string;
+    operation: 'read' | 'search' | 'write' | 'now' | 'threads';
+    input: Record<string, unknown>;
+  }>) => Promise<unknown>;
   /** Presence lives in the session's own runner, so this dep only exists there. */
   sessionPresenceWho?: (args: Readonly<{ sessionId: string; resources?: readonly string[] }>) => Promise<unknown>;
   sessionTerminalComposerClear?: (args: Readonly<{
@@ -2395,6 +2401,23 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionWorkStateGet({ sessionId, ...(serverId ? { serverId } : {}) });
           return { ok: true, result: res };
+        }
+
+        const agentMemoryOperation = ({
+          'agent.memory.read': 'read',
+          'agent.memory.search': 'search',
+          'agent.memory.write': 'write',
+          'agent.now.update': 'now',
+          'agent.threads.read': 'threads',
+        } as const)[actionId as 'agent.memory.read'];
+        if (agentMemoryOperation) {
+          const { sessionId: rawSessionId, ...input } = parsed.data as Record<string, unknown>;
+          const sessionId = normalizeId(rawSessionId);
+          if (!sessionId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.agentMemory) {
+            return { ok: false, errorCode: 'unsupported_action', error: `unsupported_action:${actionId}` };
+          }
+          return { ok: true, result: await deps.agentMemory({ sessionId, operation: agentMemoryOperation, input }) };
         }
 
         if (actionId === 'session.presence.who') {

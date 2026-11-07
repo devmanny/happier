@@ -29,6 +29,21 @@ describe('actionToolExposure', () => {
     expect(isActionDirectToolExposedOn(spec, 'session_agent')).toBe(true);
   });
 
+  it('exposes the agent memory tools directly to session agents under their Spanish names', () => {
+    const names = {
+      'agent.memory.read': 'memoria_leer',
+      'agent.memory.search': 'memoria_buscar',
+      'agent.memory.write': 'memoria_anotar',
+      'agent.now.update': 'ahora_actualizar',
+      'agent.threads.read': 'mis_hilos',
+    } as const;
+    for (const [id, tool] of Object.entries(names)) {
+      const spec = getActionSpec(id as keyof typeof names);
+      expect(spec.bindings?.mcpToolName).toBe(tool);
+      expect(isActionDirectToolExposedOn(spec, 'session_agent')).toBe(true);
+    }
+  });
+
   it('defaults ordinary session-agent action-backed tools to discoverable-only', () => {
     for (const id of ['subagents.delegate.start', 'execution.run.start', 'session.status.get'] as const) {
       const spec = getActionSpec(id);

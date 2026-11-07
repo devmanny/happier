@@ -2,15 +2,24 @@ import axios from 'axios';
 
 import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
 
-import type { PresenceKvTransport } from './sessionPresence';
 
 /** Same budget as the other account-scoped document calls (`/v2/account/settings`). */
 const KV_REQUEST_TIMEOUT_MS = 15_000;
 
 type KvRow = Readonly<{ key: string; value: string | null; version: number }>;
 
+/** The relay's UserKVStore (`/v1/kv`), reduced to what account-scoped records need. */
+export type AccountKvTransport = Readonly<{
+  /** Live rows under `prefix` (deleted rows, whose value is null, are left out). */
+  list: (prefix: string) => Promise<ReadonlyArray<Readonly<{ key: string; value: string; version: number }>>>;
+  mutate: (mutations: ReadonlyArray<Readonly<{ key: string; value: string | null; version: number }>>) => Promise<
+    | Readonly<{ ok: true; results: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
+    | Readonly<{ ok: false; current: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
+  >;
+}>;
+
 /** The relay's UserKVStore routes (`apps/server/sources/app/api/routes/kv/kvRoutes.ts`). */
-export function createPresenceKvHttpTransport(params: Readonly<{ token: string; baseUrl?: string }>): PresenceKvTransport {
+export function createAccountKvHttpTransport(params: Readonly<{ token: string; baseUrl?: string }>): AccountKvTransport {
   const baseUrl = params.baseUrl ?? resolveServerHttpBaseUrl();
   const headers = { Authorization: `Bearer ${params.token}`, 'Content-Type': 'application/json' };
   return {

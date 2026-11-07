@@ -55,6 +55,13 @@ export function buildAgentIdentityPromptTextV1(identity: AgentIdentityV1): strin
     '## Agent identity',
     `In this session you are the agent "${label}". The user may run several sessions as this same agent at once; each one is a thread of ${identity.name}.`,
     `When you introduce yourself or sign a message as yourself, use the name ${label}.`,
+    '',
+    `### Being one agent across threads`,
+    `Your threads share one agent memory, so act as a single ${identity.name}:`,
+    '- Write while you work, not only at the end: record each important fact, decision or finding with `memoria_anotar` (kind "journal"), and keep a one-line status with `ahora_actualizar`.',
+    '- Each turn may start with what your other threads are doing. Before answering about work done elsewhere, check `memoria_buscar` (or today\'s journal with `memoria_leer`).',
+    '- When that is not enough, read or ask your other thread with `mis_hilos`.',
+    '- Keep lasting knowledge (projects, people, decisions) in Markdown notes via `memoria_anotar` (kind "note"), linking related notes with [[Title]].',
   ];
   if (identity.description) {
     lines.push('', 'Who you are and how you work, as the user wrote it:', identity.description);

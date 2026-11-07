@@ -7,32 +7,13 @@ import {
   type AgentPresenceV1,
 } from '@happier-dev/protocol';
 
-import { SessionPresence, toWhoIsHereResult, type PresenceKvTransport } from './sessionPresence';
+import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
+import { SessionPresence, toWhoIsHereResult } from './sessionPresence';
 
 const material = { type: 'dataKey', machineKey: new Uint8Array(32).fill(5) } as const;
 
-/** In-memory UserKVStore with the relay's version rules (the HTTP boundary). */
 function createKvStore() {
-  const rows = new Map<string, { value: string | null; version: number }>();
-  const transport: PresenceKvTransport = {
-    async list(prefix) {
-      return [...rows.entries()]
-        .filter(([key, row]) => key.startsWith(prefix) && row.value !== null)
-        .map(([key, row]) => ({ key, value: row.value!, version: row.version }));
-    },
-    async mutate(mutations) {
-      const conflicts = mutations.filter((m) => (rows.get(m.key)?.version ?? -1) !== m.version);
-      if (conflicts.length > 0) {
-        return { ok: false, current: conflicts.map((m) => ({ key: m.key, version: rows.get(m.key)?.version ?? -1 })) };
-      }
-      const results = mutations.map((m) => {
-        const version = m.version + 1;
-        rows.set(m.key, { value: m.value, version });
-        return { key: m.key, version };
-      });
-      return { ok: true, results };
-    },
-  };
+  const { rows, transport } = createInMemoryAccountKv();
   const read = (key: string): AgentPresenceV1 | null => {
     const value = rows.get(key)?.value;
     if (!value) return null;

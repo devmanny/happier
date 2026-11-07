@@ -122,6 +122,8 @@ import {
 import { normalizeCliSessionUsageLimitRecoveryOperationResult } from '@/session/usageLimitRecoveryControls/sessionUsageLimitRecoveryOperationResult';
 import { toWhoIsHereResult } from '@/session/presence/sessionPresence';
 import { getSessionPresence } from '@/session/presence/startSessionPresence';
+import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { runAgentMemoryTool } from '@/session/agentMemory/runAgentMemoryTool';
 
 export type ResumeInactiveSessionWhenUsageLimitReady = (input: Readonly<{
   sessionId: string;
@@ -1839,6 +1841,31 @@ export function createCliActionDeps(params: Readonly<{
 
     sessionGoalClear: async ({ sessionId }) => {
       return await callRoutedSessionGoalControl(sessionId, 'clear', {});
+    },
+
+    agentMemory: async ({ sessionId, operation, input }) => {
+      const memory = getAgentMemory(sessionId);
+      if (!memory) {
+        return {
+          ok: false,
+          error: 'This session is not working as one of your agents, or it is not running in this process; agent memory is not available.',
+        };
+      }
+      const credentials = params.credentials;
+      return await runAgentMemoryTool({
+        memory,
+        operation,
+        input,
+        ...(credentials
+          ? {
+              readThreadMessages: async (threadSessionId: string, limit: number) => {
+                const result = await getSessionRecentMessages({ credentials, idOrPrefix: threadSessionId, limit });
+                if (!result.ok) throw new Error(result.errorMessage);
+                return result.messages.map((message) => ({ role: message.role, text: message.text, createdAt: message.createdAt }));
+              },
+            }
+          : {}),
+      });
     },
 
     sessionPresenceWho: async ({ sessionId, resources }) => {

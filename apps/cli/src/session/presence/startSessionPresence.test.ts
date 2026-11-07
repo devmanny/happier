@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Credentials } from '@/persistence';
 
-import type { PresenceKvTransport } from './sessionPresence';
+import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
 import { getSessionPresence, resetSessionPresenceForTests, startSessionPresence } from './startSessionPresence';
 
 const credentials: Credentials = {
@@ -14,7 +14,7 @@ const credentials: Credentials = {
 
 function createTransport() {
   const writes: Array<{ key: string; value: string | null; version: number }> = [];
-  const transport: PresenceKvTransport = {
+  const transport: AccountKvTransport = {
     list: async () => [],
     mutate: async (mutations) => {
       writes.push(...mutations);

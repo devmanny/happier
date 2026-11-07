@@ -503,6 +503,19 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionWaitIdle).toHaveBeenCalledWith({ sessionId: 's1', timeoutSeconds: 42, serverId: 'server-a' });
   });
 
+  it('routes the agent memory tools to the session runner with their operation and input', async () => {
+    const agentMemory = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentMemory });
+    await executor.execute('agent.memory.search' as any, { sessionId: 's1', query: 'testflight' }, { surface: 'session_agent' as any });
+    await executor.execute('agent.memory.write' as any, { sessionId: 's1', kind: 'journal', text: 'Subí el build' }, { surface: 'session_agent' as any });
+    await executor.execute('agent.now.update' as any, { sessionId: 's1', text: 'Probando' }, { surface: 'session_agent' as any });
+    expect(agentMemory.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'search', input: { query: 'testflight' } },
+      { sessionId: 's1', operation: 'write', input: { kind: 'journal', text: 'Subí el build' } },
+      { sessionId: 's1', operation: 'now', input: { text: 'Probando' } },
+    ]);
+  });
+
   it('asks the current session who else is here, passing declared resources', async () => {
     const sessionPresenceWho = vi.fn(async () => ({ others: [] }));
     const executor = createExecutor({ sessionPresenceWho });

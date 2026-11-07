@@ -13,14 +13,8 @@ import {
   type AgentPresenceV1,
 } from '@happier-dev/protocol';
 
-/** The relay's UserKVStore (`/v1/kv`), reduced to what presence needs. */
-export type PresenceKvTransport = Readonly<{
-  list: (prefix: string) => Promise<ReadonlyArray<Readonly<{ key: string; value: string; version: number }>>>;
-  mutate: (mutations: ReadonlyArray<Readonly<{ key: string; value: string | null; version: number }>>) => Promise<
-    | Readonly<{ ok: true; results: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
-    | Readonly<{ ok: false; current: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
-  >;
-}>;
+import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
+
 
 /** What this thread is, read fresh on every write (title and folder can change mid-session). */
 export type PresenceSelfDescription = Pick<AgentPresenceV1, 'agent' | 'providerId' | 'machineId' | 'host' | 'directory' | 'task'>;
@@ -51,7 +45,7 @@ export class SessionPresence {
 
   constructor(private readonly deps: Readonly<{
     sessionId: string;
-    transport: PresenceKvTransport;
+    transport: AccountKvTransport;
     material: AccountScopedCryptoMaterial;
     describeSelf: () => PresenceSelfDescription;
     now?: () => number;

@@ -93,6 +93,16 @@ prefixes:
   on the Agent SDK runner get a pre-edit warning through a `PreToolUse` hook; Codex app-server in
   yolo mode exposes no pre-edit hook, so its patches are only recorded as they start. Agents can
   ask and declare resources with the `quien_esta_aqui` MCP tool (`session.presence.who`).
+- `agent/<uuid>/now/<sessionId>`, `agent/<uuid>/journal/<YYYY-MM-DD>/<entryId>`,
+  `agent/<uuid>/note/<noteId>` — the agent's shared memory, kind `agent_memory`
+  (`packages/protocol/src/agentProfiles/agentMemory.ts`). `now` is written only by that thread (its
+  title at each turn start, then what the agent says with `ahora_actualizar`); journal entries are
+  append-only, one key each (version -1), so threads never collide; notes are Markdown with
+  `[[links]]`, edited with CAS by any thread or the app. Every provider prompt of an agent thread
+  ends with a short summary of its other threads' `now` (`resolveProviderPromptForDispatch`,
+  provider-only text). Tools: `memoria_leer`, `memoria_buscar` (searched in the CLI after
+  decrypting), `memoria_anotar`, `ahora_actualizar`, `mis_hilos`. One listing returns at most
+  1000 rows, so reads go per kind and the journal per day.
 
 ### Account and usage
 - `GET /v1/account/profile`

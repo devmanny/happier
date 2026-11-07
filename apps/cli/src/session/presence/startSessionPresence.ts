@@ -3,8 +3,9 @@ import { AGENT_IDENTITY_METADATA_KEY, AGENT_PRESENCE_HEARTBEAT_MS } from '@happi
 import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persistence';
 import { logger } from '@/ui/logger';
 
-import { createPresenceKvHttpTransport } from './presenceKvHttpTransport';
-import { SessionPresence, type PresenceKvTransport, type PresenceSelfDescription } from './sessionPresence';
+import { createAccountKvHttpTransport } from '@/api/kv/accountKvHttpTransport';
+import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
+import { SessionPresence, type PresenceSelfDescription } from './sessionPresence';
 
 export type PresenceWatchedSession = Readonly<{
   sessionId: string;
@@ -57,7 +58,7 @@ export function reportPresenceFailure(action: string) {
 export function startSessionPresence(
   session: PresenceWatchedSession,
   credentials: Credentials,
-  deps: Readonly<{ transport?: PresenceKvTransport }> = {},
+  deps: Readonly<{ transport?: AccountKvTransport }> = {},
 ): SessionPresence | null {
   const sessionId = session.sessionId;
   if (!sessionId || sessionId.startsWith('offline-') || !credentials.encryption) return null;
@@ -66,7 +67,7 @@ export function startSessionPresence(
   previous?.detach();
   const presence = previous?.presence ?? new SessionPresence({
     sessionId,
-    transport: deps.transport ?? createPresenceKvHttpTransport({ token: credentials.token }),
+    transport: deps.transport ?? createAccountKvHttpTransport({ token: credentials.token }),
     material: resolveAccountScopedCryptoMaterial(credentials),
     describeSelf: () => describeSessionForPresence(session.getMetadataSnapshot?.() ?? null),
   });

@@ -50,6 +50,8 @@ describe('agent identity', () => {
     const text = buildAgentIdentityPromptTextV1({ v: 1, id: 'a1', name: 'Julián', emoji: '🤖', description: 'Firma como Julián 🤖.' });
     expect(text).toContain('Julián');
     expect(text).toContain('Firma como Julián 🤖.');
+    // One agent across threads: the memory rules travel with the identity.
+    for (const tool of ['memoria_anotar', 'ahora_actualizar', 'memoria_buscar', 'mis_hilos']) expect(text).toContain(tool);
   });
 
   it('keeps titles out of the clear-text key', () => {
