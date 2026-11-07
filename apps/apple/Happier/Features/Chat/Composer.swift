@@ -361,6 +361,12 @@ struct Composer: View {
                     Image(systemName: "arrow.triangle.swap").foregroundStyle(Color.userBubble)
                     Text(SessionModelPicker.label(armed, sessions: Array(store.sessions.values))).lineLimit(1)
                 } else {
+                    // A session started as an agent shows who it is; the picker still changes only
+                    // this session's model and effort.
+                    if let agent = store.sessions[sessionId]?.agentIdentity {
+                        Text(agent.label).lineLimit(1)
+                        Text("·").foregroundStyle(.secondary)
+                    }
                     Text(controls.displayModelName).lineLimit(1)
                     if let effort = controls.displayEffort {
                         Text(EffortSlider.name(effort)).foregroundStyle(.secondary)

@@ -7,11 +7,15 @@ public enum AccountScopedBlob {
     public enum Kind: UInt8, Sendable {
         case accountSettings = 1
         case providerAccountUsageSnapshot = 6
+        case agentProfile = 11
+        case agentPresence = 12
 
         var name: String {
             switch self {
             case .accountSettings: "account_settings"
             case .providerAccountUsageSnapshot: "provider_account_usage_snapshot"
+            case .agentProfile: "agent_profile"
+            case .agentPresence: "agent_presence"
             }
         }
     }

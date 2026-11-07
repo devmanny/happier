@@ -29,6 +29,15 @@ struct SettingsView: View {
             } footer: {
                 Text("The computers your sessions run on.")
             }
+            Section {
+                NavigationLink {
+                    AgentsView()
+                } label: {
+                    Label("Agents", systemImage: "person.2")
+                }
+            } footer: {
+                Text("Named agents with their own description, engine and account. Choose one when you start a session.")
+            }
             NotificationSettingsSection()
             Section {
                 NavigationLink {

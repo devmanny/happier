@@ -242,6 +242,83 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Agents (sealed profiles in the account's UserKVStore, `agent/<id>/profile`)
+
+    /// The user's agents by name; empty until loaded.
+    public private(set) var agentProfiles: [AgentProfile] = []
+    public private(set) var agentProfilesError: String?
+    @ObservationIgnored private var agentProfileVersions: [String: Int] = [:]
+
+    public func agentProfile(id: String?) -> AgentProfile? {
+        guard let id else { return nil }
+        return agentProfiles.first { $0.id == id }
+    }
+
+    public func refreshAgentProfiles() async {
+        guard let api else { return }
+        guard let machineKey = keys?.content.secretKey else {
+            agentProfilesError = String(localized: "Agents need an end-to-end encrypted account.")
+            return
+        }
+        do {
+            let records = AgentProfile.records(fromList: try await api.kvList(prefix: AgentProfile.kvPrefix), machineKey: machineKey)
+            agentProfileVersions = Dictionary(records.map { ($0.profile.id, $0.version) }, uniquingKeysWith: { $1 })
+            agentProfiles = records.map(\.profile).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            agentProfilesError = nil
+        } catch {
+            agentProfilesError = UserFacingError.message(for: error)
+        }
+    }
+
+    /// Creates or replaces the agent. Another device's write in between wins only for the version:
+    /// this edit is written again on top of it.
+    @discardableResult
+    public func saveAgentProfile(_ profile: AgentProfile) async -> Bool {
+        var profile = profile
+        profile.updatedAt = ServerClock.nowMs()
+        return await writeAgentProfile(id: profile.id, profile: profile)
+    }
+
+    public func deleteAgentProfile(id: String) async {
+        await writeAgentProfile(id: id, profile: nil)
+    }
+
+    @discardableResult
+    private func writeAgentProfile(id: String, profile: AgentProfile?) async -> Bool {
+        guard let api, let machineKey = keys?.content.secretKey else {
+            report(RPCError(message: String(localized: "Agents need an end-to-end encrypted account."), code: nil))
+            return false
+        }
+        do {
+            let value = try profile?.sealed(machineKey: machineKey)
+            var version = agentProfileVersions[id] ?? -1
+            for _ in 0..<3 {
+                switch try await api.kvWrite(key: AgentProfile.kvKey(id: id), value: value, version: version) {
+                case .saved(let saved):
+                    agentProfileVersions[id] = saved
+                    agentProfiles.removeAll { $0.id == id }
+                    if let profile {
+                        agentProfiles.append(profile)
+                        agentProfiles.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                    }
+                    return true
+                case .conflict(let current, let currentValue):
+                    // Deleted elsewhere and deleting here: nothing left to do.
+                    if profile == nil, currentValue?.isEmpty ?? true {
+                        agentProfiles.removeAll { $0.id == id }
+                        agentProfileVersions[id] = current
+                        return true
+                    }
+                    version = current
+                }
+            }
+            throw RPCError(message: String(localized: "This agent changed on another device at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            report(error)
+            return false
+        }
+    }
+
     // MARK: - Relays
 
     private static let knownServersKey = "happier.knownServers"
@@ -321,6 +398,9 @@ public final class HappierStore {
         accountSettings = nil
         accountSettingsError = nil
         accountSettingsVersion = 0
+        agentProfiles = []
+        agentProfilesError = nil
+        agentProfileVersions = [:]
         machines = []
         openSessionIds = OpenSessions()
         draftStates.values.forEach { $0.upload?.cancel() }
@@ -1345,13 +1425,13 @@ public final class HappierStore {
     /// Starts an agent in a folder on a machine (`spawn-happy-session`, `spawnSessionPayload.ts`),
     /// waits for the session to appear, sends the first message and opens it.
     public func createSession(machineId: String, directory: String, agentId: String, permissionMode: PermissionMode,
-                              modelId: String? = nil, effort: String? = nil,
+                              modelId: String? = nil, effort: String? = nil, agent: AgentProfile? = nil,
                               firstMessage: String, attachments: [AttachmentDraft] = [], goal: String? = nil,
                               approveNewDirectory: Bool = false,
                               grouping: NewSessionGroup? = nil, title: String? = nil) async -> SpawnOutcome {
         let nonce = UUID().uuidString.lowercased()
         let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode, modelId: modelId,
-                                         effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory)
+                                         effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory, agent: agent)
         do {
             var result: JSONValue
             do {

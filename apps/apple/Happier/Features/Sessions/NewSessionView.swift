@@ -22,6 +22,10 @@ struct NewSessionView: View {
     @State private var permissionMode: PermissionMode = .yolo
     /// The agent last started from here; its model and effort are remembered per agent.
     @AppStorage(NewSessionDefaults.agentKey) private var lastAgentId = ""
+    /// Who works in the new session: one of the user's agents (Settings → Agents), nil for none.
+    @State private var workAgentId: String?
+    /// The agent last chosen here ("" for none), offered again next time.
+    @AppStorage("newSessionWorkAgentId") private var lastWorkAgentId = ""
     @State private var firstMessage = ""
     @State private var starting = false
     @State private var error: String?
@@ -59,6 +63,7 @@ struct NewSessionView: View {
     }
 
     private var machine: Machine? { store.machines.first { $0.id == machineId } }
+    private var workAgent: AgentProfile? { store.agentProfile(id: workAgentId) }
 
     private var recentDirectories: [String] {
         machineId.map { Machine.recentDirectories(machineId: $0, sessions: Array(store.sessions.values)) } ?? []
@@ -169,7 +174,7 @@ struct NewSessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .onChange(of: agentId, initial: true) { _, agent in
-            restoreChoices(for: agent)
+            if let workAgent, workAgent.providerId == agent { applyChoices(of: workAgent) } else { restoreChoices(for: agent) }
             applyDefaultPermissionMode(for: agent)
             if !SessionGoal.supported(agentId: agent, sessions: Array(store.sessions.values)) { goal = nil }
         }
@@ -215,18 +220,25 @@ struct NewSessionView: View {
             // The per-agent default chosen in Settings (or the React Native app).
             if store.accountSettings == nil { await store.refreshAccountSettings() }
             applyDefaultPermissionMode(for: agentId)
+            await store.refreshAgentProfiles()
+            if workAgentId == nil, let last = store.agentProfile(id: lastWorkAgentId) { choose(last) }
         }
         .task(id: machineId) {
             guard let machineId else { return }
             installed = nil
             installed = await store.installedAgents(on: machineId)
             // The picked agent isn't on this machine: the first one that is.
-            if let installed, !installed.contains(agentId), let first = agents.first { agentId = first }
+            if let installed, !installed.contains(agentId), let first = agents.first {
+                // An agent whose engine isn't on this machine can't work here.
+                workAgentId = nil
+                agentId = first
+            }
         }
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet {
                 AgentModelPicker(
-                    agents: agents,
+                    // An agent's engine is fixed; only its model and effort change, for this session.
+                    agents: workAgent.map { [$0.providerId] } ?? agents,
                     choice: Binding(
                         get: { AgentModelChoice(agentId: agentId, modelId: modelId, effort: effort) },
                         set: { next in
@@ -236,7 +248,11 @@ struct NewSessionView: View {
                             effort = next.effort
                         }),
                     models: { agent in SessionControls.newSessionModels(agentId: agent, sessions: Array(store.sessions.values)) },
-                    footer: String(localized: "The conversation starts with this agent and model."))
+                    footer: workAgent == nil
+                        ? String(localized: "The conversation starts with this agent and model.")
+                        : String(localized: "Changes apply to this session only; the agent keeps its own settings."),
+                    leading: store.agentProfiles.isEmpty ? nil : AnyView(whoIsWorking),
+                    agentSectionTitle: workAgent == nil ? "Agent" : "Engine")
             }
             #if os(macOS)
             .frame(minWidth: 380, minHeight: 520)
@@ -252,6 +268,55 @@ struct NewSessionView: View {
                     #endif
             }
         }
+    }
+
+    /// "Who's working?": the user's agents, or none and the model chosen by hand.
+    private var whoIsWorking: some View {
+        Section("Who's Working?") {
+            ForEach(store.agentProfiles) { profile in
+                Button {
+                    guard profile.id != workAgentId else { return }
+                    AppHaptics.selection()
+                    choose(profile)
+                } label: {
+                    AgentProfileRow(profile: profile, selected: profile.id == workAgentId)
+                }
+                .buttonStyle(.pressable)
+                .disabled(installed.map { !$0.contains(profile.providerId) } ?? false)
+            }
+            Button {
+                guard workAgentId != nil else { return }
+                AppHaptics.selection()
+                workAgentId = nil
+                restoreChoices(for: agentId)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "questionmark")
+                        .frame(width: 36, height: 36)
+                        .glassEffect(.regular, in: Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("No Agent").foregroundStyle(.primary)
+                        Text("Choose the model by hand").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if workAgentId == nil { Image(systemName: "checkmark").foregroundStyle(Color.userBubble).fontWeight(.semibold) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.pressable)
+        }
+    }
+
+    /// Works as `profile`: its engine, model and effort (changeable for this session).
+    private func choose(_ profile: AgentProfile) {
+        workAgentId = profile.id
+        if agentId == profile.providerId { applyChoices(of: profile) } else { agentId = profile.providerId }
+    }
+
+    private func applyChoices(of profile: AgentProfile) {
+        modelId = profile.modelId.flatMap { id in models.contains { $0.id == id } ? id : nil } ?? "default"
+        effort = profile.effort
+        fitEffort()
     }
 
     /// "Abundia-mini · ~/Projects/radar".
@@ -441,13 +506,18 @@ struct NewSessionView: View {
             showModelPicker = true
         } label: {
             chip {
-                Image("Agents/\(agentId)").resizable().scaledToFit().frame(width: 15, height: 15)
-                Text(agentLabel).lineLimit(1)
+                if let workAgent {
+                    // The agent takes the model pill's place; its model and effort follow.
+                    Text(verbatim: "\(workAgent.label) · \(agentLabel)").lineLimit(1)
+                } else {
+                    Image("Agents/\(agentId)").resizable().scaledToFit().frame(width: 15, height: 15)
+                    Text(agentLabel).lineLimit(1)
+                }
             }
         }
         .buttonStyle(.glass)
         .glassHover()
-        .accessibilityLabel("Model")
+        .accessibilityLabel(workAgent == nil ? "Model" : "Agent")
     }
 
     /// "Opus 5.5 · High": the model and, when it has levels, its effort.
@@ -551,7 +621,7 @@ struct NewSessionView: View {
         let effort = effortLevels.isEmpty ? nil : effort
         Task {
             let outcome = await store.createSession(machineId: machineId, directory: path, agentId: agentId, permissionMode: permissionMode,
-                                                    modelId: modelId, effort: effort, firstMessage: firstMessage,
+                                                    modelId: modelId, effort: effort, agent: workAgent, firstMessage: firstMessage,
                                                     attachments: attachments, goal: goal, approveNewDirectory: approve,
                                                     grouping: draft?.group, title: parentName)
             starting = false
@@ -600,6 +670,9 @@ struct NewSessionView: View {
 
     private func rememberChoices() {
         lastAgentId = agentId
+        lastWorkAgentId = workAgentId ?? ""
+        // An agent's model and effort are its own; a per-session change doesn't become the default.
+        guard workAgent == nil else { return }
         let defaults = UserDefaults.standard
         defaults.set(modelId, forKey: Self.modelKey(agentId))
         if !effortLevels.isEmpty, let effort { defaults.set(effort, forKey: Self.effortKey(agentId)) }

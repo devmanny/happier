@@ -10,8 +10,9 @@ public enum ServerClock {
 public enum SpawnRequest {
     /// `modelId` seeds the session's model override (`"default"` or nil keeps the CLI settings);
     /// `effort` seeds the `reasoning_effort` config option, as the new-session screen does.
+    /// `agent` makes the session work as that agent (`agentIdentityV1`) with its account.
     public static func params(directory: String, agentId: String, permissionMode: PermissionMode, modelId: String? = nil,
-                              effort: String? = nil, nonce: String, approveNewDirectory: Bool,
+                              effort: String? = nil, nonce: String, approveNewDirectory: Bool, agent: AgentProfile? = nil,
                               now: Double = ServerClock.nowMs()) -> JSONValue {
         let now = now.rounded(.down)
         var params: [String: JSONValue] = [
@@ -24,6 +25,11 @@ public enum SpawnRequest {
             params["modelUpdatedAt"] = .number(now)
         }
         if let overrides = effortOverrides(effort, now: now) { params["sessionConfigOptionOverrides"] = overrides }
+        if let agent {
+            params["agentIdentityV1"] = agent.identityJSON
+            // The CLI expands `~` and hands the folder to Claude Code; no Claude token leaves the machine.
+            if agentId == "claude", let dir = agent.claudeConfigDir { params["environmentVariables"] = ["CLAUDE_CONFIG_DIR": .string(dir)] }
+        }
         return .object(params)
     }
 

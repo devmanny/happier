@@ -807,11 +807,17 @@ struct SessionRow: View, Equatable {
                 }
                 // The session's project folder (or machine), always readable under the title. Its
                 // color, if it has one, is the avatar's disc.
-                Text(session.displayPath ?? session.host ?? "")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
+                // The agent it works as leads, so a long path never cuts its name.
+                HStack(spacing: 0) {
+                    if let agent = session.agentIdentity {
+                        Text(verbatim: "\(agent.label) · ").layoutPriority(1)
+                    }
+                    Text(session.displayPath ?? session.host ?? "")
+                        .truncationMode(.head)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
                 SessionTokenIndicator(sessionId: session.id, parents: usageParents)
             }
         }

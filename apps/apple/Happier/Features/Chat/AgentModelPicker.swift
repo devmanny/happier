@@ -28,12 +28,17 @@ struct AgentModelPicker: View {
     var ultracode: Binding<Bool>?
     /// Explains when the choice applies ("Applies from your next message.").
     var footer: String?
+    /// Sections shown first (a new session's "Who's working?").
+    var leading: AnyView?
+    /// The Agent section's title.
+    var agentSectionTitle: LocalizedStringKey = "Agent"
 
     var body: some View {
         let choices = models(choice.agentId)
         let model = effortModel ?? choices.first { $0.id == choice.modelId }
         List {
-            Section("Agent") {
+            if let leading { leading }
+            Section(agentSectionTitle) {
                 ForEach(agents, id: \.self) { agent in
                     Button {
                         guard agent != choice.agentId else { return }
