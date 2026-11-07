@@ -250,6 +250,8 @@ public final class HappierStore {
     /// False when the agents listing came back full: some agents may be missing from it.
     public private(set) var agentProfilesComplete = true
     @ObservationIgnored private var agentProfileVersions: [String: Int] = [:]
+    /// Versions of the legacy `agent/<id>/profile` copies older builds still read; kept in step on write.
+    @ObservationIgnored private var legacyAgentProfileVersions: [String: Int] = [:]
 
     public func agentProfile(id: String?) -> AgentProfile? {
         guard let id else { return nil }
@@ -264,11 +266,23 @@ public final class HappierStore {
         }
         do {
             let listing = try await api.kvList(prefix: AgentProfile.kvPrefix)
-            // Profiles share the `agent/` prefix with the agents' memory, so a full listing can leave agents out.
             agentProfilesComplete = KVListing.isComplete(listing)
-            let records = AgentProfile.records(fromList: listing, machineKey: machineKey)
-            agentProfileVersions = Dictionary(records.map { ($0.profile.id, $0.version) }, uniquingKeysWith: { $1 })
-            agentProfiles = records.map(\.profile).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            let current = AgentProfile.records(fromList: listing, machineKey: machineKey)
+            // Builds before the move kept profiles under `agent/<id>/profile` (mixed with memory).
+            let legacy = AgentProfile.records(fromList: try await api.kvList(prefix: AgentProfile.legacyKvPrefix), machineKey: machineKey)
+            legacyAgentProfileVersions = Dictionary(legacy.map { ($0.profile.id, $0.version) }, uniquingKeysWith: { $1 })
+            var versions = Dictionary(current.map { ($0.profile.id, $0.version) }, uniquingKeysWith: { $1 })
+            let plan = AgentProfile.reconcile(current: current, legacy: legacy)
+            for copy in plan.copies {
+                // A conflict means another device copied (or edited) it first: the next refresh reads that.
+                if case .saved(let saved) = try await api.kvWrite(key: AgentProfile.kvKey(id: copy.profile.id),
+                                                                  value: copy.profile.sealed(machineKey: machineKey),
+                                                                  version: copy.version) {
+                    versions[copy.profile.id] = saved
+                }
+            }
+            agentProfileVersions = versions
+            agentProfiles = plan.profiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             agentProfilesError = nil
         } catch {
             agentProfilesError = UserFacingError.message(for: error)
@@ -282,6 +296,15 @@ public final class HappierStore {
         var profile = profile
         profile.updatedAt = ServerClock.nowMs()
         return await writeAgentProfile(id: profile.id, profile: profile)
+    }
+
+    /// Keeps the legacy copy in step for builds that still read it; best effort, since the new key is
+    /// the source of truth (a conflict means an old build edited it, which the next refresh reconciles).
+    private func writeLegacyAgentProfile(id: String, value: String?, api: HappierAPI) async {
+        guard let version = legacyAgentProfileVersions[id] else { return }
+        if case .saved(let saved) = try? await api.kvWrite(key: AgentProfile.legacyKvKey(id: id), value: value, version: version) {
+            legacyAgentProfileVersions[id] = value == nil ? nil : saved
+        }
     }
 
     public func deleteAgentProfile(id: String) async {
@@ -301,6 +324,7 @@ public final class HappierStore {
                 switch try await api.kvWrite(key: AgentProfile.kvKey(id: id), value: value, version: version) {
                 case .saved(let saved):
                     agentProfileVersions[id] = saved
+                    await writeLegacyAgentProfile(id: id, value: value, api: api)
                     agentProfiles.removeAll { $0.id == id }
                     if let profile {
                         agentProfiles.append(profile)
@@ -602,6 +626,7 @@ public final class HappierStore {
         agentProfiles = []
         agentProfilesError = nil
         agentProfileVersions = [:]
+        legacyAgentProfileVersions = [:]
         agentMemories = [:]
         agentMemoryError = nil
         tasks = []

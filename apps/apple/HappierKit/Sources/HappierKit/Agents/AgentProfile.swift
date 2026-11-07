@@ -53,15 +53,49 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
 
     // MARK: Storage
 
-    public static let kvPrefix = "agent/"
+    /// Profiles have their own prefix, so an agent's memory (`agent/<id>/…`) can't crowd them out
+    /// of a listing (one `GET /v1/kv` returns at most `KVListing.maxRows`).
+    public static let kvPrefix = "agentprofile/"
 
-    public static func kvKey(id: String) -> String { "agent/\(id.lowercased())/profile" }
+    public static func kvKey(id: String) -> String { "agentprofile/\(id.lowercased())" }
 
-    /// The agent id a `agent/<id>/profile` key belongs to; nil for any other key under the prefix.
+    /// Where builds before the move keep profiles. Read and written alongside the new key while such
+    /// builds may still be in use; remove both once no build older than the move is installed.
+    public static let legacyKvPrefix = "agent/"
+
+    public static func legacyKvKey(id: String) -> String { "agent/\(id.lowercased())/profile" }
+
+    /// The agent id an `agentprofile/<id>` (or legacy `agent/<id>/profile`) key belongs to; nil for any other key.
     public static func id(fromKey key: String) -> String? {
         let parts = key.split(separator: "/", omittingEmptySubsequences: false)
+        if parts.count == 2, parts[0] == "agentprofile", !parts[1].isEmpty { return String(parts[1]) }
         guard parts.count == 3, parts[0] == "agent", parts[2] == "profile", !parts[1].isEmpty else { return nil }
         return String(parts[1])
+    }
+
+    /// What a refresh shows and what it must copy to the new keys. A profile only an old build knows
+    /// is copied as new (version -1); one an old build edited after the move (newer `updatedAt`) is
+    /// copied over the new key's version. Each copy is a versioned write, so when two devices migrate
+    /// at once one write lands and the other just re-reads; the legacy keys are never deleted here.
+    struct Reconciliation {
+        var profiles: [AgentProfile]
+        var copies: [Record]
+    }
+
+    static func reconcile(current: [Record], legacy: [Record]) -> Reconciliation {
+        var byId = Dictionary(current.map { ($0.profile.id, $0) }, uniquingKeysWith: { $1 })
+        var copies: [Record] = []
+        for old in legacy {
+            if let now = byId[old.profile.id] {
+                guard old.profile.updatedAt > now.profile.updatedAt else { continue }
+                copies.append(Record(profile: old.profile, version: now.version))
+                byId[old.profile.id] = Record(profile: old.profile, version: now.version)
+            } else {
+                copies.append(Record(profile: old.profile, version: -1))
+                byId[old.profile.id] = Record(profile: old.profile, version: -1)
+            }
+        }
+        return Reconciliation(profiles: byId.values.map(\.profile), copies: copies)
     }
 
     var json: JSONValue {
@@ -108,7 +142,7 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
         var version: Int
     }
 
-    /// Readable profiles from a `GET /v1/kv?prefix=agent/` response; deleted rows (empty value),
+    /// Readable profiles from a `GET /v1/kv` profile listing (either prefix); deleted rows (empty value),
     /// other keys under the prefix and rows this device can't open are skipped.
     static func records(fromList response: JSONValue, machineKey: Data) -> [Record] {
         (response["items"]?.arrayValue ?? []).compactMap { item in

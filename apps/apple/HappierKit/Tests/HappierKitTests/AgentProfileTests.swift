@@ -32,10 +32,32 @@ import Testing
     }
 
     @Test func keysAreOpaqueAndOnlyProfileKeysAreProfiles() {
-        #expect(AgentProfile.kvKey(id: "0F1E") == "agent/0f1e/profile")
+        // Profiles have their own prefix, so an agent's memory can't crowd them out of a listing.
+        #expect(AgentProfile.kvKey(id: "0F1E") == "agentprofile/0f1e")
+        #expect(AgentProfile.id(fromKey: "agentprofile/0f1e") == "0f1e")
+        // Where builds before the move kept them.
+        #expect(AgentProfile.legacyKvKey(id: "0F1E") == "agent/0f1e/profile")
         #expect(AgentProfile.id(fromKey: "agent/0f1e/profile") == "0f1e")
         #expect(AgentProfile.id(fromKey: "agent/0f1e/now/s1") == nil)
         #expect(AgentProfile.id(fromKey: "presence/s1") == nil)
+    }
+
+    @Test func reconcilingCopiesProfilesOnlyOldBuildsKnowAndKeepsTheNewestOfEach() throws {
+        var older = Self.julian(); older.updatedAt = 10
+        var newer = Self.julian(); newer.name = "Julián 2"; newer.updatedAt = 20
+        var tomas = Self.julian(); tomas = AgentProfile(id: "70", name: "Tomás", providerId: "claude", account: .init(label: "Nómada"), updatedAt: 5)
+
+        // Only an old build knows Tomás: copy it to the new key (create, version -1).
+        // Julián: an old build edited it after the move (legacy newer): copy over the new key's version.
+        let plan = AgentProfile.reconcile(current: [.init(profile: older, version: 4)],
+                                          legacy: [.init(profile: newer, version: 1), .init(profile: tomas, version: 0)])
+        #expect(plan.profiles.map(\.name).sorted() == ["Julián 2", "Tomás"])
+        #expect(plan.copies.map { [$0.profile.id, String($0.version)] }.sorted { $0[0] < $1[0] } == [[older.id, "4"], ["70", "-1"]])
+
+        // Already moved and not edited by an old build since: nothing to copy.
+        let settled = AgentProfile.reconcile(current: [.init(profile: newer, version: 5)], legacy: [.init(profile: older, version: 1)])
+        #expect(settled.copies.isEmpty)
+        #expect(settled.profiles.map(\.name) == ["Julián 2"])
     }
 
     @Test func listingKeepsLiveProfilesAndSkipsDeletedOrForeignRows() throws {

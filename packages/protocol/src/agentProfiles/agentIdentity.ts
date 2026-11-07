@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * A user-defined agent (name, emoji, description) a session works as. The full profile lives
- * sealed in the account's UserKVStore under `agent/<id>/profile`; a spawn carries only this
+ * sealed in the account's UserKVStore under `agentprofile/<id>`; a spawn carries only this
  * identity, which the runner keeps in `metadata.agentIdentityV1` and gives to the model.
  */
 export const AgentIdentityV1Schema = z.object({
@@ -20,12 +20,23 @@ export const AGENT_IDENTITY_ENV_KEY = 'HAPPIER_AGENT_IDENTITY_JSON';
 /** Session metadata key the runner writes and clients read to show the agent. */
 export const AGENT_IDENTITY_METADATA_KEY = 'agentIdentityV1';
 
-/** UserKVStore keys stay opaque: names and titles only live inside the sealed value. */
+/**
+ * UserKVStore keys stay opaque: names and titles only live inside the sealed value. Profiles have
+ * their own prefix so an agent's memory (`agent/<id>/…`) can't crowd them out of one listing.
+ */
 export function agentProfileKvKey(agentId: string): string {
-  return `agent/${agentId}/profile`;
+  return `${AGENT_PROFILE_KV_PREFIX}${agentId}`;
 }
 
-export const AGENT_PROFILE_KV_PREFIX = 'agent/';
+export const AGENT_PROFILE_KV_PREFIX = 'agentprofile/';
+
+/**
+ * Where builds before the move kept profiles. Clients read and keep it in step while such builds may
+ * still be installed; remove it once no build older than the move is in use.
+ */
+export function legacyAgentProfileKvKey(agentId: string): string {
+  return `agent/${agentId}/profile`;
+}
 
 /** The identity from an object or its JSON text; null when it isn't a usable identity. */
 export function parseAgentIdentityV1(value: unknown): AgentIdentityV1 | null {

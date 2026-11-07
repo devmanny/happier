@@ -3723,6 +3723,7 @@ export {
   AgentIdentityV1Schema,
   agentProfileKvKey,
   buildAgentIdentityPromptTextV1,
+  legacyAgentProfileKvKey,
   parseAgentIdentityV1,
   type AgentIdentityV1,
 } from './agentProfiles/agentIdentity.js';

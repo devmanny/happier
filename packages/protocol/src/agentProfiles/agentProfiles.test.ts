@@ -6,6 +6,7 @@ import {
 } from '../crypto/accountScopedCipher.js';
 import {
   agentProfileKvKey,
+  legacyAgentProfileKvKey,
   buildAgentIdentityPromptTextV1,
   parseAgentIdentityV1,
 } from './agentIdentity.js';
@@ -55,7 +56,9 @@ describe('agent identity', () => {
   });
 
   it('keeps titles out of the clear-text key', () => {
-    expect(agentProfileKvKey('0f1e')).toBe('agent/0f1e/profile');
+    // Own prefix: an agent's memory (agent/<id>/…) can't crowd profiles out of a listing.
+    expect(agentProfileKvKey('0f1e')).toBe('agentprofile/0f1e');
+    expect(legacyAgentProfileKvKey('0f1e')).toBe('agent/0f1e/profile');
     expect(agentPresenceKvKey('cmv1')).toBe('presence/cmv1');
   });
 

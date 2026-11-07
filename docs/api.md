@@ -81,8 +81,13 @@ Keys are clear text, so they stay opaque; everything readable lives in the seale
 (account-scoped blob, `packages/protocol/src/crypto/accountScopedCipher.ts`). Current client-owned
 prefixes:
 
-- `agent/<uuid>/profile` — a user-defined Agent (name, emoji, description, provider/model/effort,
+- `agentprofile/<uuid>` — a user-defined Agent (name, emoji, description, provider/model/effort,
   account label and optional Claude config folder), kind `agent_profile`. Written by the native app.
+  Builds before 2026-11-07 kept it at `agent/<uuid>/profile`, mixed with the agent's memory. Current
+  builds read both places, copy a profile only the old place has (or that an old build edited later,
+  by `updatedAt`) with a versioned write (concurrent migrations: one lands, the other re-reads), and
+  keep the old key in step on edit/delete; the old key is never deleted by the migration. Drop the
+  legacy read/write once no older build is installed.
   A spawn carries only `agentIdentityV1` `{v, id, name, emoji?, description?}`; the runner keeps
   `{v, id, name, emoji?}` in session metadata `agentIdentityV1` and adds the description to the
   coding prompt (`packages/protocol/src/agentProfiles/agentIdentity.ts`).
@@ -112,10 +117,10 @@ prefixes:
   user's open tasks due within a day or overdue; it records `notifiedV1` with a versioned write
   before pushing, so only one machine notifies. Repetition is not part of a task yet.
 
-`GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Every client reports a full
-listing as possibly incomplete instead of cutting it silently. Agent profiles share the `agent/`
-prefix with agent memory, so a large memory can push profiles out of that listing; paging the
-route (or a profile-only prefix) is the pending fix.
+`GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
+stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per
+day), and every client still reports a full listing as possibly incomplete instead of cutting it
+silently. A cursor on the route is a possible future improvement.
 
 ### Account and usage
 - `GET /v1/account/profile`
