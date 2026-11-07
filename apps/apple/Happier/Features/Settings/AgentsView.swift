@@ -1,5 +1,6 @@
 import HappierKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Settings → Agents: the user's agents (name, description, engine and fixed account), synced
 /// through the account's encrypted store to every device.
@@ -190,6 +191,17 @@ private struct AgentEditor: View {
                     }
                 }
             }
+            if !isNew {
+                Section {
+                    NavigationLink {
+                        AgentMemoryView(agent: profile)
+                    } label: {
+                        Label("Memory", systemImage: "brain")
+                    }
+                } footer: {
+                    Text("What this agent's threads are doing, its journal and its notes.")
+                }
+            }
             Section {
                 TextField("Name, e.g. Claude Work", text: $profile.account.label)
                 if profile.providerId == "claude" {
@@ -248,5 +260,233 @@ private struct AgentEditor: View {
     private func optional(_ path: WritableKeyPath<AgentProfile, String?>) -> Binding<String> {
         Binding(get: { profile[keyPath: path] ?? "" },
                 set: { profile[keyPath: path] = $0.isEmpty ? nil : $0 })
+    }
+}
+
+// MARK: - Memory
+
+/// An agent's memory: what each of its threads is doing now, its journal and its Markdown notes.
+/// Synced through the account's encrypted store; exportable as an Obsidian folder.
+struct AgentMemoryView: View {
+    @Environment(HappierStore.self) private var store
+    let agent: AgentProfile
+    @State private var editingNote: AgentMemory.Note?
+    @State private var exporting = false
+    @State private var exportError: String?
+
+    private var memory: AgentMemory { store.agentMemories[agent.id] ?? AgentMemory() }
+
+    private var journalByDay: [(day: String, entries: [AgentMemory.JournalEntry])] {
+        Dictionary(grouping: memory.journal, by: \.day)
+            .map { (day: $0.key, entries: $0.value.sorted { $0.at > $1.at }) }
+            .sorted { $0.day > $1.day }
+    }
+
+    var body: some View {
+        Form {
+            if let error = store.agentMemoryError, store.agentMemories[agent.id] == nil {
+                Text(error).foregroundStyle(.secondary)
+            }
+            Section {
+                if memory.now.isEmpty {
+                    Text("No thread has reported yet.").foregroundStyle(.secondary)
+                }
+                ForEach(memory.now) { thread in
+                    Button {
+                        AppHaptics.light()
+                        Task { await store.openRelatedSession(thread.sessionId) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(thread.text.isEmpty ? String(localized: "Working") : thread.text)
+                                .foregroundStyle(.primary)
+                            Text(nowDetail(thread))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressable)
+                }
+            } header: {
+                Text("Now")
+            }
+            Section {
+                if memory.notes.isEmpty {
+                    Text("No notes yet.").foregroundStyle(.secondary)
+                }
+                ForEach(memory.notes) { note in
+                    Button {
+                        AppHaptics.light()
+                        editingNote = note
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(note.title.isEmpty ? String(localized: "Untitled") : note.title).foregroundStyle(.primary)
+                            Text(note.markdown).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.pressable)
+                    .swipeActions {
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            Task { await store.deleteAgentNote(note, agentId: agent.id) }
+                        }
+                    }
+                    .contextMenu {
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            Task { await store.deleteAgentNote(note, agentId: agent.id) }
+                        }
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Notes")
+                    Spacer()
+                    Button("New Note", systemImage: "plus") {
+                        AppHaptics.light()
+                        editingNote = AgentMemory.Note(title: "", markdown: "")
+                    }
+                    .labelStyle(.iconOnly)
+                }
+            }
+            ForEach(journalByDay, id: \.day) { group in
+                Section(group.day) {
+                    ForEach(group.entries) { entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.text)
+                            Text(Date(timeIntervalSince1970: entry.at / 1000), style: .time)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .swipeActions {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                Task { await store.deleteAgentJournalEntry(entry, agentId: agent.id) }
+                            }
+                        }
+                        .contextMenu {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                Task { await store.deleteAgentJournalEntry(entry, agentId: agent.id) }
+                            }
+                        }
+                    }
+                }
+            }
+            if journalByDay.isEmpty {
+                Section("Journal") { Text("Nothing logged yet.").foregroundStyle(.secondary) }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("\(agent.label) Memory")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Export to Obsidian", systemImage: "square.and.arrow.up") {
+                    AppHaptics.light()
+                    exporting = true
+                }
+                .disabled(store.agentMemories[agent.id] == nil)
+            }
+        }
+        .refreshable { await store.refreshAgentMemory(agentId: agent.id) }
+        .task { await store.refreshAgentMemory(agentId: agent.id) }
+        .fileExporter(isPresented: $exporting,
+                      document: AgentMemoryFolder(agentName: agent.name, memory: memory),
+                      contentType: .folder,
+                      defaultFilename: AgentMemoryExport.folderName(agentName: agent.name)) { result in
+            if case .failure(let error) = result { exportError = error.localizedDescription }
+        }
+        .alert("Couldn't Export", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportError ?? "")
+        }
+        .sheet(item: $editingNote) { note in
+            NavigationStack {
+                AgentNoteEditor(note: note, agentId: agent.id)
+            }
+            #if os(macOS)
+            .frame(minWidth: 520, minHeight: 560)
+            #endif
+        }
+    }
+
+    private func nowDetail(_ thread: AgentMemory.Now) -> String {
+        let ago = Date(timeIntervalSince1970: thread.updatedAt / 1000).formatted(.relative(presentation: .named))
+        let place = [thread.title, [thread.host, thread.directory].compactMap { $0 }.joined(separator: " ")]
+            .compactMap { $0?.isEmpty == false ? $0 : nil }
+        return (place + [ago]).joined(separator: " · ")
+    }
+}
+
+/// One note's title and Markdown body; `[[links]]` point at other notes by title.
+private struct AgentNoteEditor: View {
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State var note: AgentMemory.Note
+    let agentId: String
+    @State private var saving = false
+
+    var body: some View {
+        Form {
+            Section("Title") {
+                TextField("Title", text: $note.title)
+            }
+            Section {
+                TextEditor(text: $note.markdown)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 280)
+            } header: {
+                Text("Markdown")
+            } footer: {
+                Text("Link other notes with [[Note title]].")
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(note.title.isEmpty ? String(localized: "Note") : note.title)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    saving = true
+                    Task {
+                        let saved = await store.saveAgentNote(note, agentId: agentId)
+                        saving = false
+                        if saved {
+                            AppHaptics.success()
+                            dismiss()
+                        }
+                    }
+                }
+                .disabled(saving || note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+}
+
+/// The Obsidian export as a folder document for `.fileExporter`.
+private struct AgentMemoryFolder: FileDocument {
+    static var readableContentTypes: [UTType] { [.folder] }
+    let agentName: String
+    let memory: AgentMemory
+
+    init(agentName: String, memory: AgentMemory) {
+        self.agentName = agentName
+        self.memory = memory
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        throw CocoaError(.featureUnsupported)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        AgentMemoryExport.fileWrapper(agentName: agentName, memory: memory)
     }
 }

@@ -319,6 +319,82 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Agent memory (`agent/<id>/now|journal|note/…`, sealed `agent_memory`)
+
+    /// Each agent's memory once loaded, by agent id.
+    public private(set) var agentMemories: [String: AgentMemory] = [:]
+    public private(set) var agentMemoryError: String?
+
+    public func refreshAgentMemory(agentId: String) async {
+        guard let api else { return }
+        guard let machineKey = keys?.content.secretKey else {
+            agentMemoryError = String(localized: "Agents need an end-to-end encrypted account.")
+            return
+        }
+        do {
+            agentMemories[agentId] = AgentMemory(fromList: try await api.kvList(prefix: AgentMemory.prefix(agentId: agentId)), machineKey: machineKey)
+            agentMemoryError = nil
+        } catch {
+            agentMemoryError = UserFacingError.message(for: error)
+        }
+    }
+
+    /// Creates or replaces a note. A write from another device or thread in between only moves the
+    /// version: this edit is written again on top of it.
+    @discardableResult
+    public func saveAgentNote(_ note: AgentMemory.Note, agentId: String) async -> Bool {
+        var note = note
+        note.updatedAt = ServerClock.nowMs()
+        guard let machineKey = keys?.content.secretKey else {
+            report(RPCError(message: String(localized: "Agents need an end-to-end encrypted account."), code: nil))
+            return false
+        }
+        let value: String
+        do { value = try note.sealed(machineKey: machineKey) } catch { report(error); return false }
+        guard let version = await writeMemoryKey(AgentMemory.Note.key(agentId: agentId, noteId: note.id), value: value,
+                                                 version: note.version) else { return false }
+        note.version = version
+        var memory = agentMemories[agentId] ?? AgentMemory()
+        memory.notes.removeAll { $0.id == note.id }
+        memory.notes.append(note)
+        memory.notes.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        agentMemories[agentId] = memory
+        return true
+    }
+
+    public func deleteAgentNote(_ note: AgentMemory.Note, agentId: String) async {
+        guard await writeMemoryKey(AgentMemory.Note.key(agentId: agentId, noteId: note.id), value: nil, version: note.version) != nil else { return }
+        agentMemories[agentId]?.notes.removeAll { $0.id == note.id }
+    }
+
+    public func deleteAgentJournalEntry(_ entry: AgentMemory.JournalEntry, agentId: String) async {
+        guard await writeMemoryKey(entry.key(agentId: agentId), value: nil, version: entry.version) != nil else { return }
+        agentMemories[agentId]?.journal.removeAll { $0.id == entry.id && $0.day == entry.day }
+    }
+
+    /// One memory key written at `version`, retried on the server's version after a conflict.
+    /// Returns the new version, or nil after reporting the failure.
+    private func writeMemoryKey(_ key: String, value: String?, version: Int) async -> Int? {
+        guard let api else { return nil }
+        var version = version
+        do {
+            for _ in 0..<3 {
+                switch try await api.kvWrite(key: key, value: value, version: version) {
+                case .saved(let saved):
+                    return saved
+                case .conflict(let current, let currentValue):
+                    // Already deleted elsewhere and deleting here: done.
+                    if value == nil, currentValue?.isEmpty ?? true { return current }
+                    version = current
+                }
+            }
+            throw RPCError(message: String(localized: "This memory changed somewhere else at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            report(error)
+            return nil
+        }
+    }
+
     // MARK: - Relays
 
     private static let knownServersKey = "happier.knownServers"
@@ -401,6 +477,8 @@ public final class HappierStore {
         agentProfiles = []
         agentProfilesError = nil
         agentProfileVersions = [:]
+        agentMemories = [:]
+        agentMemoryError = nil
         machines = []
         openSessionIds = OpenSessions()
         draftStates.values.forEach { $0.upload?.cancel() }
