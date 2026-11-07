@@ -13,12 +13,13 @@ import {
 
 import { createAccountKvHttpTransport, type AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
 import { runAutomationAsNewSession } from '@/daemon/automation/automationRunNewSession';
+import { awaitSpawnedSessionId, type SpawnSessionNonceResolver } from '@/session/services/awaitSpawnedSessionId';
 import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persistence';
 import type { SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
 import { sendSessionMessage } from '@/session/services/sendSessionMessage';
 
-import { runTaskOccurrence, type TaskOccurrenceResult } from './runTaskOccurrence';
+import { runTaskOccurrence, type TaskOccurrenceResult, type TaskOccurrenceSpawn } from './runTaskOccurrence';
 
 async function readExact(transport: AccountKvTransport, key: string): Promise<string | null> {
   return (await transport.list(key)).find((row) => row.key === key)?.value ?? null;
@@ -54,10 +55,51 @@ export async function readLiveThreadIds(
   return live;
 }
 
+/**
+ * Opens the occurrence's thread as the agent. The daemon may accept the spawn before the session id
+ * exists (`sessionIdStatus: 'pending'`); the id is then settled by the spawn nonce, as other spawn
+ * callers do.
+ */
+export async function startOccurrenceThread(
+  deps: Readonly<{
+    spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+    resolveSpawnSessionByNonce: SpawnSessionNonceResolver;
+  }>,
+  spawn: TaskOccurrenceSpawn,
+  firstMessage: string,
+  occurrenceId: string,
+): Promise<Readonly<{ ok: true; sessionId: string }> | Readonly<{ ok: false; code: string; message: string }>> {
+  const now = Date.now();
+  const result = await runAutomationAsNewSession({
+    spawnSession: deps.spawnSession,
+    runId: occurrenceId,
+    firstInputText: firstMessage,
+    template: {
+      directory: spawn.directory,
+      backendTarget: spawn.backendTarget,
+      agentIdentity: spawn.agentIdentity,
+      ...(spawn.environmentVariables ? { environmentVariables: spawn.environmentVariables } : {}),
+      ...(spawn.modelId ? { modelId: spawn.modelId, modelUpdatedAt: now } : {}),
+      ...(spawn.effort
+        ? { sessionConfigOptionOverrides: { v: 1, updatedAt: now, overrides: { reasoning_effort: { updatedAt: now, value: spawn.effort } } } }
+        : {}),
+      ...(spawn.permissionMode
+        ? { permissionMode: spawn.permissionMode as SpawnSessionOptions['permissionMode'], permissionModeUpdatedAt: now }
+        : {}),
+    } as SpawnSessionOptions,
+  });
+  const settled = await awaitSpawnedSessionId({ result, resolveSpawnSessionByNonce: deps.resolveSpawnSessionByNonce });
+  return settled.type === 'success'
+    ? { ok: true, sessionId: settled.sessionId }
+    : { ok: false, code: settled.errorCode, message: settled.errorMessage };
+}
+
 /** What the daemon's automation worker calls for a recurring task's run. */
 export function createTaskOccurrenceRunner(params: Readonly<{
   credentials: Credentials;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
+  /** Settles a spawn the daemon accepted before it knew the session id (`daemon.spawnSession.resolve`). */
+  resolveSpawnSessionByNonce: SpawnSessionNonceResolver;
   getAccountSettings: () => AccountSettings | null | undefined;
 }>): ((run: Readonly<{ runId: string; dueAt?: number; taskId: string; ruleId: string }>) => Promise<TaskOccurrenceResult>) | null {
   const credentials = params.credentials;
@@ -75,36 +117,8 @@ export function createTaskOccurrenceRunner(params: Readonly<{
       const mode = modes && typeof modes === 'object' ? (modes as Record<string, unknown>)[`agent:${providerId}`] : undefined;
       return typeof mode === 'string' ? mode : undefined;
     },
-    startNewThread: async (spawn, firstMessage, occurrenceId) => {
-      const now = Date.now();
-      const result = await runAutomationAsNewSession({
-        spawnSession: params.spawnSession,
-        runId: occurrenceId,
-        firstInputText: firstMessage,
-        template: {
-          directory: spawn.directory,
-          backendTarget: spawn.backendTarget,
-          agentIdentity: spawn.agentIdentity,
-          ...(spawn.environmentVariables ? { environmentVariables: spawn.environmentVariables } : {}),
-          ...(spawn.modelId ? { modelId: spawn.modelId, modelUpdatedAt: now } : {}),
-          ...(spawn.effort
-            ? { sessionConfigOptionOverrides: { v: 1, updatedAt: now, overrides: { reasoning_effort: { updatedAt: now, value: spawn.effort } } } }
-            : {}),
-          ...(spawn.permissionMode
-            ? { permissionMode: spawn.permissionMode as SpawnSessionOptions['permissionMode'], permissionModeUpdatedAt: now }
-            : {}),
-        } as SpawnSessionOptions,
-      });
-      if (result.type === 'success' && result.sessionId) return { ok: true, sessionId: result.sessionId };
-      if (result.type === 'requestToApproveDirectoryCreation') {
-        return { ok: false, code: 'directory_approval_required', message: `Directory creation requires approval: ${result.directory}` };
-      }
-      return {
-        ok: false,
-        code: result.type === 'error' ? result.errorCode : 'spawn_failed',
-        message: result.type === 'error' ? result.errorMessage : 'the session did not start',
-      };
-    },
+    startNewThread: (spawn, firstMessage, occurrenceId) =>
+      startOccurrenceThread({ spawnSession: params.spawnSession, resolveSpawnSessionByNonce: params.resolveSpawnSessionByNonce }, spawn, firstMessage, occurrenceId),
     continueThread: async (sessionId, message, occurrenceId) => {
       const result = await sendSessionMessage({
         credentials,

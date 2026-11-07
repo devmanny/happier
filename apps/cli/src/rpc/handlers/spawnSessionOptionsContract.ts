@@ -1,3 +1,4 @@
+import { AgentIdentityV1Schema } from '@happier-dev/protocol';
 import { z } from 'zod';
 import { SpawnSessionTerminalSchema } from '@happier-dev/protocol/spawnSession';
 import {
@@ -67,6 +68,8 @@ const SpawnDaemonSessionRequestCompatSchema = z.object({
   modelId: z.string().optional(),
   modelUpdatedAt: z.number().int().optional(),
   sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
+  /** The user-defined agent the session works as (an undeclared field here would be dropped silently). */
+  agentIdentity: AgentIdentityV1Schema.optional(),
   backendTarget: SpawnBackendTargetSchema.optional(),
   terminal: SpawnSessionTerminalSchema.optional(),
   windowsRemoteSessionLaunchMode: z.enum(['hidden', 'windows_terminal', 'console']).optional(),
@@ -145,6 +148,7 @@ const SPAWN_SESSION_OPTION_KEYS = [
   'modelId',
   'modelUpdatedAt',
   'sessionConfigOptionOverrides',
+  'agentIdentity',
   'approvedNewDirectoryCreation',
   'backendTarget',
   'terminal',

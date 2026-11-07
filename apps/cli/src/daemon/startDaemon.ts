@@ -8535,6 +8535,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 runAgentTaskOccurrence: createTaskOccurrenceRunner({
                   credentials,
                   spawnSession,
+                  resolveSpawnSessionByNonce: resolveDaemonSpawnSessionByNonce,
                   getAccountSettings: () => getActiveAccountSettingsSnapshot()?.settings ?? null,
                 }) ?? undefined,
               });
