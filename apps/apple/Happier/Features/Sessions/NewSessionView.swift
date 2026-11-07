@@ -251,7 +251,6 @@ struct NewSessionView: View {
                     footer: workAgent == nil
                         ? String(localized: "The conversation starts with this agent and model.")
                         : String(localized: "Changes apply to this session only; the agent keeps its own settings."),
-                    leading: store.agentProfiles.isEmpty ? nil : AnyView(whoIsWorking),
                     agentSectionTitle: workAgent == nil ? "Agent" : "Engine")
             }
             #if os(macOS)
@@ -270,41 +269,42 @@ struct NewSessionView: View {
         }
     }
 
-    /// "Who's working?": the user's agents, or none and the model chosen by hand.
-    private var whoIsWorking: some View {
-        Section("Who's Working?") {
-            ForEach(store.agentProfiles) { profile in
-                Button {
-                    guard profile.id != workAgentId else { return }
-                    AppHaptics.selection()
-                    choose(profile)
-                } label: {
-                    AgentProfileRow(profile: profile, selected: profile.id == workAgentId)
-                }
-                .buttonStyle(.pressable)
-                .disabled(installed.map { !$0.contains(profile.providerId) } ?? false)
-            }
-            Button {
-                guard workAgentId != nil else { return }
-                AppHaptics.selection()
-                workAgentId = nil
-                restoreChoices(for: agentId)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "questionmark")
-                        .frame(width: 36, height: 36)
-                        .glassEffect(.regular, in: Circle())
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("No Agent").foregroundStyle(.primary)
-                        Text("Choose the model by hand").font(.caption).foregroundStyle(.secondary)
+    /// "Who's working?": one of the user's agents, or none. Sits next to the model pill; picking
+    /// an agent fills the model and effort with its defaults, which the pill can still change.
+    private var workAgentMenu: some View {
+        Menu {
+            Section("Who's Working?") {
+                ForEach(store.agentProfiles) { profile in
+                    Button {
+                        guard profile.id != workAgentId else { return }
+                        AppHaptics.selection()
+                        choose(profile)
+                    } label: {
+                        checked(profile.label, profile.id == workAgentId)
                     }
-                    Spacer(minLength: 0)
-                    if workAgentId == nil { Image(systemName: "checkmark").foregroundStyle(Color.userBubble).fontWeight(.semibold) }
+                    .disabled(installed.map { !$0.contains(profile.providerId) } ?? false)
                 }
-                .contentShape(Rectangle())
+                Button {
+                    guard workAgentId != nil else { return }
+                    AppHaptics.selection()
+                    workAgentId = nil
+                    restoreChoices(for: agentId)
+                } label: {
+                    checked(String(localized: "No Agent"), workAgentId == nil)
+                }
             }
-            .buttonStyle(.pressable)
+        } label: {
+            chip {
+                Image(systemName: workAgent == nil ? "person.crop.circle.badge.questionmark" : "person.crop.circle")
+                Text(workAgent?.label ?? String(localized: "No Agent")).lineLimit(1)
+            }
         }
+        .menuStyle(.button)
+        .buttonStyle(.glass)
+        .glassHover()
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("Who's working")
     }
 
     /// Works as `profile`: its engine, model and effort (changeable for this session).
@@ -440,6 +440,7 @@ struct NewSessionView: View {
                     }
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
+                            if !store.agentProfiles.isEmpty { workAgentMenu }
                             agentMenu
                             permissionMenu
                         }
@@ -506,18 +507,13 @@ struct NewSessionView: View {
             showModelPicker = true
         } label: {
             chip {
-                if let workAgent {
-                    // The agent takes the model pill's place; its model and effort follow.
-                    Text(verbatim: "\(workAgent.label) · \(agentLabel)").lineLimit(1)
-                } else {
-                    Image("Agents/\(agentId)").resizable().scaledToFit().frame(width: 15, height: 15)
-                    Text(agentLabel).lineLimit(1)
-                }
+                Image("Agents/\(agentId)").resizable().scaledToFit().frame(width: 15, height: 15)
+                Text(agentLabel).lineLimit(1)
             }
         }
         .buttonStyle(.glass)
         .glassHover()
-        .accessibilityLabel(workAgent == nil ? "Model" : "Agent")
+        .accessibilityLabel("Model")
     }
 
     /// "Opus 5.5 · High": the model and, when it has levels, its effort.
