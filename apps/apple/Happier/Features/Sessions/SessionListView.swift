@@ -738,7 +738,7 @@ extension SessionListView {
             if request != nil, !tasksPanelAvailable { showTasks = true }
         }
         .sheet(isPresented: $showTasks) {
-            TasksView()
+            TasksView(openSessionId: selection == NewChat.id ? nil : selection)
                 #if os(macOS)
                 .frame(minWidth: 520, minHeight: 560)
                 #endif

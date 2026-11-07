@@ -515,19 +515,36 @@ extension EnvironmentValues {
 /// its status.
 struct TasksView: View {
     var presentation: TasksPresentation = .sheet
+    /// The conversation open beside the list (nil on the iPhone's sheet or with none open). Tasks
+    /// belong to the account; this only decides what is shown as linked to it.
+    var openSessionId: String?
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var assignee: AgentTask.AssigneeFilter = .all
     @State private var status: AgentTask.StatusFilter = .open
+    @State private var scope: AgentTask.Scope = .all
     @State private var creating = false
     /// The task whose detail is open, when one is.
     @State private var path: [String] = []
 
-    private var visible: [AgentTask] { AgentTask.filter(store.tasks, assignee: assignee, status: status) }
+    private var sections: [AgentTask.Section] {
+        AgentTask.sections(AgentTask.filter(store.tasks, assignee: assignee, status: .all),
+                           scope: openSessionId == nil ? .all : scope, openSessionId: openSessionId, status: status)
+    }
 
     var body: some View {
+        let sections = sections
         NavigationStack(path: $path) {
             List {
+                if openSessionId != nil {
+                    Picker("Show", selection: $scope) {
+                        Text("All").tag(AgentTask.Scope.all)
+                        Text("This Session").tag(AgentTask.Scope.thisSession)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .listRowSeparator(.hidden)
+                }
                 if !store.tasksComplete {
                     Text("Only the first \(KVListing.maxRows) stored tasks could be read, so some may be missing here.")
                         .foregroundStyle(.orange)
@@ -535,17 +552,35 @@ struct TasksView: View {
                 if let error = store.tasksError {
                     Text(error).foregroundStyle(.secondary)
                 }
-                ForEach(visible) { task in
-                    NavigationLink(value: task.id) { TaskRow(task: task) }
+                ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                    Section {
+                        ForEach(section.tasks) { task in
+                            NavigationLink(value: task.id) {
+                                TaskRow(task: task, openSessionId: openSessionId) { open($0) }
+                            }
+                        }
+                    } header: {
+                        header(section, isFirstGroup: sections.firstIndex { $0.kind != .linkedToOpenSession } == index)
+                    }
                 }
             }
             #if os(iOS)
             .listStyle(.plain)
             #endif
             .overlay {
-                if visible.isEmpty, store.tasksError == nil {
-                    ContentUnavailableView("No Tasks", systemImage: "checklist",
-                                           description: Text("Tasks for you and your agents show up here."))
+                if sections.isEmpty, store.tasksError == nil {
+                    if scope == .thisSession, openSessionId != nil {
+                        ContentUnavailableView {
+                            Label("No Tasks Linked to This Session", systemImage: "link")
+                        } description: {
+                            Text("Tasks belong to your account; the rest are in All.")
+                        } actions: {
+                            Button("Show All") { scope = .all }
+                        }
+                    } else {
+                        ContentUnavailableView("No Tasks", systemImage: "checklist",
+                                               description: Text("Tasks for you and your agents show up here."))
+                    }
                 }
             }
             .navigationDestination(for: String.self) { id in
@@ -590,6 +625,24 @@ struct TasksView: View {
         }
     }
 
+    /// "Linked to this session", then "All tasks" grouped by who each task is for.
+    @ViewBuilder
+    private func header(_ section: AgentTask.Section, isFirstGroup: Bool) -> some View {
+        switch section.kind {
+        case .linkedToOpenSession:
+            Label("Linked to This Session · \(section.tasks.count)", systemImage: "link")
+        case .assignee(let assignee):
+            let who = assignee == .user ? String(localized: "You") : assignee.label
+            Text(isFirstGroup ? "All Tasks · \(who) · \(section.tasks.count)" : "\(who) · \(section.tasks.count)")
+        }
+    }
+
+    /// Opens a linked session in the middle; the sheet gets out of the way, the panel stays.
+    private func open(_ sessionId: String) {
+        Task { await store.openRelatedSession(sessionId) }
+        if presentation == .sheet { dismiss() }
+    }
+
     private func refresh() async {
         await store.refreshTasks()
         if store.agentProfiles.isEmpty { await store.refreshAgentProfiles() }
@@ -620,6 +673,40 @@ struct TasksView: View {
 
 private struct TaskRow: View {
     let task: AgentTask
+    var openSessionId: String?
+    var openSession: (String) -> Void = { _ in }
+    @Environment(HappierStore.self) private var store
+
+    /// The sessions it is linked to, shortly named and tappable; the open one marked.
+    @ViewBuilder private var sessions: some View {
+        let linked = task.linkedSessions
+        if linked.isEmpty {
+            Label("No session", systemImage: "link").labelStyle(.titleAndIcon).foregroundStyle(.tertiary)
+        } else {
+            HStack(spacing: 6) {
+                Image(systemName: "link").foregroundStyle(.tertiary)
+                ForEach(linked.prefix(2)) { link in
+                    Button {
+                        openSession(link.sessionId)
+                    } label: {
+                        HStack(spacing: 3) {
+                            if link.sessionId == openSessionId {
+                                Image(systemName: "smallcircle.filled.circle").foregroundStyle(Color.userBubble)
+                            }
+                            Text(Self.shortName(store.sessions[link.sessionId]?.title ?? link.sessionId))
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(link.sessionId == openSessionId ? "Open session (this one)" : "Open session")
+                }
+                if linked.count > 2 { Text("+\(linked.count - 2)").foregroundStyle(.secondary) }
+            }
+        }
+    }
+
+    static func shortName(_ title: String) -> String {
+        title.count > 22 ? String(title.prefix(21)) + "…" : title
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -641,6 +728,9 @@ private struct TaskRow: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            sessions
+                .font(.caption2)
+                .lineLimit(1)
         }
         .padding(.vertical, 2)
     }
@@ -854,14 +944,21 @@ private struct TaskDetailView: View {
                 }
                 .disabled(comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            if !task.wrappedValue.threads.isEmpty {
-                Section("Sessions") {
-                    ForEach(task.wrappedValue.threads, id: \.self) { sessionId in
-                        Button {
-                            Task { await store.openRelatedSession(sessionId) }
-                            close()
-                        } label: {
-                            Text(store.sessions[sessionId]?.title ?? sessionId).lineLimit(1)
+            Section("Sessions") {
+                let linked = task.wrappedValue.linkedSessions
+                if linked.isEmpty {
+                    Text("Not linked to any session yet.").foregroundStyle(.secondary)
+                }
+                ForEach(linked) { link in
+                    Button {
+                        Task { await store.openRelatedSession(link.sessionId) }
+                        close()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(store.sessions[link.sessionId]?.title ?? link.sessionId).lineLimit(1)
+                            Text(link.reasons.map(\.label).joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1239,5 +1336,16 @@ private struct TaskRuleEditor: View {
         let pieces = string.split(separator: "-").compactMap { Int($0) }
         guard pieces.count == 3 else { return nil }
         return Calendar.current.date(from: DateComponents(year: pieces[0], month: pieces[1], day: pieces[2]))
+    }
+}
+
+extension AgentTask.SessionLink {
+    /// How the session is linked to the task, as the task detail lists it.
+    var label: String {
+        switch self {
+        case .source: String(localized: "Where it came from")
+        case .worked: String(localized: "Worked on it")
+        case .occurrence: String(localized: "Ran a repeat")
+        }
     }
 }

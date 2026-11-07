@@ -195,7 +195,7 @@ struct MainView: View {
         if tasksPanelAvailable {
             detail
                 .inspector(isPresented: $tasksPanelOpen) {
-                    TasksView(presentation: .panel)
+                    TasksView(presentation: .panel, openSessionId: selection == NewChat.id ? nil : selection)
                         .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
                 }
                 .toolbar {

@@ -328,6 +328,79 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         return next
     }
 
+    // MARK: Sessions and sections (tasks belong to the account; some are linked to sessions)
+
+    /// Why a session is linked to a task.
+    public enum SessionLink: String, Sendable, Equatable {
+        /// The task came from it (`source.sessionId`).
+        case source
+        /// It worked on the task (`threads`).
+        case worked
+        /// It worked one of the task's repeating occurrences.
+        case occurrence
+    }
+
+    public struct LinkedSession: Sendable, Equatable, Identifiable {
+        public let sessionId: String
+        public let reasons: [SessionLink]
+        public var id: String { sessionId }
+    }
+
+    /// Every session linked to this task, in the order they appeared: where it came from first.
+    public var linkedSessions: [LinkedSession] {
+        var order: [String] = []
+        var reasons: [String: [SessionLink]] = [:]
+        func add(_ sessionId: String?, _ reason: SessionLink) {
+            guard let sessionId, !sessionId.isEmpty else { return }
+            if reasons[sessionId] == nil { order.append(sessionId) }
+            if reasons[sessionId]?.contains(reason) != true { reasons[sessionId, default: []].append(reason) }
+        }
+        add(source?.sessionId, .source)
+        for thread in threads { add(thread, .worked) }
+        for occurrence in occurrences { add(occurrence.sessionId, .occurrence) }
+        return order.map { LinkedSession(sessionId: $0, reasons: reasons[$0] ?? []) }
+    }
+
+    public func isLinked(to sessionId: String) -> Bool {
+        linkedSessions.contains { $0.sessionId == sessionId }
+    }
+
+    /// What the Tasks list shows: every task of the account, or only those linked to the open session.
+    public enum Scope: Hashable, Sendable { case all, thisSession }
+
+    public struct Section: Sendable, Equatable, Identifiable {
+        public enum Kind: Hashable, Sendable {
+            case linkedToOpenSession
+            case assignee(Assignee)
+        }
+        public let kind: Kind
+        public let tasks: [AgentTask]
+        public var id: Kind { kind }
+    }
+
+    /// "All": the tasks linked to the open session first (when there are any), then every task
+    /// grouped by who it's for (you first, then agents by name). "This session": only the linked ones.
+    public static func sections(_ tasks: [AgentTask], scope: Scope, openSessionId: String?, status: StatusFilter) -> [Section] {
+        let visible = filter(tasks, assignee: .all, status: status)
+        let linked = openSessionId.map { id in visible.filter { $0.isLinked(to: id) } } ?? []
+        switch scope {
+        case .thisSession:
+            return linked.isEmpty ? [] : [Section(kind: .linkedToOpenSession, tasks: linked)]
+        case .all:
+            var groups: [String: (assignee: Assignee, tasks: [AgentTask])] = [:]
+            for task in visible {
+                let key = task.assignee.agentId ?? ""
+                groups[key, default: (task.assignee, [])].tasks.append(task)
+            }
+            let ordered = groups.values.sorted { a, b in
+                if (a.assignee == .user) != (b.assignee == .user) { return a.assignee == .user }
+                return a.assignee.label.localizedStandardCompare(b.assignee.label) == .orderedAscending
+            }
+            return (linked.isEmpty ? [] : [Section(kind: .linkedToOpenSession, tasks: linked)])
+                + ordered.map { Section(kind: .assignee($0.assignee), tasks: $0.tasks) }
+        }
+    }
+
     // MARK: Filters
 
     public enum AssigneeFilter: Hashable, Sendable {
