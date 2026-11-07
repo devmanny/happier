@@ -1,3 +1,5 @@
+import { getEquivalentActionIdForBuiltInTool } from '@/agent/tools/happierTools/actionToolCatalog';
+import { projectContextualActionToolInputSchema } from '@/agent/tools/happierTools/contextualActionToolInput';
 import { listBuiltInHappierTools } from '@/agent/tools/happierTools/listBuiltInHappierTools';
 import { DEVICE_BROWSER_MCP_TOOLS } from '@/mcp/deviceBrowser/registerDeviceBrowserMcpTools';
 
@@ -28,7 +30,12 @@ export function registerHappierMcpBridgeTools(
     const meta = {
       description: tool.description,
       title: tool.title,
-      inputSchema: tool.inputSchema,
+      // The session server fills current-session fields, so they must not be required here.
+      inputSchema: projectContextualActionToolInputSchema({
+        actionId: getEquivalentActionIdForBuiltInTool(tool.name),
+        inputSchema: tool.inputSchema,
+        context: { boundDownstream: true },
+      }),
       ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
     };
 

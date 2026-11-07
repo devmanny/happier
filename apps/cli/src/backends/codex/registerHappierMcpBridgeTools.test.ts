@@ -10,6 +10,19 @@ describe('registerHappierMcpBridgeTools', () => {
     delete process.env.HAPPIER_ACTIONS_SETTINGS_V1;
   });
 
+  it('leaves current-session fields optional so the session server can fill them', async () => {
+    const { registerHappierMcpBridgeTools } = await import('./registerHappierMcpBridgeTools');
+    const calls: any[] = [];
+    registerHappierMcpBridgeTools({
+      registerTool: (name: string, definition: any) => { calls.push({ name, definition }); },
+    } as any, { callHttpTool: async () => ({ content: [], isError: false }) });
+
+    for (const name of ['quien_esta_aqui', 'session_goal_get']) {
+      const schema = calls.find((c) => c.name === name)?.definition.inputSchema;
+      expect(schema?.safeParse({}).success, name).toBe(true);
+    }
+  });
+
   it('registers only the currently enabled Happier MCP tools and forwards calls', async () => {
     process.env.HAPPIER_ACTIONS_SETTINGS_V1 = JSON.stringify({
       v: 1,

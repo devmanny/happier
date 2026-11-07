@@ -4,6 +4,11 @@ import { z } from 'zod';
 export type SessionBoundActionToolContext = Readonly<{
   defaultSessionId?: string | null;
   defaultSessionMachineId?: string | null;
+  /**
+   * A proxy (the stdio MCP bridge) that doesn't know the session itself but forwards to the
+   * session server, which binds the contextual defaults (`bindContextualActionToolInput`).
+   */
+  boundDownstream?: boolean;
 }>;
 
 function normalizeContextValue(value: string | null | undefined): string | null {
@@ -66,7 +71,8 @@ export function projectContextualActionToolInputSchema(params: Readonly<{
   const shape = params.inputSchema.shape as Record<string, z.ZodTypeAny>;
   const overrides: Record<string, z.ZodTypeAny> = {};
   for (const [field, source] of Object.entries(getContextualDefaults(params.actionId))) {
-    if (!shape[field] || !resolveContextValue(source, params.context)) continue;
+    if (!shape[field]) continue;
+    if (params.context.boundDownstream !== true && !resolveContextValue(source, params.context)) continue;
     overrides[field] = shape[field].optional();
   }
   return Object.keys(overrides).length > 0
