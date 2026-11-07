@@ -820,6 +820,7 @@ private struct TaskDetailView: View {
                 Text("Assign to… starts the agent here; without a folder it uses the machine's latest folder.")
             }
             sourceSection(task)
+            TaskRepeatSections(task: task.wrappedValue, close: close)
             Section("Comment") {
                 TextField("Add a comment", text: $comment, axis: .vertical)
                 Button("Add Comment") {
@@ -936,5 +937,283 @@ private struct TaskDetailView: View {
             case .failed(let message): alert = message
             }
         }
+    }
+}
+
+/// "Repeat": the task's rules (one Automation each), time zone, thread continuity, next run,
+/// Pause/Resume, Run now, and each occurrence's result. Saved on its own, because saving it also
+/// creates or updates the Automations on the relay.
+private struct TaskRepeatSections: View {
+    let task: AgentTask
+    let close: () -> Void
+    @Environment(HappierStore.self) private var store
+    @State private var draft: TaskRecurrence?
+    @State private var editingRule: TaskRecurrence.Rule?
+    @State private var saving = false
+    @State private var termsWarning: TaskRecurrence?
+
+    private var stored: TaskRecurrence? { task.recurrence }
+    private var agent: AgentProfile? { task.assignee.agentId.flatMap { store.agentProfile(id: $0) } }
+
+    var body: some View {
+        Group {
+            if let recurrence = draft {
+                rulesSection(recurrence)
+                optionsSection(recurrence)
+            } else {
+                Section("Repeat") {
+                    Button("Repeat This Task…") {
+                        draft = TaskRecurrence(rules: [TaskRecurrence.Rule(kind: .weekly([1, 2, 3, 4, 5]), hour: 9, minute: 0)])
+                    }
+                }
+            }
+            if !task.occurrences.isEmpty { occurrencesSection }
+        }
+        .onAppear { draft = stored }
+        .onChange(of: stored) { _, latest in if !saving { draft = latest } }
+        .sheet(item: $editingRule) { rule in
+            NavigationStack {
+                TaskRuleEditor(rule: rule) { edited in
+                    guard var recurrence = draft else { return }
+                    if let index = recurrence.rules.firstIndex(where: { $0.id == edited.id }) { recurrence.rules[index] = edited }
+                    else { recurrence.rules.append(edited) }
+                    draft = recurrence
+                }
+            }
+            #if os(macOS)
+            .frame(minWidth: 380, minHeight: 420)
+            #endif
+        }
+        .alert("Automated Access with Claude", isPresented: Binding(get: { termsWarning != nil }, set: { if !$0 { termsWarning = nil } })) {
+            Button("Continue") {
+                guard let pending = termsWarning else { return }
+                termsWarning = nil
+                save(pending, warned: true)
+            }
+            Button("Cancel", role: .cancel) { termsWarning = nil }
+        } message: {
+            Text("""
+            Repeating work runs without you, which is automated access. Anthropic's Consumer Terms (section 3.7) ask for an \
+            API key for that, not a Claude subscription. If \(agent?.name ?? "this agent") signs in with a subscription, \
+            consider assigning the task to a Codex agent instead.
+            """)
+        }
+    }
+
+    private func rulesSection(_ recurrence: TaskRecurrence) -> some View {
+        Section {
+            ForEach(recurrence.rules) { rule in
+                Button {
+                    editingRule = rule
+                } label: {
+                    Text(rule.summary).foregroundStyle(.primary)
+                }
+                .buttonStyle(.plain)
+            }
+            .onDelete { offsets in
+                guard var next = draft, next.rules.count > offsets.count else { return }
+                next.rules.remove(atOffsets: offsets)
+                draft = next
+            }
+            Button("Add Rule") { editingRule = TaskRecurrence.Rule(kind: .weekly([6, 0]), hour: 16, minute: 0) }
+        } header: {
+            Text("Repeat")
+        } footer: {
+            if let problem = store.recurrenceProblem(for: task) {
+                Text(problem).foregroundStyle(.orange)
+            } else if recurrence.paused {
+                Text("Paused.")
+            } else if let next = recurrence.nextRun() {
+                Text("Next run: \(next.formatted(date: .abbreviated, time: .shortened))")
+            }
+        }
+    }
+
+    private func optionsSection(_ recurrence: TaskRecurrence) -> some View {
+        Section {
+            Picker("Time Zone", selection: Binding(get: { recurrence.timezone }, set: { draft?.timezone = $0 })) {
+                ForEach(TimeZone.knownTimeZoneIdentifiers, id: \.self) { Text($0).tag($0) }
+                if !TimeZone.knownTimeZoneIdentifiers.contains(recurrence.timezone) { Text(recurrence.timezone).tag(recurrence.timezone) }
+            }
+            Picker("Each Time", selection: Binding(get: { recurrence.continuity }, set: { draft?.continuity = $0 })) {
+                ForEach(TaskRecurrence.Continuity.allCases) { Text($0.label).tag($0) }
+            }
+            if draft != stored {
+                Button(saving ? "Saving…" : "Save Repeat") { save(recurrence, warned: false) }
+                    .disabled(saving || store.recurrenceProblem(for: task) != nil)
+                if stored != nil { Button("Discard Changes") { draft = stored } }
+            }
+            if let stored, draft == stored {
+                Button(stored.paused ? "Resume" : "Pause") {
+                    var next = stored
+                    next.paused.toggle()
+                    save(next, warned: next.paused)
+                }
+                .disabled(saving)
+                Button("Run Now") { Task { await store.runRecurrenceNow(taskId: task.id) } }
+                    .disabled(saving || stored.paused)
+            }
+            if stored != nil || draft != nil {
+                Button("Stop Repeating", role: .destructive) {
+                    if stored == nil { draft = nil } else { save(nil, warned: true) }
+                }
+                .disabled(saving)
+            }
+        } footer: {
+            Text("Each rule fires on \(machineName) in \(task.directory ?? "the task's folder"). If the previous occurrence is still running, the new one is skipped and shows here as skipped.")
+        }
+    }
+
+    private var machineName: String {
+        task.machineId.flatMap { id in store.machines.first { $0.id == id }?.name } ?? String(localized: "the task's machine")
+    }
+
+    private var occurrencesSection: some View {
+        Section("Occurrences") {
+            ForEach(task.occurrences.reversed()) { occurrence in
+                Button {
+                    guard let sessionId = occurrence.sessionId else { return }
+                    Task { await store.openRelatedSession(sessionId) }
+                    close()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(occurrence.status.label)
+                                .foregroundStyle(occurrence.status == .failed || occurrence.status == .interrupted ? Color.red : Color.primary)
+                            Spacer()
+                            Text(Date(timeIntervalSince1970: occurrence.startedAt / 1000).formatted(date: .abbreviated, time: .shortened))
+                                .foregroundStyle(.secondary)
+                        }
+                        let rule = task.recurrence?.rules.first { $0.id == occurrence.ruleId }?.summary
+                        let details = [rule, occurrence.note].compactMap { $0 }
+                        if !details.isEmpty { Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(occurrence.sessionId == nil)
+            }
+        }
+    }
+
+    /// Starting (or resuming) repetition for a Claude agent warns first about automated access.
+    private func save(_ recurrence: TaskRecurrence?, warned: Bool) {
+        let starts = recurrence.map { !$0.paused && (stored == nil || stored?.paused == true) } ?? false
+        if !warned, starts, TaskRecurrence.needsAutomatedAccessWarning(providerId: agent?.providerId) {
+            termsWarning = recurrence
+            return
+        }
+        saving = true
+        Task {
+            let saved = await store.saveRecurrence(taskId: task.id, recurrence)
+            saving = false
+            if saved != nil { draft = recurrence == nil ? nil : saved?.recurrence }
+        }
+    }
+}
+
+/// One rule: weekly days and time, every N days from a date, or a day of the month.
+private struct TaskRuleEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var rule: TaskRecurrence.Rule
+    let save: (TaskRecurrence.Rule) -> Void
+
+    private enum Mode: String, CaseIterable, Identifiable {
+        case weekly, everyNDays, monthly
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .weekly: String(localized: "Days of the Week")
+            case .everyNDays: String(localized: "Every N Days")
+            case .monthly: String(localized: "Day of the Month")
+            }
+        }
+    }
+
+    private var mode: Binding<Mode> {
+        Binding(get: {
+            switch rule.kind {
+            case .weekly: .weekly
+            case .everyNDays: .everyNDays
+            case .monthly: .monthly
+            }
+        }, set: { next in
+            switch next {
+            case .weekly: rule.kind = .weekly([1, 2, 3, 4, 5])
+            case .everyNDays: rule.kind = .everyNDays(1, anchorDate: Self.dayString(.now))
+            case .monthly: rule.kind = .monthly(1)
+            }
+        })
+    }
+
+    private var time: Binding<Date> {
+        Binding(get: {
+            Calendar.current.date(bySettingHour: rule.hour, minute: rule.minute, second: 0, of: .now) ?? .now
+        }, set: { date in
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+            rule.hour = parts.hour ?? 0
+            rule.minute = parts.minute ?? 0
+        })
+    }
+
+    private var valid: Bool {
+        if case .weekly(let days) = rule.kind { return !days.isEmpty }
+        return true
+    }
+
+    var body: some View {
+        Form {
+            Picker("Repeats", selection: mode) {
+                ForEach(Mode.allCases) { Text($0.label).tag($0) }
+            }
+            switch rule.kind {
+            case .weekly(let days):
+                Section("Days") {
+                    // Monday first, as the week reads.
+                    ForEach([1, 2, 3, 4, 5, 6, 0], id: \.self) { day in
+                        Toggle(Calendar.current.weekdaySymbols[day], isOn: Binding(get: { days.contains(day) }, set: { on in
+                            var next = days
+                            if on { next.insert(day) } else { next.remove(day) }
+                            rule.kind = .weekly(next)
+                        }))
+                    }
+                }
+            case .everyNDays(let n, let anchor):
+                Section {
+                    Stepper("Every \(n) day\(n == 1 ? "" : "s")", value: Binding(get: { n }, set: { rule.kind = .everyNDays(max(1, $0), anchorDate: anchor) }), in: 1...365)
+                    DatePicker("Starting", selection: Binding(get: { Self.day(anchor) ?? .now }, set: { rule.kind = .everyNDays(n, anchorDate: Self.dayString($0)) }),
+                               displayedComponents: .date)
+                }
+            case .monthly(let day):
+                Section {
+                    Stepper("Day \(day)", value: Binding(get: { day }, set: { rule.kind = .monthly(min(31, max(1, $0))) }), in: 1...31)
+                } footer: {
+                    if day > 28 { Text("Months without day \(day) are skipped.") }
+                }
+            }
+            DatePicker("Time", selection: time, displayedComponents: .hourAndMinute)
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Rule")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") {
+                    save(rule)
+                    dismiss()
+                }
+                .disabled(!valid)
+            }
+        }
+    }
+
+    private static func dayString(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 2000, parts.month ?? 1, parts.day ?? 1)
+    }
+
+    private static func day(_ string: String) -> Date? {
+        let pieces = string.split(separator: "-").compactMap { Int($0) }
+        guard pieces.count == 3 else { return nil }
+        return Calendar.current.date(from: DateComponents(year: pieces[0], month: pieces[1], day: pieces[2]))
     }
 }

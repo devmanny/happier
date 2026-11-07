@@ -6,6 +6,7 @@ import Foundation
 public enum AccountScopedBlob {
     public enum Kind: UInt8, Sendable {
         case accountSettings = 1
+        case automationTemplatePayload = 2
         case providerAccountUsageSnapshot = 6
         case agentProfile = 11
         case agentPresence = 12
@@ -15,6 +16,7 @@ public enum AccountScopedBlob {
         var name: String {
             switch self {
             case .accountSettings: "account_settings"
+            case .automationTemplatePayload: "automation_template_payload"
             case .providerAccountUsageSnapshot: "provider_account_usage_snapshot"
             case .agentProfile: "agent_profile"
             case .agentPresence: "agent_presence"

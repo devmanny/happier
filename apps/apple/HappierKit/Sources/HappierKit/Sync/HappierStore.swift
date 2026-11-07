@@ -466,7 +466,108 @@ public final class HappierStore {
     @discardableResult
     public func updateTask(id: String, _ update: AgentTask.Update) async -> AgentTask? {
         guard let current = task(id: id), !update.isEmpty else { return task(id: id) }
-        return await writeTask(current, update: update)
+        guard let saved = await writeTask(current, update: update) else { return nil }
+        // A repeating task's Automations carry its machine, folder and agent: keep them in step.
+        if let recurrence = saved.recurrence, update.machineId != nil || update.directory != nil || update.assignee != nil {
+            do {
+                _ = try await syncRecurrenceAutomations(task: saved, recurrence: recurrence, previous: recurrence)
+            } catch {
+                report(error)
+            }
+        }
+        return saved
+    }
+
+    // MARK: Recurring tasks (one Automation per rule, `/v2/automations`)
+
+    /// What a recurring task needs before its rules can fire: an agent, a machine and a folder.
+    public func recurrenceProblem(for task: AgentTask) -> String? {
+        guard let agentId = task.assignee.agentId, agentProfile(id: agentId) != nil else {
+            return String(localized: "Assign the task to one of your agents first: an agent works each occurrence.")
+        }
+        guard task.machineId?.isEmpty == false else { return String(localized: "Choose the machine the task runs on.") }
+        guard task.directory?.isEmpty == false else { return String(localized: "Choose the folder the agent works in.") }
+        return nil
+    }
+
+    /// Saves the task's recurrence (nil removes it), creating, updating, pausing or deleting one
+    /// Automation per rule first, so the server only fires what the task describes.
+    @discardableResult
+    public func saveRecurrence(taskId: String, _ recurrence: TaskRecurrence?) async -> AgentTask? {
+        guard let api, let current = task(id: taskId) else { return nil }
+        let previous = current.recurrence
+        guard var next = recurrence else {
+            do {
+                for rule in previous?.rules ?? [] { if let id = rule.automationId { try await api.deleteTaskAutomation(id: id) } }
+            } catch {
+                report(error)
+                return nil
+            }
+            return await writeTask(current, update: AgentTask.Update(recurrence: .some(nil)))
+        }
+        if let problem = recurrenceProblem(for: current) {
+            report(RPCError(message: problem, code: nil))
+            return nil
+        }
+        var created: [String] = []
+        do {
+            (next, created) = try await syncRecurrenceAutomations(task: current, recurrence: next, previous: previous)
+            let kept = Set(next.rules.compactMap(\.automationId))
+            for rule in previous?.rules ?? [] {
+                if let id = rule.automationId, !kept.contains(id) { try await api.deleteTaskAutomation(id: id) }
+            }
+        } catch {
+            for id in created { try? await api.deleteTaskAutomation(id: id) }
+            report(error)
+            return nil
+        }
+        guard let saved = await writeTask(current, update: AgentTask.Update(recurrence: .some(next))) else {
+            // The task didn't take the new rules: don't leave Automations firing for them.
+            for id in created { try? await api.deleteTaskAutomation(id: id) }
+            return nil
+        }
+        return saved
+    }
+
+    /// Fires the task's first rule now (the daemon still skips it while an occurrence is running).
+    public func runRecurrenceNow(taskId: String) async {
+        guard let api, let id = task(id: taskId)?.recurrence?.rules.compactMap(\.automationId).first else { return }
+        do {
+            try await api.runTaskAutomationNow(id: id)
+        } catch {
+            report(error)
+        }
+    }
+
+    /// Creates each rule's Automation that doesn't exist yet and updates the rest (schedule, machine,
+    /// template); pauses or resumes them when that changed. Returns the rules with their ids and the
+    /// Automations it created.
+    private func syncRecurrenceAutomations(task: AgentTask, recurrence: TaskRecurrence,
+                                           previous: TaskRecurrence?) async throws -> (TaskRecurrence, [String]) {
+        guard let api, let machineKey = keys?.content.secretKey else {
+            throw RPCError(message: String(localized: "Tasks need an end-to-end encrypted account."), code: nil)
+        }
+        guard let agentId = task.assignee.agentId, let agent = agentProfile(id: agentId),
+              let machineId = task.machineId, let directory = task.directory else {
+            throw RPCError(message: recurrenceProblem(for: task) ?? "", code: nil)
+        }
+        var next = recurrence
+        var created: [String] = []
+        for index in next.rules.indices {
+            let rule = next.rules[index]
+            let template = try TaskRecurrence.automationTemplateCiphertext(taskId: task.id, ruleId: rule.id, directory: directory,
+                                                                          providerId: agent.providerId, machineKey: machineKey)
+            if let id = rule.automationId {
+                try await api.updateTaskAutomation(id: id, rule: rule, timezone: next.timezone, machineId: machineId, templateCiphertext: template)
+                if (previous?.paused ?? false) != next.paused { try await api.setTaskAutomation(id: id, paused: next.paused) }
+            } else {
+                let id = try await api.createTaskAutomation(taskId: task.id, rule: rule, timezone: next.timezone, enabled: !next.paused,
+                                                            machineId: machineId, templateCiphertext: template)
+                created.append(id)
+                next.rules[index].automationId = id
+            }
+        }
+        return (next, created)
     }
 
     public func deleteTask(id: String) async {

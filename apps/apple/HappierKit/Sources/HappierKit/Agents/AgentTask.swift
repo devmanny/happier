@@ -148,6 +148,17 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     public var version = -1
     var extra: [String: JSONValue] = [:]
 
+    /// Repeats on these rules; kept as written in the task (unknown fields included) until edited here.
+    public var recurrence: TaskRecurrence? {
+        get { TaskRecurrence(json: extra["recurrence"]) }
+        set { extra["recurrence"] = newValue?.json }
+    }
+
+    /// Each firing of a rule, oldest first, as the CLI wrote it. Read-only here: the stored copy is kept.
+    public var occurrences: [TaskOccurrence] {
+        extra["occurrences"]?.arrayValue?.compactMap(TaskOccurrence.init(json:)) ?? []
+    }
+
     public init(id: String = UUID().uuidString.lowercased(), title: String, description: String? = nil,
                 assignee: Assignee = .user, status: Status = .todo, now: Double = ServerClock.nowMs()) {
         self.id = id.lowercased()
@@ -245,12 +256,14 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         public var directory: String??
         public var source: Source??
         public var comment: String?
+        /// The whole recurrence (`.some(nil)` removes it).
+        public var recurrence: TaskRecurrence??
         /// The session that worked on it, linked once.
         public var threadSessionId: String?
 
         public init(title: String? = nil, description: String?? = nil, assignee: Assignee? = nil, status: Status? = nil,
                     startAt: Double?? = nil, dueAt: Double?? = nil, machineId: String?? = nil, directory: String?? = nil,
-                    source: Source?? = nil, comment: String? = nil, threadSessionId: String? = nil) {
+                    source: Source?? = nil, comment: String? = nil, recurrence: TaskRecurrence?? = nil, threadSessionId: String? = nil) {
             self.title = title
             self.description = description
             self.assignee = assignee
@@ -261,6 +274,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             self.directory = directory
             self.source = source
             self.comment = comment
+            self.recurrence = recurrence
             self.threadSessionId = threadSessionId
         }
 
@@ -276,6 +290,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             if edited.machineId != original.machineId { machineId = .some(edited.machineId) }
             if edited.directory != original.directory { directory = .some(edited.directory) }
             if edited.source != original.source { source = .some(edited.source) }
+            if edited.recurrence != original.recurrence { recurrence = .some(edited.recurrence) }
         }
 
         public var isEmpty: Bool { self == Update() }
@@ -295,6 +310,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         if let machineId = update.machineId { next.machineId = machineId }
         if let directory = update.directory { next.directory = directory }
         if let source = update.source { next.source = source }
+        if let recurrence = update.recurrence { next.recurrence = recurrence }
         if let thread = update.threadSessionId, !thread.isEmpty, !threads.contains(thread) { next.threads.append(thread) }
         let comment = update.comment?.trimmingCharacters(in: .whitespacesAndNewlines)
         if (comment?.isEmpty == false) || statusChanged {
