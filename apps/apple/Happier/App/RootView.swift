@@ -99,6 +99,8 @@ struct MainView: View {
     @State private var restoredSessionId: String?
     /// Whether the sessions sidebar is showing (its toolbar button folds it away and back).
     @State private var columns: NavigationSplitViewVisibility = .all
+    /// The Tasks panel on the right (iPad and Mac), remembered across launches.
+    @AppStorage("happier.tasksPanelOpen") private var tasksPanelOpen = false
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     /// The iPhone sessions sidebar; it starts open when there is no conversation to come back to.
@@ -164,17 +166,56 @@ struct MainView: View {
                 .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 420)
                 #endif
         } detail: {
-            if selection == NewChat.id {
-                NewSessionView()
-            } else if let selection, store.sessions.keys.contains(selection) {
-                ChatView(sessionId: selection)
-                    .id(selection)
-            } else if !store.hasLoadedSessions {
-                HappierSpinner(size: HappierSpinner.hero)
-            } else {
-                ContentUnavailableView("No Conversation Selected", systemImage: "bubble.left.and.bubble.right",
-                                       description: Text("Pick a session to see what your agent is up to."))
-            }
+            detailWithTasksPanel
+        }
+        .environment(\.tasksPanelAvailable, tasksPanelAvailable)
+    }
+
+    /// iPad (regular width) and Mac get the Tasks panel on the right; the iPhone keeps its sheet.
+    private var tasksPanelAvailable: Bool {
+        #if os(iOS)
+        sizeClass == .regular
+        #else
+        true
+        #endif
+    }
+
+    @ViewBuilder
+    private var detailWithTasksPanel: some View {
+        if tasksPanelAvailable {
+            detail
+                .inspector(isPresented: $tasksPanelOpen) {
+                    TasksView(presentation: .panel)
+                        .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
+                }
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            AppHaptics.light()
+                            tasksPanelOpen.toggle()
+                        } label: {
+                            Label(tasksPanelOpen ? "Hide Tasks" : "Show Tasks", systemImage: "checklist")
+                        }
+                        .help(Text(tasksPanelOpen ? "Hide Tasks" : "Show Tasks"))
+                    }
+                }
+        } else {
+            detail
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if selection == NewChat.id {
+            NewSessionView()
+        } else if let selection, store.sessions.keys.contains(selection) {
+            ChatView(sessionId: selection)
+                .id(selection)
+        } else if !store.hasLoadedSessions {
+            HappierSpinner(size: HappierSpinner.hero)
+        } else {
+            ContentUnavailableView("No Conversation Selected", systemImage: "bubble.left.and.bubble.right",
+                                   description: Text("Pick a session to see what your agent is up to."))
         }
     }
 }

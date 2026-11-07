@@ -34,6 +34,7 @@ struct SessionListView: View {
     @State private var showAccount = false
     @State private var showNotifications = false
     @State private var showTasks = false
+    @Environment(\.tasksPanelAvailable) private var tasksPanelAvailable
     @Environment(NotificationInbox.self) private var inbox
     /// The bell carries a dot while notifications of sessions still listed are waiting.
     private var unseenNotifications: Bool {
@@ -676,14 +677,17 @@ extension SessionListView {
                 }
                 .help(Text("Notifications"))
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    AppHaptics.light()
-                    showTasks = true
-                } label: {
-                    Label("Tasks", systemImage: "checklist")
+            // Where the window has its Tasks panel, its own button (beside the conversation) opens it.
+            if !tasksPanelAvailable {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        AppHaptics.light()
+                        showTasks = true
+                    } label: {
+                        Label("Tasks", systemImage: "checklist")
+                    }
+                    .help(Text("Tasks for you and your agents"))
                 }
-                .help(Text("Tasks for you and your agents"))
             }
             ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
 

@@ -502,9 +502,19 @@ private struct AgentMemoryFolder: FileDocument {
 
 // MARK: - Tasks
 
+/// Where the Tasks list shows: a sheet from the session list (iPhone), or the window's right-hand
+/// panel beside the conversation (iPad and Mac), which stays open while a session opens in the middle.
+enum TasksPresentation { case sheet, panel }
+
+extension EnvironmentValues {
+    /// True where the window shows Tasks in its right-hand panel instead of a sheet.
+    @Entry var tasksPanelAvailable = false
+}
+
 /// Tasks for you and your agents (`task/<id>` in the UserKVStore), with filters by who it's for and
-/// its status. Opened from the session list's toolbar.
+/// its status.
 struct TasksView: View {
+    var presentation: TasksPresentation = .sheet
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var assignee: AgentTask.AssigneeFilter = .all
@@ -537,7 +547,8 @@ struct TasksView: View {
                 }
             }
             .navigationDestination(for: String.self) { id in
-                TaskDetailView(taskId: id) { dismiss() }
+                // In the panel an opened session shows in the middle while the task stays here.
+                TaskDetailView(taskId: id) { if presentation == .sheet { dismiss() } }
             }
             .refreshable { await refresh() }
             .task { await refresh() }
@@ -546,8 +557,10 @@ struct TasksView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                if presentation == .sheet {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
                 ToolbarItem(placement: .primaryAction) { filterMenu }
                 ToolbarItem(placement: .primaryAction) {
