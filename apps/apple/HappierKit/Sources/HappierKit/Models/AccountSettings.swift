@@ -99,6 +99,22 @@ public struct AccountSettings: Sendable, Equatable {
         return [Self.permissionModesKey: .object(map)]
     }
 
+    // MARK: Composer status line
+
+    /// Where the conversation's status line (agent and state) sits above the composer: left, where
+    /// "Online" always was, or right, above the mic. Native app only; other apps keep the key.
+    public enum StatusPosition: String, CaseIterable, Sendable { case left, right }
+
+    static let statusPositionKey = "nativeComposerStatusPositionV1"
+
+    public var statusPosition: StatusPosition {
+        values[Self.statusPositionKey]?.stringValue.flatMap(StatusPosition.init(rawValue:)) ?? .left
+    }
+
+    public func delta(statusPosition position: StatusPosition) -> [String: JSONValue] {
+        [Self.statusPositionKey: .string(position.rawValue)]
+    }
+
     // MARK: Folder colors
 
     /// A project folder's color, so each window shows which project it's in (native app only;

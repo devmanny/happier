@@ -135,6 +135,15 @@ struct SettingsView: View {
                     Text(option.title).tag(option)
                 }
             }
+            if let settings = store.accountSettings {
+                Picker("Status Position", selection: Binding(get: { settings.statusPosition }, set: { position in
+                    AppHaptics.selection()
+                    Task { await store.updateAccountSettings { $0.delta(statusPosition: position) } }
+                })) {
+                    Label("Left", systemImage: "text.alignleft").tag(AccountSettings.StatusPosition.left)
+                    Label("Right", systemImage: "text.alignright").tag(AccountSettings.StatusPosition.right)
+                }
+            }
             #if os(iOS)
             Toggle("Haptics", isOn: $hapticsEnabled)
             #endif

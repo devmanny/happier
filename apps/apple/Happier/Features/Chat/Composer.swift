@@ -310,6 +310,8 @@ struct Composer: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
+    private var statusOnRight: Bool { store.accountSettings?.statusPosition == .right }
+
     /// The status pill, and beside it what runs in the background.
     private func statusRow(_ session: Session) -> some View {
         // The daemon's count already includes active delegated runs; without it, add them up here.
@@ -332,9 +334,9 @@ struct Composer: View {
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
             }
         }
-        // On the right, above the mic.
-        .padding(.trailing, 4)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        // Left (as "Online" always was) or right above the mic, as the account's settings say.
+        .padding(statusOnRight ? .trailing : .leading, 4)
+        .frame(maxWidth: .infinity, alignment: statusOnRight ? .trailing : .leading)
         .animation(.smooth(duration: 0.25), value: running > 0)
     }
 
