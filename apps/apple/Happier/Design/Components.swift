@@ -1,5 +1,63 @@
 import HappierKit
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+/// An agent's provider logo, small, at the trailing edge of a row that names one of your agents.
+struct ProviderLogo: View {
+    let providerId: String
+    var size: CGFloat = 18
+
+    var body: some View {
+        Image("Agents/\(providerId)")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+    }
+
+    /// The logo for a menu item's icon. Menus draw an image at its own size (the asset is a large
+    /// vector), so it is drawn at `size` first; template, so the menu tints it.
+    @MainActor static func menuImage(_ providerId: String, size: CGFloat = 18) -> Image {
+        let key = "\(providerId)@\(size)"
+        if let cached = menuImages[key] { return cached }
+        let image: Image
+        #if canImport(UIKit)
+        if let source = UIImage(named: "Agents/\(providerId)") {
+            let rendered = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
+                source.draw(in: fitted(source.size, in: size))
+            }
+            image = Image(uiImage: rendered.withRenderingMode(.alwaysTemplate))
+        } else {
+            image = Image(systemName: "cpu")
+        }
+        #else
+        if let source = NSImage(named: "Agents/\(providerId)")?.copy() as? NSImage {
+            let fit = fitted(source.size, in: size)
+            source.size = fit.size
+            source.isTemplate = true
+            image = Image(nsImage: source)
+        } else {
+            image = Image(systemName: "cpu")
+        }
+        #endif
+        menuImages[key] = image
+        return image
+    }
+
+    @MainActor private static var menuImages: [String: Image] = [:]
+
+    private static func fitted(_ natural: CGSize, in side: CGFloat) -> CGRect {
+        guard natural.width > 0, natural.height > 0 else { return CGRect(x: 0, y: 0, width: side, height: side) }
+        let scale = min(side / natural.width, side / natural.height)
+        let size = CGSize(width: natural.width * scale, height: natural.height * scale)
+        return CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height)
+    }
+}
 
 /// The one agent avatar, wherever an agent is shown (session rows, previews, notifications, the
 /// new conversation): its logo on a Liquid Glass disc with a faint wash of its brand colour

@@ -579,7 +579,17 @@ public final class HappierStore {
     @discardableResult
     public func updateTask(id: String, _ update: AgentTask.Update) async -> AgentTask? {
         guard let current = task(id: id), !update.isEmpty else { return task(id: id) }
+        // Handing it to someone else cancels a pending start made for the previous assignee.
+        let update = current.scheduleAware(update)
         guard let saved = await writeTask(current, update: update) else { return nil }
+        if case .some(.none) = update.scheduledStart, let id = current.scheduledStart?.automationId {
+            do { try await api?.deleteTaskAutomation(id: id) } catch { report(error) }
+        }
+        // A pending start on the task's machine follows it to the new one.
+        if let start = saved.scheduledStart, let automationId = start.automationId, saved.assignee.agentId != nil,
+           update.machineId != nil, let machineId = saved.machineId, machineId != current.machineId {
+            do { try await api?.moveTaskAutomation(id: automationId, machineId: machineId) } catch { report(error) }
+        }
         // Closing a repeating task pauses its Automations: they must not keep firing on a closed task.
         if let paused = current.recurrenceToPause(closingWith: update) {
             return await saveRecurrence(taskId: id, paused) ?? saved
@@ -710,23 +720,131 @@ public final class HappierStore {
         }
     }
 
-    /// Hands the task to `agent` (in progress) and starts a session as that agent in `directory` on
-    /// `machineId`, whose first message carries the task. The new session is linked to the task.
-    public func assignTask(id: String, to agent: AgentProfile, machineId: String, directory: String,
-                           approveNewDirectory: Bool = false) async -> SpawnOutcome {
-        guard let assigned = await updateTask(id: id, AgentTask.Update(assignee: .agent(agent), status: .inProgress)) else {
-            return .failed(lastError ?? String(localized: "The task couldn't be updated."))
+    /// "Assign to…": only who it's for. Nothing starts and the status stays.
+    @discardableResult
+    public func assignTask(id: String, to assignee: AgentTask.Assignee) async -> AgentTask? {
+        await updateTask(id: id, .assigning(assignee))
+    }
+
+    /// "Start Now" for a task assigned to an agent: starts a session as that agent in `directory` on
+    /// `machineId`, whose first message carries the task, links it and puts the task in progress.
+    public func startTaskNow(id: String, machineId: String, directory: String, approveNewDirectory: Bool = false) async -> SpawnOutcome {
+        guard let current = task(id: id), let agentId = current.assignee.agentId, let agent = agentProfile(id: agentId) else {
+            return .failed(String(localized: "Assign the task to one of your agents first."))
         }
         let mode = accountSettings?.defaultPermissionMode(for: agent.providerId) ?? .yolo
         let outcome = await createSession(machineId: machineId, directory: directory, agentId: agent.providerId, permissionMode: mode,
                                           modelId: agent.modelId, effort: agent.effort, agent: agent,
-                                          firstMessage: assigned.assignmentMessage(agentName: agent.name),
+                                          firstMessage: current.assignmentMessage(agentName: agent.name),
                                           approveNewDirectory: approveNewDirectory)
         if case .created(let sessionId) = outcome {
-            await updateTask(id: id, AgentTask.Update(threadSessionId: sessionId))
-            await rename(sessionId, to: assigned.title)
+            await markStarted(id: id, sessionId: sessionId)
+            await rename(sessionId, to: current.title)
         }
         return outcome
+    }
+
+    /// "Start Now" for a task assigned to a session: sends that session the task as a message (the
+    /// composer's path, which also reaches a session that isn't running), links it and puts the task
+    /// in progress. False after reporting why not.
+    public func startTaskInSession(id: String) async -> Bool {
+        guard let current = task(id: id), let sessionId = current.assignee.sessionId else { return false }
+        guard sessions[sessionId] != nil, await send(current.assignmentMessage(agentName: nil), to: sessionId) else { return false }
+        await markStarted(id: id, sessionId: sessionId)
+        return true
+    }
+
+    /// Links the session that started the task and marks it in progress; a pending start is no
+    /// longer needed (`updateTask` deletes its Automation).
+    private func markStarted(id: String, sessionId: String) async {
+        var update = AgentTask.Update.started(sessionId: sessionId)
+        if task(id: id)?.scheduledStart != nil { update.scheduledStart = .some(nil) }
+        await updateTask(id: id, update)
+    }
+
+    // MARK: Scheduled start (one Automation, `/v2/automations`)
+
+    /// Where and as which agent a scheduled start runs: the agent's engine, machine and folder, or the
+    /// assigned session's own.
+    private func scheduledStartPlace(for task: AgentTask) -> (machineId: String, directory: String, providerId: String)? {
+        if let sessionId = task.assignee.sessionId {
+            guard let session = sessions[sessionId], let machineId = session.machineId,
+                  let directory = session.path ?? task.directory, !directory.isEmpty else { return nil }
+            return (machineId, directory, session.agentId ?? "claude")
+        }
+        guard let agentId = task.assignee.agentId, let agent = agentProfile(id: agentId),
+              let machineId = task.machineId, !machineId.isEmpty, let directory = task.directory, !directory.isEmpty else { return nil }
+        return (machineId, directory, agent.providerId)
+    }
+
+    /// What a task needs before it can be scheduled; nil when it can be.
+    public func scheduleProblem(for task: AgentTask) -> String? {
+        if let sessionId = task.assignee.sessionId {
+            guard let session = sessions[sessionId] else { return String(localized: "The task's session isn't on this device anymore.") }
+            guard session.machineId != nil else { return String(localized: "The task's session isn't linked to a machine.") }
+            guard (session.path ?? task.directory)?.isEmpty == false else { return String(localized: "Choose the folder the agent works in.") }
+            return nil
+        }
+        guard let agentId = task.assignee.agentId, agentProfile(id: agentId) != nil else {
+            return String(localized: "Assign the task to one of your agents or a session first.")
+        }
+        guard task.machineId?.isEmpty == false else { return String(localized: "Choose the machine the task runs on.") }
+        guard task.directory?.isEmpty == false else { return String(localized: "Choose the folder the agent works in.") }
+        return nil
+    }
+
+    /// The engine a scheduled start runs, for the Consumer Terms warning.
+    public func scheduledStartProviderId(for task: AgentTask) -> String? {
+        scheduledStartPlace(for: task)?.providerId
+    }
+
+    /// Starts the task once at `at` (in `timezone`): moves the pending start, or creates its Automation
+    /// and records it on the task.
+    @discardableResult
+    public func scheduleTaskStart(id: String, at: Date, timezone: String = TimeZone.current.identifier) async -> AgentTask? {
+        guard let api, let machineKey = keys?.content.secretKey, let current = task(id: id) else { return nil }
+        var start = TaskScheduledStart(at: (at.timeIntervalSince1970 * 1000).rounded(.down), timezone: timezone)
+        if let pending = current.scheduledStart, let automationId = pending.automationId {
+            start.automationId = automationId
+            do { try await api.rescheduleStartAutomation(id: automationId, start: start) } catch {
+                report(error)
+                return nil
+            }
+            return await writeTask(current, update: AgentTask.Update(scheduledStart: .some(start)))
+        }
+        if let problem = scheduleProblem(for: current) {
+            report(RPCError(message: problem, code: nil))
+            return nil
+        }
+        guard let place = scheduledStartPlace(for: current) else { return nil }
+        do {
+            let template = try TaskScheduledStart.automationTemplateCiphertext(taskId: current.id, directory: place.directory,
+                                                                              providerId: place.providerId, machineKey: machineKey)
+            start.automationId = try await api.createScheduledStartAutomation(taskId: current.id, start: start, machineId: place.machineId,
+                                                                             templateCiphertext: template)
+        } catch {
+            report(error)
+            return nil
+        }
+        guard let saved = await writeTask(current, update: AgentTask.Update(scheduledStart: .some(start))) else {
+            // The task didn't take it: don't leave an Automation firing for it.
+            if let created = start.automationId { try? await api.deleteTaskAutomation(id: created) }
+            return nil
+        }
+        return saved
+    }
+
+    /// Cancels the pending start: deletes its Automation, then removes it from the task.
+    @discardableResult
+    public func cancelScheduledStart(id: String) async -> AgentTask? {
+        guard let api, let current = task(id: id), let pending = current.scheduledStart else { return task(id: id) }
+        if let automationId = pending.automationId {
+            do { try await api.deleteTaskAutomation(id: automationId) } catch {
+                report(error)
+                return nil
+            }
+        }
+        return await writeTask(current, update: AgentTask.Update(scheduledStart: .some(nil)))
     }
 
     /// Writes `task` (new when `update` is nil) at its version, re-applying `update` on the server's

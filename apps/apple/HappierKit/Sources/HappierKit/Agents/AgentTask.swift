@@ -28,6 +28,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         /// The account's owner.
         case user
         case agent(id: String, name: String?, emoji: String?)
+        /// One session: starting the task sends it a message there. `title` is a display hint.
+        case session(id: String, title: String?)
 
         public static func agent(_ profile: AgentProfile) -> Assignee {
             .agent(id: profile.id, name: profile.name, emoji: profile.emoji)
@@ -38,10 +40,34 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             return nil
         }
 
+        public var sessionId: String? {
+            if case .session(let id, _) = self { return id }
+            return nil
+        }
+
+        /// The name shown; a session's own title (from the session list) is better when known.
         public var label: String {
             switch self {
             case .user: String(localized: "Me")
             case .agent(_, let name, let emoji): [emoji, name].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " ")
+            case .session(let id, let title): title?.isEmpty == false ? title! : id
+            }
+        }
+
+        /// Groups: you, then agents, then sessions.
+        var groupKey: String {
+            switch self {
+            case .user: ""
+            case .agent(let id, _, _): "agent:\(id)"
+            case .session(let id, _): "session:\(id)"
+            }
+        }
+
+        var groupRank: Int {
+            switch self {
+            case .user: 0
+            case .agent: 1
+            case .session: 2
             }
         }
 
@@ -51,6 +77,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             case "agent":
                 guard let id = json?["agentId"]?.stringValue, !id.isEmpty else { return nil }
                 self = .agent(id: id, name: json?["name"]?.stringValue, emoji: json?["emoji"]?.stringValue)
+            case "session":
+                guard let id = json?["sessionId"]?.stringValue, !id.isEmpty else { return nil }
+                self = .session(id: id, title: json?["title"]?.stringValue)
             default: return nil
             }
         }
@@ -62,6 +91,10 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
                 var object: [String: JSONValue] = ["kind": "agent", "agentId": .string(id)]
                 if let name, !name.isEmpty { object["name"] = .string(name) }
                 if let emoji, !emoji.isEmpty { object["emoji"] = .string(emoji) }
+                return .object(object)
+            case .session(let id, let title):
+                var object: [String: JSONValue] = ["kind": "session", "sessionId": .string(id)]
+                if let title, !title.isEmpty { object["title"] = .string(title) }
                 return .object(object)
             }
         }
@@ -152,6 +185,12 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     public var recurrence: TaskRecurrence? {
         get { TaskRecurrence(json: extra["recurrence"]) }
         set { extra["recurrence"] = newValue?.json }
+    }
+
+    /// A pending one-time start; the daemon removes it once it started the task.
+    public var scheduledStart: TaskScheduledStart? {
+        get { TaskScheduledStart(json: extra["scheduledStartV1"]) }
+        set { extra["scheduledStartV1"] = newValue?.json }
     }
 
     /// Each firing of a rule, oldest first, as the CLI wrote it. Read-only here: the stored copy is kept.
@@ -268,10 +307,13 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         public var recurrence: TaskRecurrence??
         /// The session that worked on it, linked once.
         public var threadSessionId: String?
+        /// The pending one-time start (`.some(nil)` removes it).
+        public var scheduledStart: TaskScheduledStart??
 
         public init(title: String? = nil, description: String?? = nil, assignee: Assignee? = nil, status: Status? = nil,
                     startAt: Double?? = nil, dueAt: Double?? = nil, machineId: String?? = nil, directory: String?? = nil,
-                    source: Source?? = nil, comment: String? = nil, recurrence: TaskRecurrence?? = nil, threadSessionId: String? = nil) {
+                    source: Source?? = nil, comment: String? = nil, recurrence: TaskRecurrence?? = nil, threadSessionId: String? = nil,
+                    scheduledStart: TaskScheduledStart?? = nil) {
             self.title = title
             self.description = description
             self.assignee = assignee
@@ -284,7 +326,14 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             self.comment = comment
             self.recurrence = recurrence
             self.threadSessionId = threadSessionId
+            self.scheduledStart = scheduledStart
         }
+
+        /// "Assign to…": only who it's for; the status stays and nothing starts.
+        public static func assigning(_ assignee: Assignee) -> Update { Update(assignee: assignee) }
+
+        /// "Start Now" worked: the session that took it is linked and it is in progress.
+        public static func started(sessionId: String) -> Update { Update(status: .inProgress, threadSessionId: sessionId) }
 
         /// Only what `edited` changed from `original`, so writing it on a newer copy keeps others' changes.
         public init(from original: AgentTask, to edited: AgentTask) {
@@ -299,6 +348,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             if edited.directory != original.directory { directory = .some(edited.directory) }
             if edited.source != original.source { source = .some(edited.source) }
             if edited.recurrence != original.recurrence { recurrence = .some(edited.recurrence) }
+            if edited.scheduledStart != original.scheduledStart { scheduledStart = .some(edited.scheduledStart) }
         }
 
         public var isEmpty: Bool { self == Update() }
@@ -319,12 +369,22 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         if let directory = update.directory { next.directory = directory }
         if let source = update.source { next.source = source }
         if let recurrence = update.recurrence { next.recurrence = recurrence }
+        if let scheduledStart = update.scheduledStart { next.scheduledStart = scheduledStart }
         if let thread = update.threadSessionId, !thread.isEmpty, !threads.contains(thread) { next.threads.append(thread) }
         let comment = update.comment?.trimmingCharacters(in: .whitespacesAndNewlines)
         if (comment?.isEmpty == false) || statusChanged {
             next.log.append(LogEntry(at: now, by: ["kind": "user"], text: comment?.isEmpty == false ? comment : nil,
                                      status: statusChanged ? update.status : nil))
         }
+        return next
+    }
+
+    /// `update`, plus cancelling a pending start when it hands the task to someone else: the start's
+    /// Automation was made for the previous assignee's agent and machine.
+    public func scheduleAware(_ update: Update) -> Update {
+        guard let assignee = update.assignee, assignee != self.assignee, scheduledStart != nil, update.scheduledStart == nil else { return update }
+        var next = update
+        next.scheduledStart = .some(nil)
         return next
     }
 
@@ -338,6 +398,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case worked
         /// It worked one of the task's repeating occurrences.
         case occurrence
+        /// The task is assigned to it.
+        case assigned
     }
 
     public struct LinkedSession: Sendable, Equatable, Identifiable {
@@ -355,6 +417,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             if reasons[sessionId] == nil { order.append(sessionId) }
             if reasons[sessionId]?.contains(reason) != true { reasons[sessionId, default: []].append(reason) }
         }
+        add(assignee.sessionId, .assigned)
         add(source?.sessionId, .source)
         for thread in threads { add(thread, .worked) }
         for occurrence in occurrences { add(occurrence.sessionId, .occurrence) }
@@ -389,11 +452,10 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case .all:
             var groups: [String: (assignee: Assignee, tasks: [AgentTask])] = [:]
             for task in visible {
-                let key = task.assignee.agentId ?? ""
-                groups[key, default: (task.assignee, [])].tasks.append(task)
+                groups[task.assignee.groupKey, default: (task.assignee, [])].tasks.append(task)
             }
             let ordered = groups.values.sorted { a, b in
-                if (a.assignee == .user) != (b.assignee == .user) { return a.assignee == .user }
+                if a.assignee.groupRank != b.assignee.groupRank { return a.assignee.groupRank < b.assignee.groupRank }
                 return a.assignee.label.localizedStandardCompare(b.assignee.label) == .orderedAscending
             }
             return (linked.isEmpty ? [] : [Section(kind: .linkedToOpenSession, tasks: linked)])
@@ -406,6 +468,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     public enum AssigneeFilter: Hashable, Sendable {
         case all, me
         case agent(String)
+        case session(String)
     }
 
     public enum StatusFilter: Hashable, Sendable {
@@ -421,6 +484,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             case .all: break
             case .me: if task.assignee != .user { return false }
             case .agent(let id): if task.assignee.agentId != id { return false }
+            case .session(let id): if task.assignee.sessionId != id { return false }
             }
             switch status {
             case .all: return true
@@ -455,15 +519,17 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
 
     // MARK: Assign to an agent
 
-    /// The first message of the session an agent starts the task in: everything it needs to begin.
-    public func assignmentMessage(agentName: String, timeZone: TimeZone = .current) -> String {
+    /// The message that starts the task: the first one of the session an agent starts it in, or the
+    /// one sent to the session it's assigned to (no agent name). Everything it needs to begin.
+    public func assignmentMessage(agentName: String?, timeZone: TimeZone = .current) -> String {
         let format = DateFormatter()
         format.locale = Locale(identifier: "en_US_POSIX")
         format.timeZone = timeZone
         format.dateFormat = "yyyy-MM-dd HH:mm"
         func date(_ ms: Double?) -> String? { ms.map { format.string(from: Date(timeIntervalSince1970: $0 / 1000)) } }
 
-        var lines = ["\(agentName), this task is now yours: \(title)", "Task id: \(id)"]
+        let opening = agentName.map { "\($0), this task is now yours: \(title)" } ?? "This task is now yours: \(title)"
+        var lines = [opening, "Task id: \(id)"]
         if let description, !description.isEmpty { lines += ["", "What was asked:", description] }
         if let source {
             let from = [source.label, source.url].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " — ")

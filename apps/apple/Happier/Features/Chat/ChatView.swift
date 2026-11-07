@@ -30,7 +30,10 @@ struct ChatView: View {
             folderPath: session?.path,
             folderColor: store.folderColor(of: session),
             // Where there's no Tasks panel (iPhone), the session's own tasks are one tap away.
-            sessionTasks: tasksPanelAvailable ? nil : sessionTaskCount)
+            sessionTasks: tasksPanelAvailable ? nil : sessionTaskCount,
+            // iPhone: the bell lives in the ⓘ menu so the bar keeps its shape; iPad and Mac keep it in the bar.
+            bellInMenu: !tasksPanelAvailable,
+            notificationsMuted: session?.notificationsMuted == true)
     }
 
     /// Open tasks linked to this session, or nil when none is linked at all.
@@ -624,7 +627,20 @@ private struct SessionToolbar: ViewModifier {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId) }
-                ToolbarItem(placement: .primaryAction) { SessionBellButton(sessionId: sessionId) }
+                if !details.bellInMenu {
+                    ToolbarItem(placement: .primaryAction) { SessionBellButton(sessionId: sessionId) }
+                } else if let open = details.sessionTasks {
+                    // iPhone: the session's own tasks, where the bell was; only when it has linked tasks.
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            perform(.sessionTasks)
+                        } label: {
+                            Label("Session Tasks", systemImage: "checklist")
+                        }
+                        .badge(open)
+                        .accessibilityLabel(open == 0 ? "Session tasks" : "Session tasks, \(open) open")
+                    }
+                }
                 SessionUsageToolbar(sessionId: sessionId)
                 ToolbarItem(placement: .primaryAction) {
                     SessionDetailsMenu(details: details, perform: perform).equatable()
@@ -673,6 +689,10 @@ private struct SessionToolbar: ViewModifier {
         case .search: startFinding()
         case .background: AppHaptics.light(); showActivity = true
         case .sessionTasks: AppHaptics.light(); showSessionTasks = true
+        case .toggleNotifications:
+            AppHaptics.selection()
+            let muted = store.sessions[sessionId]?.notificationsMuted == true
+            Task { await store.setNotificationsMuted(!muted, in: sessionId) }
         case .openInWindow: openWindow(id: SessionWindow.id, value: sessionId)
         case .browser: openBrowser()
         case .folderColor(let color):
@@ -918,10 +938,12 @@ private struct SessionDetailsMenu: View, Equatable {
         let folderColor: AccountSettings.FolderColor?
         /// Open tasks linked to this session; nil hides the entry (none linked, or a Tasks panel exists).
         var sessionTasks: Int? = nil
+        var bellInMenu = false
+        var notificationsMuted = false
     }
 
     enum Action {
-        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete, sessionTasks
+        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete, sessionTasks, toggleNotifications
         case folderColor(AccountSettings.FolderColor?)
     }
 
@@ -950,9 +972,11 @@ private struct SessionDetailsMenu: View, Equatable {
                 if details.hasBackground {
                     Button("Subagents & Tasks", systemImage: "square.stack.3d.down.right") { perform(.background) }
                 }
-                if let open = details.sessionTasks {
-                    Button(open == 0 ? "Session Tasks" : "Session Tasks · \(open) open", systemImage: "checklist") {
-                        perform(.sessionTasks)
+                if details.bellInMenu {
+                    // The session's bell, with its state: on by default; off, it never notifies you.
+                    Button(details.notificationsMuted ? "Turn On Notifications" : "Mute Notifications",
+                           systemImage: details.notificationsMuted ? "bell.slash" : "bell") {
+                        perform(.toggleNotifications)
                     }
                 }
                 // This session's tab in the integrated browser, where its agent browses.

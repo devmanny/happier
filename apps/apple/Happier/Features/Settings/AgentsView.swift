@@ -90,6 +90,7 @@ struct AgentProfileRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
+            ProviderLogo(providerId: profile.providerId)
             if selected { Image(systemName: "checkmark").foregroundStyle(Color.userBubble).fontWeight(.semibold) }
         }
         .contentShape(Rectangle())
@@ -525,7 +526,8 @@ struct TasksView: View {
     @State private var assignee: AgentTask.AssigneeFilter = .all
     @State private var status: AgentTask.StatusFilter = .open
     @State private var scope: AgentTask.Scope = .all
-    @State private var creating = false
+    @State private var creating: AgentTask.Assignee?
+    @State private var assigningExisting = false
     /// The task whose detail is open, when one is.
     @State private var path: [String] = []
 
@@ -591,7 +593,7 @@ struct TasksView: View {
             }
             .navigationDestination(for: String.self) { id in
                 // In the panel an opened session shows in the middle while the task stays here.
-                TaskDetailView(taskId: id) { if presentation == .sheet { dismiss() } }
+                TaskDetailView(taskId: id, openSessionId: openSessionId) { if presentation == .sheet { dismiss() } }
             }
             .refreshable { await refresh() }
             .task { await refresh() }
@@ -616,19 +618,41 @@ struct TasksView: View {
                 }
                 ToolbarItem(placement: .primaryAction) { filterMenu }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("New Task", systemImage: "plus") {
-                        AppHaptics.light()
-                        creating = true
+                    if let thisSession {
+                        Menu {
+                            Button("New Task for This Session", systemImage: "plus") { create(for: thisSession) }
+                            Button("Assign Existing Task Here…", systemImage: "arrow.down.to.line") { assigningExisting = true }
+                            Divider()
+                            Button("New Task", systemImage: "checklist") { create(for: .user) }
+                        } label: {
+                            Label("New Task", systemImage: "plus")
+                        }
+                    } else {
+                        Button("New Task", systemImage: "plus") { create(for: .user) }
                     }
                 }
             }
-            .sheet(isPresented: $creating) {
-                NewTaskSheet()
+            .sheet(item: Binding(get: { creating.map(PresetAssignee.init) }, set: { creating = $0?.assignee })) { preset in
+                NewTaskSheet(assignee: preset.assignee, openSessionId: openSessionId)
                     #if os(macOS)
                     .frame(minWidth: 420, minHeight: 360)
                     #endif
             }
+            .sheet(isPresented: $assigningExisting) {
+                if let thisSession { TaskPickerSheet(assignee: thisSession) }
+            }
         }
+    }
+
+    /// The open session as an assignee, while the list shows this session's tasks.
+    private var thisSession: AgentTask.Assignee? {
+        guard let openSessionId, onlyThisSession || scope == .thisSession else { return nil }
+        return .session(id: openSessionId, title: store.sessions[openSessionId]?.title)
+    }
+
+    private func create(for assignee: AgentTask.Assignee) {
+        AppHaptics.light()
+        creating = assignee
     }
 
     /// "Linked to this session", then "All tasks" grouped by who each task is for.
@@ -638,7 +662,7 @@ struct TasksView: View {
         case .linkedToOpenSession:
             Label("Linked to This Session · \(section.tasks.count)", systemImage: "link")
         case .assignee(let assignee):
-            let who = assignee == .user ? String(localized: "You") : assignee.label
+            let who = assignee == .user ? String(localized: "You") : store.taskAssigneeName(assignee)
             Text(isFirstGroup ? "All Tasks · \(who) · \(section.tasks.count)" : "\(who) · \(section.tasks.count)")
         }
     }
@@ -654,6 +678,12 @@ struct TasksView: View {
         if store.agentProfiles.isEmpty { await store.refreshAgentProfiles() }
     }
 
+    /// Sessions some task is assigned to, for the filter.
+    private var assignedSessionIds: [String] {
+        var seen = Set<String>()
+        return store.tasks.compactMap(\.assignee.sessionId).filter { seen.insert($0).inserted }
+    }
+
     private var filterMenu: some View {
         Menu {
             Picker("For", selection: $assignee) {
@@ -661,6 +691,9 @@ struct TasksView: View {
                 Text("Me").tag(AgentTask.AssigneeFilter.me)
                 ForEach(store.agentProfiles) { profile in
                     Text(profile.label).tag(AgentTask.AssigneeFilter.agent(profile.id))
+                }
+                ForEach(assignedSessionIds, id: \.self) { id in
+                    Text(store.taskAssigneeName(.session(id: id, title: nil))).tag(AgentTask.AssigneeFilter.session(id))
                 }
             }
             Picker("Status", selection: $status) {
@@ -720,7 +753,11 @@ private struct TaskRow: View {
                 .strikethrough(task.status == .done)
                 .lineLimit(2)
             HStack(spacing: 6) {
-                Text(task.assignee.label)
+                if task.assignee.sessionId != nil {
+                    Text("Session · \(Self.shortName(store.taskAssigneeName(task.assignee)))")
+                } else {
+                    Text(task.assignee.label)
+                }
                 Text("·")
                 Text(task.status.label)
                 if let due = task.due() {
@@ -746,18 +783,149 @@ private struct TaskRow: View {
 private struct TaskAssigneePicker: View {
     @Binding var assignee: AgentTask.Assignee
     let agents: [AgentProfile]
+    /// The session open beside the list, offered as an assignee.
+    var openSessionId: String?
+    @Environment(HappierStore.self) private var store
 
     var body: some View {
         Picker("For", selection: $assignee) {
             Text("Me").tag(AgentTask.Assignee.user)
             ForEach(agents) { profile in
-                Text(profile.label).tag(AgentTask.Assignee.agent(profile))
+                Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
+                    .tag(AgentTask.Assignee.agent(profile))
             }
             // An agent this device doesn't know (deleted or not loaded yet) stays selectable as it is.
             if case .agent(let id, _, _) = assignee, !agents.contains(where: { $0.id == id }) {
                 Text(assignee.label.isEmpty ? id : assignee.label).tag(assignee)
             }
+            if let openSessionId {
+                // The stored assignee itself when it is this session, so the picker shows it selected.
+                let tag = assignee.sessionId == openSessionId ? assignee : .session(id: openSessionId, title: store.sessions[openSessionId]?.title)
+                Text("This Session · \(store.taskAssigneeName(tag))").tag(tag)
+            }
+            if let id = assignee.sessionId, id != openSessionId {
+                Text("Session · \(store.taskAssigneeName(assignee))").tag(assignee)
+            }
         }
+    }
+}
+
+extension HappierStore {
+    /// Who a task is for, as shown: a session by its current title, then the one stored, then its id.
+    func taskAssigneeName(_ assignee: AgentTask.Assignee) -> String {
+        if let id = assignee.sessionId, let title = sessions[id]?.title { return title }
+        return assignee.label
+    }
+}
+
+/// So a "New Task" sheet can be presented with who it is for already chosen.
+private struct PresetAssignee: Identifiable {
+    let assignee: AgentTask.Assignee
+    var id: String { assignee.agentId.map { "agent:\($0)" } ?? assignee.sessionId.map { "session:\($0)" } ?? "user" }
+}
+
+/// "Assign Existing Task Here…": the account's open tasks not already for `assignee`; picking one
+/// only assigns it.
+private struct TaskPickerSheet: View {
+    let assignee: AgentTask.Assignee
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var matches: [AgentTask] {
+        AgentTask.filter(store.tasks, assignee: .all, status: .open)
+            .filter { $0.assignee.sessionId == nil || $0.assignee.sessionId != assignee.sessionId }
+            .filter { query.isEmpty || $0.title.localizedStandardContains(query) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(matches) { task in
+                Button {
+                    Task { await store.assignTask(id: task.id, to: assignee) }
+                    dismiss()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.title).foregroundStyle(.primary).lineLimit(2)
+                        Text("\(store.taskAssigneeName(task.assignee)) · \(task.status.label)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .overlay {
+                if matches.isEmpty { ContentUnavailableView("No Open Tasks", systemImage: "checklist") }
+            }
+            .searchable(text: $query)
+            .navigationTitle("Assign a Task Here")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 420)
+        #endif
+    }
+}
+
+/// "Assign to…" → "Other Session…": every session, searchable by title or folder.
+private struct TaskSessionPicker: View {
+    var excluding: String?
+    let pick: (Session) -> Void
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var matches: [Session] {
+        store.sessionList.filter { session in
+            session.id != excluding && (query.isEmpty || session.title.localizedStandardContains(query)
+                                        || (session.path?.localizedStandardContains(query) ?? false))
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(matches) { session in
+                Button {
+                    pick(session)
+                    dismiss()
+                } label: {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(session.title).foregroundStyle(.primary).lineLimit(1)
+                            if let path = session.path {
+                                Text(displayPath(path, machineId: session.machineId))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if let agentId = session.agentId { ProviderLogo(providerId: agentId) }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .overlay {
+                if matches.isEmpty { ContentUnavailableView("No Sessions", systemImage: "bubble.left.and.bubble.right") }
+            }
+            .searchable(text: $query)
+            .navigationTitle("Assign to a Session")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 460)
+        #endif
+    }
+
+    private func displayPath(_ path: String, machineId: String?) -> String {
+        if let home = store.machines.first(where: { $0.id == machineId })?.homeDir, path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
     }
 }
 
@@ -782,8 +950,14 @@ private struct TaskDateField: View {
 private struct NewTaskSheet: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var task = AgentTask(title: "")
+    @State private var task: AgentTask
     @State private var saving = false
+    private let openSessionId: String?
+
+    init(assignee: AgentTask.Assignee = .user, openSessionId: String? = nil) {
+        _task = State(initialValue: AgentTask(title: "", assignee: assignee))
+        self.openSessionId = openSessionId
+    }
 
     var body: some View {
         NavigationStack {
@@ -796,7 +970,7 @@ private struct NewTaskSheet: View {
                         .lineLimit(3...8)
                 }
                 Section {
-                    TaskAssigneePicker(assignee: $task.assignee, agents: store.agentProfiles)
+                    TaskAssigneePicker(assignee: $task.assignee, agents: store.agentProfiles, openSessionId: openSessionId)
                     TaskDateField(title: "Due", ms: $task.dueAt)
                 }
             }
@@ -823,18 +997,26 @@ private struct NewTaskSheet: View {
     }
 }
 
-/// One task: every field editable, its comments and history, the sessions that worked on it, and
-/// "Assign to…", which hands it to an agent and starts that agent on it.
+/// One task: every field editable, its comments and history, the sessions that worked on it,
+/// "Assign to…" (an agent or a session; it only assigns), and, once assigned, "Start Now" and
+/// "Schedule…" (a one-time start on the relay's Automations).
 private struct TaskDetailView: View {
     let taskId: String
+    /// The session open beside the list, offered first in "Assign to…".
+    var openSessionId: String?
     /// Leaves the Tasks sheet, so an opened session is on screen.
     let close: () -> Void
     @Environment(HappierStore.self) private var store
     @State private var draft: AgentTask?
     @State private var comment = ""
     @State private var confirmDelete = false
-    @State private var assigning = false
+    @State private var working = false
     @State private var alert: String?
+    @State private var pickingSession = false
+    /// The schedule sheet, opened at this date.
+    @State private var scheduling: ScheduleDraft?
+    /// A new scheduled start for a Claude agent, held until the Consumer Terms warning is answered.
+    @State private var termsWarning: Date?
     @State private var approveFolder: (agent: AgentProfile, machineId: String, directory: String)?
 
     /// The task as it was when these edits started: what "changes" are measured against, so a
@@ -914,21 +1096,51 @@ private struct TaskDetailView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Section("Assign to…") {
-                        ForEach(store.agentProfiles) { profile in
-                            Button(profile.label) { assign(to: profile) }
+                    if !store.agentProfiles.isEmpty {
+                        Section("Agents") {
+                            ForEach(store.agentProfiles) { profile in
+                                Toggle(isOn: assigned(.agent(profile))) {
+                                    Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
+                                }
+                            }
                         }
+                    }
+                    Section("Sessions") {
+                        if let openSessionId, let session = store.sessions[openSessionId] {
+                            Toggle("This Session · \(session.title)", isOn: assigned(.session(id: session.id, title: session.title)))
+                        }
+                        Button("Other Session…", systemImage: "magnifyingglass") { pickingSession = true }
                     }
                 } label: {
                     Label("Assign to…", systemImage: "person.crop.circle.badge.plus")
                 }
-                .disabled(store.agentProfiles.isEmpty || assigning || changes != nil)
+                .disabled(working || changes != nil)
             }
+        }
+        .sheet(isPresented: $pickingSession) {
+            TaskSessionPicker(excluding: nil) { session in assign(.session(id: session.id, title: session.title)) }
+        }
+        .sheet(item: $scheduling) { draft in
+            TaskScheduleSheet(initial: draft.date, isChange: draft.isChange) { date in schedule(at: date, warned: false) }
+        }
+        .alert("Automated Access with Claude", isPresented: Binding(get: { termsWarning != nil }, set: { if !$0 { termsWarning = nil } })) {
+            Button("Continue") {
+                guard let pending = termsWarning else { return }
+                termsWarning = nil
+                schedule(at: pending, warned: true)
+            }
+            Button("Cancel", role: .cancel) { termsWarning = nil }
+        } message: {
+            Text("""
+            A scheduled start runs without you, which is automated access. Anthropic's Consumer Terms (section 3.7) ask for an \
+            API key for that, not a Claude subscription. If this agent signs in with a subscription, consider assigning the \
+            task to a Codex agent instead.
+            """)
         }
         .confirmationDialog("Delete this task?", isPresented: $confirmDelete) {
             Button("Delete", role: .destructive) { Task { await store.deleteTask(id: taskId) } }
         }
-        .alert("Assign to…", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
+        .alert("Task", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(alert ?? "")
@@ -936,7 +1148,7 @@ private struct TaskDetailView: View {
         .alert("Create the folder?", isPresented: Binding(get: { approveFolder != nil }, set: { if !$0 { approveFolder = nil } })) {
             Button("Create and Start") {
                 guard let pending = approveFolder else { return }
-                start(pending.agent, machineId: pending.machineId, directory: pending.directory, approve: true)
+                spawn(pending.agent, machineId: pending.machineId, directory: pending.directory, approve: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -954,7 +1166,7 @@ private struct TaskDetailView: View {
                     .lineLimit(3...12)
             }
             Section {
-                TaskAssigneePicker(assignee: task.assignee, agents: store.agentProfiles)
+                TaskAssigneePicker(assignee: task.assignee, agents: store.agentProfiles, openSessionId: openSessionId)
                 Picker("Status", selection: task.status) {
                     ForEach(AgentTask.Status.allCases) { Text($0.label).tag($0) }
                 }
@@ -979,8 +1191,9 @@ private struct TaskDetailView: View {
             } header: {
                 Text("Where")
             } footer: {
-                Text("Assign to… starts the agent here; without a folder it uses the machine's latest folder.")
+                Text("Start Now starts the agent here; without a folder it uses the machine's latest folder. A scheduled start needs both.")
             }
+            if let stored, stored.assignee != .user { startSection(stored) }
             sourceSection(task)
             TaskRepeatSections(task: task.wrappedValue, close: close)
             Section("Comment") {
@@ -1082,8 +1295,115 @@ private struct TaskDetailView: View {
         return String(localized: "A session")
     }
 
+    // MARK: Assign, start, schedule
+
+    /// "Assign to…" item state: checked for who the task is for; choosing another only assigns it.
+    private func assigned(_ assignee: AgentTask.Assignee) -> Binding<Bool> {
+        Binding(get: {
+            guard let current = stored?.assignee else { return false }
+            if let id = assignee.agentId { return current.agentId == id }
+            if let id = assignee.sessionId { return current.sessionId == id }
+            return current == assignee
+        }, set: { _ in assign(assignee) })
+    }
+
+    private func assign(_ assignee: AgentTask.Assignee) {
+        guard let current = stored?.assignee else { return }
+        if let id = assignee.agentId, current.agentId == id { return }
+        if let id = assignee.sessionId, current.sessionId == id { return }
+        AppHaptics.selection()
+        working = true
+        Task {
+            await store.assignTask(id: taskId, to: assignee)
+            working = false
+        }
+    }
+
+    /// "Start Now", "Schedule…", or the pending start with "Change…" and "Cancel".
+    private func startSection(_ task: AgentTask) -> some View {
+        Section {
+            if let start = task.scheduledStart {
+                LabeledContent("Starts", value: start.date.formatted(date: .abbreviated, time: .shortened))
+                Button("Change…") { scheduling = ScheduleDraft(date: max(start.date, .now), isChange: true) }
+                    .disabled(working)
+                Button("Cancel Scheduled Start", role: .destructive) {
+                    working = true
+                    Task {
+                        await store.cancelScheduledStart(id: taskId)
+                        working = false
+                    }
+                }
+                .disabled(working)
+            }
+            Button("Start Now", systemImage: "play.fill") { startNow() }
+                .disabled(working || changes != nil || task.status == .done)
+            if task.scheduledStart == nil {
+                Button("Schedule…", systemImage: "calendar.badge.clock") {
+                    if let problem = store.scheduleProblem(for: task) {
+                        alert = problem
+                    } else {
+                        scheduling = ScheduleDraft(date: .now.addingTimeInterval(3600), isChange: false)
+                    }
+                }
+                .disabled(working || changes != nil || task.status == .done)
+            }
+        } header: {
+            Text("Start")
+        } footer: {
+            if changes != nil {
+                Text("Save your edits first.")
+            } else if task.assignee.sessionId != nil {
+                Text("Starting sends the task to \(store.taskAssigneeName(task.assignee)).")
+            } else if task.scheduledStart == nil, let problem = store.scheduleProblem(for: task) {
+                Text(problem).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func startNow() {
+        guard let task = stored else { return }
+        if let sessionId = task.assignee.sessionId {
+            guard store.sessions[sessionId] != nil else {
+                alert = String(localized: "The task's session isn't on this device anymore. Assign the task again.")
+                return
+            }
+            working = true
+            Task {
+                let sent = await store.startTaskInSession(id: taskId)
+                working = false
+                if sent {
+                    await store.openRelatedSession(sessionId)
+                    close()
+                } else {
+                    alert = String(localized: "The task couldn't be sent to its session. If the message failed there, retry it from the session.")
+                }
+            }
+            return
+        }
+        guard let agent = task.assignee.agentId.flatMap({ store.agentProfile(id: $0) }) else {
+            alert = String(localized: "This task's agent isn't on this device. Assign it again.")
+            return
+        }
+        startAgent(agent)
+    }
+
+    /// Creates or moves the pending start; a new one for a Claude engine warns about automated access first.
+    private func schedule(at date: Date, warned: Bool) {
+        guard let task = stored else { return }
+        if !warned, task.scheduledStart == nil,
+           TaskRecurrence.needsAutomatedAccessWarning(providerId: store.scheduledStartProviderId(for: task)) {
+            termsWarning = date
+            return
+        }
+        working = true
+        Task {
+            await store.scheduleTaskStart(id: taskId, at: date)
+            working = false
+        }
+    }
+
     /// The task's machine (or the first one online) and folder (or that machine's latest one).
-    private func assign(to agent: AgentProfile) {
+    private func startAgent(_ agent: AgentProfile) {
         guard let task = stored else { return }
         let machine = store.machines.first { $0.id == task.machineId } ?? store.machines.first { $0.active }
         guard let machine else {
@@ -1097,14 +1417,14 @@ private struct TaskDetailView: View {
             alert = String(localized: "Set the task's folder first, so \(agent.name) knows where to work.")
             return
         }
-        start(agent, machineId: machine.id, directory: directory, approve: false)
+        spawn(agent, machineId: machine.id, directory: directory, approve: false)
     }
 
-    private func start(_ agent: AgentProfile, machineId: String, directory: String, approve: Bool) {
-        assigning = true
+    private func spawn(_ agent: AgentProfile, machineId: String, directory: String, approve: Bool) {
+        working = true
         Task {
-            let outcome = await store.assignTask(id: taskId, to: agent, machineId: machineId, directory: directory, approveNewDirectory: approve)
-            assigning = false
+            let outcome = await store.startTaskNow(id: taskId, machineId: machineId, directory: directory, approveNewDirectory: approve)
+            working = false
             draft = store.task(id: taskId)
             switch outcome {
             case .created: close()
@@ -1112,6 +1432,61 @@ private struct TaskDetailView: View {
             case .failed(let message): alert = message
             }
         }
+    }
+}
+
+private struct ScheduleDraft: Identifiable {
+    let date: Date
+    let isChange: Bool
+    var id: Date { date }
+}
+
+/// "Schedule…": the date and time the task starts, in this device's time zone, within a year.
+private struct TaskScheduleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State var date: Date
+    let isChange: Bool
+    let save: (Date) -> Void
+
+    init(initial: Date, isChange: Bool, save: @escaping (Date) -> Void) {
+        _date = State(initialValue: initial)
+        self.isChange = isChange
+        self.save = save
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    DatePicker("Starts", selection: $date, in: Date.now...TaskScheduledStart.latest(),
+                               displayedComponents: [.date, .hourAndMinute])
+                        #if os(iOS)
+                        .datePickerStyle(.graphical)
+                        #endif
+                } footer: {
+                    Text("Time zone: \(TimeZone.current.identifier). The task's machine starts it then, or when it wakes.")
+                }
+            }
+            .formStyle(.grouped)
+            .environment(\.timeZone, .current)
+            .navigationTitle(isChange ? "Change Start" : "Schedule Start")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isChange ? "Save" : "Schedule") {
+                        save(date)
+                        dismiss()
+                    }
+                    .disabled(date <= .now)
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 380, minHeight: 420)
+        #endif
     }
 }
 
@@ -1398,6 +1773,7 @@ extension AgentTask.SessionLink {
     /// How the session is linked to the task, as the task detail lists it.
     var label: String {
         switch self {
+        case .assigned: String(localized: "Assigned to it")
         case .source: String(localized: "Where it came from")
         case .worked: String(localized: "Worked on it")
         case .occurrence: String(localized: "Ran a repeat")

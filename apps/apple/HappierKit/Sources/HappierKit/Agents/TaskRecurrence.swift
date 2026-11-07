@@ -270,7 +270,7 @@ extension HappierAPI {
     }
 
     /// Runs `call`, turning the routes' absence (404 without `automation_not_found`) into `AutomationsUnavailable`.
-    private func automations<T>(_ call: () async throws -> T) async throws -> T {
+    func automations<T>(_ call: () async throws -> T) async throws -> T {
         do {
             return try await call()
         } catch let error as HTTPClient.ServerError where error.status == 404 && error.body?["error"]?.stringValue != "automation_not_found" {

@@ -275,12 +275,13 @@ struct NewSessionView: View {
         Menu {
             Section("Who's Working?") {
                 ForEach(store.agentProfiles) { profile in
-                    Button {
+                    // A toggle, so the menu checks the chosen agent and keeps its logo as the icon.
+                    Toggle(isOn: Binding(get: { profile.id == workAgentId }, set: { _ in
                         guard profile.id != workAgentId else { return }
                         AppHaptics.selection()
                         choose(profile)
-                    } label: {
-                        checked(profile.label, profile.id == workAgentId)
+                    })) {
+                        Label { Text(profile.label) } icon: { ProviderLogo.menuImage(profile.providerId) }
                     }
                     .disabled(installed.map { !$0.contains(profile.providerId) } ?? false)
                 }
