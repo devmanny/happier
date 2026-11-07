@@ -115,7 +115,18 @@ prefixes:
   the native app edits it with CAS, re-applying the change on a version conflict. An agent thread's
   provider prompt ends with its open tasks (its board). Each daemon checks every 5 minutes for the
   user's open tasks due within a day or overdue; it records `notifiedV1` with a versioned write
-  before pushing, so only one machine notifies. Repetition is not part of a task yet.
+  before pushing, so only one machine notifies.
+  A task may repeat (`recurrence`, `packages/protocol/src/tasks/agentTaskRecurrence.ts`): rules in
+  the user's time zone (weekdays + time, every N days from an anchor date, a day of the month), each
+  one a server Automation (`/v2/automations`, cron + time zone, assigned to the task's machine, named
+  opaquely `task <id> rule <id>`) whose sealed template carries only `agentTaskV1 {taskId, ruleId}`.
+  The Automations engine stays the only scheduler. When a run is claimed, the daemon works the
+  occurrence with the agent's current profile (identity, account, engine): it continues the task's
+  last thread or opens a new one, as the task says. "Every N days" fires daily and is decided against
+  its anchor at run time. Occurrences never overlap: while the previous occurrence's thread has a
+  live presence record the new firing is recorded as skipped (waiting would hold the run past its
+  lease, and the next firing comes anyway). Each occurrence (running, completed at its turn end,
+  skipped, failed, interrupted) is kept in the task's history with its thread.
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

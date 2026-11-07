@@ -465,6 +465,7 @@ import { refreshAccountSettingsForMinimumVersion } from '@/settings/accountSetti
 import { warmActiveAccountSettingsSnapshotBestEffort } from '@/settings/accountSettings/warmActiveAccountSettingsSnapshot';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { startTaskDueNotifier } from '@/daemon/agentTasks/taskDueNotifier';
+import { createTaskOccurrenceRunner } from '@/daemon/agentTasks/taskOccurrenceRunner';
 import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
 import { createAccountKvHttpTransport } from '@/api/kv/accountKvHttpTransport';
 import { isBackendEnabledByAccountSettings } from '@/settings/backendEnabled';
@@ -8530,6 +8531,12 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 machineId,
                 encryption: credentials.encryption ?? undefined,
                 spawnSession,
+                // Recurring tasks ride on this worker: a task rule's run works that task's occurrence.
+                runAgentTaskOccurrence: createTaskOccurrenceRunner({
+                  credentials,
+                  spawnSession,
+                  getAccountSettings: () => getActiveAccountSettingsSnapshot()?.settings ?? null,
+                }) ?? undefined,
               });
             }
 

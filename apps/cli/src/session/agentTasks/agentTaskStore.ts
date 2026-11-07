@@ -73,6 +73,21 @@ export class AgentTaskStore {
     return await this.update(taskId, (task, now) => applyAgentTaskUpdate(task, update, now));
   }
 
+  /** At the end of a turn in `sessionId`, the recurring occurrences that thread was working are completed. */
+  async completeOccurrencesInThread(sessionId: string): Promise<void> {
+    const { tasks } = await this.list();
+    for (const task of tasks) {
+      if (!task.occurrences?.some((entry) => entry.status === 'running' && entry.sessionId === sessionId)) continue;
+      await this.update(task.id, (latest, at) => ({
+        ...latest,
+        occurrences: (latest.occurrences ?? []).map((entry) => (entry.status === 'running' && entry.sessionId === sessionId
+          ? { ...entry, status: 'completed' as const, finishedAt: at }
+          : entry)),
+        updatedAt: at,
+      }));
+    }
+  }
+
   /** The agent's open tasks in a few lines (its board); empty when it has none. */
   async boardFor(agentId: string): Promise<string> {
     const { tasks, complete } = await this.list();

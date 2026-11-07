@@ -72,6 +72,10 @@ export async function executeClaimedRun(params: {
   leaseDurationMs: number;
   encryption?: AutomationTemplateEncryption;
   claimed: ClaimableRunPayload;
+  /** Works a recurring task's occurrence (`daemon/agentTasks/runTaskOccurrence.ts`). */
+  runAgentTaskOccurrence?: (run: Readonly<{ runId: string; dueAt?: number; taskId: string; ruleId: string }>) => Promise<
+    Readonly<{ type: 'success'; sessionId?: string }> | Readonly<{ type: 'failed'; errorCode: string; errorMessage: string }>
+  >;
 }): Promise<void> {
   const {
     token,
@@ -129,6 +133,33 @@ export async function executeClaimedRun(params: {
     }
 
     const template = parsedTemplate.value;
+    if (template.agentTaskV1) {
+      if (!params.runAgentTaskOccurrence) {
+        await claimClient.failRun({
+          runId: claimed.run.id,
+          machineId,
+          errorCode: 'agent_task_unsupported',
+          errorMessage: 'This daemon cannot work recurring task occurrences',
+        });
+        return;
+      }
+      const occurrence = await params.runAgentTaskOccurrence({
+        runId: claimed.run.id,
+        ...(typeof claimed.run.dueAt === 'number' ? { dueAt: claimed.run.dueAt } : {}),
+        taskId: template.agentTaskV1.taskId,
+        ruleId: template.agentTaskV1.ruleId,
+      });
+      if (occurrence.type === 'success') {
+        await claimClient.succeedRun({
+          runId: claimed.run.id,
+          machineId,
+          ...(occurrence.sessionId ? { producedSessionId: occurrence.sessionId } : {}),
+        });
+      } else {
+        await claimClient.failRun({ runId: claimed.run.id, machineId, errorCode: occurrence.errorCode, errorMessage: occurrence.errorMessage });
+      }
+      return;
+    }
     const existingSessionTemplate = {
       ...template,
       existingSessionId: template.existingSessionId!,

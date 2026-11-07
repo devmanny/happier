@@ -3724,6 +3724,10 @@ export {
   agentProfileKvKey,
   buildAgentIdentityPromptTextV1,
   legacyAgentProfileKvKey,
+  AgentProfileV1Schema,
+  agentIdentityFromProfile,
+  parseAgentProfileV1,
+  type AgentProfileV1,
   parseAgentIdentityV1,
   type AgentIdentityV1,
 } from './agentProfiles/agentIdentity.js';
@@ -3786,3 +3790,17 @@ export {
   type AgentTaskUpdate,
   type AgentTaskV1,
 } from './tasks/agentTask.js';
+export {
+  TASK_OCCURRENCE_STATUSES,
+  TaskOccurrenceSchema,
+  TaskRecurrenceRuleSchema,
+  TaskRecurrenceV1Schema,
+  buildTaskOccurrencePrompt,
+  decideTaskOccurrence,
+  isRecurrenceOccurrenceDay,
+  recurrenceRuleCron,
+  type TaskOccurrence,
+  type TaskOccurrenceDecision,
+  type TaskRecurrenceRule,
+  type TaskRecurrenceV1,
+} from './tasks/agentTaskRecurrence.js';

@@ -79,3 +79,37 @@ export function buildAgentIdentityPromptTextV1(identity: AgentIdentityV1): strin
   }
   return lines.join('\n');
 }
+
+/**
+ * The full profile at `agentprofile/<id>` (kind `agent_profile`), written by the native app and read
+ * by the daemon when it works a recurring task as that agent. Unknown keys pass through.
+ */
+export const AgentProfileV1Schema = z.object({
+  v: z.literal(1),
+  id: z.string().min(1),
+  name: z.string().trim().min(1),
+  emoji: z.string().optional(),
+  description: z.string().optional(),
+  providerId: z.string().min(1),
+  modelId: z.string().optional(),
+  effort: z.string().optional(),
+  account: z.object({ label: z.string(), configDir: z.string().optional() }).passthrough(),
+  updatedAt: z.number(),
+}).passthrough();
+export type AgentProfileV1 = z.infer<typeof AgentProfileV1Schema>;
+
+export function parseAgentProfileV1(value: unknown): AgentProfileV1 | null {
+  const parsed = AgentProfileV1Schema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** The identity a spawn carries for a profile. */
+export function agentIdentityFromProfile(profile: AgentProfileV1): AgentIdentityV1 {
+  return {
+    v: 1,
+    id: profile.id,
+    name: profile.name,
+    ...(profile.emoji ? { emoji: profile.emoji } : {}),
+    ...(profile.description?.trim() ? { description: profile.description.trim() } : {}),
+  };
+}

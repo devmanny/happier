@@ -1,9 +1,11 @@
 import { z } from 'zod';
 
+import { TaskOccurrenceSchema, TaskRecurrenceV1Schema } from './agentTaskRecurrence.js';
+
 /**
  * A task for the user or one of their agents, sealed in the account's UserKVStore under the opaque
  * key `task/<uuid>` (kind `agent_task`). Titles and everything readable live in the sealed value.
- * Repetition is not part of a task yet (it will ride on Automations).
+ * Repetition rides on Automations (`agentTaskRecurrence.ts`).
  */
 export const AGENT_TASK_KV_PREFIX = 'task/';
 
@@ -69,6 +71,10 @@ export const AgentTaskV1Schema = z.object({
   createdBy: ActorSchema.optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
+  /** Repeats on these rules (one Automation per rule). */
+  recurrence: TaskRecurrenceV1Schema.optional(),
+  /** Each firing of a rule: result and thread, oldest first. */
+  occurrences: z.array(TaskOccurrenceSchema).optional(),
   /** When the user was already told it was due soon / overdue, so every machine tells once. */
   notifiedV1: z.object({ dueSoonAt: z.number().optional(), overdueAt: z.number().optional() }).strip().optional(),
 }).strip();
