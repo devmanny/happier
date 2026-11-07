@@ -131,6 +131,14 @@ prefixes:
   its thread is working (and is refused with a clear message when it has none); only the user
   closes or pauses the task, and closing it from the app pauses its Automations so they stop
   firing (the daemon also skips firings on a closed task without recording them).
+  A task's assignee is the user, an agent, or an existing session (with or without an agent); a
+  session's provider prompt ends with the tasks assigned to it too, and `tarea_actualizar` works the
+  same from a session without an agent ("me" is the session). A one-time "Schedule…" start
+  (`scheduledStartV1 {at, timezone, automationId}`) is one Automation whose cron names that minute,
+  day and month (so within a year) with an `agentTaskV1 {taskId, kind: scheduled_start}` template.
+  When it fires the daemon opens the agent's thread, or sends the assigned session the task through
+  the canonical send path (resuming it), links the thread, clears the schedule and deletes the
+  Automation; a later yearly firing finds no schedule and does nothing.
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

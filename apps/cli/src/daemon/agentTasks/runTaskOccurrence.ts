@@ -65,7 +65,7 @@ function recordOccurrence(
   };
 }
 
-function spawnFor(task: AgentTaskV1, profile: AgentProfileV1, permissionMode: string | undefined): TaskOccurrenceSpawn {
+export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1, permissionMode: string | undefined): TaskOccurrenceSpawn {
   const configDir = profile.account.configDir?.trim();
   return {
     directory: task.directory!,
@@ -126,7 +126,7 @@ export async function runTaskOccurrence(
     note = `could not continue ${decision.thread.sessionId} (${continued.code}); opened a new thread`;
   }
 
-  const started = await deps.startNewThread(spawnFor(task, profile, deps.defaultPermissionMode(profile.providerId)), prompt, run.runId);
+  const started = await deps.startNewThread(spawnForTask(task, profile, deps.defaultPermissionMode(profile.providerId)), prompt, run.runId);
   if (!started.ok) {
     await save({ ...base, status: 'failed', finishedAt: now, note: `${started.code}: ${started.message}` }, decision.closePrevious);
     return { type: 'failed', errorCode: started.code, errorMessage: started.message };

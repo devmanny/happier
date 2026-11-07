@@ -154,3 +154,47 @@ export function buildTaskOccurrencePrompt(params: Readonly<{ task: AgentTaskV1; 
     `\nWork on it now. When you finish, report the result with tarea_actualizar (taskId ${task.id}) and a short comment. The task repeats, so it stays open for the next occurrence; marking it done only records this occurrence's result.`,
   ].join('');
 }
+
+/**
+ * A one-time start ("Schedule…" on a task assigned to an agent): one Automation whose cron names
+ * that minute, day and month in the user's time zone, so the existing engine stays the only
+ * scheduler and a sleeping machine runs it when it wakes. The daemon starts the task, clears the
+ * schedule from the task and deletes the Automation; a later yearly firing finds no schedule and
+ * does nothing. A start must therefore be within a year.
+ */
+export const TaskScheduledStartV1Schema = z.object({
+  at: z.number(),
+  timezone: z.string().min(1),
+  automationId: z.string().optional(),
+}).strip();
+export type TaskScheduledStartV1 = z.infer<typeof TaskScheduledStartV1Schema>;
+
+export function scheduledStartCron(at: number, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+  }).formatToParts(new Date(at));
+  const part = (type: string) => Number.parseInt(parts.find((entry) => entry.type === type)?.value ?? '0', 10);
+  return `${part('minute')} ${part('hour')} ${part('day')} ${part('month')} *`;
+}
+
+export type ScheduledStartDecision = Readonly<{ kind: 'start' }> | Readonly<{ kind: 'skip'; reason: string }>;
+
+/** Whether a scheduled-start firing still applies: the task must still hold this schedule. */
+export function decideScheduledStart(params: Readonly<{ task: AgentTaskV1; automationId: string }>): ScheduledStartDecision {
+  const { task } = params;
+  if (task.scheduledStartV1?.automationId !== params.automationId) return { kind: 'skip', reason: 'schedule cancelled or moved' };
+  if (task.status === 'done') return { kind: 'skip', reason: 'task is done' };
+  if (task.assignee.kind === 'user') return { kind: 'skip', reason: 'task is assigned to the user' };
+  return { kind: 'start' };
+}
+
+/** The message that puts the agent to work on a task it was scheduled to start. */
+export function buildTaskStartPrompt(task: AgentTaskV1): string {
+  return [
+    `Task "${task.title}" was scheduled to start now (task id ${task.id}).`,
+    task.description ? `\n${task.description}` : '',
+    task.source?.url || task.source?.label ? `\nSource: ${[task.source.label, task.source.url].filter(Boolean).join(' — ')}` : '',
+    task.dueAt ? `\nDue: ${new Date(task.dueAt).toISOString()}` : '',
+    `\nWork on it now and keep it updated with tarea_actualizar (taskId ${task.id}).`,
+  ].join('');
+}

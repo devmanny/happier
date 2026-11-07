@@ -88,10 +88,10 @@ export class AgentTaskStore {
     }
   }
 
-  /** The agent's open tasks in a few lines (its board); empty when it has none. */
-  async boardFor(agentId: string): Promise<string> {
+  /** A thread's open tasks in a few lines (its board): its agent's and its session's; empty when none. */
+  async boardFor(owner: Readonly<{ agentId?: string | null; sessionId?: string | null }>): Promise<string> {
     const { tasks, complete } = await this.list();
-    const board = buildAgentTaskBoard({ agentId, tasks, now: this.now() });
+    const board = buildAgentTaskBoard({ ...owner, tasks, now: this.now() });
     return board && !complete ? `${board}\n- (more tasks than one listing holds; some may be missing)` : board;
   }
 

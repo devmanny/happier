@@ -112,10 +112,10 @@ async function readAdvisory(label: string, read: () => Promise<string | null>): 
 async function readAgentTurnContext(sessionId: string | undefined): Promise<string | null> {
     const memory = getAgentMemory(sessionId);
     const tasks = getAgentTasks(sessionId);
-    const agentId = tasks?.caller.agent?.id;
     const [threads, board] = await Promise.all([
         memory ? readAdvisory('thread context', () => memory.turnContextBlock()) : null,
-        tasks && agentId ? readAdvisory('task board', () => tasks.store.boardFor(agentId)) : null,
+        // Tasks assigned to this thread's agent, or to the session itself (with or without an agent).
+        tasks ? readAdvisory('task board', () => tasks.store.boardFor({ agentId: tasks.caller.agent?.id, sessionId: tasks.caller.sessionId })) : null,
     ]);
     const boardBlock = board
         ? `[Happier · your open tasks (update them with tarea_actualizar and their id).]\n${board}`

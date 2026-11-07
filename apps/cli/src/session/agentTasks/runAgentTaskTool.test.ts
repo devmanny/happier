@@ -42,8 +42,9 @@ describe('runAgentTaskTool', () => {
     const { store, read } = setup();
     await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Notas', assignee: 'me' } });
     expect(read('t1')?.assignee).toEqual({ kind: 'agent', agentId: 'a-mateo', name: 'Mateo', emoji: '🤖' });
-    expect(await runAgentTaskTool({ store, caller: { agent: null, sessionId: 's9' }, operation: 'create', input: { title: 'x', assignee: 'me' } }))
-      .toMatchObject({ ok: false });
+    // A session without an agent: "me" is the session itself.
+    await runAgentTaskTool({ store, caller: { agent: null, sessionId: 's9' }, operation: 'create', input: { title: 'x', assignee: 'me' } });
+    expect(read('t2')?.assignee).toEqual({ kind: 'session', sessionId: 's9' });
   });
 
   it('updates status with a comment, links the thread and rejects a bad date', async () => {
@@ -84,7 +85,7 @@ describe('runAgentTaskTool', () => {
     const { store } = setup();
     await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Login', assignee: 'me' } });
     await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Cable', assignee: 'user' } });
-    const board = await store.boardFor('a-mateo');
+    const board = await store.boardFor({ agentId: 'a-mateo', sessionId: 's1' });
     expect(board).toContain('t1 · Login · To do');
     expect(board).not.toContain('Cable');
   });

@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { parseAgentTaskV1, type AgentTaskV1 } from './agentTask.js';
 import {
   buildTaskOccurrencePrompt,
+  decideScheduledStart,
   decideTaskOccurrence,
+  scheduledStartCron,
   isRecurrenceOccurrenceDay,
   recurrenceRuleCron,
   type TaskRecurrenceRule,
@@ -86,5 +88,27 @@ describe('deciding an occurrence', () => {
     expect(prompt).toContain('Revisa errores de la noche.');
     expect(prompt).toContain('tarea_actualizar');
     expect(prompt).toContain('t1');
+  });
+});
+
+describe('scheduled start', () => {
+  it('turns a one-time start into a cron for that minute, day and month in the time zone', () => {
+    expect(scheduledStartCron(Date.parse('2026-11-12T16:30:00Z'), 'America/Mexico_City')).toBe('30 10 12 11 *');
+    expect(scheduledStartCron(Date.parse('2026-12-31T23:05:00Z'), 'UTC')).toBe('5 23 31 12 *');
+  });
+
+  it('starts only the schedule the task still has, and only once', () => {
+    const scheduled = task({ recurrence: undefined, scheduledStartV1: { at: 5, timezone: 'UTC', automationId: 'auto-1' } });
+    expect(decideScheduledStart({ task: scheduled, automationId: 'auto-1' })).toEqual({ kind: 'start' });
+    expect(decideScheduledStart({ task: scheduled, automationId: 'auto-old' })).toMatchObject({ kind: 'skip' });
+    expect(decideScheduledStart({ task: task({ recurrence: undefined }), automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
+    expect(decideScheduledStart({ task: { ...scheduled, status: 'done' }, automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
+    expect(decideScheduledStart({ task: { ...scheduled, assignee: { kind: 'user' } }, automationId: 'auto-1' })).toMatchObject({ kind: 'skip' });
+    expect(decideScheduledStart({ task: { ...scheduled, assignee: { kind: 'session', sessionId: 's1' } }, automationId: 'auto-1' })).toEqual({ kind: 'start' });
+  });
+
+  it('parses a scheduled start on a task', () => {
+    const scheduled = task({ scheduledStartV1: { at: 5, timezone: 'UTC', automationId: 'auto-1' } });
+    expect(parseAgentTaskV1(scheduled)).toEqual(scheduled);
   });
 });

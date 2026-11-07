@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { TaskOccurrenceSchema, TaskRecurrenceV1Schema } from './agentTaskRecurrence.js';
+import { TaskOccurrenceSchema, TaskRecurrenceV1Schema, TaskScheduledStartV1Schema } from './agentTaskRecurrence.js';
 
 /**
  * A task for the user or one of their agents, sealed in the account's UserKVStore under the opaque
@@ -28,6 +28,8 @@ const STATUS_LABELS: Record<AgentTaskStatus, string> = {
 const AssigneeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('user') }).strip(),
   z.object({ kind: z.literal('agent'), agentId: z.string().min(1), name: z.string().optional(), emoji: z.string().optional() }).strip(),
+  /** An existing session, with or without an agent: it is told about the task and works it. */
+  z.object({ kind: z.literal('session'), sessionId: z.string().min(1), title: z.string().optional() }).strip(),
 ]);
 export type AgentTaskAssignee = z.infer<typeof AssigneeSchema>;
 
@@ -73,6 +75,8 @@ export const AgentTaskV1Schema = z.object({
   updatedAt: z.number(),
   /** Repeats on these rules (one Automation per rule). */
   recurrence: TaskRecurrenceV1Schema.optional(),
+  /** A one-time start the user scheduled for the assigned agent. */
+  scheduledStartV1: TaskScheduledStartV1Schema.optional(),
   /** Each firing of a rule: result and thread, oldest first. */
   occurrences: z.array(TaskOccurrenceSchema).optional(),
   /** When the user was already told it was due soon / overdue, so every machine tells once. */
@@ -147,10 +151,16 @@ export function agentTaskStatusLabel(status: AgentTaskStatus): string {
   return STATUS_LABELS[status];
 }
 
-/** The agent's open tasks in a few lines, overdue and soonest first: its board at each turn start. */
-export function buildAgentTaskBoard(params: Readonly<{ agentId: string; tasks: readonly AgentTaskV1[]; now: number }>): string {
+/**
+ * A thread's open tasks in a few lines, overdue and soonest first: its board at each turn start.
+ * A thread works the tasks assigned to its agent and those assigned to the session itself.
+ */
+export function buildAgentTaskBoard(params: Readonly<{ agentId?: string | null; sessionId?: string | null; tasks: readonly AgentTaskV1[]; now: number }>): string {
+  const isMine = (task: AgentTaskV1) =>
+    (task.assignee.kind === 'agent' && !!params.agentId && task.assignee.agentId === params.agentId)
+    || (task.assignee.kind === 'session' && !!params.sessionId && task.assignee.sessionId === params.sessionId);
   return params.tasks
-    .filter((task) => task.assignee.kind === 'agent' && task.assignee.agentId === params.agentId && isAgentTaskOpen(task))
+    .filter((task) => isMine(task) && isAgentTaskOpen(task))
     .sort((a, b) => (a.dueAt ?? Number.POSITIVE_INFINITY) - (b.dueAt ?? Number.POSITIVE_INFINITY) || a.createdAt - b.createdAt)
     .map((task) => [task.id, task.title, STATUS_LABELS[task.status], describeTaskDue(task, params.now), task.directory]
       .filter(Boolean).join(' · '))

@@ -36,9 +36,21 @@ describe('executeClaimedRun (recurring task occurrences)', () => {
       token: 't', machineId: 'm1', claimClient: client, spawnSession, heartbeatMs: 60_000, leaseDurationMs: 120_000,
       claimed: claimed(payload), runAgentTaskOccurrence,
     });
-    expect(runAgentTaskOccurrence).toHaveBeenCalledWith({ runId: 'run-1', dueAt: 5_000, taskId: 't1', ruleId: 'r1' });
+    expect(runAgentTaskOccurrence).toHaveBeenCalledWith({
+      runId: 'run-1', automationId: 'automation-1', dueAt: 5_000, taskId: 't1', ruleId: 'r1', kind: 'recurrence',
+    });
     expect(spawnSession).not.toHaveBeenCalled();
     expect(client.succeedRun).toHaveBeenCalledWith({ runId: 'run-1', machineId: 'm1', producedSessionId: 's-new' });
+  });
+
+  it('hands a task\'s one-time scheduled start to the same handler, with its kind', async () => {
+    const runAgentTaskOccurrence = vi.fn(async () => ({ type: 'success' as const }));
+    await executeClaimedRun({
+      token: 't', machineId: 'm1', claimClient: claimClient(), spawnSession: vi.fn(), heartbeatMs: 60_000, leaseDurationMs: 120_000,
+      claimed: claimed({ directory: '/repo', agent: 'codex', prompt: 'Scheduled task', agentTaskV1: { taskId: 't1', kind: 'scheduled_start' } }),
+      runAgentTaskOccurrence,
+    });
+    expect(runAgentTaskOccurrence).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't1', kind: 'scheduled_start', automationId: 'automation-1' }));
   });
 
   it('fails the run with the occurrence\'s error, and when this daemon can\'t work tasks', async () => {

@@ -73,6 +73,13 @@ describe('agent tasks', () => {
     expect(isAgentTaskOpen(task({ status: 'in_review' }))).toBe(true);
   });
 
+  it('can be assigned to a session (with or without an agent), whose board then lists it', () => {
+    const forSession = task({ id: 't-s', title: 'Probar en Mac', assignee: { kind: 'session', sessionId: 's1', title: 'Navegador' } });
+    expect(parseAgentTaskV1(forSession)).toEqual(forSession);
+    expect(buildAgentTaskBoard({ sessionId: 's1', tasks: [forSession, task()], now: 0 })).toBe('- t-s · Probar en Mac · To do');
+    expect(buildAgentTaskBoard({ agentId: 'a-mateo', sessionId: 's9', tasks: [forSession, task()], now: 0 })).toBe('- t1 · Revisar TestFlight · To do');
+  });
+
   it('notices the user\'s tasks once when due soon and once when overdue', () => {
     const now = 100 * HOUR;
     const mine = task({ id: 'm1', assignee: { kind: 'user' }, dueAt: now + 2 * HOUR });

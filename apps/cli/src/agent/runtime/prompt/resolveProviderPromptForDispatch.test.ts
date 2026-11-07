@@ -445,6 +445,23 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         }
     });
 
+    it('gives a session without an agent the tasks assigned to it at the start of the turn', async () => {
+        const kv = createInMemoryAccountKv();
+        const { session } = createSession();
+        const plainSession = Object.assign(new EventEmitter(), session, { sessionId: 'sess-plain' });
+        const credentials = { token: 't', encryption: { type: 'dataKey' as const, publicKey: new Uint8Array(32), machineKey: new Uint8Array(32).fill(8) } };
+        const tasks = startAgentTasks(plainSession, credentials, { transport: kv.transport, env: {} })!;
+        await tasks.store.create({ title: 'Probar en Mac', assignee: { kind: 'session', sessionId: 'sess-plain' }, status: 'todo', threads: [] });
+        try {
+            const resolution = await resolveProviderPromptForDispatch({
+                session: plainSession, userText: 'hola', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
+            });
+            expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Probar en Mac · To do/);
+        } finally {
+            resetAgentTasksForTests();
+        }
+    });
+
     it('leaves a message with no references unbounded and unmeasured (legacy path untouched)', async () => {
         // A legacy message carries provider context that resolution never produced. D-27 bounds
         // RESOLVED context, so a legacy envelope larger than the bound must still dispatch.

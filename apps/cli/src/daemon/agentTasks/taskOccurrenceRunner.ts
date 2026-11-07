@@ -11,7 +11,11 @@ import {
   type AgentProfileV1,
 } from '@happier-dev/protocol';
 
+import axios from 'axios';
+
 import { createAccountKvHttpTransport, type AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
+import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
+import { logger } from '@/ui/logger';
 import { runAutomationAsNewSession } from '@/daemon/automation/automationRunNewSession';
 import { awaitSpawnedSessionId, type SpawnSessionNonceResolver } from '@/session/services/awaitSpawnedSessionId';
 import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persistence';
@@ -19,6 +23,7 @@ import type { SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/reg
 import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
 import { sendSessionMessage } from '@/session/services/sendSessionMessage';
 
+import { runScheduledTaskStart } from './runScheduledTaskStart';
 import { runTaskOccurrence, type TaskOccurrenceResult, type TaskOccurrenceSpawn } from './runTaskOccurrence';
 
 async function readExact(transport: AccountKvTransport, key: string): Promise<string | null> {
@@ -101,35 +106,60 @@ export function createTaskOccurrenceRunner(params: Readonly<{
   /** Settles a spawn the daemon accepted before it knew the session id (`daemon.spawnSession.resolve`). */
   resolveSpawnSessionByNonce: SpawnSessionNonceResolver;
   getAccountSettings: () => AccountSettings | null | undefined;
-}>): ((run: Readonly<{ runId: string; dueAt?: number; taskId: string; ruleId: string }>) => Promise<TaskOccurrenceResult>) | null {
+}>): ((run: Readonly<{ runId: string; automationId: string; dueAt?: number; taskId: string; ruleId?: string; kind: 'recurrence' | 'scheduled_start' }>) => Promise<TaskOccurrenceResult>) | null {
   const credentials = params.credentials;
   if (!credentials.encryption) return null;
   const transport = createAccountKvHttpTransport({ token: credentials.token });
   const material = resolveAccountScopedCryptoMaterial(credentials);
   const store = new AgentTaskStore({ transport, material });
 
-  return async (run) => await runTaskOccurrence(run, {
-    store,
-    readAgentProfile: (agentId) => readAgentProfileFromKv(transport, material, agentId),
-    liveThreadIds: () => readLiveThreadIds(transport, material, Date.now()),
-    defaultPermissionMode: (providerId) => {
-      const modes = (params.getAccountSettings() as Record<string, unknown> | null | undefined)?.sessionDefaultPermissionModeByTargetKey;
-      const mode = modes && typeof modes === 'object' ? (modes as Record<string, unknown>)[`agent:${providerId}`] : undefined;
-      return typeof mode === 'string' ? mode : undefined;
-    },
-    startNewThread: (spawn, firstMessage, occurrenceId) =>
-      startOccurrenceThread({ spawnSession: params.spawnSession, resolveSpawnSessionByNonce: params.resolveSpawnSessionByNonce }, spawn, firstMessage, occurrenceId),
-    continueThread: async (sessionId, message, occurrenceId) => {
-      const result = await sendSessionMessage({
-        credentials,
-        idOrPrefix: sessionId,
-        message,
-        wait: false,
-        timeoutMs: 60_000,
-        localId: `task-occurrence:${occurrenceId}`,
-        resumeInactiveSession: true,
-      });
-      return result.ok ? { ok: true } : { ok: false, code: result.code };
-    },
+  const deleteAutomation = async (automationId: string) => {
+    const response = await axios.delete(`${resolveServerHttpBaseUrl()}/v2/automations/${encodeURIComponent(automationId)}`, {
+      headers: { Authorization: `Bearer ${credentials.token}` },
+      timeout: 15_000,
+      validateStatus: () => true,
+    });
+    if (response.status !== 200 && response.status !== 404) {
+      logger.warn('[DAEMON AUTOMATION] Could not remove a fired one-time task start (it will not run again)', { automationId, status: response.status });
+    }
+  };
+
+  return async (run) => {
+    const common = {
+      store,
+      readAgentProfile: (agentId: string) => readAgentProfileFromKv(transport, material, agentId),
+      defaultPermissionMode: (providerId: string) => readDefaultPermissionMode(params.getAccountSettings(), providerId),
+      startNewThread: (spawn: TaskOccurrenceSpawn, firstMessage: string, occurrenceId: string) =>
+        startOccurrenceThread({ spawnSession: params.spawnSession, resolveSpawnSessionByNonce: params.resolveSpawnSessionByNonce }, spawn, firstMessage, occurrenceId),
+      continueThread: (sessionId: string, message: string, occurrenceId: string) => continueThread(credentials, sessionId, message, occurrenceId),
+    };
+    if (run.kind === 'scheduled_start') {
+      return await runScheduledTaskStart({ runId: run.runId, automationId: run.automationId, taskId: run.taskId }, { ...common, deleteAutomation });
+    }
+    if (!run.ruleId) return { type: 'failed', errorCode: 'invalid_template', errorMessage: 'a recurring task run needs its rule' };
+    return await runTaskOccurrence({ runId: run.runId, ...(run.dueAt !== undefined ? { dueAt: run.dueAt } : {}), taskId: run.taskId, ruleId: run.ruleId }, {
+      ...common,
+      liveThreadIds: () => readLiveThreadIds(transport, material, Date.now()),
+    });
+  };
+}
+
+function readDefaultPermissionMode(settings: AccountSettings | null | undefined, providerId: string): string | undefined {
+  const modes = (settings as Record<string, unknown> | null | undefined)?.sessionDefaultPermissionModeByTargetKey;
+  const mode = modes && typeof modes === 'object' ? (modes as Record<string, unknown>)[`agent:${providerId}`] : undefined;
+  return typeof mode === 'string' ? mode : undefined;
+}
+
+/** Sends the session a message (resuming it if inactive), through the canonical send path. */
+async function continueThread(credentials: Credentials, sessionId: string, message: string, occurrenceId: string) {
+  const result = await sendSessionMessage({
+    credentials,
+    idOrPrefix: sessionId,
+    message,
+    wait: false,
+    timeoutMs: 60_000,
+    localId: `task-occurrence:${occurrenceId}`,
+    resumeInactiveSession: true,
   });
+  return result.ok ? { ok: true as const } : { ok: false as const, code: result.code };
 }

@@ -48,7 +48,8 @@ function readAssignee(input: Record<string, unknown>, caller: AgentTaskCaller): 
   const lowered = raw.toLowerCase();
   if (lowered === 'user' || lowered === 'manny') return { kind: 'user' };
   if (lowered === 'me') {
-    if (!caller.agent) throw new TaskInputError('"me" needs a session working as an agent; use "user" or an agent id');
+    // A session without an agent works the task itself.
+    if (!caller.agent) return { kind: 'session', sessionId: caller.sessionId };
     return { kind: 'agent', agentId: caller.agent.id, name: caller.agent.name, ...(caller.agent.emoji ? { emoji: caller.agent.emoji } : {}) };
   }
   return { kind: 'agent', agentId: raw };

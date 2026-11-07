@@ -73,7 +73,14 @@ export async function executeClaimedRun(params: {
   encryption?: AutomationTemplateEncryption;
   claimed: ClaimableRunPayload;
   /** Works a recurring task's occurrence (`daemon/agentTasks/runTaskOccurrence.ts`). */
-  runAgentTaskOccurrence?: (run: Readonly<{ runId: string; dueAt?: number; taskId: string; ruleId: string }>) => Promise<
+  runAgentTaskOccurrence?: (run: Readonly<{
+    runId: string;
+    automationId: string;
+    dueAt?: number;
+    taskId: string;
+    ruleId?: string;
+    kind: 'recurrence' | 'scheduled_start';
+  }>) => Promise<
     Readonly<{ type: 'success'; sessionId?: string }> | Readonly<{ type: 'failed'; errorCode: string; errorMessage: string }>
   >;
 }): Promise<void> {
@@ -145,9 +152,11 @@ export async function executeClaimedRun(params: {
       }
       const occurrence = await params.runAgentTaskOccurrence({
         runId: claimed.run.id,
+        automationId: claimed.automation.id,
         ...(typeof claimed.run.dueAt === 'number' ? { dueAt: claimed.run.dueAt } : {}),
         taskId: template.agentTaskV1.taskId,
-        ruleId: template.agentTaskV1.ruleId,
+        ...(template.agentTaskV1.ruleId ? { ruleId: template.agentTaskV1.ruleId } : {}),
+        kind: template.agentTaskV1.kind ?? 'recurrence',
       });
       if (occurrence.type === 'success') {
         await claimClient.succeedRun({
