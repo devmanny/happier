@@ -145,8 +145,11 @@ prefixes:
   existing session carries it as that message's permission intent (`sendSessionMessage`
   `permissionModeOverride`, as `session send --permission-mode`) without changing the session's
   mode. `archivedAt` marks a task the user is not going to do: hidden by default, never deleted,
-  off every board, and its repetitions and scheduled start do nothing. Both fields are optional;
-  builds before 2026-11-07 parse such tasks but drop the two fields if they rewrite one.
+  off every board, and its repetitions and scheduled start do nothing. Both fields are optional.
+  Task writers keep fields they don't know, at every level (passthrough schemas in the CLI; kept
+  JSON in the native app), so a newer build's field survives an older writer. CLI builds up to
+  0.2.17-native.22 and app builds before 2026-11-07 14:30 strip unknown fields when they rewrite a
+  task (they would drop `permissionMode` and `archivedAt`).
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

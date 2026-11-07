@@ -20,7 +20,7 @@ export const TaskRecurrenceRuleSchema = z.discriminatedUnion('kind', [
     weekdays: z.array(z.number().int().min(0).max(6)).min(1),
     time: TimeSchema,
     automationId: z.string().optional(),
-  }).strip(),
+  }).passthrough(),
   z.object({
     id: z.string().min(1),
     kind: z.literal('every_n_days'),
@@ -28,14 +28,14 @@ export const TaskRecurrenceRuleSchema = z.discriminatedUnion('kind', [
     anchorDate: DateSchema,
     time: TimeSchema,
     automationId: z.string().optional(),
-  }).strip(),
+  }).passthrough(),
   z.object({
     id: z.string().min(1),
     kind: z.literal('monthly'),
     dayOfMonth: z.number().int().min(1).max(31),
     time: TimeSchema,
     automationId: z.string().optional(),
-  }).strip(),
+  }).passthrough(),
 ]);
 export type TaskRecurrenceRule = z.infer<typeof TaskRecurrenceRuleSchema>;
 
@@ -47,7 +47,7 @@ export const TaskRecurrenceV1Schema = z.object({
   continuity: z.enum(['same_thread', 'new_thread']),
   paused: z.boolean(),
   rules: z.array(TaskRecurrenceRuleSchema).min(1),
-}).strip();
+}).passthrough();
 export type TaskRecurrenceV1 = z.infer<typeof TaskRecurrenceV1Schema>;
 
 export const TASK_OCCURRENCE_STATUSES = ['running', 'completed', 'skipped', 'failed', 'interrupted'] as const;
@@ -63,7 +63,7 @@ export const TaskOccurrenceSchema = z.object({
   sessionId: z.string().optional(),
   status: z.enum(TASK_OCCURRENCE_STATUSES),
   note: z.string().optional(),
-}).strip();
+}).passthrough();
 export type TaskOccurrence = z.infer<typeof TaskOccurrenceSchema>;
 
 function parseTime(time: string): { hour: number; minute: number } {
@@ -171,7 +171,7 @@ export const TaskScheduledStartV1Schema = z.object({
   at: z.number(),
   timezone: z.string().min(1),
   automationId: z.string().optional(),
-}).strip();
+}).passthrough();
 export type TaskScheduledStartV1 = z.infer<typeof TaskScheduledStartV1Schema>;
 
 export function scheduledStartCron(at: number, timezone: string): string {

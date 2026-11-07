@@ -7,6 +7,9 @@ import { TaskOccurrenceSchema, TaskRecurrenceV1Schema, TaskScheduledStartV1Schem
  * A task for the user or one of their agents, sealed in the account's UserKVStore under the opaque
  * key `task/<uuid>` (kind `agent_task`). Titles and everything readable live in the sealed value.
  * Repetition rides on Automations (`agentTaskRecurrence.ts`).
+ *
+ * Every task schema is passthrough: a field this build doesn't know (written by a newer one) is kept
+ * when the task is read and rewritten, so older writers never drop it.
  */
 export const AGENT_TASK_KV_PREFIX = 'task/';
 
@@ -27,17 +30,17 @@ const STATUS_LABELS: Record<AgentTaskStatus, string> = {
 
 /** Who a task is for, or who did something to it. */
 const AssigneeSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('user') }).strip(),
-  z.object({ kind: z.literal('agent'), agentId: z.string().min(1), name: z.string().optional(), emoji: z.string().optional() }).strip(),
+  z.object({ kind: z.literal('user') }).passthrough(),
+  z.object({ kind: z.literal('agent'), agentId: z.string().min(1), name: z.string().optional(), emoji: z.string().optional() }).passthrough(),
   /** An existing session, with or without an agent: it is told about the task and works it. */
-  z.object({ kind: z.literal('session'), sessionId: z.string().min(1), title: z.string().optional() }).strip(),
+  z.object({ kind: z.literal('session'), sessionId: z.string().min(1), title: z.string().optional() }).passthrough(),
 ]);
 export type AgentTaskAssignee = z.infer<typeof AssigneeSchema>;
 
 const ActorSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('user') }).strip(),
-  z.object({ kind: z.literal('agent'), agentId: z.string().min(1), sessionId: z.string().optional() }).strip(),
-  z.object({ kind: z.literal('session'), sessionId: z.string().min(1) }).strip(),
+  z.object({ kind: z.literal('user') }).passthrough(),
+  z.object({ kind: z.literal('agent'), agentId: z.string().min(1), sessionId: z.string().optional() }).passthrough(),
+  z.object({ kind: z.literal('session'), sessionId: z.string().min(1) }).passthrough(),
 ]);
 export type AgentTaskActor = z.infer<typeof ActorSchema>;
 
@@ -47,7 +50,7 @@ const SourceSchema = z.object({
   label: z.string().optional(),
   url: z.string().optional(),
   sessionId: z.string().optional(),
-}).strip();
+}).passthrough();
 export type AgentTaskSource = z.infer<typeof SourceSchema>;
 
 export const AgentTaskV1Schema = z.object({
@@ -70,7 +73,7 @@ export const AgentTaskV1Schema = z.object({
     by: ActorSchema,
     text: z.string().optional(),
     status: z.enum(AGENT_TASK_STATUSES).optional(),
-  }).strip()),
+  }).passthrough()),
   createdBy: ActorSchema.optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
@@ -81,7 +84,7 @@ export const AgentTaskV1Schema = z.object({
   /** Each firing of a rule: result and thread, oldest first. */
   occurrences: z.array(TaskOccurrenceSchema).optional(),
   /** When the user was already told it was due soon / overdue, so every machine tells once. */
-  notifiedV1: z.object({ dueSoonAt: z.number().optional(), overdueAt: z.number().optional() }).strip().optional(),
+  notifiedV1: z.object({ dueSoonAt: z.number().optional(), overdueAt: z.number().optional() }).passthrough().optional(),
   /**
    * How every start of this task runs ("Start now", "Schedule…", each occurrence), for an agent or a
    * session. Absent means YOLO, the default for new tasks and for tasks written before the field.
@@ -89,7 +92,7 @@ export const AgentTaskV1Schema = z.object({
   permissionMode: z.enum(SESSION_PERMISSION_INTENT_INPUTS).optional(),
   /** Set when the user archived it (not going to do it): hidden by default, never deleted. */
   archivedAt: z.number().optional(),
-}).strip();
+}).passthrough();
 export type AgentTaskV1 = z.infer<typeof AgentTaskV1Schema>;
 
 export function parseAgentTaskV1(value: unknown): AgentTaskV1 | null {

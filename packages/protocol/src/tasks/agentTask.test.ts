@@ -60,6 +60,27 @@ describe('agent tasks', () => {
     expect(applyAgentTaskUpdate(archived, { archived: false }, 8)).not.toHaveProperty('archivedAt');
   });
 
+  it('keeps fields it does not know, at every level, when read and rewritten (a newer build\'s)', () => {
+    const newer = {
+      ...task(),
+      futureTop: { x: 1 },
+      assignee: { kind: 'agent', agentId: 'a-mateo', futureAssignee: true },
+      log: [{ at: 1, by: { kind: 'user', futureActor: 2 }, text: 'hola', futureLog: 'y' }],
+      recurrence: { v: 1, timezone: 'UTC', continuity: 'new_thread', paused: false, futureRecurrence: 3,
+        rules: [{ id: 'r1', kind: 'weekly', weekdays: [1], time: '09:00', futureRule: 4 }] },
+      occurrences: [{ id: 'o1', startedAt: 1, status: 'running', futureOccurrence: 5 }],
+      scheduledStartV1: { at: 9, timezone: 'UTC', futureStart: 6 },
+    };
+    const parsed = parseAgentTaskV1(newer)!;
+    expect(parsed).toEqual(newer);
+    const updated = applyAgentTaskUpdate(parsed, { status: 'in_progress', comment: 'sigo' }, 10);
+    expect(parseAgentTaskV1(JSON.parse(JSON.stringify(updated)))).toMatchObject({
+      futureTop: { x: 1 }, assignee: { futureAssignee: true }, log: [{ futureLog: 'y', by: { futureActor: 2 } }, { text: 'sigo' }],
+      recurrence: { futureRecurrence: 3, rules: [{ futureRule: 4 }] }, occurrences: [{ futureOccurrence: 5 }],
+      scheduledStartV1: { futureStart: 6 },
+    });
+  });
+
   it('applies an update: status, fields, a comment in the log and the thread that worked on it', () => {
     const updated = applyAgentTaskUpdate(task(), {
       status: 'in_progress', dueAt: 5 * HOUR, comment: 'Empecé', by: { kind: 'agent', agentId: 'a-mateo', sessionId: 's1' }, threadSessionId: 's1',

@@ -138,6 +138,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         public var status: Status?
 
         public var byUser: Bool { by["kind"]?.stringValue == "user" }
+        /// What this build doesn't read (a newer build's fields, a status it doesn't know), kept as written.
+        var extra: [String: JSONValue] = [:]
 
         init?(json: JSONValue) {
             guard let at = json["at"]?.doubleValue, let by = json["by"], by["kind"]?.stringValue != nil else { return nil }
@@ -145,6 +147,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             self.by = by
             self.text = json["text"]?.stringValue
             self.status = json["status"]?.stringValue.flatMap(Status.init(rawValue:))
+            var known: Set<String> = ["at", "by", "text"]
+            if status != nil { known.insert("status") }
+            self.extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
         }
 
         init(at: Double, by: JSONValue, text: String?, status: Status?) {
@@ -155,7 +160,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         }
 
         var json: JSONValue {
-            var object: [String: JSONValue] = ["at": .number(at), "by": by]
+            var object = extra
+            object["at"] = .number(at)
+            object["by"] = by
             if let text { object["text"] = .string(text) }
             if let status { object["status"] = .string(status.rawValue) }
             return .object(object)
@@ -181,6 +188,10 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     /// The UserKVStore version this copy was read at (-1 for a task not stored yet).
     public var version = -1
     var extra: [String: JSONValue] = [:]
+    /// The assignee and source as read, written back as they were (a newer build's fields
+    /// included) unless they were changed here.
+    private var storedAssignee: JSONValue?
+    private var storedSource: JSONValue?
 
     /// Repeats on these rules; kept as written in the task (unknown fields included) until edited here.
     public var recurrence: TaskRecurrence? {
@@ -266,6 +277,8 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         self.machineId = json["machineId"]?.stringValue
         self.directory = json["directory"]?.stringValue
         self.source = Source(json: json["source"])
+        self.storedAssignee = json["assignee"]
+        self.storedSource = json["source"]
         self.threads = json["threads"]?.arrayValue?.compactMap(\.stringValue) ?? []
         self.log = json["log"]?.arrayValue?.compactMap(LogEntry.init(json:)) ?? []
         self.createdAt = json["createdAt"]?.doubleValue ?? 0
@@ -281,13 +294,13 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         object["id"] = .string(id)
         object["title"] = .string(title)
         object["description"] = description.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
-        object["assignee"] = assignee.json
+        object["assignee"] = storedAssignee.flatMap { Assignee(json: $0) == assignee ? $0 : nil } ?? assignee.json
         object["status"] = .string(status.rawValue)
         object["startAt"] = startAt.map(JSONValue.number)
         object["dueAt"] = dueAt.map(JSONValue.number)
         object["machineId"] = machineId.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
         object["directory"] = directory.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
-        object["source"] = source?.json
+        object["source"] = source.flatMap { source in storedSource.flatMap { Source(json: $0) == source ? $0 : nil } ?? source.json }
         object["threads"] = .array(threads.map(JSONValue.string))
         object["log"] = .array(log.map(\.json))
         object["createdAt"] = .number(createdAt)

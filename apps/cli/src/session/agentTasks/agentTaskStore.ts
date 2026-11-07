@@ -21,6 +21,9 @@ export type AgentTaskListing = Readonly<{ tasks: AgentTaskV1[]; complete: boolea
  * The account's tasks in the UserKVStore (`task/<uuid>`, kind `agent_task`). Any thread or the app
  * may edit a task, so every write re-reads it and re-applies the change on a version conflict.
  */
+/** A task's declared fields (the schema is passthrough, so its type also admits unknown keys). */
+type KnownTaskFields = { [K in keyof AgentTaskV1 as string extends K ? never : K]: AgentTaskV1[K] };
+
 export class AgentTaskStore {
   constructor(private readonly deps: Readonly<{
     transport: AccountKvTransport;
@@ -48,7 +51,7 @@ export class AgentTaskStore {
     return row && task ? { task, version: row.version } : null;
   }
 
-  async create(fields: Omit<AgentTaskV1, 'v' | 'id' | 'createdAt' | 'updatedAt' | 'log'>): Promise<AgentTaskV1> {
+  async create(fields: Omit<KnownTaskFields, 'v' | 'id' | 'createdAt' | 'updatedAt' | 'log'>): Promise<AgentTaskV1> {
     const now = this.now();
     const task: AgentTaskV1 = { ...fields, v: 1, id: this.deps.newId?.() ?? randomUUID(), log: [], createdAt: now, updatedAt: now };
     const result = await this.deps.transport.mutate([{ key: agentTaskKvKey(task.id), value: this.seal(task), version: -1 }]);

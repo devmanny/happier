@@ -26,6 +26,25 @@ import Testing
         #expect(Self.task().applying(AgentTask.Update(permissionMode: .safeYolo), now: 5).json["permissionMode"]?.stringValue == "auto")
     }
 
+    @Test func aRewriteKeepsFieldsANewerBuildAddedAtEveryLevel() {
+        let newer = Self.task([
+            "futureTop": ["x": 1],
+            "assignee": ["kind": "agent", "agentId": "a-mateo", "futureAssignee": true],
+            "source": ["kind": "chat", "label": "WhatsApp", "futureSource": 2],
+            "log": [["at": 1, "by": ["kind": "user"], "text": "hola", "futureLog": "y"], ["at": 2, "by": ["kind": "user"], "status": "someday"]],
+        ])
+        let json = newer.applying(AgentTask.Update(status: .inProgress, comment: "sigo"), now: 5).json
+        #expect(json["futureTop"]?["x"]?.intValue == 1)
+        #expect(json["assignee"]?["futureAssignee"]?.boolValue == true)
+        #expect(json["source"]?["futureSource"]?.intValue == 2)
+        #expect(json["log"]?.arrayValue?.first?["futureLog"]?.stringValue == "y")
+        #expect(json["log"]?.arrayValue?[1]["status"]?.stringValue == "someday")
+        #expect(json["log"]?.arrayValue?.count == 3)
+        // An edited assignee is written as chosen.
+        let moved = newer.applying(.assigning(.user), now: 6).json
+        #expect(moved["assignee"]?["futureAssignee"] == nil)
+    }
+
     @Test func archivingHidesTheTaskWithoutDeletingItAndPausesItsRepetition() {
         var task = Self.task()
         let archived = task.applying(.archiving(true), now: 7)
