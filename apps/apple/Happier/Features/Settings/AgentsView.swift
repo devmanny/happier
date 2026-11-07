@@ -531,6 +531,9 @@ struct TasksView: View {
     @State private var pickingSessionFor: [String] = []
     @State private var creating: AgentTask.Assignee?
     @State private var assigningExisting = false
+    @State private var query = ""
+    /// The in-memory search index, kept in step with the tasks as they change.
+    @State private var taskSearch = TaskSearch()
     /// The task whose detail is open, when one is, with where it was opened from.
     @State private var path: [TaskRoute] = []
 
@@ -545,10 +548,32 @@ struct TasksView: View {
                                   openSessionId: openSessionId, status: .all, showCompleted: true, showArchived: true)
     }
 
+    /// Search ignores the filter and the scope: every task, open first, then completed and archived.
+    private var searchResults: [TaskSearch.Result] {
+        let tasks = store.tasks
+        taskSearch.sync(tasks, context: TaskSearch.Context(
+            assigneeName: { store.taskAssigneeName($0) },
+            sessionTitle: { store.sessions[$0]?.title },
+            machineName: { id in store.machines.first { $0.id == id }?.name }))
+        return taskSearch.search(query, in: tasks)
+    }
+
+    private var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        let sections = sections
+        let sections = isSearching ? [] : sections
+        let results = isSearching ? searchResults : []
         NavigationStack(path: $path) {
             List(selection: selecting ? $selection : nil) {
+                if isSearching {
+                    ForEach(results) { result in
+                        NavigationLink(value: TaskRoute(id: result.id, origin: listOrigin)) {
+                            TaskRow(task: result.task, openSessionId: openSessionId, match: result) { open($0) }
+                        }
+                        .tag(result.id)
+                        .contextMenu { rowMenu(result.task) }
+                    }
+                }
                 if openSessionId != nil, !onlyThisSession {
                     Picker("Show", selection: $scope) {
                         Text("All").tag(AgentTask.Scope.all)
@@ -617,7 +642,9 @@ struct TasksView: View {
                 TaskSessionPicker(excluding: nil) { session in assign(ids, .session(id: session.id, title: session.title)) }
             }
             .overlay {
-                if sections.isEmpty, store.tasksError == nil {
+                if isSearching {
+                    if results.isEmpty { ContentUnavailableView.search(text: query) }
+                } else if sections.isEmpty, store.tasksError == nil {
                     if onlyThisSession {
                         ContentUnavailableView("No Open Tasks Here", systemImage: "link",
                                                description: Text("Tasks linked to this session show up here; all your tasks are in Tasks."))
@@ -650,6 +677,7 @@ struct TasksView: View {
                 }
                 store.tasksRequest = nil
             }
+            .searchable(text: $query, prompt: "Search Tasks")
             .navigationTitle(onlyThisSession ? "Session Tasks" : "Tasks")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -879,6 +907,8 @@ private struct TaskRow: View {
     var completedHere = false
     /// The circle's action; nil while selecting.
     var toggleDone: (() -> Void)?
+    /// A search result: what matched in the title, and a piece of the field that matched otherwise.
+    var match: TaskSearch.Result?
     var openSession: (String) -> Void = { _ in }
     @Environment(HappierStore.self) private var store
 
@@ -907,6 +937,17 @@ private struct TaskRow: View {
                 if linked.count > 2 { Text("+\(linked.count - 2)").foregroundStyle(.secondary) }
             }
         }
+    }
+
+    /// The matched words in bold (no color: a match isn't a state).
+    private func highlighted(_ text: String, _ ranges: [Range<String.Index>]) -> AttributedString {
+        var result = AttributedString(text)
+        for range in ranges {
+            guard let lower = AttributedString.Index(range.lowerBound, within: result),
+                  let upper = AttributedString.Index(range.upperBound, within: result) else { continue }
+            result[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
+        }
+        return result
     }
 
     static func shortName(_ title: String) -> String {
@@ -944,10 +985,16 @@ private struct TaskRow: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(task.title)
+            Text(highlighted(task.title, match?.titleHighlights ?? []))
                 .strikethrough(task.status == .done || completedHere)
                 .foregroundStyle(completedHere ? .secondary : .primary)
                 .lineLimit(2)
+            if let snippet = match?.snippet {
+                (Text("\(snippet.field.label): ").foregroundStyle(.tertiary) + Text(highlighted(snippet.snippet.text, snippet.snippet.highlights)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
             HStack(spacing: 6) {
                 if task.assignee.sessionId != nil {
                     Text("Session · \(Self.shortName(store.taskAssigneeName(task.assignee)))")
@@ -956,6 +1003,10 @@ private struct TaskRow: View {
                 }
                 Text("·")
                 Text(task.status.label)
+                if task.isArchived {
+                    Text("·")
+                    Text("Archived")
+                }
                 if let due = task.due() {
                     Text("·")
                     Text(due.text).foregroundStyle(due.overdue && task.status != .done ? Color.red : Color.secondary)

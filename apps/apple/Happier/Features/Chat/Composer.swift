@@ -366,10 +366,12 @@ struct Composer: View {
                 } else {
                     Text(controls.displayModelName).lineLimit(1)
                     if let effort = controls.displayEffort {
-                        // The level as signal bars, filled up to it.
-                        Image(systemName: "cellularbars", variableValue: EffortSlider.fraction(effort, of: controls.effortModel?.effortLevels ?? []))
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel(Text("Effort \(EffortSlider.name(effort))"))
+                        // One bar per level the model offers, filled up to it (all with Ultracode).
+                        if let bars = EffortBars(level: effort, levels: controls.effortModel?.effortLevels ?? [],
+                                                 ultracode: controls.ultracode == true) {
+                            EffortBarsMark(bars: bars)
+                                .accessibilityLabel(Text(controls.ultracode == true ? "Effort Ultracode" : "Effort \(EffortSlider.name(effort))"))
+                        }
                     }
                 }
                 #if os(macOS)
@@ -550,6 +552,25 @@ private struct SessionStatusRow: View {
         case .offline:
             return Look(text: "Inactive", detail: session.activeAt.map { Text("· active \($0, format: .relative(presentation: .named))") })
         }
+    }
+}
+
+/// Effort as rising bars, drawn so there can be as many as the model has levels (the
+/// `cellularbars` symbol only has 4). Monochrome like it: filled bars solid, the rest faint.
+struct EffortBarsMark: View {
+    let bars: EffortBars
+    @ScaledMetric(relativeTo: .subheadline) private var height = 11
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: max(1, height * 0.12)) {
+            ForEach(0..<bars.count, id: \.self) { index in
+                RoundedRectangle(cornerRadius: height * 0.1, style: .continuous)
+                    .frame(width: max(2, height * 0.2), height: height * CGFloat(index + 1) / CGFloat(bars.count))
+                    .opacity(index < bars.filled ? 1 : 0.25)
+            }
+        }
+        .frame(height: height, alignment: .bottom)
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -834,12 +855,6 @@ struct EffortSlider: View {
     let selection: String
     let onCommit: (String) -> Void
     @State private var dragIndex: Int?
-
-    /// How far up its model's levels `level` is (0…1), for a filled-bars mark.
-    static func fraction(_ level: String, of levels: [String]) -> Double {
-        guard let index = levels.firstIndex(of: level), levels.count > 0 else { return 1 }
-        return Double(index + 1) / Double(levels.count)
-    }
 
     static func name(_ level: String) -> String {
         switch level {
