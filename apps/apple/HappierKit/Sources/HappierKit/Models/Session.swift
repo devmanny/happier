@@ -198,6 +198,8 @@ public struct Session: Identifiable, Sendable, Equatable {
     }
     public var host: String? { metadata["host"]?.stringValue }
     public var agentId: String? { Agent.id(fromFlavor: metadata["flavor"]?.stringValue) }
+    /// The bell is off: the session never notifies (`notificationsMutedV1`, on by default).
+    public var notificationsMuted: Bool { metadata["notificationsMutedV1"]?["muted"]?.boolValue == true }
     public var isUserFacing: Bool { metadata["systemSessionV1"]?["hidden"]?.boolValue != true && archivedAt == nil }
     public var permissionMode: String? { metadata["permissionMode"]?.stringValue }
     /// The agent's own conversation id (Claude session, Codex thread…): every agent's

@@ -613,6 +613,7 @@ private struct SessionToolbar: ViewModifier {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId) }
+                ToolbarItem(placement: .primaryAction) { SessionBellButton(sessionId: sessionId) }
                 SessionUsageToolbar(sessionId: sessionId)
                 ToolbarItem(placement: .primaryAction) {
                     SessionDetailsMenu(details: details, perform: perform).equatable()
@@ -981,4 +982,23 @@ final class ChatScrollState {
     var geometry: ChatScroll.Geometry?
     var visibleIds: [String] = []
     var followScheduled = false
+}
+
+/// The session's bell: on by default. Off, the session never notifies you; it still reports to
+/// its parent session, which notifies as usual.
+struct SessionBellButton: View {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        let muted = store.sessions[sessionId]?.notificationsMuted == true
+        Button {
+            AppHaptics.selection()
+            Task { await store.setNotificationsMuted(!muted, in: sessionId) }
+        } label: {
+            Label(muted ? "Turn On Notifications" : "Mute Notifications", systemImage: muted ? "bell.slash" : "bell")
+        }
+        .help(muted ? "This session doesn't notify you. Turn its notifications back on."
+                    : "Stop notifications from this session. It still reports to its parent session.")
+    }
 }

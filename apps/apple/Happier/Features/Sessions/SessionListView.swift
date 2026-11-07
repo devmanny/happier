@@ -457,6 +457,11 @@ extension View {
                     AppHaptics.selection()
                     Task { await store.setPinned(session.id, !pinned) }
                 }
+                Button(session.notificationsMuted ? "Turn On Notifications" : "Mute Notifications",
+                       systemImage: session.notificationsMuted ? "bell" : "bell.slash") {
+                    AppHaptics.selection()
+                    Task { await store.setNotificationsMuted(!session.notificationsMuted, in: session.id) }
+                }
                 if let rename {
                     Button("Rename…", systemImage: "pencil") {
                         AppHaptics.light()
@@ -784,6 +789,12 @@ struct SessionRow: View, Equatable {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                             .accessibilityLabel(Text("Pinned"))
+                    }
+                    if session.notificationsMuted {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(Text("Notifications muted"))
                     }
                     if session.archivedAt != nil {
                         Image(systemName: "archivebox.fill")

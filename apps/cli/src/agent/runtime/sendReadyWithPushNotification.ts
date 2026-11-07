@@ -1,3 +1,4 @@
+import { isSessionNotificationMuted } from '@/session/notifications/sessionNotificationMute'
 import { logger } from '@/ui/logger'
 import type { SessionClientPort } from '@/api/session/sessionClientPort'
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog'
@@ -104,6 +105,7 @@ export function sendReadyWithPushNotification(opts: {
     }
     const shouldSend = opts.shouldSendPush ?? (() => true)
     if (shouldSend() !== true) return
+    if (isSessionNotificationMuted(opts.session.sessionId)) return
     if (!opts.pushSender?.sendToAllDevices) return
     const content = buildReadyNotificationContent({
       sessionTitle: opts.sessionTitle,

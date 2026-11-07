@@ -1,3 +1,4 @@
+import { isSessionNotificationMuted } from '@/session/notifications/sessionNotificationMute';
 import {
   resolveNotificationChannelsV1FromAccountSettings,
   type AccountSettings,
@@ -161,7 +162,12 @@ export async function dispatchActivityNotificationAsync(params: Readonly<{
   let attemptedChannels = 0;
   let deliveredChannels = 0;
   const eligibleChannelCount = channels.filter((channel) => isTopicEnabled(channel, params.event.topic)).length;
-  if (duplicateSuppressed && eligibleChannelCount > 0) {
+  // The session's bell is off: it never notifies the user (its parent is told separately).
+  const sessionMuted = isSessionNotificationMuted(params.event.sessionId);
+  if (sessionMuted && eligibleChannelCount > 0) {
+    logger.debug('[activityNotifications] Suppressed for a muted session', { sessionId: params.event.sessionId, topic: params.event.topic });
+  }
+  if ((duplicateSuppressed || sessionMuted) && eligibleChannelCount > 0) {
     return {
       attemptedChannels: 0,
       deliveredChannels: 0,

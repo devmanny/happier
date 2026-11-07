@@ -245,6 +245,11 @@ public enum MetadataEdit {
         set(metadata, "listParentV1", ["v": 1, "updatedAt": .number(now), "parentSessionId": parentSessionId.map(JSONValue.string) ?? .null])
     }
 
+    /// The session's bell: off (`muted`) means it never notifies; it still talks to its parent.
+    public static func setNotificationsMuted(_ muted: Bool, in metadata: JSONValue, now: Double) -> JSONValue {
+        set(metadata, "notificationsMutedV1", ["v": 1, "muted": .bool(muted), "updatedAt": .number(now)])
+    }
+
     /// The session's title (`summary`, as the agent's own title updates write it).
     public static func setTitle(_ title: String, in metadata: JSONValue, now: Double) -> JSONValue {
         set(metadata, "summary", ["text": .string(title), "updatedAt": .number(now)])

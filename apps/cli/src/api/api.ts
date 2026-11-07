@@ -15,6 +15,7 @@ import { MachineRegistrationIdentitySchema } from '@/api/types'
 import { ApiSessionClient } from './session/sessionClient';
 import { startParentLinkWatcher } from '@/session/lineage/parentLinkWatcher';
 import { startSessionPresence } from '@/session/presence/startSessionPresence';
+import { trackSessionNotificationMute } from '@/session/notifications/sessionNotificationMute';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
@@ -783,6 +784,8 @@ export class ApiClient {
     startParentLinkWatcher(client);
     // Every runner publishes where it is and what it touches while it works (advisory).
     startSessionPresence(client, this.credential);
+    // Its notification bell is read from its metadata whenever it would notify.
+    trackSessionNotificationMute(client);
     return client;
   }
 

@@ -2441,6 +2441,10 @@ public final class HappierStore {
         await editMetadata(sessionId) { MetadataEdit.setPermissionMode(mode, in: $0, now: $1) }
     }
 
+    public func setNotificationsMuted(_ muted: Bool, in sessionId: String) async {
+        await editMetadata(sessionId) { MetadataEdit.setNotificationsMuted(muted, in: $0, now: $1) }
+    }
+
     /// Read-modify-write of the full session metadata with optimistic concurrency
     /// (`update-metadata`, retried on version mismatch like `updateSessionMetadataWithRetry.ts`).
     private func editMetadata(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async {

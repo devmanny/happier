@@ -3740,3 +3740,7 @@ export {
   type AgentPresenceV1,
   type PresenceConflict,
 } from './agentProfiles/agentPresence.js';
+export {
+  SESSION_NOTIFICATIONS_MUTED_METADATA_KEY,
+  isSessionNotificationsMuted,
+} from './sessionMetadata/sessionNotificationsMutedV1.js';

@@ -8,6 +8,7 @@ import {
 
 import { dispatchActivityNotificationAsync } from './dispatchActivityNotification';
 import type { ActivityNotificationEvent } from './activityNotificationEvent';
+import { resetSessionNotificationMuteForTests, trackSessionNotificationMute } from '@/session/notifications/sessionNotificationMute';
 
 describe('dispatchActivityNotificationAsync', () => {
   const fetchSpy = vi.fn();
@@ -44,6 +45,41 @@ describe('dispatchActivityNotificationAsync', () => {
     expect(payloads[1].request.toolDetails).toBeNull();
     expect(payloads[2].request.toolDetails).toContain('Review the complete patch');
     expect(payloads[2].content.body).toContain('git diff -- apps/cli/src/main.ts');
+  });
+
+  it('sends nothing for a session whose bell is off, and keeps notifying for other sessions', async () => {
+    const sendToAllDevicesAsync = vi.fn(async () => {});
+    let metadata: unknown = { notificationsMutedV1: { v: 1, muted: true, updatedAt: 1 } };
+    trackSessionNotificationMute({ sessionId: 'muted', getMetadataSnapshot: () => metadata });
+    const settings = accountSettingsParse({ notificationChannelsV1: [
+      { v: 1, id: 'push', kind: 'expo_push', enabled: true, topics: { ready: true } },
+      { v: 1, id: 'hook', kind: 'webhook', enabled: true, url: 'https://hooks.example.test/happier', topics: { ready: true } },
+    ] });
+    try {
+      const muted = await dispatchActivityNotificationAsync({
+        settings, expoPushSender: { sendToAllDevicesAsync }, dedupeWindowMs: 0,
+        event: { topic: 'ready', sessionId: 'muted' } as ActivityNotificationEvent,
+      });
+      expect(muted.deliveredChannels).toBe(0);
+      expect(sendToAllDevicesAsync).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      await dispatchActivityNotificationAsync({
+        settings, expoPushSender: { sendToAllDevicesAsync }, dedupeWindowMs: 0,
+        event: { topic: 'ready', sessionId: 'other' } as ActivityNotificationEvent,
+      });
+      expect(sendToAllDevicesAsync).toHaveBeenCalledTimes(1);
+
+      // Turning the bell back on takes effect on the next notification.
+      metadata = { notificationsMutedV1: { v: 1, muted: false, updatedAt: 2 } };
+      await dispatchActivityNotificationAsync({
+        settings, expoPushSender: { sendToAllDevicesAsync }, dedupeWindowMs: 0,
+        event: { topic: 'ready', sessionId: 'muted' } as ActivityNotificationEvent,
+      });
+      expect(sendToAllDevicesAsync).toHaveBeenCalledTimes(2);
+    } finally {
+      resetSessionNotificationMuteForTests();
+    }
   });
 
   it('falls back to the builtin expo push channel when explicit channels are missing', async () => {
