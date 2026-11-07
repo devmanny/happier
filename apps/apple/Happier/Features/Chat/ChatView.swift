@@ -69,6 +69,8 @@ private struct SessionChatHost: View, Equatable {
 private struct ChatConversationView: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store
+    /// Bumped only when "working" flips with time alone (see `body`).
+    @State private var statusClock = 0
     @State private var draft = ""
     /// The synced draft text the composer last took up or saw, to tell your own edits from it.
     @State private var lastSyncedDraft = ""
@@ -118,181 +120,184 @@ private struct ChatConversationView: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 15)) { context in
-            let working = session?.status(at: context.date) == .working
-            ScrollView {
-                // Drawn in full, not lazily: a lazy stack moved by the app's own scrolls (opening,
-                // following the end) could rest on rows it had only estimated and stay blank.
-                // `ChatWindow` keeps how many rows are drawn bounded.
-                VStack(spacing: 2) {
-                    let allRows = ChatRow.rows(from: items, working: working)
-                    let rows = Array(ChatWindow.visible(allRows, limit: windowLimit))
-                    if rows.count < allRows.count || store.hasOlderMessages[sessionId] == true {
-                        // One step back in history each time it comes into view.
-                        HappierSpinner()
-                            .padding()
-                            .onScrollVisibilityChange(threshold: 0.01) { visible in
-                                if visible { Task { await revealOlder() } }
-                            }
-                    }
-                    // Straight in the stack: the rows must be the scroll target layout's own children.
-                    // Wrapped in a view of their own (even one that only skipped redraws) the scroll
-                    // stopped seeing them, kept its position on the bottom anchor and pulled the
-                    // reader back there on every redraw.
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, _ in
-                        transcriptRow(rows, at: index, working: working)
-                    }
-                    // The running turn's work line already shows progress; the dots cover the gap before it appears.
-                    if working, !(rows.last.map { if case .work(_, _, true) = $0 { true } else { false } } ?? false) {
-                        HStack {
-                            TypingIndicator()
-                            Spacer()
+        // "Working" goes stale with time (no signal for a while); `statusClock` redraws only when
+        // that flips, instead of rebuilding the whole conversation every 15 s.
+        let _ = statusClock
+        let working = session?.status(at: .now) == .working
+        Group {
+        ScrollView {
+            // Drawn in full, not lazily: a lazy stack moved by the app's own scrolls (opening,
+            // following the end) could rest on rows it had only estimated and stay blank.
+            // `ChatWindow` keeps how many rows are drawn bounded.
+            VStack(spacing: 2) {
+                let allRows = ChatRow.rows(from: items, working: working)
+                let rows = Array(ChatWindow.visible(allRows, limit: windowLimit))
+                if rows.count < allRows.count || store.hasOlderMessages[sessionId] == true {
+                    // One step back in history each time it comes into view.
+                    HappierSpinner()
+                        .padding()
+                        .onScrollVisibilityChange(threshold: 0.01) { visible in
+                            if visible { Task { await revealOlder() } }
                         }
-                        .padding(.top, 8)
-                        .transition(.scale(scale: 0.6, anchor: .bottomLeading).combined(with: .opacity))
+                }
+                // Straight in the stack: the rows must be the scroll target layout's own children.
+                // Wrapped in a view of their own (even one that only skipped redraws) the scroll
+                // stopped seeing them, kept its position on the bottom anchor and pulled the
+                // reader back there on every redraw.
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, _ in
+                    transcriptRow(rows, at: index, working: working)
+                }
+                // The running turn's work line already shows progress; the dots cover the gap before it appears.
+                if working, !(rows.last.map { if case .work(_, _, true) = $0 { true } else { false } } ?? false) {
+                    HStack {
+                        TypingIndicator()
+                        Spacer()
                     }
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.bottomAnchor)
+                    .padding(.top, 8)
+                    .transition(.scale(scale: 0.6, anchor: .bottomLeading).combined(with: .opacity))
                 }
-                .scrollTargetLayout()
+                Color.clear
+                    .frame(height: 1)
+                    .id(Self.bottomAnchor)
             }
-            // Margins, not padding: the initial bottom positioning aligns the scroll target layout's
-            // frame with the viewport, so padding around it became a horizontal offset that ate the
-            // left margin until the first scroll.
-            .simultaneousGesture(closeTextSelection)
-            .contentMargins(.horizontal, 14, for: .scrollContent)
-            .contentMargins(.vertical, 10, for: .scrollContent)
-            .scrollPosition($scrollPosition)
-            // Opens on the newest message. Growing content doesn't pull the view down (that kept a
-            // reader scrolled up from reading while the agent worked); a pinned chat follows the
-            // end on its own (`onScrollGeometryChange`).
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: items.isEmpty, initial: true) { _, isEmpty in
-                // On open (including an already-loaded transcript) land on the concrete bottom
-                // anchor: it renders the latest messages instead of an estimated (blank) region and
-                // settles the horizontal offset on the content margin.
-                if !isEmpty {
-                    pinnedToEnd = true
-                    scrollToBottom(animated: false)
-                }
-            }
-            .onScrollGeometryChange(for: ChatScroll.Geometry.self, of: Self.chatGeometry) { _, new in
-                scrollState.geometry = new
-                let jump = ChatScroll.showsJumpToLatest(new)
-                if jump != showsJump { showsJump = jump }
-                // Rows measured at their real height, typing dots, a streamed reply or a taller
-                // composer moved the end: a pinned chat goes back to it.
-                guard ChatScroll.shouldFollow(pinned: pinnedToEnd, geometry: new), !scrollState.followScheduled else { return }
-                scrollState.followScheduled = true
+            .scrollTargetLayout()
+        }
+        // Margins, not padding: the initial bottom positioning aligns the scroll target layout's
+        // frame with the viewport, so padding around it became a horizontal offset that ate the
+        // left margin until the first scroll.
+        .simultaneousGesture(closeTextSelection)
+        .contentMargins(.horizontal, 14, for: .scrollContent)
+        .contentMargins(.vertical, 10, for: .scrollContent)
+        .scrollPosition($scrollPosition)
+        // Opens on the newest message. Growing content doesn't pull the view down (that kept a
+        // reader scrolled up from reading while the agent worked); a pinned chat follows the
+        // end on its own (`onScrollGeometryChange`).
+        .defaultScrollAnchor(.bottom)
+        .onChange(of: items.isEmpty, initial: true) { _, isEmpty in
+            // On open (including an already-loaded transcript) land on the concrete bottom
+            // anchor: it renders the latest messages instead of an estimated (blank) region and
+            // settles the horizontal offset on the content margin.
+            if !isEmpty {
+                pinnedToEnd = true
                 scrollToBottom(animated: false)
             }
-            .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                // A lazy stack can settle on a stretch it hasn't drawn yet (a jump while rows were
-                // still being measured, mostly on the Mac with a long, busy transcript) and stay
-                // blank until the next scroll. Seeing no row at all, put the reader back on drawn ones.
-                guard visible.isEmpty else {
-                    scrollState.visibleIds = visible
-                    return
-                }
-                guard !items.isEmpty, Date.now.timeIntervalSince(lastBlankRepair) > 0.5 else { return }
-                lastBlankRepair = .now
-                Self.scrollLog.notice("blank transcript viewport; scrolling back onto rows")
-                if pinnedToEnd {
-                    scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
-                } else if let row = scrollState.visibleIds.first {
-                    scrollPosition.scrollTo(id: row, anchor: .top)
-                } else {
-                    scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
-                }
+        }
+        .onScrollGeometryChange(for: ChatScroll.Geometry.self, of: Self.chatGeometry) { _, new in
+            scrollState.geometry = new
+            let jump = ChatScroll.showsJumpToLatest(new)
+            if jump != showsJump { showsJump = jump }
+            // Rows measured at their real height, typing dots, a streamed reply or a taller
+            // composer moved the end: a pinned chat goes back to it.
+            guard ChatScroll.shouldFollow(pinned: pinnedToEnd, geometry: new), !scrollState.followScheduled else { return }
+            scrollState.followScheduled = true
+            scrollToBottom(animated: false)
+        }
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
+            // A lazy stack can settle on a stretch it hasn't drawn yet (a jump while rows were
+            // still being measured, mostly on the Mac with a long, busy transcript) and stay
+            // blank until the next scroll. Seeing no row at all, put the reader back on drawn ones.
+            guard visible.isEmpty else {
+                scrollState.visibleIds = visible
+                return
             }
-            .onScrollPhaseChange { old, new, context in
-                // Only the user's own drags pin or unpin; programmatic scrolls don't.
-                if new == .interacting { pinnedToEnd = false }
-                if new == .idle, old == .interacting || old == .decelerating {
-                    pinnedToEnd = ChatScroll.isPinned(afterUserScrollTo: Self.chatGeometry(context.geometry))
-                }
-            }
-            .onChange(of: items.last?.id) { _, _ in
-                // Your own message just landed (optimistic bubble): follow it to the bottom.
-                if case .userText(let message)? = items.last, message.isPending {
-                    pinnedToEnd = true
-                    scrollToBottom()
-                }
-            }
-            // Scrolled up into the history: a button back to the newest message.
-            .overlay(alignment: .bottom) {
-                if showsJump {
-                    Button {
-                        AppHaptics.light()
-                        pinnedToEnd = true
-                        scrollToBottom()
-                    } label: {
-                        Image(systemName: "arrow.down")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.glass)
-                    .glassHover()
-                    .buttonBorderShape(.circle)
-                    .controlSize(.large)
-                    .padding(.bottom, 10)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-                    .accessibilityLabel(Text("Jump to latest"))
-                }
-            }
-            .animation(.smooth(duration: 0.2), value: showsJump)
-            .scrollDismissesKeyboard(.interactively)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let selected {
-                    SelectionBar(count: selected.count) {
-                        MessageClipboard.copy(selectedText(working: working))
-                        AppHaptics.success()
-                        withAnimation(.smooth) { self.selected = nil }
-                    } onSend: {
-                        AppHaptics.light()
-                        choosingDestination = true
-                    } onSelectAll: {
-                        AppHaptics.selection()
-                        self.selected = Set(selectableItems(working: working).map(\.id))
-                    } onCancel: {
-                        AppHaptics.light()
-                        withAnimation(.smooth) { self.selected = nil }
-                    }
-                    .sheet(isPresented: $choosingDestination) {
-                        SessionPickerSheet(title: Text("Send to Session"), offers: { $0.id != sessionId }) { destination in
-                            let text = selectedText(working: working)
-                            withAnimation(.smooth) { self.selected = nil }
-                            Task {
-                                await store.send(text, to: destination.id)
-                                store.openRequest = destination.id
-                            }
-                        }
-                    }
-                } else {
-                VStack(spacing: 0) {
-                if MessageSpeaker.shared.speakingText != nil {
-                    SpeechControls()
-                        .padding(.top, 6)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                Composer(sessionId: sessionId, text: $draft, attachments: $attachments, working: working) { attachments in
-                    let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty || !attachments.isEmpty else { return }
-                    draft = ""
-                    pinnedToEnd = true
-                    scrollToBottom()
-                    Task { await store.send(text, attachments: attachments, to: sessionId) }
-                } onStop: {
-                    Task { await store.abort(sessionId) }
-                } onShowActivity: {
-                    showActivity = true
-                }
-                }
-                .animation(.smooth(duration: 0.25), value: MessageSpeaker.shared.speakingText != nil)
-                }
+            guard !items.isEmpty, Date.now.timeIntervalSince(lastBlankRepair) > 0.5 else { return }
+            lastBlankRepair = .now
+            Self.scrollLog.notice("blank transcript viewport; scrolling back onto rows")
+            if pinnedToEnd {
+                scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
+            } else if let row = scrollState.visibleIds.first {
+                scrollPosition.scrollTo(id: row, anchor: .top)
+            } else {
+                scrollPosition.scrollTo(id: Self.bottomAnchor, anchor: .bottom)
             }
         }
+        .onScrollPhaseChange { old, new, context in
+            // Only the user's own drags pin or unpin; programmatic scrolls don't.
+            if new == .interacting { pinnedToEnd = false }
+            if new == .idle, old == .interacting || old == .decelerating {
+                pinnedToEnd = ChatScroll.isPinned(afterUserScrollTo: Self.chatGeometry(context.geometry))
+            }
+        }
+        .onChange(of: items.last?.id) { _, _ in
+            // Your own message just landed (optimistic bubble): follow it to the bottom.
+            if case .userText(let message)? = items.last, message.isPending {
+                pinnedToEnd = true
+                scrollToBottom()
+            }
+        }
+        // Scrolled up into the history: a button back to the newest message.
+        .overlay(alignment: .bottom) {
+            if showsJump {
+                Button {
+                    AppHaptics.light()
+                    pinnedToEnd = true
+                    scrollToBottom()
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.glass)
+                .glassHover()
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+                .padding(.bottom, 10)
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+                .accessibilityLabel(Text("Jump to latest"))
+            }
+        }
+        .animation(.smooth(duration: 0.2), value: showsJump)
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let selected {
+                SelectionBar(count: selected.count) {
+                    MessageClipboard.copy(selectedText(working: working))
+                    AppHaptics.success()
+                    withAnimation(.smooth) { self.selected = nil }
+                } onSend: {
+                    AppHaptics.light()
+                    choosingDestination = true
+                } onSelectAll: {
+                    AppHaptics.selection()
+                    self.selected = Set(selectableItems(working: working).map(\.id))
+                } onCancel: {
+                    AppHaptics.light()
+                    withAnimation(.smooth) { self.selected = nil }
+                }
+                .sheet(isPresented: $choosingDestination) {
+                    SessionPickerSheet(title: Text("Send to Session"), offers: { $0.id != sessionId }) { destination in
+                        let text = selectedText(working: working)
+                        withAnimation(.smooth) { self.selected = nil }
+                        Task {
+                            await store.send(text, to: destination.id)
+                            store.openRequest = destination.id
+                        }
+                    }
+                }
+            } else {
+            VStack(spacing: 0) {
+            if MessageSpeaker.shared.speakingText != nil {
+                SpeechControls()
+                    .padding(.top, 6)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            Composer(sessionId: sessionId, text: $draft, attachments: $attachments, working: working) { attachments in
+                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty || !attachments.isEmpty else { return }
+                draft = ""
+                pinnedToEnd = true
+                scrollToBottom()
+                Task { await store.send(text, attachments: attachments, to: sessionId) }
+            } onStop: {
+                Task { await store.abort(sessionId) }
+            } onShowActivity: {
+                showActivity = true
+            }
+            }
+            .animation(.smooth(duration: 0.25), value: MessageSpeaker.shared.speakingText != nil)
+            }
+        }
+    }
         .safeAreaInset(edge: .top, spacing: 0) {
             if finding {
                 let matches = TranscriptSearch.matches(in: items, query: findQuery)
@@ -326,6 +331,17 @@ private struct ChatConversationView: View {
                 let before = store.transcripts[sessionId]?.minSeq
                 await store.loadOlder(sessionId)
                 if store.transcripts[sessionId]?.minSeq == before { break }
+            }
+        }
+        .task(id: sessionId) {
+            // "Working" ends by itself once the session stops signalling: check every 15 s and
+            // redraw only if it flipped.
+            var shown = session?.status(at: .now) == .working
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                let now = session?.status(at: .now) == .working
+                if now != shown { statusClock &+= 1 }
+                shown = now
             }
         }
         .task(id: sessionId) {

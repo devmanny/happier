@@ -3,12 +3,13 @@ import SwiftUI
 import WidgetKit
 
 /// Keeps the Home Screen widgets current: whenever what's waiting on you changes, it leaves them
-/// the new list in the shared App Group and asks them to redraw. It reads the sessions at most
-/// every five seconds, not on each update: with dozens of sessions streaming, recomputing on
-/// every change kept the CPU busy.
+/// the new list in the shared App Group and asks them to redraw. It publishes at most once a
+/// minute, after a burst settles (`WidgetPublishPace`): with dozens of sessions streaming,
+/// recomputing on every change kept the CPU busy, and each reload wakes the widgets and the watch.
 struct AttentionWidgetPublisher: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.scenePhase) private var scenePhase
+    @State private var lastPublishedAt: Date?
 
     /// What the widgets show, per session: waiting for you, unread, and the title (and, for the
     /// watch, the first request and the agent's last words where the conversation is loaded).
@@ -61,12 +62,12 @@ struct AttentionWidgetPublisher: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
             .task { await follow() }
-            // Tasks are read once at launch; after that they arrive live from the socket, and coming
-            // back to the foreground catches up through the account's change cursor.
+            // Tasks are read once at launch; after that they arrive live from the socket, and each
+            // (re)connection, including coming back to the foreground, catches up through the
+            // account's change cursor (`runSync`), so the foreground doesn't do it a second time.
             .task { await store.refreshTasks() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { publish() }
-                if phase == .active { Task { await store.catchUpAccountKV() } }
             }
             .onDisappear {
                 // Signed out: the widgets forget this account's sessions.
@@ -98,10 +99,15 @@ struct AttentionWidgetPublisher: View {
                         continuation.resume()
                     }
                 }
-                try? await Task.sleep(for: .seconds(5))
+                let wait = WidgetPublishPace.wait(lastPublishedAt: lastPublishedAt?.timeIntervalSince1970,
+                                                  now: Date.now.timeIntervalSince1970)
+                try? await Task.sleep(for: .seconds(wait))
                 guard !Task.isCancelled else { return }
             }
             let now = (signature: signature, activity: activity, targets: targets, tasks: tasks)
+            if now.signature != last?.signature || now.activity != last?.activity || now.tasks != last?.tasks {
+                lastPublishedAt = .now
+            }
             if now.signature != last?.signature || now.activity != last?.activity { publish() }
             if now.tasks != last?.tasks { publishTasks() }
             if now.targets != last?.targets { ShareTargets(sessions: store.sessionList).save() }
@@ -127,9 +133,10 @@ struct AttentionWidgetPublisher: View {
         let activityChanged = !activity.looksLike(ActivitySnapshot.load())
         if attentionChanged { attention.save() }
         if activityChanged { activity.save() }
-        if attentionChanged || activityChanged { WidgetCenter.shared.reloadAllTimelines() }
+        guard attentionChanged || activityChanged else { return }
+        WidgetCenter.shared.reloadAllTimelines()
 
-        // Reuse this batch's summaries for the watch instead of rebuilding/sending them twice.
+        // The watch shows the same summaries: sent only when they changed.
         #if os(iOS)
         WatchBridge.shared.publish(WatchContext(attention: attention, activity: activity))
         #endif

@@ -40,6 +40,11 @@ final class MessageSpeaker: NSObject {
     /// Multiple composer windows must not release another recorder's suspension.
     @ObservationIgnored private var recordingOwners: Set<ObjectIdentifier> = []
     @ObservationIgnored private var isInBackground = false
+    /// Auto read stops by itself after 10 minutes in the background with nothing to read.
+    @ObservationIgnored private var idle = AutoReadIdle()
+    @ObservationIgnored private var idleTask: Task<Void, Never>?
+    /// Set while auto read stops for being idle, so the Live Activity ends saying so.
+    @ObservationIgnored private var pausedForIdle = false
     #if os(iOS)
     @ObservationIgnored private var activity: Activity<ReadAloudAttributes>?
     #endif
@@ -114,6 +119,9 @@ final class MessageSpeaker: NSObject {
             autoReadSessionId = nil
             autoReadCursor = nil
             autoReadStore = nil
+            idleTask?.cancel()
+            idleTask = nil
+            idle = AutoReadIdle()
             store.keepsConnectionInBackground = false
             setKeepAlive(false)
             if speakingText == nil { deactivateAudio() }
@@ -126,6 +134,7 @@ final class MessageSpeaker: NSObject {
         autoReadCursor = AutoReadCursor(existing: store.transcripts[sessionId]?.items ?? [])
         // New messages must keep arriving with the app minimized.
         store.keepsConnectionInBackground = true
+        idle = AutoReadIdle()
         refreshActivity()
         followTask = Task { [weak self, weak store] in
             while !Task.isCancelled, let store {
@@ -148,6 +157,35 @@ final class MessageSpeaker: NSObject {
     func appMovedToBackground(_ background: Bool) {
         isInBackground = background
         setKeepAlive(background && autoReadSessionId != nil)
+        noteIdle()
+    }
+
+    /// Re-arms the idle stop after anything that changes whether there is something to read.
+    private func noteIdle() {
+        guard let sessionId = autoReadSessionId else { return }
+        let state = AutoReadIdle.State(reading: speakingText != nil, waiting: queue.waiting,
+                                       turnActive: autoReadStore?.sessions[sessionId]?.thinking ?? false,
+                                       inBackground: isInBackground)
+        let now = Date().timeIntervalSince1970
+        idle.note(state, at: now)
+        idleTask?.cancel()
+        idleTask = nil
+        guard let deadline = idle.deadline else { return }
+        idleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, deadline - now)))
+            guard !Task.isCancelled else { return }
+            self?.pauseIfIdle()
+        }
+    }
+
+    /// Ten minutes in the background with nothing to read: auto read turns off (the silent
+    /// keep-alive and the socket are released) and the Live Activity ends saying so.
+    private func pauseIfIdle() {
+        guard let sessionId = autoReadSessionId, let store = autoReadStore,
+              idle.shouldPause(at: Date().timeIntervalSince1970) else { return }
+        pausedForIdle = true
+        toggleAutoRead(sessionId, store: store)
+        pausedForIdle = false
     }
 
     /// The conversation changed: its newly completed agent messages join the queue.
@@ -155,7 +193,10 @@ final class MessageSpeaker: NSObject {
         guard autoReadSessionId == sessionId, var cursor = autoReadCursor else { return }
         let changes = cursor.take(items, turnActive: turnActive, recording: !recordingOwners.isEmpty)
         autoReadCursor = cursor
-        defer { if !changes.isEmpty { refreshActivity() } }
+        defer {
+            if !changes.isEmpty { refreshActivity() }
+            noteIdle()
+        }
         for change in changes {
             switch change {
             case .new(let block):
@@ -273,6 +314,7 @@ final class MessageSpeaker: NSObject {
         speakingText = markdown
         speakSentence(from: 0)
         refreshActivity()
+        noteIdle()
     }
 
     private func setRate(_ newRate: Double) {
@@ -404,6 +446,7 @@ final class MessageSpeaker: NSObject {
         // Auto read keeps the audio session for the next message (other audio back to full volume).
         if autoReadSessionId == nil { deactivateAudio() } else { mixWithOthers() }
         refreshActivity()
+        noteIdle()
     }
 
     // MARK: Live Activity
@@ -417,7 +460,16 @@ final class MessageSpeaker: NSObject {
                 self.activity = nil
                 // ActivityKit's handles are safe to use from any task.
                 nonisolated(unsafe) let ending = activity
-                Task { await ending.end(nil, dismissalPolicy: .immediate) }
+                if pausedForIdle {
+                    // Stays on the Lock Screen a while so it's clear why reading stopped.
+                    let paused = ActivityContent(state: ReadAloudAttributes.ContentState(
+                        title: String(localized: "Auto-read paused"),
+                        snippet: String(localized: "Nothing new to read for 10 minutes."),
+                        isSpeaking: false, isPaused: false, waiting: 0, autoRead: false), staleDate: nil)
+                    Task { await ending.end(paused, dismissalPolicy: .after(.now.addingTimeInterval(30 * 60))) }
+                } else {
+                    Task { await ending.end(nil, dismissalPolicy: .immediate) }
+                }
             }
             return
         }

@@ -286,7 +286,8 @@ public final class HappierStore {
                 }
             }
             agentProfileVersions = versions
-            agentProfiles = plan.profiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            let sorted = plan.profiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            if sorted != agentProfiles { agentProfiles = sorted }
             agentProfilesError = nil
         } catch {
             agentProfilesError = UserFacingError.message(for: error)
@@ -561,7 +562,9 @@ public final class HappierStore {
         do {
             let listing = try await api.kvList(prefix: AgentTask.kvPrefix)
             tasksComplete = KVListing.isComplete(listing)
-            tasks = AgentTask.records(fromList: listing, machineKey: machineKey)
+            // Replaced only when something differs: every view reading the tasks redraws on a write.
+            let read = AgentTask.records(fromList: listing, machineKey: machineKey)
+            if read != tasks { tasks = read }
             tasksError = nil
         } catch {
             tasksError = UserFacingError.message(for: error)
