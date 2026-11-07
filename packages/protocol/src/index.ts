@@ -3716,3 +3716,27 @@ export {
   type DeviceBrowserSuccess,
   type DeviceBrowserTab,
 } from './deviceBrowser/deviceBrowserRpc.js';
+export {
+  AGENT_IDENTITY_ENV_KEY,
+  AGENT_IDENTITY_METADATA_KEY,
+  AGENT_PROFILE_KV_PREFIX,
+  AgentIdentityV1Schema,
+  agentProfileKvKey,
+  buildAgentIdentityPromptTextV1,
+  parseAgentIdentityV1,
+  type AgentIdentityV1,
+} from './agentProfiles/agentIdentity.js';
+export {
+  AGENT_PRESENCE_HEARTBEAT_MS,
+  AGENT_PRESENCE_KV_PREFIX,
+  AGENT_PRESENCE_STALE_AFTER_MS,
+  AgentPresenceV1Schema,
+  agentPresenceKvKey,
+  describePresenceConflict,
+  describePresenceHolder,
+  findPresenceConflicts,
+  isAgentPresenceLive,
+  parseAgentPresenceV1,
+  type AgentPresenceV1,
+  type PresenceConflict,
+} from './agentProfiles/agentPresence.js';

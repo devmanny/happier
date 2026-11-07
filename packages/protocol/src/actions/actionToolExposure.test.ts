@@ -23,6 +23,12 @@ describe('actionToolExposure', () => {
     }
   });
 
+  it('exposes the presence check directly to session agents as quien_esta_aqui', () => {
+    const spec = getActionSpec('session.presence.who');
+    expect(spec.bindings?.mcpToolName).toBe('quien_esta_aqui');
+    expect(isActionDirectToolExposedOn(spec, 'session_agent')).toBe(true);
+  });
+
   it('defaults ordinary session-agent action-backed tools to discoverable-only', () => {
     for (const id of ['subagents.delegate.start', 'execution.run.start', 'session.status.get'] as const) {
       const spec = getActionSpec(id);

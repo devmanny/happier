@@ -120,6 +120,8 @@ import {
   usageLimitRecoveryFeatureDisabledResult,
 } from '@/features/usageLimitRecoveryFeatureGate';
 import { normalizeCliSessionUsageLimitRecoveryOperationResult } from '@/session/usageLimitRecoveryControls/sessionUsageLimitRecoveryOperationResult';
+import { toWhoIsHereResult } from '@/session/presence/sessionPresence';
+import { getSessionPresence } from '@/session/presence/startSessionPresence';
 
 export type ResumeInactiveSessionWhenUsageLimitReady = (input: Readonly<{
   sessionId: string;
@@ -1837,6 +1839,17 @@ export function createCliActionDeps(params: Readonly<{
 
     sessionGoalClear: async ({ sessionId }) => {
       return await callRoutedSessionGoalControl(sessionId, 'clear', {});
+    },
+
+    sessionPresenceWho: async ({ sessionId, resources }) => {
+      const presence = getSessionPresence(sessionId);
+      if (!presence) {
+        return {
+          available: false,
+          reason: 'Presence is published by the running session itself; this session is not running in this process.',
+        };
+      }
+      return toWhoIsHereResult(await presence.whoIsHere({ ...(resources ? { resources } : {}) }));
     },
 
     sessionTerminalComposerClear: async ({ sessionId, expectedStateAtMs }) => {

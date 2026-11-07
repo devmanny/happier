@@ -28,7 +28,7 @@ import { reclaimJsonOwnerFileLockSnapshot } from '@/utils/fs/jsonOwnerFileLock';
 import { isPidAliveBySignal } from '@/daemon/processRunState';
 import type { PublicReleaseRingLabel } from '@happier-dev/release-runtime/releaseRings';
 import { createServerUrlComparableKey } from '@happier-dev/protocol';
-import type { MachineReplacementReason } from '@happier-dev/protocol';
+import type { AccountScopedCryptoMaterial, MachineReplacementReason } from '@happier-dev/protocol';
 
 async function bestEffortChmod(path: string, mode: number): Promise<void> {
   if (process.platform === 'win32') return;
@@ -683,6 +683,14 @@ export function requireEncryptionCredentials(credentials: Credentials): asserts 
       code: 'ACCOUNT_ENCRYPTION_KEY_REQUIRED',
     });
   }
+}
+
+/** The key material account-scoped blobs (settings, agent profiles, presence…) are sealed with. */
+export function resolveAccountScopedCryptoMaterial(credentials: Credentials): AccountScopedCryptoMaterial {
+  requireEncryptionCredentials(credentials);
+  return credentials.encryption.type === 'legacy'
+    ? { type: 'legacy', secret: credentials.encryption.secret }
+    : { type: 'dataKey', machineKey: credentials.encryption.machineKey };
 }
 
 export async function readCredentials(scope: CredentialReadScope = {}): Promise<Credentials | null> {

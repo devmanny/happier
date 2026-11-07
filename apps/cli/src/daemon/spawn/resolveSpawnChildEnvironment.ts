@@ -1,3 +1,4 @@
+import { AGENT_IDENTITY_ENV_KEY } from '@happier-dev/protocol';
 import { SPAWN_SESSION_ERROR_CODES } from '@/rpc/handlers/registerSessionHandlers';
 import type { SpawnSessionOptions } from '@/rpc/handlers/registerSessionHandlers';
 import type { SpawnSessionErrorCode } from '@/rpc/handlers/registerSessionHandlers';
@@ -231,6 +232,9 @@ export async function resolveSpawnChildEnvironment(params: {
   }
   if (params.options.mcpSelection) {
     extraEnvForChild.HAPPIER_SESSION_MCP_SELECTION_JSON = JSON.stringify(params.options.mcpSelection);
+  }
+  if (params.options.agentIdentity) {
+    extraEnvForChild[AGENT_IDENTITY_ENV_KEY] = JSON.stringify(params.options.agentIdentity);
   }
   if (params.options.sessionConfigOptionOverrides) {
     extraEnvForChild.HAPPIER_SESSION_CONFIG_OPTION_OVERRIDES_JSON = JSON.stringify(params.options.sessionConfigOptionOverrides);

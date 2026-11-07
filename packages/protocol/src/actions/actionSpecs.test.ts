@@ -25,6 +25,7 @@ const RESULT_REQUIRED_BLOCKING_ACTION_IDS = [
   'session.status.get',
   'session.work_state.get',
   'session.goal.get',
+  'session.presence.who',
   'session.goal.clear',
   'session.terminalComposer.clear',
   'session.pendingInput.interruptAndRun',

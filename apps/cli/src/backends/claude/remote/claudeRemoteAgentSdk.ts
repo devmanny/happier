@@ -52,6 +52,7 @@ import { killProcessTree } from '@/agent/runtime/process/killProcessTree';
 import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import { readTailTextFile } from '@/utils/fs/readTailTextFile';
 import { buildClaudeAgentSdkHooks } from './agentSdk/buildClaudeAgentSdkHooks';
+import { getSessionPresence, reportPresenceFailure } from '@/session/presence/startSessionPresence';
 import {
     normalizeClaudeProviderTaskEvent,
     readClaudeSessionHookProviderTaskActivity,
@@ -629,6 +630,9 @@ export async function claudeRemoteAgentSdk(opts: {
 	                activity,
 	            });
 	        },
+	        beforeFileEdit: async (filePath) =>
+	            await getSessionPresence(opts.happySessionId)?.beforeFileEdit(filePath)
+	                .catch((error: unknown) => { reportPresenceFailure('pre-edit check')(error); return null; }) ?? null,
 	        canCallTool: (toolName, input, resolvedMode, options) =>
 	            canCallToolWithModeTransitions(toolName, input, resolvedMode, {
 	                signal: options.signal,

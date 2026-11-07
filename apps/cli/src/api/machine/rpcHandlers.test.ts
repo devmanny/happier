@@ -810,6 +810,34 @@ describe('registerMachineRpcHandlers', () => {
     }));
   });
 
+  it('passes a valid agent identity through and drops a malformed one', async () => {
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+        registered.set(method, handler);
+      },
+    } as any;
+
+    const spawnSession = vi.fn(async () => ({ type: 'success', sessionId: 's1' } as const));
+    registerMachineRpcHandlers({
+      rpcHandlerManager,
+      handlers: {
+        spawnSession,
+        stopSession: async () => true,
+        requestShutdown: () => {},
+      },
+    });
+
+    const handler = registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION)!;
+    await handler({ directory: '/tmp', agentIdentityV1: { v: 1, id: 'a1', name: 'Mateo', emoji: '🤖' } });
+    expect(spawnSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      agentIdentity: { v: 1, id: 'a1', name: 'Mateo', emoji: '🤖' },
+    }));
+
+    await handler({ directory: '/tmp', agentIdentityV1: { v: 1, id: 'a1', name: '  ' } });
+    expect((spawnSession.mock.calls.at(-1) as unknown[] | undefined)?.[0]).not.toHaveProperty('agentIdentity');
+  });
+
   it('passes canonical spawn fields through when spawning a session', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {

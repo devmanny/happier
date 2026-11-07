@@ -1846,11 +1846,11 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             expect(capturedOptions.env.CLAUDE_CODE_OAUTH_SCOPES).toBeUndefined();
             expect(capturedOptions.env.HAPPIER_CLAUDE_EXPLICIT_ENV_ALLOWED_TEST).toBe('allowed-explicit-value');
 
-            // Bash commands must reach Claude Code's permission layer unmodified: the only
-            // PreToolUse hook is the provider-owned AskUserQuestion bridge. Auth isolation
-            // happens via the subprocess env instead of rewriting Bash input.
-            expect(capturedOptions.hooks.PreToolUse).toEqual([
-                expect.objectContaining({ matcher: 'AskUserQuestion' }),
+            // Bash commands must reach Claude Code's permission layer unmodified: no PreToolUse
+            // hook matches Bash (only the AskUserQuestion bridge and the advisory file-edit
+            // presence check). Auth isolation happens via the subprocess env instead.
+            expect(capturedOptions.hooks.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toEqual([
+                'AskUserQuestion', 'Edit|MultiEdit|Write|NotebookEdit',
             ]);
         } finally {
             if (originals.refreshToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN;
@@ -3497,11 +3497,12 @@ describe('claudeRemoteAgentSdk options and hooks', () => {
             createQuery,
         } as any);
 
-        // Bash `tool_input.command` must stay byte-identical to what the model produced. The
-        // provider-owned AskUserQuestion bridge is the only PreToolUse hook, so it cannot rewrite
-        // Bash input or disturb Claude's prefix allow rules and Auto classifier.
-        expect(capturedHooks?.PreToolUse).toEqual([
-            expect.objectContaining({ matcher: 'AskUserQuestion' }),
+        // Bash `tool_input.command` must stay byte-identical to what the model produced. No
+        // PreToolUse hook matches Bash (only the AskUserQuestion bridge and the advisory file-edit
+        // presence check, which never returns updatedInput), so Claude's prefix allow rules and
+        // Auto classifier are undisturbed.
+        expect(capturedHooks?.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toEqual([
+            'AskUserQuestion', 'Edit|MultiEdit|Write|NotebookEdit',
         ]);
     });
 

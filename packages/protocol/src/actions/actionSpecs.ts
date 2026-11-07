@@ -258,6 +258,11 @@ const SessionIdRequiredInputSchema = z.object({
   sessionId: z.string().min(1),
 }).passthrough();
 
+const SessionPresenceWhoInputSchema = z.object({
+  sessionId: z.string().min(1),
+  resources: z.array(z.string().min(1)).optional(),
+}).passthrough();
+
 const SessionTitleSetInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
   title: z.string().trim().min(1),
@@ -2585,6 +2590,37 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: SessionGoalSetInputSchema,
+  },
+  {
+    id: 'session.presence.who',
+    title: 'Who is here',
+    description: 'List the other live threads (sessions) of your agents: agent, machine, folder, task, files they are editing and shared resources in use (e.g. build-ios, testflight, daemon-restart). Pass `resources` to declare the shared resources you are about to use; they are released when your turn ends. Advisory only: nothing is locked.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'quien_esta_aqui' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","resources":["build-ios"]}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Who is here',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'resources', title: 'Shared resources you are about to use', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionPresenceWhoInputSchema,
   },
   {
     id: 'session.goal.clear',

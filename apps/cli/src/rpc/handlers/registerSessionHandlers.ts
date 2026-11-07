@@ -5,6 +5,7 @@ import type { Metadata } from '@/api/types';
 import type { SessionAttachFilePayload } from '@/agent/runtime/sessionAttachPayload';
 import type { ConnectedServicesMaterializationDiagnostic } from '@/daemon/connectedServices/materialize/providerMaterializerTypes';
 import type { CodexBackendMode } from '@happier-dev/agents';
+import type { AgentIdentityV1 } from '@happier-dev/protocol';
 import { configuration } from '@/configuration';
 import {
     AcpConfigOptionOverridesV1,
@@ -135,6 +136,11 @@ export interface SpawnSessionOptions {
     modelId?: string;
     modelUpdatedAt?: number;
     sessionConfigOptionOverrides?: AcpConfigOptionOverridesV1;
+    /**
+     * Optional: the user-defined agent this session works as. The runner records it in
+     * `metadata.agentIdentityV1` and gives the name and description to the model.
+     */
+    agentIdentity?: AgentIdentityV1;
     approvedNewDirectoryCreation?: boolean;
     backendTarget?: BackendTargetRefV1;
     /**

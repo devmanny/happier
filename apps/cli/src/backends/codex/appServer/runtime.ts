@@ -1,7 +1,7 @@
 import { buildUsageLimitIssueFingerprint, isSessionUsageLimitRecoveryForIssue } from '@happier-dev/protocol';
 import { randomUUID } from 'node:crypto';
 import { canPublishSessionResumeIdentity } from '@/session/metadata/sessionIdentityPublication';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import type { PermissionResult } from '@/agent/permissions/permissionResult';
 
 import type { ApiSessionClient } from '@/api/session/sessionClient';
@@ -38,6 +38,7 @@ import {
     readPendingLocalId,
 } from '@happier-dev/protocol';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
+import { getSessionPresence, reportPresenceFailure } from '@/session/presence/startSessionPresence';
 import { isChangeTitleToolNameAlias, normalizePatchInputRecord } from '@happier-dev/protocol/tools/v2';
 import { TurnChangeSetCollector } from '@/agent/tools/diff/turnChangeSetCollector';
 import { emitCanonicalTurnDiffTool } from '@/agent/runtime/emitCanonicalTurnDiffTool';
@@ -2939,6 +2940,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         source: 'provider_tool',
                         confidence: 'strong',
                     });
+                    // Codex never asks before applying a patch in yolo mode, so presence can only
+                    // record the files as the patch starts (no pre-edit warning for Codex).
+                    void getSessionPresence(params.session.sessionId)
+                        ?.noteFilesEdited(Object.keys(changes).map((path) => resolvePath(params.directory, path)))
+                        .catch(reportPresenceFailure('record patched files'));
                 }
             }
             if (context.sidechainId) {

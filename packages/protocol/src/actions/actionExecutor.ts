@@ -300,6 +300,8 @@ export type ActionExecutorDeps = Readonly<{
     serverId?: string | null;
   }>) => Promise<unknown>;
   sessionGoalClear?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<unknown>;
+  /** Presence lives in the session's own runner, so this dep only exists there. */
+  sessionPresenceWho?: (args: Readonly<{ sessionId: string; resources?: readonly string[] }>) => Promise<unknown>;
   sessionTerminalComposerClear?: (args: Readonly<{
     sessionId: string;
     expectedStateAtMs?: number;
@@ -2392,6 +2394,20 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
           }
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
           const res = await deps.sessionWorkStateGet({ sessionId, ...(serverId ? { serverId } : {}) });
+          return { ok: true, result: res };
+        }
+
+        if (actionId === 'session.presence.who') {
+          const sessionId = normalizeId((parsed.data as any).sessionId);
+          if (!sessionId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.sessionPresenceWho) {
+            return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:session.presence.who' };
+          }
+          const resources = (parsed.data as { resources?: unknown }).resources;
+          const res = await deps.sessionPresenceWho({
+            sessionId,
+            ...(Array.isArray(resources) ? { resources: resources.filter((r): r is string => typeof r === 'string') } : {}),
+          });
           return { ok: true, result: res };
         }
 

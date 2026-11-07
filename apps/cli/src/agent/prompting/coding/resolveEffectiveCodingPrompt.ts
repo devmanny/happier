@@ -1,11 +1,14 @@
 import {
+  buildAgentIdentityPromptTextV1,
   buildCodingSessionPromptPlanBaseV1,
   buildPromptPlanDiagnosticsV1,
   buildPromptPlanV1,
   renderPromptPlanV1,
   type PromptBlockV1,
+  type AgentIdentityV1,
   type PromptPlanV1,
 } from '@happier-dev/protocol';
+import { readAgentIdentityFromEnvironment } from '@/agent/runtime/agentIdentityEnvironment';
 
 import type { Credentials } from '@/persistence';
 import { resolveCliMemoryRecallGuidanceEnabled } from '@/agent/promptLibrary/resolveCliMemoryRecallGuidanceEnabled';
@@ -35,6 +38,8 @@ type ResolveEffectiveCodingPromptArgs = Readonly<{
   memoryMachineId?: string | null;
   cache?: Map<string, string | null>;
   fetchPromptArtifactRecord?: FetchPromptArtifactRecord;
+  /** The agent this session works as; defaults to the one the daemon handed this runner. */
+  agentIdentity?: AgentIdentityV1 | null;
 }>;
 
 export async function resolveEffectiveCodingPromptText(
@@ -107,9 +112,14 @@ export async function resolveEffectiveCodingPromptPlan(
       },
     });
   })();
+  const agentIdentity = args.agentIdentity === undefined ? readAgentIdentityFromEnvironment() : args.agentIdentity;
+  // Kept apart from the base so a provider base override (e.g. Codex `appendSystemPrompt`) never drops it.
+  const agentIdentityBlocks: PromptBlockV1[] = agentIdentity
+    ? [{ id: 'agent_identity', scope: 'user_prompt', text: buildAgentIdentityPromptTextV1(agentIdentity) }]
+    : [];
   const plan = buildPromptPlanV1({
     modality: 'coding',
-    blocks: [...basePlan.blocks, ...promptStackBlocks, ...providerBehaviorBlocks, ...toolDeliveryBlocks],
+    blocks: [...basePlan.blocks, ...agentIdentityBlocks, ...promptStackBlocks, ...providerBehaviorBlocks, ...toolDeliveryBlocks],
   });
 
   return {

@@ -7,6 +7,8 @@
  * @module createSessionMetadata
  */
 
+import { AGENT_IDENTITY_METADATA_KEY } from '@happier-dev/protocol';
+import { readAgentIdentityFromEnvironment } from './agentIdentityEnvironment';
 import os from 'node:os';
 import { readProcessInstanceFingerprintSync } from '@happier-dev/cli-common/processInstance';
 import { resolve } from 'node:path';
@@ -185,8 +187,21 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         agentPath: sessionPath,
     });
     const nativeAgentEnvironmentV1 = readSessionNativeEnvironment(opts.nativeAgentEnvironment);
+    // Metadata carries who the session is (for lists and other threads); the description only
+    // goes to the model, through the coding prompt.
+    const agentIdentity = readAgentIdentityFromEnvironment();
     const metadataBase: Metadata = {
         ...(nativeAgentEnvironmentV1 ? { nativeAgentEnvironmentV1 } : {}),
+        ...(agentIdentity
+            ? {
+                  [AGENT_IDENTITY_METADATA_KEY]: {
+                      v: 1 as const,
+                      id: agentIdentity.id,
+                      name: agentIdentity.name,
+                      ...(agentIdentity.emoji ? { emoji: agentIdentity.emoji } : {}),
+                  },
+              }
+            : {}),
         path: sessionPath,
         host: os.hostname(),
         version: packageJson.version,

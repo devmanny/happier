@@ -77,6 +77,23 @@ Auth flows:
 - `POST /v1/kv/bulk`
 - `POST /v1/kv` (batch mutate)
 
+Keys are clear text, so they stay opaque; everything readable lives in the sealed value
+(account-scoped blob, `packages/protocol/src/crypto/accountScopedCipher.ts`). Current client-owned
+prefixes:
+
+- `agent/<uuid>/profile` — a user-defined Agent (name, emoji, description, provider/model/effort,
+  account label and optional Claude config folder), kind `agent_profile`. Written by the native app.
+  A spawn carries only `agentIdentityV1` `{v, id, name, emoji?, description?}`; the runner keeps
+  `{v, id, name, emoji?}` in session metadata `agentIdentityV1` and adds the description to the
+  coding prompt (`packages/protocol/src/agentProfiles/agentIdentity.ts`).
+- `presence/<sessionId>` — "who is where", kind `agent_presence`, written only by that session's
+  runner while a turn runs (folder, task, files being edited, declared shared resources), refreshed
+  every 60 s and ignored by readers after 3 min without a signal; removed when the turn ends.
+  Advisory, never a lock (`packages/protocol/src/agentProfiles/agentPresence.ts`). Claude sessions
+  on the Agent SDK runner get a pre-edit warning through a `PreToolUse` hook; Codex app-server in
+  yolo mode exposes no pre-edit hook, so its patches are only recorded as they start. Agents can
+  ask and declare resources with the `quien_esta_aqui` MCP tool (`session.presence.who`).
+
 ### Account and usage
 - `GET /v1/account/profile`
 - `GET /v1/account/settings`

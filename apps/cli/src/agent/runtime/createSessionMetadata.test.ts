@@ -39,6 +39,18 @@ describe('createSessionMetadata', () => {
         });
     });
 
+    it('records the agent the session works as, and nothing for a malformed identity', () => {
+        vi.stubEnv('HAPPIER_AGENT_IDENTITY_JSON', JSON.stringify({ v: 1, id: 'a1', name: 'Julián', emoji: '🤖', description: 'Arquitecto' }));
+        try {
+            const { metadata } = createSessionMetadata({ flavor: 'claude', machineId: 'machine-1', startedBy: 'daemon' });
+            expect(Reflect.get(metadata, 'agentIdentityV1')).toEqual({ v: 1, id: 'a1', name: 'Julián', emoji: '🤖' });
+            vi.stubEnv('HAPPIER_AGENT_IDENTITY_JSON', '{"v":1,"id":"a1","name":""}');
+            expect(createSessionMetadata({ flavor: 'claude', machineId: 'machine-1' }).metadata).not.toHaveProperty('agentIdentityV1');
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('does not seed legacy messageQueueV1 metadata', () => {
         const { metadata } = createSessionMetadata({
             flavor: 'claude',

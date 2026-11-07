@@ -503,6 +503,20 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionWaitIdle).toHaveBeenCalledWith({ sessionId: 's1', timeoutSeconds: 42, serverId: 'server-a' });
   });
 
+  it('asks the current session who else is here, passing declared resources', async () => {
+    const sessionPresenceWho = vi.fn(async () => ({ others: [] }));
+    const executor = createExecutor({ sessionPresenceWho });
+
+    const result = await executor.execute(
+      'session.presence.who' as any,
+      { sessionId: 's1', resources: ['build-ios', 'testflight'] },
+      { surface: 'session_agent' as any },
+    );
+
+    expect(result).toEqual({ ok: true, result: { others: [] } });
+    expect(sessionPresenceWho).toHaveBeenCalledWith({ sessionId: 's1', resources: ['build-ios', 'testflight'] });
+  });
+
   it('executes session work-state and goal actions through protocol deps', async () => {
     const sessionWorkStateGet = vi.fn(async () => ({ workState: null }));
     const sessionGoalGet = vi.fn(async () => ({ workState: null }));

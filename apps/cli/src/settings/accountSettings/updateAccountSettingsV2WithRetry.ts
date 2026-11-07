@@ -1,7 +1,7 @@
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
-import { requireEncryptionCredentials, type Credentials } from '@/persistence';
+import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persistence';
 
 import axios from 'axios';
 
@@ -28,13 +28,6 @@ import {
 } from './accountSettingsCache';
 import { resolveAccountSettingsHttpBaseUrl } from './resolveAccountSettingsHttpBaseUrl';
 import { assertAccountEncryptionModeAllowedByEffectiveClientRequirement } from './resolveEffectiveClientEncryptionRequirement';
-
-function resolveMaterial(credentials: Credentials): { type: 'legacy'; secret: Uint8Array } | { type: 'dataKey'; machineKey: Uint8Array } {
-  requireEncryptionCredentials(credentials);
-  return credentials.encryption.type === 'legacy'
-    ? { type: 'legacy', secret: credentials.encryption.secret }
-    : { type: 'dataKey', machineKey: credentials.encryption.machineKey };
-}
 
 function resolveDefaultRandomBytes(): (n: number) => Uint8Array {
   return (n) => new Uint8Array(nodeRandomBytes(n));
@@ -105,7 +98,7 @@ async function parseSettingsFromContent(params: Readonly<{
   const ciphertext = params.content.c;
   const opened = openAccountScopedBlobCiphertext({
     kind: 'account_settings',
-    material: resolveMaterial(params.credentials),
+    material: resolveAccountScopedCryptoMaterial(params.credentials),
     ciphertext,
   });
   if (opened?.value && typeof opened.value === 'object' && !Array.isArray(opened.value)) {
@@ -233,7 +226,7 @@ export async function updateAccountSettingsV2WithRetry(_params: Readonly<{
           t: 'encrypted',
           c: sealAccountScopedBlobCiphertext({
             kind: 'account_settings',
-            material: resolveMaterial(params.credentials),
+            material: resolveAccountScopedCryptoMaterial(params.credentials),
             payload: nextRaw,
             randomBytes,
           }),
