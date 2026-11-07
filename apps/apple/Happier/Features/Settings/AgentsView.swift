@@ -499,3 +499,442 @@ private struct AgentMemoryFolder: FileDocument {
         AgentMemoryExport.fileWrapper(agentName: agentName, memory: memory)
     }
 }
+
+// MARK: - Tasks
+
+/// Tasks for you and your agents (`task/<id>` in the UserKVStore), with filters by who it's for and
+/// its status. Opened from the session list's toolbar.
+struct TasksView: View {
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var assignee: AgentTask.AssigneeFilter = .all
+    @State private var status: AgentTask.StatusFilter = .open
+    @State private var creating = false
+
+    private var visible: [AgentTask] { AgentTask.filter(store.tasks, assignee: assignee, status: status) }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !store.tasksComplete {
+                    Text("Only the first \(KVListing.maxRows) stored tasks could be read, so some may be missing here.")
+                        .foregroundStyle(.orange)
+                }
+                if let error = store.tasksError {
+                    Text(error).foregroundStyle(.secondary)
+                }
+                ForEach(visible) { task in
+                    NavigationLink(value: task.id) { TaskRow(task: task) }
+                }
+            }
+            #if os(iOS)
+            .listStyle(.plain)
+            #endif
+            .overlay {
+                if visible.isEmpty, store.tasksError == nil {
+                    ContentUnavailableView("No Tasks", systemImage: "checklist",
+                                           description: Text("Tasks for you and your agents show up here."))
+                }
+            }
+            .navigationDestination(for: String.self) { id in
+                TaskDetailView(taskId: id) { dismiss() }
+            }
+            .refreshable { await refresh() }
+            .task { await refresh() }
+            .navigationTitle("Tasks")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .primaryAction) { filterMenu }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("New Task", systemImage: "plus") {
+                        AppHaptics.light()
+                        creating = true
+                    }
+                }
+            }
+            .sheet(isPresented: $creating) {
+                NewTaskSheet()
+                    #if os(macOS)
+                    .frame(minWidth: 420, minHeight: 360)
+                    #endif
+            }
+        }
+    }
+
+    private func refresh() async {
+        await store.refreshTasks()
+        if store.agentProfiles.isEmpty { await store.refreshAgentProfiles() }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Picker("For", selection: $assignee) {
+                Text("Everyone").tag(AgentTask.AssigneeFilter.all)
+                Text("Me").tag(AgentTask.AssigneeFilter.me)
+                ForEach(store.agentProfiles) { profile in
+                    Text(profile.label).tag(AgentTask.AssigneeFilter.agent(profile.id))
+                }
+            }
+            Picker("Status", selection: $status) {
+                Text("Open").tag(AgentTask.StatusFilter.open)
+                ForEach(AgentTask.Status.allCases) { status in
+                    Text(status.label).tag(AgentTask.StatusFilter.only(status))
+                }
+                Text("All").tag(AgentTask.StatusFilter.all)
+            }
+        } label: {
+            Label("Filter", systemImage: assignee == .all && status == .open
+                  ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+        }
+    }
+}
+
+private struct TaskRow: View {
+    let task: AgentTask
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(task.title)
+                .strikethrough(task.status == .done)
+                .lineLimit(2)
+            HStack(spacing: 6) {
+                Text(task.assignee.label)
+                Text("·")
+                Text(task.status.label)
+                if let due = task.due() {
+                    Text("·")
+                    Text(due.text).foregroundStyle(due.overdue && task.status != .done ? Color.red : Color.secondary)
+                }
+                if let folder = task.directory.map({ ($0 as NSString).lastPathComponent }), !folder.isEmpty {
+                    Text("·")
+                    Text(folder).lineLimit(1)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// Who a task can be for: you or one of your agents.
+private struct TaskAssigneePicker: View {
+    @Binding var assignee: AgentTask.Assignee
+    let agents: [AgentProfile]
+
+    var body: some View {
+        Picker("For", selection: $assignee) {
+            Text("Me").tag(AgentTask.Assignee.user)
+            ForEach(agents) { profile in
+                Text(profile.label).tag(AgentTask.Assignee.agent(profile))
+            }
+            // An agent this device doesn't know (deleted or not loaded yet) stays selectable as it is.
+            if case .agent(let id, _, _) = assignee, !agents.contains(where: { $0.id == id }) {
+                Text(assignee.label.isEmpty ? id : assignee.label).tag(assignee)
+            }
+        }
+    }
+}
+
+/// An optional date: a toggle, then the picker.
+private struct TaskDateField: View {
+    let title: LocalizedStringKey
+    @Binding var ms: Double?
+
+    var body: some View {
+        Toggle(title, isOn: Binding(
+            get: { ms != nil },
+            set: { on in ms = on ? (ms ?? ServerClock.nowMs() + 86_400_000) : nil }))
+        if let current = ms {
+            DatePicker(title, selection: Binding(
+                get: { Date(timeIntervalSince1970: current / 1000) },
+                set: { ms = ($0.timeIntervalSince1970 * 1000).rounded(.down) }))
+                .labelsHidden()
+        }
+    }
+}
+
+private struct NewTaskSheet: View {
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var task = AgentTask(title: "")
+    @State private var saving = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Title", text: $task.title)
+                    TextField("What needs to happen", text: Binding(get: { task.description ?? "" },
+                                                                   set: { task.description = $0.isEmpty ? nil : $0 }),
+                              axis: .vertical)
+                        .lineLimit(3...8)
+                }
+                Section {
+                    TaskAssigneePicker(assignee: $task.assignee, agents: store.agentProfiles)
+                    TaskDateField(title: "Due", ms: $task.dueAt)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("New Task")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        saving = true
+                        Task {
+                            let saved = await store.createTask(task)
+                            saving = false
+                            if saved { dismiss() }
+                        }
+                    }
+                    .disabled(task.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
+                }
+            }
+        }
+    }
+}
+
+/// One task: every field editable, its comments and history, the sessions that worked on it, and
+/// "Assign to…", which hands it to an agent and starts that agent on it.
+private struct TaskDetailView: View {
+    let taskId: String
+    /// Leaves the Tasks sheet, so an opened session is on screen.
+    let close: () -> Void
+    @Environment(HappierStore.self) private var store
+    @State private var draft: AgentTask?
+    @State private var comment = ""
+    @State private var confirmDelete = false
+    @State private var assigning = false
+    @State private var alert: String?
+    @State private var approveFolder: (agent: AgentProfile, machineId: String, directory: String)?
+
+    private var stored: AgentTask? { store.task(id: taskId) }
+    private var changes: AgentTask.Update? {
+        guard let stored, let draft else { return nil }
+        let update = AgentTask.Update(from: stored, to: draft)
+        return update.isEmpty ? nil : update
+    }
+
+    var body: some View {
+        Group {
+            if let draft = Binding($draft) {
+                form(draft)
+            } else {
+                ContentUnavailableView("Task Not Found", systemImage: "checklist",
+                                       description: Text("It may have been deleted on another device."))
+            }
+        }
+        .onAppear { if draft == nil { draft = stored } }
+        .onChange(of: stored) { _, latest in
+            // Someone else's change shows up here unless this screen has unsaved edits.
+            if changes == nil { draft = latest }
+        }
+        .navigationTitle(draft?.title ?? "Task")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Save") {
+                    guard let changes else { return }
+                    Task { if let saved = await store.updateTask(id: taskId, changes) { draft = saved } }
+                }
+                .disabled(changes == nil)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Section("Assign to…") {
+                        ForEach(store.agentProfiles) { profile in
+                            Button(profile.label) { assign(to: profile) }
+                        }
+                    }
+                } label: {
+                    Label("Assign to…", systemImage: "person.crop.circle.badge.plus")
+                }
+                .disabled(store.agentProfiles.isEmpty || assigning || changes != nil)
+            }
+        }
+        .confirmationDialog("Delete this task?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { Task { await store.deleteTask(id: taskId) } }
+        }
+        .alert("Assign to…", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(alert ?? "")
+        }
+        .alert("Create the folder?", isPresented: Binding(get: { approveFolder != nil }, set: { if !$0 { approveFolder = nil } })) {
+            Button("Create and Start") {
+                guard let pending = approveFolder else { return }
+                start(pending.agent, machineId: pending.machineId, directory: pending.directory, approve: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(approveFolder?.directory ?? "")
+        }
+    }
+
+    private func form(_ task: Binding<AgentTask>) -> some View {
+        Form {
+            Section {
+                TextField("Title", text: task.title)
+                TextField("What was asked", text: Binding(get: { task.wrappedValue.description ?? "" },
+                                                          set: { task.wrappedValue.description = $0.isEmpty ? nil : $0 }),
+                          axis: .vertical)
+                    .lineLimit(3...12)
+            }
+            Section {
+                TaskAssigneePicker(assignee: task.assignee, agents: store.agentProfiles)
+                Picker("Status", selection: task.status) {
+                    ForEach(AgentTask.Status.allCases) { Text($0.label).tag($0) }
+                }
+                if let due = task.wrappedValue.due(), task.wrappedValue.status != .done {
+                    Text(due.text).foregroundStyle(due.overdue ? Color.red : Color.secondary)
+                }
+            }
+            Section("Dates") {
+                TaskDateField(title: "Starts", ms: task.startAt)
+                TaskDateField(title: "Due", ms: task.dueAt)
+            }
+            Section {
+                Picker("Machine", selection: Binding(get: { task.wrappedValue.machineId ?? "" },
+                                                     set: { task.wrappedValue.machineId = $0.isEmpty ? nil : $0 })) {
+                    Text("Any").tag("")
+                    ForEach(store.machines) { Text($0.name).tag($0.id) }
+                    if let id = task.wrappedValue.machineId, !store.machines.contains(where: { $0.id == id }) { Text(id).tag(id) }
+                }
+                TextField("Folder", text: Binding(get: { task.wrappedValue.directory ?? "" },
+                                                  set: { task.wrappedValue.directory = $0.isEmpty ? nil : $0 }))
+                    .autocorrectionDisabled()
+            } header: {
+                Text("Where")
+            } footer: {
+                Text("Assign to… starts the agent here; without a folder it uses the machine's latest folder.")
+            }
+            sourceSection(task)
+            Section("Comment") {
+                TextField("Add a comment", text: $comment, axis: .vertical)
+                Button("Add Comment") {
+                    let text = comment
+                    comment = ""
+                    Task { if let saved = await store.updateTask(id: taskId, AgentTask.Update(comment: text)) { draft = saved } }
+                }
+                .disabled(comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if !task.wrappedValue.threads.isEmpty {
+                Section("Sessions") {
+                    ForEach(task.wrappedValue.threads, id: \.self) { sessionId in
+                        Button {
+                            Task { await store.openRelatedSession(sessionId) }
+                            close()
+                        } label: {
+                            Text(store.sessions[sessionId]?.title ?? sessionId).lineLimit(1)
+                        }
+                    }
+                }
+            }
+            if !task.wrappedValue.log.isEmpty {
+                Section("History") {
+                    ForEach(Array(task.wrappedValue.log.enumerated().reversed()), id: \.offset) { _, entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let text = entry.text { Text(text) }
+                            HStack(spacing: 4) {
+                                Text(who(entry))
+                                if let status = entry.status { Text("→ \(status.label)") }
+                                Text(Date(timeIntervalSince1970: entry.at / 1000), style: .relative)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Section {
+                Button("Delete Task", role: .destructive) { confirmDelete = true }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func sourceSection(_ task: Binding<AgentTask>) -> some View {
+        let source = Binding(get: { task.wrappedValue.source ?? AgentTask.Source() },
+                             set: { next in
+                                 let empty = (next.label ?? "").isEmpty && (next.url ?? "").isEmpty && next.sessionId == nil
+                                 task.wrappedValue.source = empty ? nil : next
+                             })
+        return Section("Where It Came From") {
+            Picker("Kind", selection: source.kind) {
+                Text("Chat").tag("chat")
+                Text("Email").tag("email")
+                Text("Session").tag("session")
+                Text("Other").tag("other")
+            }
+            TextField("Label", text: Binding(get: { source.wrappedValue.label ?? "" },
+                                             set: { source.wrappedValue.label = $0.isEmpty ? nil : $0 }))
+            TextField("Link", text: Binding(get: { source.wrappedValue.url ?? "" },
+                                            set: { source.wrappedValue.url = $0.isEmpty ? nil : $0 }))
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                #endif
+            if let link = source.wrappedValue.url.flatMap(URL.init(string:)), link.scheme != nil {
+                Link("Open Link", destination: link)
+            }
+            if let sessionId = source.wrappedValue.sessionId {
+                Button("Open Session") {
+                    Task { await store.openRelatedSession(sessionId) }
+                    close()
+                }
+            }
+        }
+    }
+
+    private func who(_ entry: AgentTask.LogEntry) -> String {
+        if entry.byUser { return String(localized: "You") }
+        if let id = entry.by["agentId"]?.stringValue {
+            return store.agentProfile(id: id)?.label ?? String(localized: "An agent")
+        }
+        return String(localized: "A session")
+    }
+
+    /// The task's machine (or the first one online) and folder (or that machine's latest one).
+    private func assign(to agent: AgentProfile) {
+        guard let task = stored else { return }
+        let machine = store.machines.first { $0.id == task.machineId } ?? store.machines.first { $0.active }
+        guard let machine else {
+            alert = String(localized: "No machine is online to start \(agent.name) on. Choose the task's machine when one is connected.")
+            return
+        }
+        let directory = task.directory
+            ?? Machine.recentDirectories(machineId: machine.id, sessions: Array(store.sessions.values)).first
+            ?? machine.homeDir
+        guard let directory, !directory.isEmpty else {
+            alert = String(localized: "Set the task's folder first, so \(agent.name) knows where to work.")
+            return
+        }
+        start(agent, machineId: machine.id, directory: directory, approve: false)
+    }
+
+    private func start(_ agent: AgentProfile, machineId: String, directory: String, approve: Bool) {
+        assigning = true
+        Task {
+            let outcome = await store.assignTask(id: taskId, to: agent, machineId: machineId, directory: directory, approveNewDirectory: approve)
+            assigning = false
+            draft = store.task(id: taskId)
+            switch outcome {
+            case .created: close()
+            case .needsDirectoryApproval(let path): approveFolder = (agent, machineId, path)
+            case .failed(let message): alert = message
+            }
+        }
+    }
+}

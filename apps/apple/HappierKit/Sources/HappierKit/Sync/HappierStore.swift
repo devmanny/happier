@@ -402,6 +402,124 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Tasks (`task/<id>`, sealed `agent_task`)
+
+    /// The user's and the agents' tasks, once loaded.
+    public private(set) var tasks: [AgentTask] = []
+    public private(set) var tasksError: String?
+    /// False when the tasks listing came back full: some tasks may be missing from it.
+    public private(set) var tasksComplete = true
+
+    public func task(id: String?) -> AgentTask? {
+        guard let id else { return nil }
+        return tasks.first { $0.id == id }
+    }
+
+    public func refreshTasks() async {
+        guard let api else { return }
+        guard let machineKey = keys?.content.secretKey else {
+            tasksError = String(localized: "Tasks need an end-to-end encrypted account.")
+            return
+        }
+        do {
+            let listing = try await api.kvList(prefix: AgentTask.kvPrefix)
+            tasksComplete = KVListing.isComplete(listing)
+            tasks = AgentTask.records(fromList: listing, machineKey: machineKey)
+            tasksError = nil
+        } catch {
+            tasksError = UserFacingError.message(for: error)
+        }
+    }
+
+    /// Stores a new task.
+    @discardableResult
+    public func createTask(_ task: AgentTask) async -> Bool {
+        await writeTask(task, update: nil) != nil
+    }
+
+    /// Applies `update` to the stored task. When an agent or another device changed it first, the
+    /// update is applied again on their copy, so their comments and fields aren't lost.
+    @discardableResult
+    public func updateTask(id: String, _ update: AgentTask.Update) async -> AgentTask? {
+        guard let current = task(id: id), !update.isEmpty else { return task(id: id) }
+        return await writeTask(current, update: update)
+    }
+
+    public func deleteTask(id: String) async {
+        guard let api, let current = task(id: id) else { return }
+        var version = current.version
+        do {
+            for _ in 0..<3 {
+                switch try await api.kvWrite(key: AgentTask.kvKey(id: id), value: nil, version: version) {
+                case .saved:
+                    tasks.removeAll { $0.id == id }
+                    return
+                case .conflict(let latest, let value):
+                    if value?.isEmpty ?? true {
+                        tasks.removeAll { $0.id == id }
+                        return
+                    }
+                    version = latest
+                }
+            }
+            throw RPCError(message: String(localized: "This task changed somewhere else at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            report(error)
+        }
+    }
+
+    /// Hands the task to `agent` (in progress) and starts a session as that agent in `directory` on
+    /// `machineId`, whose first message carries the task. The new session is linked to the task.
+    public func assignTask(id: String, to agent: AgentProfile, machineId: String, directory: String,
+                           approveNewDirectory: Bool = false) async -> SpawnOutcome {
+        guard let assigned = await updateTask(id: id, AgentTask.Update(assignee: .agent(agent), status: .inProgress)) else {
+            return .failed(lastError ?? String(localized: "The task couldn't be updated."))
+        }
+        let mode = accountSettings?.defaultPermissionMode(for: agent.providerId) ?? .yolo
+        let outcome = await createSession(machineId: machineId, directory: directory, agentId: agent.providerId, permissionMode: mode,
+                                          modelId: agent.modelId, effort: agent.effort, agent: agent,
+                                          firstMessage: assigned.assignmentMessage(agentName: agent.name),
+                                          approveNewDirectory: approveNewDirectory)
+        if case .created(let sessionId) = outcome {
+            await updateTask(id: id, AgentTask.Update(threadSessionId: sessionId))
+            await rename(sessionId, to: assigned.title)
+        }
+        return outcome
+    }
+
+    /// Writes `task` (new when `update` is nil) at its version, re-applying `update` on the server's
+    /// copy after a conflict. Returns the stored task, or nil after reporting the failure.
+    private func writeTask(_ task: AgentTask, update: AgentTask.Update?) async -> AgentTask? {
+        guard let api, let machineKey = keys?.content.secretKey else {
+            report(RPCError(message: String(localized: "Tasks need an end-to-end encrypted account."), code: nil))
+            return nil
+        }
+        var base = task
+        do {
+            for _ in 0..<3 {
+                var next = update.map { base.applying($0, now: ServerClock.nowMs()) } ?? base
+                switch try await api.kvWrite(key: AgentTask.kvKey(id: next.id), value: try next.sealed(machineKey: machineKey), version: base.version) {
+                case .saved(let version):
+                    next.version = version
+                    tasks.removeAll { $0.id == next.id }
+                    tasks.append(next)
+                    return next
+                case .conflict(let latest, let value):
+                    guard update != nil, let value, var current = AgentTask.open(value, machineKey: machineKey) else {
+                        throw RPCError(message: String(localized: "This task was changed or deleted somewhere else. Refresh and try again."),
+                                       code: "version-mismatch")
+                    }
+                    current.version = latest
+                    base = current
+                }
+            }
+            throw RPCError(message: String(localized: "This task changed somewhere else at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            report(error)
+            return nil
+        }
+    }
+
     // MARK: - Relays
 
     private static let knownServersKey = "happier.knownServers"
@@ -486,6 +604,9 @@ public final class HappierStore {
         agentProfileVersions = [:]
         agentMemories = [:]
         agentMemoryError = nil
+        tasks = []
+        tasksError = nil
+        tasksComplete = true
         machines = []
         openSessionIds = OpenSessions()
         draftStates.values.forEach { $0.upload?.cancel() }

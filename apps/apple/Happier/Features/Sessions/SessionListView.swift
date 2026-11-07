@@ -33,6 +33,7 @@ struct SessionListView: View {
     @State private var query = ""
     @State private var showAccount = false
     @State private var showNotifications = false
+    @State private var showTasks = false
     @Environment(NotificationInbox.self) private var inbox
     /// The bell carries a dot while notifications of sessions still listed are waiting.
     private var unseenNotifications: Bool {
@@ -675,6 +676,15 @@ extension SessionListView {
                 }
                 .help(Text("Notifications"))
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    AppHaptics.light()
+                    showTasks = true
+                } label: {
+                    Label("Tasks", systemImage: "checklist")
+                }
+                .help(Text("Tasks for you and your agents"))
+            }
             ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
 
         }
@@ -717,6 +727,12 @@ extension SessionListView {
             NotificationCenterView()
                 #if os(macOS)
                 .frame(minWidth: 420, minHeight: 480)
+                #endif
+        }
+        .sheet(isPresented: $showTasks) {
+            TasksView()
+                #if os(macOS)
+                .frame(minWidth: 520, minHeight: 560)
                 #endif
         }
         .task { await inbox.refresh() }
