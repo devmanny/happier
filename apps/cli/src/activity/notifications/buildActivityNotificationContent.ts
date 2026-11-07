@@ -110,12 +110,16 @@ export function buildActivityNotificationContent(
       fallbackBody: `${event.waitingForCommandLabel} is waiting for your command`,
       includeMessageText: options.readyIncludeMessageText,
       messageText: event.assistantPreviewText,
+      agentName: event.agentName,
     });
     return {
       title: content.title,
       body: content.body,
       data: {
         sessionId: event.sessionId,
+        // The push boundary reads `subtitle`; `options` waits for a client that can show them as buttons.
+        ...(content.subtitle ? { subtitle: content.subtitle } : {}),
+        ...(content.options.length > 0 ? { options: [...content.options] } : {}),
       },
     };
   }

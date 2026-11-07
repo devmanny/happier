@@ -19,7 +19,8 @@ describe('TurnAssistantTextSnapshotStore', () => {
 
     expect(store.getForTurn({ turnToken, startSeqExclusive: 10 })).toMatchObject({
       turnToken,
-      text: 'The branch is ready.',
+      // Raw formatting is kept for the notification formatter; only the ends are trimmed.
+      text: 'The branch\n\nis ready.',
       source: 'ephemeral',
       seq: null,
       localId: 'assistant-1',

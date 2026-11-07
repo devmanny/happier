@@ -826,6 +826,15 @@ export {
 } from './push/readyNotificationContent.js';
 
 export {
+  buildAssistantMessagePreview,
+  stripMarkdown,
+  truncatePlainTextAtWordBoundary,
+  type AssistantMessagePreview,
+} from './text/plainTextPreview.js';
+
+export { hasIncompleteOptions, parseOptionsFromText } from './text/agentResponseOptions.js';
+
+export {
   CODEX_BACKEND_MODES,
   normalizeCodexBackendMode,
   type CodexBackendMode,

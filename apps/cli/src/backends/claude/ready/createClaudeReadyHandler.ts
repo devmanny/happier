@@ -14,7 +14,7 @@ type ClaudeReadySession = Readonly<{
 }>;
 
 type ClaudeReadyPushSender = Readonly<{
-    sendToAllDevices: (title: string, body: string, opts: { sessionId: string }) => void;
+    sendToAllDevices: (title: string, body: string, data: Record<string, unknown>) => void;
 }>;
 
 export function createClaudeReadyHandler(params: Readonly<{

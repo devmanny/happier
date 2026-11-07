@@ -105,6 +105,30 @@ describe('sendReadyWithPushNotification', () => {
     )
   })
 
+  it('sends the raw reply as a clean preview with the agent as subtitle and its options', () => {
+    const sendToAllDevices = vi.fn()
+    const session = {
+      ...createSessionStub('session-9'),
+      getMetadataSnapshot: () => ({ agentIdentityV1: { v: 1, id: 'agent-1', name: 'Mateo', emoji: '🤖' } }),
+    }
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: { sendToAllDevices },
+      waitingForCommandLabel: 'Codex',
+      logPrefix: '[Codex]',
+      sessionTitle: 'Checkout',
+      assistantPreviewText: 'Ya está abierto.\n\n**No se realizó ningún cobro.**\n\nMateo 🤖\n<options>\n<option>Comprar</option>\n<option>Cancelar</option>\n</options>',
+      includeAssistantPreviewText: true,
+    })
+
+    expect(sendToAllDevices).toHaveBeenCalledWith(
+      'Checkout',
+      'Ya está abierto. No se realizó ningún cobro.',
+      { sessionId: 'session-9', subtitle: 'Mateo', options: ['Comprar', 'Cancelar'] },
+    )
+  })
+
   it('falls back to waiting text when assistant preview text is disabled', () => {
     const sendToAllDevices = vi.fn()
     const session = createSessionStub('session-123')

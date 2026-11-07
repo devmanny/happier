@@ -67,4 +67,17 @@ describe('resolveReadyNotificationAssistantText', () => {
       startSeqExclusive: 1,
     })).toBeNull();
   });
+
+  it('keeps the raw reply formatting for the notification formatter and cuts long text at a word boundary', () => {
+    expect(resolveReadyNotificationAssistantText({
+      includeMessageText: true,
+      explicitAssistantText: '  ## Done\n\n- **one**\n- two  ',
+    })).toBe('## Done\n\n- **one**\n- two');
+
+    expect(resolveReadyNotificationAssistantText({
+      includeMessageText: true,
+      explicitAssistantText: 'alpha beta gamma delta',
+      maxTextChars: 14,
+    })).toBe('alpha beta…');
+  });
 });

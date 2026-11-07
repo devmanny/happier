@@ -95,9 +95,10 @@ function sanitizeNotificationSubtitle(raw: string): string {
 }
 
 function resolveIosSubtitleFromPushData(data: Record<string, unknown> | undefined): string | undefined {
-    if (!resolvePushRequestKindFromPushData(data)) return undefined
-    const tool = typeof data?.tool === 'string' ? sanitizeNotificationSubtitle(data.tool) : ''
-    return tool ? tool : undefined
+    // Requests show their tool; other session pushes (a finished turn) the agent the session works as.
+    const raw = resolvePushRequestKindFromPushData(data) ? data?.tool : data?.subtitle
+    const subtitle = typeof raw === 'string' ? sanitizeNotificationSubtitle(raw) : ''
+    return subtitle ? subtitle : undefined
 }
 
 export class PushNotificationClient {

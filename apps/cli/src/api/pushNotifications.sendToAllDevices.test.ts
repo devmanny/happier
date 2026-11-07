@@ -208,6 +208,29 @@ describe('PushNotificationClient.sendToAllDevicesAsync', () => {
     expect((accountChunk as any[])[0].categoryId).toBeUndefined();
   });
 
+  it('shows a ready push\'s agent as subtitle and keeps its options in data, still repliable', async () => {
+    (axios as any).get.mockResolvedValue({ data: { tokens: [{ id: '1', token: 'ExponentPushToken[a]' }] } });
+
+    const client = new PushNotificationClient('t', 'https://api.example.test');
+    await client.sendToAllDevicesAsync('Title', 'Body', { sessionId: 's_1', subtitle: 'Mateo\n', options: ['Yes', 'No'] });
+
+    const [chunk] = sendPushNotificationsAsyncSpy.mock.calls.at(-1) ?? [];
+    expect((chunk as any[])[0]).toMatchObject({
+      subtitle: 'Mateo',
+      categoryId: PUSH_NOTIFICATION_CATEGORY_IDS.sessionMessageV1,
+      data: { sessionId: 's_1', options: ['Yes', 'No'] },
+    });
+  });
+
+  it('bounds a long body at a word boundary', async () => {
+    const client = new PushNotificationClient('t');
+    const body = 'abcdefghijklmnop '.repeat(500).trim();
+    await client.sendPushNotifications([{ to: 'ExponentPushToken[a]', title: 'T', body, data: { sessionId: 's_1' } }]);
+    const message = sendPushNotificationsAsyncSpy.mock.calls[0][0][0];
+    expect(Buffer.byteLength(JSON.stringify(message), 'utf8')).toBeLessThanOrEqual(4096);
+    expect(message.body).toMatch(/ abcdefghijklmnop…$/);
+  });
+
   it('sets iOS subtitle and Android channelId for permission request pushes', async () => {
     (axios as any).get.mockResolvedValue({
       data: {

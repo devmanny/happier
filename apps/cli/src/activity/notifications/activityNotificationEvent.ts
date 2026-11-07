@@ -4,7 +4,10 @@ export type ActivityNotificationEvent =
     sessionId: string;
     sessionTitle?: string | null;
     waitingForCommandLabel: string;
+    /** Raw assistant reply of the finished turn; the content builder formats it. */
     assistantPreviewText?: string | null;
+    /** The agent the session works as (`metadata.agentIdentityV1.name`), shown as subtitle. */
+    agentName?: string | null;
   }>
   | Readonly<{
     topic: 'permission_request';

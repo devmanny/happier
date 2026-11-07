@@ -14,6 +14,7 @@ describe('buildReadyNotificationContent', () => {
     })).toEqual({
       title: 'Review branch',
       body: 'The branch is ready to review.',
+      options: [],
     });
   });
 
@@ -28,6 +29,7 @@ describe('buildReadyNotificationContent', () => {
     })).toEqual({
       title: 'Review branch',
       body: 'Qwen Code is waiting for your command',
+      options: [],
     });
 
     expect(buildReadyNotificationContent({
@@ -40,6 +42,39 @@ describe('buildReadyNotificationContent', () => {
     })).toEqual({
       title: 'Qwen Code',
       body: 'Qwen Code is waiting for your command',
+      options: [],
+    });
+  });
+
+  it('formats the raw assistant message, returns its options and the agent as subtitle', () => {
+    expect(buildReadyNotificationContent({
+      sessionTitle: 'Checkout',
+      defaultTitle: 'Codex',
+      waitingForCommandLabel: 'Codex',
+      fallbackBody: 'Codex is waiting for your command',
+      agentName: 'Mateo',
+      messageText: '## Ready\n\n**No charge was made.**\n\nMateo 🤖\n<options>\n<option>Buy it</option>\n<option>Cancel</option>\n</options>',
+    })).toEqual({
+      title: 'Checkout',
+      subtitle: 'Mateo',
+      body: 'Ready No charge was made.',
+      options: ['Buy it', 'Cancel'],
+    });
+  });
+
+  it('falls back to the waiting body and hides options when the message is disabled', () => {
+    expect(buildReadyNotificationContent({
+      defaultTitle: 'Codex',
+      waitingForCommandLabel: 'Codex',
+      fallbackBody: 'Codex is waiting for your command',
+      includeMessageText: false,
+      agentName: '  Mateo  ',
+      messageText: 'Done <options><option>Yes</option></options>',
+    })).toEqual({
+      title: 'Codex',
+      subtitle: 'Mateo',
+      body: 'Codex is waiting for your command',
+      options: [],
     });
   });
 });
