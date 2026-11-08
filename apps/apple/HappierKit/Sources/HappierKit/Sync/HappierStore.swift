@@ -760,7 +760,9 @@ public final class HappierStore {
 
     /// "Start Now" for a task assigned to an agent: starts a session as that agent in `directory` on
     /// `machineId`, whose first message carries the task, links it and puts the task in progress.
-    public func startTaskNow(id: String, machineId: String, directory: String, approveNewDirectory: Bool = false) async -> SpawnOutcome {
+    /// `opensSession` false: the caller opens it (after closing what showed the task).
+    public func startTaskNow(id: String, machineId: String, directory: String, approveNewDirectory: Bool = false,
+                             opensSession: Bool = true) async -> SpawnOutcome {
         guard let current = task(id: id), let agentId = current.assignee.agentId, let agent = agentProfile(id: agentId) else {
             return .failed(String(localized: "Assign the task to one of your agents first."))
         }
@@ -768,10 +770,13 @@ public final class HappierStore {
         let outcome = await createSession(machineId: machineId, directory: directory, agentId: agent.providerId, permissionMode: current.permissionMode,
                                           modelId: agent.modelId, effort: agent.effort, agent: agent,
                                           firstMessage: current.assignmentMessage(agentName: agent.name),
-                                          approveNewDirectory: approveNewDirectory)
+                                          approveNewDirectory: approveNewDirectory, opensSession: false)
         if case .created(let sessionId) = outcome {
+            // Linked and named before the session is opened: opening it changes what's on screen
+            // (the task's sheet may go away), and a start must not be left unlinked by that.
             await markStarted(id: id, sessionId: sessionId)
             await rename(sessionId, to: current.title)
+            if opensSession { openRequest = sessionId }
         }
         return outcome
     }
@@ -2077,7 +2082,8 @@ public final class HappierStore {
                               modelId: String? = nil, effort: String? = nil, agent: AgentProfile? = nil,
                               firstMessage: String, attachments: [AttachmentDraft] = [], goal: String? = nil,
                               approveNewDirectory: Bool = false,
-                              grouping: NewSessionGroup? = nil, title: String? = nil) async -> SpawnOutcome {
+                              grouping: NewSessionGroup? = nil, title: String? = nil,
+                              opensSession: Bool = true) async -> SpawnOutcome {
         let nonce = UUID().uuidString.lowercased()
         let params = SpawnRequest.params(directory: directory, agentId: agentId, permissionMode: permissionMode, modelId: modelId,
                                          effort: effort, nonce: nonce, approveNewDirectory: approveNewDirectory, agent: agent)
@@ -2124,7 +2130,8 @@ public final class HappierStore {
             if !message.isEmpty || !attachments.isEmpty, sessions[sessionId] != nil {
                 await send(message, attachments: attachments, to: sessionId)
             }
-            openRequest = sessionId
+            // A caller with more to record first (a task's start) opens it itself afterwards.
+            if opensSession { openRequest = sessionId }
             return .created(sessionId: sessionId)
         } catch {
             return .failed(UserFacingError.message(for: error))

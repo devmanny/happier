@@ -1733,8 +1733,11 @@ private struct TaskDetailView: View {
                 let sent = await store.startTaskInSession(id: taskId)
                 working = false
                 if sent {
-                    await store.openRelatedSession(sessionId)
+                    // Close what shows the task first, then open the session: opening it first
+                    // took away the screen that presented this sheet, and closing afterwards
+                    // then closed the session that had just opened.
                     close()
+                    await store.openRelatedSession(sessionId)
                 } else {
                     alert = String(localized: "The task couldn't be sent to its session. If the message failed there, retry it from the session.")
                 }
@@ -1784,11 +1787,15 @@ private struct TaskDetailView: View {
     private func spawn(_ agent: AgentProfile, machineId: String, directory: String, approve: Bool) {
         working = true
         Task {
-            let outcome = await store.startTaskNow(id: taskId, machineId: machineId, directory: directory, approveNewDirectory: approve)
+            // Linked and named by the store first; this screen closes, then the session opens.
+            let outcome = await store.startTaskNow(id: taskId, machineId: machineId, directory: directory,
+                                                   approveNewDirectory: approve, opensSession: false)
             working = false
             if let fresh = store.task(id: taskId) { draft = fresh }
             switch outcome {
-            case .created: close()
+            case .created(let sessionId):
+                close()
+                await store.openRelatedSession(sessionId)
             case .needsDirectoryApproval(let path): approveFolder = (agent, machineId, path)
             case .failed(let message): alert = message
             }
