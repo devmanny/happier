@@ -196,6 +196,7 @@ import { deriveUsageLimitRecoveryTiming } from '@/session/usageLimitRecoveryCont
 import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { isCommittedRuntimeAuthRecoveryDisposition } from '@/daemon/connectedServices/runtimeAuth/resolveRuntimeAuthRecoveryCommitDisposition';
+import { buildModelEffortChangeOutcome } from '@/agent/runtime/configChange/modelEffortChangeOutcome';
 
 type CodexAppServerStartOrLoadOptions = Readonly<{
     resumeId?: string | null;
@@ -1389,6 +1390,26 @@ export function createCodexAppServerRuntime(params: Readonly<{
     let currentCollaborationMode: NonNullable<ReturnType<typeof resolveCodexAppServerCollaborationModeSelection>>['payload'] | null = null;
     let currentModelId: string | null = null;
     let currentReasoningEffort: string | null = null;
+    /** The model and effort the last started turn ran with: a change is recorded when a turn applies it. */
+    let lastAppliedTurnConfig: { model: string | null; effort: string | null } | null = null;
+    const recordAppliedTurnConfig = (applied: { model: string | null; effort: string | null }) => {
+        const previous = lastAppliedTurnConfig;
+        lastAppliedTurnConfig = applied;
+        if (!previous) return;
+        const event = buildModelEffortChangeOutcome({
+            provider: 'codex',
+            runtime: 'codex-app-server',
+            previous,
+            applied,
+            modelLabel: (modelId) => {
+                const models = (params.session.getMetadataSnapshot?.() as { sessionModelsV1?: { availableModels?: Array<{ id?: unknown; name?: unknown }> } } | null)
+                    ?.sessionModelsV1?.availableModels;
+                const name = models?.find((model) => model.id === modelId)?.name;
+                return typeof name === 'string' && name.trim() ? name.trim() : modelId;
+            },
+        });
+        if (event) params.session.sendSessionEvent?.(event);
+    };
     let currentServiceTier: string | null = null;
     let hasServiceTierOverride = false;
     let pendingTurnStartSeqInclusive: number | null = null;
@@ -5188,6 +5209,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             currentCollaborationMode = null;
             currentModelId = null;
             currentReasoningEffort = null;
+            lastAppliedTurnConfig = null;
             currentServiceTier = null;
             permissionSupport = 'unknown';
             nextClientConnectedServiceIdentity = latestConnectedServiceRuntimeIdentity ?? nextClientConnectedServiceIdentity;
@@ -5425,6 +5447,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         }
                     }
                     const startedTurnId = readTurnId(response);
+                    // The provider accepted the turn with these: that's when a change is applied.
+                    recordAppliedTurnConfig({
+                        model: typeof turnStartParams.model === 'string' ? turnStartParams.model : null,
+                        effort: typeof turnStartParams.effort === 'string' ? turnStartParams.effort : null,
+                    });
                     if (startedTurnId) {
                         pendingTurn = { ...activeTurn, turnId: startedTurnId };
                         latestPendingTurnId = startedTurnId;

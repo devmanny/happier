@@ -264,19 +264,26 @@ private struct EventRow: View {
     let event: TranscriptEvent
 
     var body: some View {
-        Text(label)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+        Group {
+            if event.kind == "runtime-config-outcome" {
+                // "Model changed to … · Effort High · 4:12 PM": when it changed.
+                Text("\(label) · \(event.createdAt, format: .dateTime.hour().minute())")
+            } else {
+                Text(label)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
     }
 
     private var label: String {
         switch event.kind {
         case "switch":
             event.data["mode"]?.stringValue == "local" ? String(localized: "Continued on the computer") : String(localized: "Continued remotely")
-        case "message":
+        case "message", "runtime-config-outcome":
             event.data["message"]?.stringValue ?? ""
         case "limit-reached":
             String(localized: "Usage limit reached")

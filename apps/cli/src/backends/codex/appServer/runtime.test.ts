@@ -8437,6 +8437,40 @@ describe('createCodexAppServerRuntime', () => {
         );
     });
 
+    it('records a model or effort change once the turn that applies it started, and only then', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-config-change-line-');
+        const sendSessionEvent = vi.fn();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn(), sendSessionEvent } as any,
+        });
+
+        await runtime.setSessionModel('gpt-5.4');
+        await runtime.setSessionConfigOption('reasoning_effort', 'medium');
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('first');
+        const configLines = () => sendSessionEvent.mock.calls.map(([event]) => event).filter((event) => event?.type === 'runtime-config-outcome');
+        // The first turn is the baseline, not a change.
+        expect(configLines()).toEqual([]);
+
+        await runtime.setSessionModel('gpt-5.5');
+        await runtime.setSessionConfigOption('reasoning_effort', 'high');
+        await runtime.sendPrompt('second');
+        expect(configLines()).toEqual([expect.objectContaining({
+            type: 'runtime-config-outcome', provider: 'codex', runtime: 'codex-app-server', status: 'applied',
+            message: 'Model changed to gpt-5.5 · Effort High',
+            changes: [
+                { key: 'model', previous: 'gpt-5.4', effective: 'gpt-5.5' },
+                { key: 'reasoningEffort', previous: 'medium', effective: 'high' },
+            ],
+        })]);
+
+        await runtime.sendPrompt('third');
+        expect(configLines()).toHaveLength(1);
+        await runtime.reset();
+    });
+
     it('keeps Fast service tier for the first turn even when thread/start responds with serviceTier: null', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-thread-start-fast-persist-');
 

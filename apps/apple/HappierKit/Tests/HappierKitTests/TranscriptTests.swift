@@ -125,6 +125,24 @@ import Testing
     }
 }
 
+/// A model or effort change the runner applied shows as a line in the conversation; other runtime
+/// config outcomes stay out of it.
+@Suite struct ModelChangeLineTests {
+    private func kinds(_ data: JSONValue) -> [String] {
+        Normalizer.event(data).compactMap { if case .event(let kind, _) = $0 { kind } else { nil } }
+    }
+
+    @Test func aModelOrEffortChangeIsALineAndOtherOutcomesAreNot() {
+        let line = kinds(["type": "runtime-config-outcome", "runtime": "codex-app-server", "status": "applied",
+            "message": "Model changed to GPT 6.1 Sol · Effort High",
+            "changes": [["key": "model", "previous": "gpt-6", "effective": "gpt-6.1-sol"], ["key": "reasoningEffort", "previous": "medium", "effective": "high"]]])
+        #expect(line == ["runtime-config-outcome"])
+        let other = kinds(["type": "runtime-config-outcome", "runtime": "claude-unified-terminal", "status": "requires_restart",
+            "message": "Restart to apply", "changes": [["key": "launchOption", "requested": "x"]]])
+        #expect(other.isEmpty)
+    }
+}
+
 /// A sent message keeps one identity from optimistic bubble to committed row, so the UI updates
 /// it in place instead of removing one bubble and inserting another.
 @Suite struct UserMessageIdentityTests {

@@ -89,10 +89,17 @@ enum Normalizer {
 
     // MARK: Session events
 
-    private static func event(_ data: JSONValue) -> [Block] {
+    static func event(_ data: JSONValue) -> [Block] {
         guard let kind = data["type"]?.stringValue else { return [] }
         switch kind {
-        case "ready", "task-lifecycle", "terminal-composer-draft-blocked", "runtime-config-outcome": return []
+        case "ready", "task-lifecycle", "terminal-composer-draft-blocked": return []
+        case "runtime-config-outcome":
+            // A model or effort change the runner applied is a line in the conversation; other
+            // runtime outcomes (restarts, launch options) stay out of it.
+            let keys = data["changes"]?.arrayValue?.compactMap { $0["key"]?.stringValue } ?? []
+            let isModelOrEffort = keys.contains("model") || keys.contains("reasoningEffort")
+            return isModelOrEffort && data["status"]?.stringValue == "applied" && data["message"]?.stringValue != nil
+                ? [.event(kind: kind, data: data)] : []
         default: return [.event(kind: kind, data: data)]
         }
     }

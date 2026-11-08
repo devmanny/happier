@@ -274,6 +274,17 @@ machines. The daemon never registers these methods.
 ## HTTP endpoints by area
 See `api.md` for the full HTTP endpoint catalog and auth flows.
 
+### Model and effort changes in the transcript
+When a runner applies a different model or reasoning effort, it writes one transcript event
+`runtime-config-outcome` with `status: "applied"`, `changes` holding the previous and effective value
+of what changed (`model`, `reasoningEffort`) and `message` like "Model changed to GPT 6.1 Sol ·
+Effort High" (only the part that changed). One builder owns it
+(`apps/cli/src/agent/runtime/configChange/modelEffortChangeOutcome.ts`): Claude records what its
+runtime reports it runs with (`effectiveModelUpdate.ts`, which used to write a plain "Model changed
+to" message event), Codex app-server when a `turn/start` with the new values is accepted. The first
+observation of a session is a baseline, never a change. The RN/web app already renders the event;
+the native app shows it as a centered line with its time.
+
 ## Sequencing and concurrency
 - `UpdatePayload.seq` is the per-user update sequence (monotonic) used for sync ordering.
 - Sessions, machines, and artifacts have their own `seq` fields used by clients for ordering.
