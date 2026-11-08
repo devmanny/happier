@@ -131,6 +131,9 @@ public final class HappierStore {
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var openSessionIds = OpenSessions()
     @ObservationIgnored private var loadTasks: [String: Task<Void, Never>] = [:]
+    /// Cached transcripts of sessions closed here whose messages were edited since (a lean
+    /// `message-updated`): the newest page is read again when they're opened.
+    @ObservationIgnored private var staleTranscripts: Set<String> = []
     @ObservationIgnored private var pendingFetches: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var pendingFetchDirty: Set<String> = []
     @ObservationIgnored private var pushDevice: PushDevice?
@@ -540,6 +543,26 @@ public final class HappierStore {
 
     func setAgentMemoryForTests(_ memory: AgentMemory, agentId: String) {
         agentMemories[agentId] = memory
+    }
+
+    /// Signed in to `api` with `keys` without the sync loop or a socket: acknowledged socket emits
+    /// (machine RPCs, metadata edits) go to `socketAck`, and updates arrive through `handleUpdate`.
+    func installForTesting(api: HappierAPI, keys: AccountKeys, snapshotDirectory: URL,
+                           socketAck: @escaping (_ event: String, _ payload: JSONValue) async throws -> [JSONValue]) {
+        self.api = api
+        self.keys = keys
+        snapshots = SessionSnapshotStore(directory: snapshotDirectory, scope: "test")
+        testSocketAck = socketAck
+        phase = .ready
+    }
+
+    @ObservationIgnored private var testSocketAck: ((String, JSONValue) async throws -> [JSONValue])?
+
+    /// The connected socket's acknowledged emit (the tests' stand-in when installed); nil offline.
+    private var acknowledgedEmit: ((String, JSONValue, Duration) async throws -> [JSONValue])? {
+        if let testSocketAck { return { event, payload, _ in try await testSocketAck(event, payload) } }
+        guard let socket, connection == .online else { return nil }
+        return { event, payload, timeout in try await socket.emitWithAck(event, payload, timeout: timeout) }
     }
 
     /// After a reconnect or coming back to the foreground: nothing to read when the KV store didn't
@@ -1009,6 +1032,7 @@ public final class HappierStore {
         sessionTokenUsage.removeAll()
         sessions.removeAll()
         transcripts.removeAll()
+        staleTranscripts = []
         resumingSessions.removeAll()
         hasLoadedSessions = false
         pendingQueues = [:]
@@ -1406,19 +1430,21 @@ public final class HappierStore {
         }
     }
 
-    private func handleUpdate(_ body: JSONValue) async {
+    func handleUpdate(_ body: JSONValue) async {
         switch body["t"]?.stringValue {
         case "new-message", "message-updated":
             guard let sid = body["sid"]?.stringValue, let session = sessions[sid], let row = body["message"] else { return }
             if row["contentOmitted"]?.boolValue == true {
                 // Lean notice for a session not open here: the list learns of it; the conversation
                 // reads it when opened (a cached transcript catches up by seq; an edit to a message
-                // it already has is read with a fresh load).
+                // it already has is read with the newest page, over the cached rows).
                 var updated = session
                 if let seq = row["seq"]?.intValue { updated.seq = max(session.seq, seq) }
                 if let at = Session.date(row["createdAt"]), body["t"]?.stringValue == "new-message" { updated.meaningfulActivityAt = at }
                 if updated != session { sessions[sid] = updated }
-                if body["t"]?.stringValue == "message-updated", !openSessionIds.contains(sid) { transcripts[sid] = nil }
+                if body["t"]?.stringValue == "message-updated", !openSessionIds.contains(sid), transcripts[sid] != nil {
+                    staleTranscripts.insert(sid)
+                }
                 return
             }
             do {
@@ -1500,6 +1526,12 @@ public final class HappierStore {
         }
         if case .after = transcripts[id]?.refresh {
             await catchUp(id)
+            if staleTranscripts.contains(id) {
+                do {
+                    await apply(try await api.messages(sessionId: id).rows, to: id)
+                    staleTranscripts.remove(id)
+                } catch { logBackground(error, "edited messages") }
+            }
         } else {
             loadingTranscripts.insert(id)
             transcriptErrors[id] = nil
@@ -1513,6 +1545,7 @@ public final class HappierStore {
                 log.notice("open: fetch=\(fetched - started, privacy: .public) decode+reduce=\(clock.now - fetched, privacy: .public) rows=\(page.rows.count, privacy: .public)")
                 hasOlderMessages[id] = page.hasMore
                 transcripts[id]?.markLoaded()
+                staleTranscripts.remove(id)
             } catch {
                 transcriptErrors[id] = UserFacingError.message(for: error)
                 log.error("open failed: \(String(describing: error), privacy: .public)")
@@ -1842,7 +1875,7 @@ public final class HappierStore {
     /// the server refuses those without it.
     public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30),
                            authorizingSession: String? = nil) async throws -> JSONValue {
-        guard let socket, connection == .online, let api else { throw RPCError(message: "Not connected", code: nil) }
+        guard let emit = acknowledgedEmit, let api else { throw RPCError(message: "Not connected", code: nil) }
         let machine: Machine
         if let cached = machines.first(where: { $0.id == machineId }) {
             machine = cached
@@ -1853,9 +1886,9 @@ public final class HappierStore {
             if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
         }
         let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
-        let ack = try await socket.emitWithAck("rpc-call", MachineRPCCall.payload(
+        let ack = try await emit("rpc-call", MachineRPCCall.payload(
             machineId: machineId, method: method, params: encoded, timeoutMs: Int(timeout.components.seconds * 1000),
-            authorizingSession: authorizingSession), timeout: timeout + .seconds(5))
+            authorizingSession: authorizingSession), timeout + .seconds(5))
         guard let response = ack.first, response["ok"]?.boolValue == true else {
             throw RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.", code: ack.first?["errorCode"]?.stringValue)
         }
@@ -3127,7 +3160,7 @@ public final class HappierStore {
     /// Read-modify-write of the full session metadata with optimistic concurrency
     /// (`update-metadata`, retried on version mismatch like `updateSessionMetadataWithRetry.ts`).
     private func editMetadata(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async {
-        guard let socket, connection == .online else {
+        guard let emit = acknowledgedEmit else {
             lastError = "Not connected. Try again when the connection is back."
             return
         }
@@ -3136,11 +3169,11 @@ public final class HappierStore {
                 guard let session = sessions[sessionId] else { return }
                 let next = edit(session.metadata, ServerClock.nowMs())
                 if next == session.metadata { return }
-                let ack = try await socket.emitWithAck("update-metadata", [
+                let ack = try await emit("update-metadata", [
                     "sid": .string(sessionId),
                     "expectedVersion": .number(Double(session.metadataVersion)),
                     "metadata": .string(try session.encodeDocument(next)),
-                ])
+                ], .seconds(30))
                 guard let response = ack.first, let version = response["version"]?.intValue else {
                     throw RPCError(message: "Invalid metadata update response", code: nil)
                 }
