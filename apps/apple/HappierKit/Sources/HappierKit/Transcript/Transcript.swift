@@ -73,6 +73,9 @@ public struct Transcript: Sendable {
         }
     }
 
+    /// The agent state last applied (pending permissions come from it).
+    var agentStateValue: JSONValue { agentState }
+
     public mutating func apply(agentState: JSONValue) {
         self.agentState = agentState
         finish()

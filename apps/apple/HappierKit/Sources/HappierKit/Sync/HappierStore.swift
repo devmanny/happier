@@ -1299,7 +1299,7 @@ public final class HappierStore {
         Task { await refreshPinnedSessions() }
         Task { await handlePendingPushTap() }
         for id in ids where transcripts[id] != nil {
-            if let state = sessions[id]?.agentState { transcripts[id]?.apply(agentState: state) }
+            if let state = sessions[id]?.agentState { applyAgentState(state, to: id) }
         }
         // A conversation opened before its session was known (a cold start, a notification tap)
         // loads as soon as it is.
@@ -1465,7 +1465,7 @@ public final class HappierStore {
             guard let id = body["id"]?.stringValue else { return }
             do { try sessions[id]?.apply(update: body) } catch { logBackground(error, "session update") }
             if body["agentState"] != nil, let state = sessions[id]?.agentState, transcripts[id] != nil {
-                transcripts[id]?.apply(agentState: state)
+                applyAgentState(state, to: id)
             }
         case "pending-changed":
             guard let sid = body["sid"]?.stringValue ?? body["sessionId"]?.stringValue else { return }
@@ -1620,6 +1620,13 @@ public final class HappierStore {
 
     /// Applying the canonical transcript also releases any failed local send it confirms. During
     /// an in-flight request, the owner consumes that acknowledgement before finishing its attempt.
+    /// The session's agent state into its transcript, only when it changed: every write to a
+    /// transcript redraws its conversation (the store can't compare whole transcripts).
+    private func applyAgentState(_ state: JSONValue, to id: String) {
+        guard let transcript = transcripts[id], transcript.agentStateValue != state else { return }
+        transcripts[id]?.apply(agentState: state)
+    }
+
     private func applyTranscript(_ messages: [TranscriptMessage], to id: String) {
         transcripts[id]?.apply(messages)
         for message in messages {
@@ -2209,7 +2216,8 @@ public final class HappierStore {
                 do {
                     let rows = try await api.pending(sessionId: id)
                     let items = await Task.detached { PendingMessage.list(rows, session: session) }.value
-                    pendingQueues[id] = items
+                    // Read again with the same messages: nothing to redraw.
+                    if pendingQueues[id] != items { pendingQueues[id] = items }
                 } catch {
                     log.error("pending refresh failed: \(String(describing: error), privacy: .public)")
                 }

@@ -59,6 +59,45 @@ import Testing
         try await until { !store.loadingTranscripts.contains("s1") }
         #expect(relay.log.values.filter { $0.hasPrefix("messages") } == ["messages after=2", "messages latest"])
     }
+
+    /// An open conversation redraws only for changes it shows: an update bringing the same agent
+    /// state must not rewrite its transcript.
+    @Test func theSameAgentStateDoesNotRewriteTheTranscript() async throws {
+        let (_, store) = try await openSession()
+        let notified = Flag()
+        withObservationTracking { _ = store.transcripts["s1"] } onChange: { notified.set() }
+        await store.handleUpdate(["t": "update-session", "id": "s1", "agentState": .null])
+        #expect(!notified.value, "the same agent state rewrote the transcript")
+    }
+
+    /// ...nor a pending queue read again with the same messages.
+    @Test func theSamePendingQueueIsNotWrittenAgain() async throws {
+        let (_, store) = try await openSession()
+        let queueNotified = Flag()
+        withObservationTracking { _ = store.pendingQueues["s1"] } onChange: { queueNotified.set() }
+        store.refreshPending("s1")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(!queueNotified.value, "the same pending queue was written again")
+    }
+
+    @MainActor private func openSession() async throws -> (Relay, HappierStore) {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        await store.refreshSessions()
+        store.open("s1")
+        try await until { store.transcripts["s1"]?.isLoaded == true && !store.loadingTranscripts.contains("s1") }
+        try await until { store.pendingQueues["s1"] != nil && !store.loadingTranscripts.contains("s1") }
+        try await Task.sleep(for: .milliseconds(200))
+        return (relay, store)
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var value: Bool { lock.withLock { raised } }
+    func set() { lock.withLock { raised = true } }
 }
 
 // MARK: - Harness
