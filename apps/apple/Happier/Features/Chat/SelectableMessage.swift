@@ -4,10 +4,6 @@ import SwiftUI
 extension EnvironmentValues {
     /// The message whose text is open for selecting ("Select Text"), if any (set by the chat).
     @Entry var textSelectingId: String? = nil
-    /// Opens a message's text for selecting.
-    @Entry var beginTextSelection: ((String) -> Void)? = nil
-    /// Where the message being selected sits on screen, so a tap elsewhere can close it.
-    @Entry var reportTextSelectionFrame: ((CGRect) -> Void)? = nil
     /// Message text can be selected (only while "Select Text" is on, on every platform).
     @Entry var messageTextSelectable = false
 }
@@ -32,7 +28,7 @@ private struct SelectableMessageModifier: ViewModifier {
     let fromUser: Bool
     let shape: BubbleShape
     @Environment(\.textSelectingId) private var selectingId
-    @Environment(\.reportTextSelectionFrame) private var reportFrame
+    @Environment(\.chatRowActions) private var rowActions
 
     func body(content: Content) -> some View {
         if selectingId == id {
@@ -43,7 +39,7 @@ private struct SelectableMessageModifier: ViewModifier {
                     shape.stroke(fromUser ? Color.white.opacity(0.9) : Color.userBubble,
                                  style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                 }
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { reportFrame?($0) }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rowActions?.reportTextSelectionFrame($0) }
                 .transition(.opacity)
         } else {
             content

@@ -174,8 +174,7 @@ private struct AgentBubble: View {
 private struct ReplyOptions: View {
     let options: [String]
     let onSelect: (String) -> Void
-    @Environment(\.editInComposer) private var editInComposer
-    @Environment(\.replyDragStarted) private var replyDragStarted
+    @Environment(\.chatRowActions) private var rowActions
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -191,7 +190,7 @@ private struct ReplyOptions: View {
                 .buttonStyle(.glass)
                 .glassHover()
                 .onDrag {
-                    replyDragStarted?(option)
+                    rowActions?.replyDragStarted(option)
                     return NSItemProvider(object: option as NSString)
                 } preview: {
                     pill(option)
@@ -200,8 +199,8 @@ private struct ReplyOptions: View {
                         .background(.regularMaterial, in: Capsule())
                 }
                 .contextMenu {
-                    if let editInComposer {
-                        Button("Edit before Sending", systemImage: "pencil") { AppHaptics.light(); editInComposer(option) }
+                    if let rowActions {
+                        Button("Edit before Sending", systemImage: "pencil") { AppHaptics.light(); rowActions.editInComposer(option) }
                     }
                     Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(option); AppHaptics.success() }
                 }
@@ -311,8 +310,7 @@ private struct MessageActionsModifier: ViewModifier {
     let selectionId: String?
     let target: MessageTarget?
     @Environment(HappierStore.self) private var store
-    @Environment(\.beginMessageSelection) private var beginSelection
-    @Environment(\.beginTextSelection) private var beginTextSelection
+    @Environment(\.chatRowActions) private var rowActions
 
     func body(content: Content) -> some View {
         let pinned = target.map { store.pins.isPinned(sessionId: $0.sessionId, seq: $0.seq) } ?? false
@@ -339,11 +337,11 @@ private struct MessageActionsModifier: ViewModifier {
                         AppHaptics.light()
                         MessageSpeaker.shared.toggle(text)
                     }
-                    if let selectionId, let beginTextSelection {
-                        Button("Select Text", systemImage: "text.cursor") { beginTextSelection(selectionId) }
+                    if let selectionId, let rowActions {
+                        Button("Select Text", systemImage: "text.cursor") { rowActions.beginTextSelection(selectionId) }
                     }
-                    if let selectionId, let beginSelection {
-                        Button("Select", systemImage: "checkmark.circle") { beginSelection(selectionId) }
+                    if let selectionId, let rowActions {
+                        Button("Select", systemImage: "checkmark.circle") { rowActions.beginMessageSelection(selectionId) }
                     }
                     if let target {
                         Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
@@ -388,12 +386,26 @@ enum MessageClipboard {
     }
 }
 
+/// What a conversation's rows can ask of it: one object per conversation, made once. Closures
+/// handed down through the environment were new on every redraw of the conversation (a closure is
+/// never equal to another), so every row re-ran on every streamed update even when only one
+/// changed; this object keeps its identity, so the environment stays the same.
+@MainActor
+final class ChatRowActions {
+    /// Enters message selection with the given transcript item preselected.
+    var beginMessageSelection: (String) -> Void = { _ in }
+    /// Puts text in the composer to edit before sending.
+    var editInComposer: (String) -> Void = { _ in }
+    /// Opens a message's text for selecting.
+    var beginTextSelection: (String) -> Void = { _ in }
+    /// Where the message being selected sits on screen, so a tap elsewhere can close it.
+    var reportTextSelectionFrame: (CGRect) -> Void = { _ in }
+    /// A reply suggestion started being dragged (a drop anywhere on the conversation lands it in
+    /// the composer instead of attaching it as a file).
+    var replyDragStarted: (String) -> Void = { _ in }
+}
+
 extension EnvironmentValues {
-    /// Enters message selection with the given transcript item preselected (set by the chat).
-    @Entry var beginMessageSelection: ((String) -> Void)? = nil
-    /// Puts text in the composer to edit before sending (set by the chat).
-    @Entry var editInComposer: ((String) -> Void)? = nil
-    /// A reply suggestion started being dragged (set by the chat, so a drop anywhere on the
-    /// conversation lands it in the composer instead of attaching it as a file).
-    @Entry var replyDragStarted: ((String) -> Void)? = nil
+    /// The open conversation's row actions (set by the chat; nil elsewhere).
+    @Entry var chatRowActions: ChatRowActions? = nil
 }

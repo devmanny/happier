@@ -71,6 +71,9 @@ private struct ChatConversationView: View {
     @Environment(HappierStore.self) private var store
     /// Bumped only when "working" flips with time alone (see `body`).
     @State private var statusClock = 0
+    /// The rows' actions: one object for the conversation's life, so the environment its rows read
+    /// doesn't change on every update (see `ChatRowActions`).
+    @State private var rowActions = ChatRowActions()
     @State private var draft = ""
     /// The synced draft text the composer last took up or saw, to tell your own edits from it.
     @State private var lastSyncedDraft = ""
@@ -405,22 +408,13 @@ private struct ChatConversationView: View {
                     .transition(.opacity)
             }
         }
-        .environment(\.beginMessageSelection) { id in
-            AppHaptics.selection()
-            withAnimation(.smooth) { selected = [id] }
-        }
-        .environment(\.editInComposer) { text in appendToDraft(text) }
+        .environment(\.chatRowActions, rowActions)
         // Your bubbles in the project folder's color, when it has one.
         .environment(\.userBubbleColor, store.folderColor(of: session)?.deep ?? .userBubble)
         .environment(\.textSelectingId, textSelectingId)
-        .environment(\.beginTextSelection) { id in
-            AppHaptics.light()
-            withAnimation(.smooth(duration: 0.2)) { textSelectingId = id }
-        }
-        .environment(\.reportTextSelectionFrame) { frame in textSelectingFrame = frame }
-        .environment(\.replyDragStarted) { text in draggedReply = text }
         .modifier(SessionFilePreview(sessionId: sessionId))
         .onAppear {
+            connectRowActions()
             store.open(sessionId)
             // What you were typing here before switching away, synced or not.
             if draft.isEmpty, let local = store.localDraft(sessionId) { draft = local }
@@ -542,6 +536,21 @@ private struct ChatConversationView: View {
     }
 
     /// Adds text to what's being written, a space apart.
+    /// What the rows' actions do here; set once (they write this view's state, which outlives copies).
+    private func connectRowActions() {
+        rowActions.beginMessageSelection = { id in
+            AppHaptics.selection()
+            withAnimation(.smooth) { selected = [id] }
+        }
+        rowActions.editInComposer = { text in appendToDraft(text) }
+        rowActions.beginTextSelection = { id in
+            AppHaptics.light()
+            withAnimation(.smooth(duration: 0.2)) { textSelectingId = id }
+        }
+        rowActions.reportTextSelectionFrame = { frame in textSelectingFrame = frame }
+        rowActions.replyDragStarted = { text in draggedReply = text }
+    }
+
     private func appendToDraft(_ text: String) {
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             draft = text
