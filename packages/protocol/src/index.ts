@@ -3822,3 +3822,9 @@ export {
   type TaskRecurrenceRule,
   type TaskRecurrenceV1,
 } from './tasks/agentTaskRecurrence.js';
+export {
+  DEVICE_DIAGNOSTICS_KV_PREFIX,
+  DeviceDiagnosticV1Schema,
+  parseDeviceDiagnosticV1,
+  type DeviceDiagnosticV1,
+} from './diagnostics/deviceDiagnostics.js';

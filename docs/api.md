@@ -150,6 +150,17 @@ prefixes:
   JSON in the native app), so a newer build's field survives an older writer. CLI builds up to
   0.2.17-native.22 and app builds before 2026-11-07 14:30 strip unknown fields when they rewrite a
   task (they would drop `permissionMode` and `archivedAt`).
+- `diag/<uuid>` — a MetricKit report (crash/hang diagnostic or daily metrics) from the native Apple
+  app, kind `device_diagnostics` (`packages/protocol/src/diagnostics/deviceDiagnostics.ts`):
+  `{v:1, kind, createdAt, device {model, os}, appVersion, build, encoding: 'zlib', payloadBase64}`,
+  where the payload is `jsonRepresentation()` compressed with Apple's zlib (raw DEFLATE). Written
+  once (version -1); a report whose write would exceed the relay's request body limit (100 MiB
+  `bodyLimit`) is saved as `{v:1, kind, tooLarge: true, compressedBytes, rawBytes, build, createdAt}`.
+  No client reads it back: `happier diagnostics pull [--out <dir>] [--keep] [--json]` saves each one
+  to `<out>/<createdAt>-<kind>-<build>-<uuid>.json` (default `~/.happier/diagnostics`) and deletes the
+  key only after its file is written. `diag` is not a change family the relay knows, so a write
+  marks the `self` KV family: the native app's next catch-up after a reconnect re-reads its tasks,
+  profiles and open memories once; the RN client filters it out by prefix (`todo.`).
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

@@ -131,6 +131,10 @@ const COMMAND_SURFACE_MANIFEST: readonly CliCommandSurfaceEntry[] = [
     allowTmux: false,
   },
   {
+    command: 'diagnostics',
+    allowTmux: false,
+  },
+  {
     command: 'session',
     allowTmux: false,
     rootHelpLabel: 'happier session',
