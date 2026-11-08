@@ -47,25 +47,26 @@ struct FilterButtonIcon: View {
 
     /// The symbol at toolbar size in `color`, with a red dot at its top right.
     static func composed(symbol: String, color: CGColor) -> Image {
-        let pointSize: CGFloat = 17
         let dotDiameter: CGFloat = 7
         #if os(iOS)
-        let configuration = UIImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+        // The toolbar's own size for a symbol (body text style, large scale), and the image exactly
+        // the glyph's size with the dot inside its corner: a bigger canvas was scaled down to fit.
+        let configuration = UIImage.SymbolConfiguration(textStyle: .body, scale: .large)
         guard let base = UIImage(systemName: symbol, withConfiguration: configuration)?
             .withTintColor(UIColor(cgColor: color), renderingMode: .alwaysOriginal) else { return Image(systemName: symbol) }
-        let size = CGSize(width: base.size.width + 2, height: base.size.height + 2)
+        let size = base.size
         let image = UIGraphicsImageRenderer(size: size).image { _ in
-            base.draw(at: CGPoint(x: 0, y: 2))
+            base.draw(at: .zero)
             UIColor.systemRed.setFill()
             UIBezierPath(ovalIn: CGRect(x: size.width - dotDiameter, y: 0, width: dotDiameter, height: dotDiameter)).fill()
         }
         return Image(uiImage: image.withRenderingMode(.alwaysOriginal))
         #else
-        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+        let configuration = NSImage.SymbolConfiguration(textStyle: .body, scale: .large)
             .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor(cgColor: color) ?? .labelColor]))
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration) else { return Image(systemName: symbol) }
-        let size = NSSize(width: base.size.width + 2, height: base.size.height + 2)
+        let size = base.size
         let image = NSImage(size: size, flipped: false) { _ in
             base.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1)
             NSColor.systemRed.setFill()
