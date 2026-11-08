@@ -867,6 +867,7 @@ extension SessionListView {
 struct SessionRow: View, Equatable {
     let session: Session
     @Environment(HappierStore.self) private var store
+    @Environment(\.sessionListOnScreen) private var onScreen
     @State private var speaker = MessageSpeaker.shared
 
     /// Redrawn when its own session changes, not every time any session in the list does.
@@ -919,7 +920,7 @@ struct SessionRow: View, Equatable {
                         Image(systemName: "speaker.wave.2.fill")
                             .font(.caption2)
                             .foregroundStyle(Color.userBubble)
-                            .symbolEffect(.variableColor.iterative, isActive: speaker.speakingText != nil)
+                            .symbolEffect(.variableColor.iterative, isActive: speaker.speakingText != nil && onScreen)
                             .accessibilityLabel(Text("Reading new messages aloud"))
                     }
                     Text(session.title)
@@ -1117,4 +1118,11 @@ struct RenameSessionAlert: ViewModifier {
             }
             .onChange(of: session?.id, initial: true) { name = session?.title ?? "" }
     }
+}
+
+extension EnvironmentValues {
+    /// False while the session list is loaded but hidden (the iPhone drawer closed under a
+    /// conversation): its rows don't animate then. An animating speaker icon there redrew the
+    /// whole hidden list as long as reading aloud went on.
+    @Entry var sessionListOnScreen = true
 }

@@ -674,6 +674,9 @@ struct TasksView: View {
             .navigationDestination(for: TaskRoute.self) { route in
                 // In the panel an opened session shows in the middle while the task stays here.
                 TaskDetailView(taskId: route.id, origin: route.origin) { if presentation == .sheet { dismiss() } }
+                    // One state per task: a link to another task (the panel replaces its path)
+                    // must not keep the previous task's draft.
+                    .id(route)
             }
             .refreshable { await refresh() }
             // Already read and kept live: reading them again here re-laid the list out while the
@@ -1417,7 +1420,7 @@ private struct TaskDetailView: View {
                         }
                     }
                 }
-                .disabled(changes == nil)
+                .disabled(changes == nil || stored == nil)
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {

@@ -27,6 +27,8 @@ struct SessionDrawer: View {
                     }
                     .equatable()
                 }
+                // Hidden under the conversation, the list keeps no animation running.
+                .environment(\.sessionListOnScreen, isOpen || dragX != nil)
                 .frame(width: width)
                 // A little parallax: the sidebar travels slower than the conversation it reveals.
                 .offset(x: (offset - width) * 0.3)
