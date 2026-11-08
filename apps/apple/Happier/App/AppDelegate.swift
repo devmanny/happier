@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
     #if os(iOS)
     private var backgroundUploads: BackgroundUploads?
     #endif
+    private var metricKitReports: MetricKitReports?
     private let log = Logger(subsystem: "dev.happier.apple", category: "push")
 
     /// Asks for notification permission (first time only) and registers with APNs on every launch.
@@ -164,6 +165,7 @@ extension AppDelegate: UIApplicationDelegate {
         Self.current = self
         UNUserNotificationCenter.current().delegate = self
         backgroundUploads = BackgroundUploads(store: store)
+        metricKitReports = MetricKitReports(store: store)
         WatchBridge.shared.store = store
         WatchBridge.shared.activate()
         return true
@@ -182,6 +184,7 @@ extension AppDelegate: NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         Self.current = self
         UNUserNotificationCenter.current().delegate = self
+        metricKitReports = MetricKitReports(store: store)
     }
 
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

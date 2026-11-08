@@ -431,6 +431,29 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Device diagnostics (`diag/<uuid>`, sealed `device_diagnostics`)
+
+    /// Saves one MetricKit report (its `jsonRepresentation()`) for `happier diagnostics pull`.
+    /// Failures go to the log only: the report came from the system, not from something the user did.
+    public func saveDeviceDiagnostic(_ json: Data, kind: DeviceDiagnostic.Kind, origin: DeviceDiagnostic.Origin) async {
+        guard let api, let machineKey = keys?.content.secretKey else {
+            log.error("MetricKit \(kind.rawValue, privacy: .public) report (\(json.count) bytes) not saved: not signed in")
+            return
+        }
+        let key = DeviceDiagnostic.kvKey(id: UUID())
+        do {
+            let saved = try DeviceDiagnostic.sealedValue(json, kind: kind, origin: origin, createdAt: .now, key: key, machineKey: machineKey)
+            if saved.tooLarge {
+                log.error("MetricKit \(kind.rawValue, privacy: .public) report (\(json.count) bytes) too large for one request; saved its size only")
+            }
+            guard case .saved = try await api.kvWrite(key: key, value: saved.value, version: -1) else {
+                throw RPCError(message: "diagnostic key \(key) already exists", code: "version-mismatch")
+            }
+        } catch {
+            logBackground(error, "saving a MetricKit report")
+        }
+    }
+
     // MARK: - Tasks (`task/<id>`, sealed `agent_task`)
 
     /// The user's and the agents' tasks, once loaded.

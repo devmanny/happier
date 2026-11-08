@@ -206,9 +206,8 @@ extension HappierAPI {
 
     /// One key, written only if it is still at `version` (-1 for a new key); nil deletes it.
     func kvWrite(key: String, value: String?, version: Int) async throws -> KVWrite {
-        let mutation: JSONValue = ["key": .string(key), "value": value.map(JSONValue.string) ?? .null, "version": .number(Double(version))]
         do {
-            let response = try await http.post("/v1/kv", ["mutations": [mutation]])
+            let response = try await http.post("/v1/kv", Self.kvWriteBody(key: key, value: value, version: version))
             let saved = response["results"]?.arrayValue?.first { $0["key"]?.stringValue == key }
             return .saved(version: saved?["version"]?.intValue ?? version + 1)
         } catch let error as HTTPClient.ServerError where error.status == 409 {
@@ -216,6 +215,13 @@ extension HappierAPI {
                   conflict["error"]?.stringValue == "version-mismatch" else { throw error }
             return .conflict(version: conflict["version"]?.intValue ?? -1, value: conflict["value"]?.stringValue)
         }
+    }
+}
+
+extension HappierAPI {
+    /// The `POST /v1/kv` body `kvWrite` sends, so a writer can tell its size before sending it.
+    static func kvWriteBody(key: String, value: String?, version: Int) -> JSONValue {
+        ["mutations": [["key": .string(key), "value": value.map(JSONValue.string) ?? .null, "version": .number(Double(version))]]]
     }
 }
 
