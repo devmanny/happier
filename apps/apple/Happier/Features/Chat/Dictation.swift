@@ -24,6 +24,27 @@ final class Dictation {
     @ObservationIgnored private var take = 0
     /// Between being asked to listen and the microphone being up.
     @ObservationIgnored private var starting = false
+    /// This take's hold on audio (reading aloud stays quiet while it's held). One per take, so an
+    /// earlier take unwinding can't release a newer one's.
+    @ObservationIgnored private var audioClaim: AudioClaim?
+
+    private final class AudioClaim {}
+
+    /// Holds audio for the microphone now, before anything else starts: push to talk claims it on
+    /// touch-down so reading aloud can't switch the audio session while the microphone opens
+    /// (that left the input with no valid format and crashed installing the tap).
+    func claimAudio() {
+        guard audioClaim == nil else { return }
+        let claim = AudioClaim()
+        audioClaim = claim
+        MessageSpeaker.shared.beginRecording(claim)
+    }
+
+    private func releaseAudio() {
+        guard let claim = audioClaim else { return }
+        audioClaim = nil
+        MessageSpeaker.shared.endRecording(claim)
+    }
 
     init() {
         // Listing the supported languages is slow: done ahead, off the main thread, so the first
@@ -59,7 +80,8 @@ final class Dictation {
         guard isRecording, let request else {
             // Let go while the microphone was still coming up: it must not start after all
             // (it used to, without the push-to-talk panel, and the next hold did nothing).
-            if starting { stop() }
+            // Let go before it even began: give back the audio claimed on touch-down.
+            if starting { stop() } else { releaseAudio() }
             return
         }
         engine?.stop()
@@ -81,7 +103,7 @@ final class Dictation {
         finishing?.resume()
         finishing = nil
         // An in-flight microphone startup releases ownership when it has actually unwound.
-        defer { if !starting { MessageSpeaker.shared.endRecording(self) } }
+        defer { if !starting { releaseAudio() } }
         take += 1
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
@@ -102,10 +124,10 @@ final class Dictation {
         error = nil
         let current = take
         starting = true
-        MessageSpeaker.shared.beginRecording(self)
+        claimAudio()
         defer {
             starting = false
-            if !isRecording { MessageSpeaker.shared.endRecording(self) }
+            if !isRecording { releaseAudio() }
         }
         guard await Self.authorize() else {
             error = String(localized: "Allow microphone and speech recognition in Settings to dictate.")
@@ -198,7 +220,15 @@ final class Dictation {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if onDevice { request.requiresOnDeviceRecognition = true }
-        let engine = AVAudioEngine()
+        var engine = AVAudioEngine()
+        // An input with no valid format (the audio route was still changing) would raise an
+        // Objective-C exception in `installTap`, which Swift can't catch: check it, give the route
+        // a moment once, then report a normal dictation error.
+        if !Self.hasUsableInput(engine.inputNode) {
+            try await Task.sleep(for: .milliseconds(250))
+            engine = AVAudioEngine()
+            guard Self.hasUsableInput(engine.inputNode) else { throw DictationError.microphoneUnavailable }
+        }
         installTap(on: engine.inputNode, feeding: request, level: level)
         engine.prepare()
         try engine.start()
@@ -211,6 +241,11 @@ final class Dictation {
         }
         guard speech else { return false }
         return await AVAudioApplication.requestRecordPermission()
+    }
+
+    private nonisolated static func hasUsableInput(_ input: AVAudioInputNode) -> Bool {
+        let format = input.outputFormat(forBus: 0)
+        return format.sampleRate > 0 && format.channelCount > 0
     }
 
     private nonisolated static func installTap(on input: AVAudioInputNode, feeding request: SFSpeechAudioBufferRecognitionRequest,
@@ -233,6 +268,17 @@ final class Dictation {
             // Metadata arrives with the last result of an utterance, when the speaker pauses.
             update(result?.bestTranscription.formattedString, result?.speechRecognitionMetadata != nil,
                    error != nil || (result?.isFinal ?? false))
+        }
+    }
+}
+
+/// A dictation that couldn't start, shown like any other dictation error.
+enum DictationError: LocalizedError {
+    case microphoneUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .microphoneUnavailable: String(localized: "The microphone isn't available right now. Try again.")
         }
     }
 }

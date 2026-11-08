@@ -12,6 +12,12 @@ struct HappierApp: App {
 
     private var store: HappierStore { delegate.store }
 
+    init() {
+        // The installed voices take a while to list (and block while they do): listed now, in
+        // the background, so reading aloud never waits on them.
+        MessageSpeaker.prepareVoices()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

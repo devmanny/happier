@@ -1334,6 +1334,32 @@ private struct TaskDetailView: View {
     @State private var changedElsewhere = false
 
     private var stored: AgentTask? { store.task(id: taskId) }
+    /// Still there (or not loaded yet): once loaded, a task gone elsewhere shows "not found".
+    private var showsForm: Bool { draft == nil || stored != nil }
+
+
+    /// Another device's (or an agent's) change to the task.
+    private func storedChanged(_ latest: AgentTask?) {
+        // Gone: the screen says so (above) and the draft is kept.
+        guard let latest else { return }
+        // Someone else's change shows up at once, unless this screen has unsaved edits: then it
+        // says so and lets you choose, instead of overwriting what you're writing.
+        if changes == nil {
+            draft = latest
+            base = latest
+        } else if latest.version != base?.version {
+            changedElsewhere = true
+        }
+    }
+
+    /// "Load Changes": the stored task replaces the edits (when it still exists).
+    private func loadChanges() {
+        if let stored {
+            draft = stored
+            base = stored
+        }
+        changedElsewhere = false
+    }
     private var actions: AgentTask.Actions? { stored?.availableActions(from: origin) }
     private var changes: AgentTask.Update? {
         guard let base = base ?? stored, let draft else { return nil }
@@ -1343,7 +1369,10 @@ private struct TaskDetailView: View {
 
     var body: some View {
         Group {
-            if let draft = Binding($draft) {
+            // Gone (deleted elsewhere) is decided by the stored task; the draft stays set once
+            // loaded, so a field of the form going away can still read it (it crashed when the
+            // draft became nil under it).
+            if showsForm, let draft = Binding($draft) {
                 form(draft)
             } else {
                 ContentUnavailableView("Task Not Found", systemImage: "checklist",
@@ -1356,16 +1385,7 @@ private struct TaskDetailView: View {
                 base = stored
             }
         }
-        .onChange(of: stored) { _, latest in
-            // Someone else's change shows up at once, unless this screen has unsaved edits: then it
-            // says so and lets you choose, instead of overwriting what you're writing.
-            if changes == nil {
-                draft = latest
-                base = latest
-            } else if latest?.version != base?.version {
-                changedElsewhere = true
-            }
-        }
+        .onChange(of: stored) { _, latest in storedChanged(latest) }
         .safeAreaInset(edge: .top) {
             if changedElsewhere {
                 HStack(spacing: 10) {
@@ -1373,11 +1393,7 @@ private struct TaskDetailView: View {
                         .font(.subheadline)
                     Spacer(minLength: 0)
                     Button("Keep My Edits") { changedElsewhere = false }
-                    Button("Load Changes") {
-                        draft = stored
-                        base = stored
-                        changedElsewhere = false
-                    }
+                    Button("Load Changes", action: loadChanges)
                     .buttonStyle(.borderedProminent)
                 }
                 .padding(10)
@@ -1770,7 +1786,7 @@ private struct TaskDetailView: View {
         Task {
             let outcome = await store.startTaskNow(id: taskId, machineId: machineId, directory: directory, approveNewDirectory: approve)
             working = false
-            draft = store.task(id: taskId)
+            if let fresh = store.task(id: taskId) { draft = fresh }
             switch outcome {
             case .created: close()
             case .needsDirectoryApproval(let path): approveFolder = (agent, machineId, path)

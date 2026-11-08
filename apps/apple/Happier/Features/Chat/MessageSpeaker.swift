@@ -379,8 +379,45 @@ final class MessageSpeaker: NSObject {
         return AVSpeechSynthesisVoice(identifier: pick.id)
     }
 
+    /// The installed voices, listed once off the main thread (`speechVoices()` waits on a system
+    /// accessibility lock and held the main thread while reading started). Until the list is in,
+    /// a reading uses the language's default voice.
+    nonisolated private static let voiceList = VoiceList()
+
+    private final class VoiceList: @unchecked Sendable {
+        private let lock = NSLock()
+        private var voices: [SpeechLanguage.Voice]?
+        private var loading = false
+
+        func cached() -> [SpeechLanguage.Voice]? {
+            lock.withLock { voices }
+        }
+
+        func load() {
+            let start = lock.withLock { () -> Bool in
+                guard voices == nil, !loading else { return false }
+                loading = true
+                return true
+            }
+            guard start else { return }
+            Task.detached(priority: .utility) { [self] in
+                let list = MessageSpeaker.listInstalledVoices()
+                lock.withLock { voices = list; loading = false }
+            }
+        }
+    }
+
+    /// Starts listing the voices in the background (at launch).
+    nonisolated static func prepareVoices() { voiceList.load() }
+
     /// The voices installed on this device, without the novelty ones (Bubbles, Bad News…).
     static func installedVoices() -> [SpeechLanguage.Voice] {
+        if let cached = voiceList.cached() { return cached }
+        voiceList.load()
+        return []
+    }
+
+    nonisolated static func listInstalledVoices() -> [SpeechLanguage.Voice] {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { !$0.voiceTraits.contains(.isNoveltyVoice) }
             .map { voice in

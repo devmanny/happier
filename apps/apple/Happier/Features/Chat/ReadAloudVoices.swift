@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Settings: the voice that reads messages aloud in each of the user's languages, with a sample.
 struct ReadAloudVoices: View {
-    @State private var voices = MessageSpeaker.installedVoices()
+    @State private var voices = MessageSpeaker.listInstalledVoices()
     @AppStorage(MessageSpeaker.languagesKey) private var languageSelection = ""
     /// Bumped when a voice is picked, so the rows read the new choice.
     @State private var picks = 0
@@ -34,7 +34,7 @@ struct ReadAloudVoices: View {
             #endif
         }
         .onReceive(NotificationCenter.default.publisher(for: AVSpeechSynthesizer.availableVoicesDidChangeNotification)) { _ in
-            voices = MessageSpeaker.installedVoices()
+            voices = MessageSpeaker.listInstalledVoices()
         }
     }
 

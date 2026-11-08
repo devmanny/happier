@@ -77,6 +77,9 @@ struct Composer: View {
         textBeforeTalking = text
         talkCancelArmed = false
         talking = true
+        // The microphone holds audio first: reading aloud, turned on just below, must not start
+        // speaking (and switch the audio session) while the microphone opens.
+        dictation.claimAudio()
         if MessageSpeaker.shared.autoReadSessionId != sessionId {
             MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
         }
