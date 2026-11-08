@@ -1046,14 +1046,14 @@ private struct TaskPermissionPicker: View {
             Menu {
                 Picker("Permissions", selection: $mode) {
                     ForEach(PermissionMode.allCases, id: \.self) { option in
-                        Label { Text(option.label(agentId: agentId)) } icon: { Image(systemName: PermissionSymbol.name(option)) }
+                        Label { Text(option.label(agentId: agentId)) } icon: { Image(systemName: option.symbolName(agentId: agentId)) }
                             .tag(option)
                     }
                 }
                 .pickerStyle(.inline)
             } label: {
                 HStack(spacing: 6) {
-                    PermissionSymbol(mode: mode)
+                    PermissionSymbol(mode: mode, agentId: agentId)
                     Text(mode.label(agentId: agentId)).foregroundStyle(.secondary)
                 }
             }

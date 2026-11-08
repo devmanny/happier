@@ -17,12 +17,26 @@ public enum PermissionMode: String, CaseIterable, Sendable {
         }
     }
 
+    /// Providers whose `default` mode asks before changes; elsewhere it defers to the CLI's own settings.
+    private static func asks(_ agentId: String?) -> Bool { agentId == "claude" || agentId == "gemini" }
+
     public func label(agentId: String?) -> String {
         switch self {
-        case .default: (agentId == "claude" || agentId == "gemini") ? "Default" : "CLI Settings"
+        case .default: Self.asks(agentId) ? "Ask" : "CLI Settings"
         case .readOnly: "Read Only"
         case .safeYolo: agentId == "gemini" ? "Safe YOLO" : "Auto"
         case .yolo: "YOLO"
+        }
+    }
+
+    /// The mode's SF Symbol, decided with its name: one family (circled outlines). `default` reads
+    /// "Ask" (a question) where it asks, and "CLI Settings" (an empty circle) elsewhere.
+    public func symbolName(agentId: String?) -> String {
+        switch self {
+        case .readOnly: "eye.circle"
+        case .default: Self.asks(agentId) ? "questionmark.circle" : "circle"
+        case .safeYolo: "bolt.circle"
+        case .yolo: "checkmark.circle"
         }
     }
 }

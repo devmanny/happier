@@ -468,7 +468,7 @@ struct Composer: View {
         // A Mac menu flattens its label (its own image placement, no background), so the pill is a
         // glass button like the model's, opening the choices beside it.
         Button { showPermissions = true } label: {
-            PermissionSymbol(mode: controls.permissionMode)
+            PermissionSymbol(mode: controls.permissionMode, agentId: controls.agentId)
         }
         .buttonStyle(.glass)
         .glassHover()
@@ -648,11 +648,13 @@ struct EffortBarsMark: View {
 /// color. No mode is colored: having every permission is the normal case, not an alert.
 struct PermissionSymbol: View {
     let mode: PermissionMode
+    /// The provider, which decides what `default` means (`PermissionMode.symbolName`).
+    let agentId: String?
     var textStyle: Font.TextStyle = .body
     var side: CGFloat = 22
 
     var body: some View {
-        Image(systemName: Self.name(mode))
+        Image(systemName: mode.symbolName(agentId: agentId))
             .font(.system(textStyle, weight: .regular))
             .imageScale(.medium)
             .symbolRenderingMode(.monochrome)
@@ -660,14 +662,6 @@ struct PermissionSymbol: View {
             .frame(width: side, height: side)
     }
 
-    static func name(_ mode: PermissionMode) -> String {
-        switch mode {
-        case .readOnly: "eye.circle"
-        case .default: "questionmark.circle"
-        case .safeYolo: "bolt.circle"
-        case .yolo: "checkmark.circle"
-        }
-    }
 }
 
 /// A round glass control of the composer (mic, dictation): prominent blue while active.
@@ -902,13 +896,13 @@ private struct PermissionMenu: View, Equatable {
         Menu {
             Picker("Permissions", selection: Binding(get: { mode }, set: { onSelect($0) })) {
                 ForEach(PermissionMode.allCases, id: \.self) { mode in
-                    Label { Text(mode.label(agentId: agentId)) } icon: { Image(systemName: PermissionSymbol.name(mode)) }
+                    Label { Text(mode.label(agentId: agentId)) } icon: { Image(systemName: mode.symbolName(agentId: agentId)) }
                         .tag(mode)
                 }
             }
             .pickerStyle(.inline)
         } label: {
-            PermissionSymbol(mode: mode)
+            PermissionSymbol(mode: mode, agentId: agentId)
         }
         .menuStyle(.button)
         .buttonStyle(.glass)
