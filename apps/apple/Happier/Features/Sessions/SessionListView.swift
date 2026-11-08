@@ -876,7 +876,8 @@ struct SessionRow: View, Equatable {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
+        // Hidden under the conversation, the row's clock waits; it refreshes when the list shows.
+        TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
             row(now: context.date)
         }
         .accessibilityElement(children: .combine)

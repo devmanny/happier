@@ -746,8 +746,11 @@ private struct SessionBrowserButton: View {
     @Environment(BrowserModel.self) private var browser
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let working = browser.tabs.contains { $0.sessionId == sessionId && ($0.agentActiveUntil ?? .distantPast) > context.date }
+        // The pulse animates by itself; the view updates once more, when the agent's use ends
+        // (it ticked every second whenever the session had a tab).
+        let activeUntil = browser.tabs.filter { $0.sessionId == sessionId }.compactMap(\.agentActiveUntil).max() ?? .distantPast
+        TimelineView(.explicit(activeUntil > .now ? [activeUntil] : [])) { context in
+            let working = activeUntil > context.date
             Button(action: action) {
                 Label("Browser", systemImage: "safari")
                     .symbolEffect(.pulse, isActive: working)

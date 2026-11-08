@@ -17,12 +17,14 @@ struct HappierSpinner: View {
     var color: Color?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// In the hidden iPhone drawer it stays still: nobody sees it there.
+    @Environment(\.sessionListOnScreen) private var onScreen
 
     var body: some View {
         // Core Animation plays the light by itself. A SwiftUI timeline here redrew the whole window
         // 30 times a second for every working session on screen, which kept the CPU busy and the
         // phone warm.
-        HappierMarkView(size: size, color: color ?? .secondary, animated: !reduceMotion)
+        HappierMarkView(size: size, color: color ?? .secondary, animated: !reduceMotion && onScreen)
             .frame(width: size, height: size)
             .accessibilityElement()
             .accessibilityLabel(Text("Loading"))
