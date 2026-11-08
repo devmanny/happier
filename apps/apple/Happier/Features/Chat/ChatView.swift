@@ -66,11 +66,65 @@ private struct SessionChatHost: View, Equatable {
     }
 }
 
+/// What the conversation shows of its session. The conversation reads only these, so a session
+/// update that changes nothing here (read position, metadata, heartbeats) doesn't redraw it.
+private struct ConversationFacts: Equatable {
+    var exists: Bool
+    var working: Bool
+    var title: String
+    var displayPath: String
+    var folderColor: AccountSettings.FolderColor?
+    var agentId: String?
+}
+
+/// Reads the session (cheap to redraw) and hands the conversation only what it shows of it.
 private struct ChatConversationView: View {
     let sessionId: String
+    @Binding var showActivity: Bool
+    @Binding var scrollPosition: ScrollPosition
+    @Binding var pinnedToEnd: Bool
+    @Binding var finding: Bool
     @Environment(HappierStore.self) private var store
-    /// Bumped only when "working" flips with time alone (see `body`).
+    /// Bumped only when "working" flips with time alone.
     @State private var statusClock = 0
+
+    var body: some View {
+        let _ = statusClock
+        let session = store.sessions[sessionId]
+        let facts = ConversationFacts(
+            exists: session != nil,
+            working: session?.status(at: .now) == .working,
+            title: session?.title ?? "",
+            displayPath: session?.displayPath ?? "",
+            folderColor: store.folderColor(of: session),
+            agentId: session?.agentId)
+        ChatConversationContent(sessionId: sessionId, facts: facts, showActivity: $showActivity, scrollPosition: $scrollPosition,
+                                pinnedToEnd: $pinnedToEnd, finding: $finding)
+            .equatable()
+            .task(id: sessionId) {
+                // "Working" ends by itself once the session stops signalling: check every 15 s and
+                // redraw only if it flipped.
+                var shown = store.sessions[sessionId]?.status(at: .now) == .working
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(15))
+                    let now = store.sessions[sessionId]?.status(at: .now) == .working
+                    if now != shown { statusClock &+= 1 }
+                    shown = now
+                }
+            }
+    }
+}
+
+/// The conversation itself: redrawn for its transcript, queue and drafts, and for `facts`, not for
+/// every change to its session.
+private struct ChatConversationContent: View, Equatable {
+    let sessionId: String
+    let facts: ConversationFacts
+    @Environment(HappierStore.self) private var store
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sessionId == rhs.sessionId && lhs.facts == rhs.facts
+    }
     /// The rows' actions: one object for the conversation's life, so the environment its rows read
     /// doesn't change on every update (see `ChatRowActions`).
     @State private var rowActions = ChatRowActions()
@@ -105,7 +159,6 @@ private struct ChatConversationView: View {
     @State private var selected: Set<String>?
     @State private var choosingDestination = false
 
-    private var session: Session? { store.sessions[sessionId] }
     private var queue: [PendingMessage] { store.pendingQueues[sessionId] ?? [] }
 
     /// Transcript items plus server-queued messages, in one list. A sent message keeps the same id
@@ -123,10 +176,7 @@ private struct ChatConversationView: View {
     }
 
     var body: some View {
-        // "Working" goes stale with time (no signal for a while); `statusClock` redraws only when
-        // that flips, instead of rebuilding the whole conversation every 15 s.
-        let _ = statusClock
-        let working = session?.status(at: .now) == .working
+        let working = facts.working
         Group {
         ScrollView {
             // Drawn in full, not lazily: a lazy stack moved by the app's own scrolls (opening,
@@ -337,17 +387,6 @@ private struct ChatConversationView: View {
             }
         }
         .task(id: sessionId) {
-            // "Working" ends by itself once the session stops signalling: check every 15 s and
-            // redraw only if it flipped.
-            var shown = session?.status(at: .now) == .working
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
-                let now = session?.status(at: .now) == .working
-                if now != shown { statusClock &+= 1 }
-                shown = now
-            }
-        }
-        .task(id: sessionId) {
             // The provider's limits, read again as often as the daemon refreshes them.
             while !Task.isCancelled {
                 await store.refreshProviderUsage(sessionId)
@@ -358,8 +397,8 @@ private struct ChatConversationView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .navigationTitle(session?.title ?? "")
-        .navigationSubtitle(session?.displayPath ?? "")
+        .navigationTitle(facts.title)
+        .navigationSubtitle(facts.displayPath)
         .overlay {
             if items.isEmpty {
                 if let error = store.transcriptErrors[sessionId] {
@@ -410,7 +449,7 @@ private struct ChatConversationView: View {
         }
         .environment(\.chatRowActions, rowActions)
         // Your bubbles in the project folder's color, when it has one.
-        .environment(\.userBubbleColor, store.folderColor(of: session)?.deep ?? .userBubble)
+        .environment(\.userBubbleColor, facts.folderColor?.deep ?? .userBubble)
         .environment(\.textSelectingId, textSelectingId)
         .modifier(SessionFilePreview(sessionId: sessionId))
         .onAppear {
@@ -518,7 +557,7 @@ private struct ChatConversationView: View {
 
     private func selectedText(working: Bool) -> String {
         let chosen = selectableItems(working: working).filter { selected?.contains($0.id) == true }
-        let agentName = session?.agentId.flatMap { Agent.displayNames[$0] } ?? String(localized: "Agent")
+        let agentName = facts.agentId.flatMap { Agent.displayNames[$0] } ?? String(localized: "Agent")
         return MessageSelection.clipboardText(chosen, agentName: agentName)
     }
 
