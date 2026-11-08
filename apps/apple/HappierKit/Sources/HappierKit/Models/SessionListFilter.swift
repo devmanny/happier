@@ -157,3 +157,54 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
         return (try? encoder.encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? ""
     }
 }
+
+/// The list's filter button: a tap switches between the usual list and the chosen filter; holding
+/// it opens the chosen filter to change it. Stored on the device, under the key the plain filter
+/// used before (read here as a chosen filter that is on).
+public struct SessionListFilterChoice: Equatable, Sendable, Codable {
+    /// What a tap brings; the usual list until a filter is chosen (then a tap opens the filter).
+    public private(set) var chosen: SessionListFilter
+    public private(set) var isOn: Bool
+
+    /// The filter the list shows.
+    public var applied: SessionListFilter { isOn ? chosen : .default }
+
+    /// A filter other than the usual list is chosen, on or off: the button carries a dot.
+    public var hasChosenFilter: Bool { !chosen.isDefault }
+
+    /// Switches the chosen filter on or off; false when nothing is chosen (then the filter opens).
+    @discardableResult
+    public mutating func toggle() -> Bool {
+        guard !chosen.isDefault else { return false }
+        isOn.toggle()
+        return true
+    }
+
+    /// A filter picked or edited: it shows at once.
+    public mutating func choose(_ filter: SessionListFilter) {
+        chosen = filter
+        isOn = !filter.isDefault
+    }
+
+    /// Back to the usual list, the chosen filter kept for the next tap.
+    public mutating func clear() { isOn = false }
+
+    public init(stored: String) {
+        let data = Data(stored.utf8)
+        if let choice = try? JSONDecoder().decode(Self.self, from: data) {
+            self = choice
+        } else if let filter = try? JSONDecoder().decode(SessionListFilter.self, from: data), !filter.isDefault {
+            chosen = filter
+            isOn = true
+        } else {
+            chosen = .default
+            isOn = false
+        }
+    }
+
+    public var stored: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return (try? encoder.encode(self)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+}

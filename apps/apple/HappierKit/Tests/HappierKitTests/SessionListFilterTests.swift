@@ -161,6 +161,63 @@ import Testing
     }
 }
 
+/// The list's filter button: a tap switches between the usual list and the chosen filter, holding
+/// it changes the chosen one, and a dot says a filter other than the usual list is chosen.
+@Suite struct SessionListFilterChoiceTests {
+    private func switched(_ choice: inout SessionListFilterChoice) -> Bool { choice.toggle() }
+
+    @Test func aTapSwitchesBetweenTheUsualListAndTheChosenFilter() {
+        var choice = SessionListFilterChoice(stored: "")
+        choice.choose(.waitingForMe)
+        #expect(choice.applied == .waitingForMe)
+        #expect(switched(&choice))
+        #expect(choice.applied == .default)
+        #expect(switched(&choice))
+        #expect(choice.applied == .waitingForMe)
+        // Clearing the list keeps what was chosen for the next tap.
+        choice.clear()
+        #expect(choice.applied == .default)
+        #expect(switched(&choice))
+        #expect(choice.applied == .waitingForMe)
+    }
+
+    @Test func withNothingChosenATapHasNothingToSwitch() {
+        var choice = SessionListFilterChoice(stored: "")
+        #expect(choice.chosen == .default)
+        #expect(!switched(&choice))
+        #expect(choice.applied == .default)
+        choice.choose(.activeWithoutTasks)
+        choice.choose(.default)
+        #expect(!switched(&choice))
+        #expect(choice.applied == .default)
+    }
+
+    @Test func theDotMarksAnyChosenFilterOnOrOff() {
+        var choice = SessionListFilterChoice(stored: "")
+        #expect(!choice.hasChosenFilter)
+        choice.choose(.waitingForMe)
+        #expect(choice.hasChosenFilter)
+        choice.clear()
+        #expect(choice.hasChosenFilter)
+        choice.choose(.default)
+        #expect(!choice.hasChosenFilter)
+    }
+
+    @Test func keepsTheChoiceAndReadsTheFilterStoredBefore() {
+        var mateo = SessionListFilter.default
+        mateo.agent = .agent("mateo")
+        var choice = SessionListFilterChoice(stored: "")
+        choice.choose(mateo)
+        choice.clear()
+        #expect(SessionListFilterChoice(stored: choice.stored) == choice)
+        // A filter saved by the earlier version stays on, as it was.
+        let before = SessionListFilterChoice(stored: mateo.stored)
+        #expect(before.chosen == mateo)
+        #expect(before.applied == mateo)
+        #expect(SessionListFilterChoice(stored: "{not json") == SessionListFilterChoice(stored: ""))
+    }
+}
+
 /// The second line of a session row: who works in it and where, no counters.
 @Suite struct SessionRowDetailTests {
     private func session(_ metadata: [String: JSONValue]) throws -> Session {

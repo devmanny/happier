@@ -31,6 +31,8 @@ struct SessionFilterView: View {
                         .accessibilityAddTraits(filter == shortcut.filter ? .isSelected : [])
                         .accessibilityIdentifier("session-filter-shortcut-\(shortcut.id)")
                     }
+                } footer: {
+                    Text("A tap on the filter button switches between this filter and the usual list.")
                 }
                 Section("Type") {
                     ForEach(SessionListFilter.Kind.allCases) { kind in

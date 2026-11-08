@@ -45,7 +45,7 @@ struct SessionListView: View {
     @State private var olderSessions: OlderSessionsSection?
     /// The archive, loaded only while a search runs or the filter shows archived sessions.
     @State private var archivedSearch: ArchivedSessions?
-    /// Which sessions the list shows, kept on this device ("" is the default list).
+    /// The filter button's chosen filter and whether it's on, kept on this device.
     @AppStorage("happier.sessionListFilter") private var storedFilter = ""
     @State private var showFilter = false
     /// Sessions whose sub-sessions are unfolded.
@@ -90,10 +90,24 @@ struct SessionListView: View {
         archivedSearch?.items.filter { $0.matches(query) && !store.deletedSessionIds.contains($0.id) } ?? []
     }
 
-    private var filter: SessionListFilter { SessionListFilter(stored: storedFilter) }
+    private var filterChoice: SessionListFilterChoice { SessionListFilterChoice(stored: storedFilter) }
+    private var filter: SessionListFilter { filterChoice.applied }
 
-    private func setFilter(_ next: SessionListFilter) {
-        withAnimation(.smooth(duration: 0.2)) { storedFilter = next.isDefault ? "" : next.stored }
+    private func changeFilter(_ change: (inout SessionListFilterChoice) -> Void) {
+        var next = filterChoice
+        change(&next)
+        withAnimation(.smooth(duration: 0.2)) { storedFilter = next.stored }
+    }
+
+    /// A tap on the filter button: the chosen filter on or off, or the filter itself when none is chosen.
+    private func switchFilter() {
+        var next = filterChoice
+        guard next.toggle() else {
+            showFilter = true
+            return
+        }
+        AppHaptics.selection()
+        withAnimation(.smooth(duration: 0.2)) { storedFilter = next.stored }
     }
 
     private var filterContext: SessionListFilter.Context { SessionListFilter.Context(tasks: store.tasks) }
@@ -404,7 +418,7 @@ struct SessionListView: View {
                 Text(verbatim: "·")
                 Button("Clear") {
                     AppHaptics.light()
-                    setFilter(.default)
+                    changeFilter { $0.clear() }
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.userBubble)
@@ -692,7 +706,7 @@ extension SessionListView {
                 } description: {
                     Text("Nothing in your sessions matches this filter.")
                 } actions: {
-                    Button("Clear Filter") { setFilter(.default) }
+                    Button("Clear Filter") { changeFilter { $0.clear() } }
                 }
             } else if sessions.isEmpty, query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true) {
                 if store.isLoadingSessions {
@@ -760,19 +774,45 @@ extension SessionListView {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    AppHaptics.light()
-                    showFilter = true
+                // A tap switches the chosen filter on and off; holding it shows the shortcuts,
+                // "Edit Filter…" and "Clear Filter" (the system menu of a primary-action button).
+                Menu {
+                    ForEach(SessionListFilter.shortcuts) { shortcut in
+                        Button {
+                            AppHaptics.selection()
+                            changeFilter { $0.choose(shortcut.filter) }
+                        } label: {
+                            if filterChoice.chosen == shortcut.filter {
+                                Label(shortcut.title, systemImage: "checkmark")
+                            } else {
+                                Text(shortcut.title)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Edit Filter…", systemImage: "slider.horizontal.3") { showFilter = true }
+                    Button("Clear Filter", systemImage: "xmark.circle") {
+                        // The usual list, with nothing chosen.
+                        changeFilter { $0.choose(.default) }
+                    }
+                    .disabled(!filterChoice.hasChosenFilter)
                 } label: {
-                    Label("Filter", systemImage: filter.isDefault
-                          ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                    Label {
+                        Text("Filter")
+                    } icon: {
+                        FilterButtonIcon(filled: !filter.isDefault, dot: filterChoice.hasChosenFilter,
+                                         tint: filter.isDefault ? nil : Color.userBubble)
+                    }
+                } primaryAction: {
+                    switchFilter()
                 }
-                .tint(filter.isDefault ? nil : Color.userBubble)
                 .accessibilityValue(filter.isDefault ? Text("Default") : Text("Filtered"))
+                .accessibilityHint(Text("Switches your filter on or off. Touch and hold for more."))
                 .accessibilityIdentifier("session-filter-button")
-                .help(Text("Choose which sessions show"))
+                .help(Text("Click to switch your filter on or off; hold for shortcuts and to edit it"))
                 .popover(isPresented: $showFilter) {
-                    SessionFilterView(filter: Binding(get: { filter }, set: { setFilter($0) }), agents: agentNames)
+                    SessionFilterView(filter: Binding(get: { filterChoice.chosen }, set: { next in changeFilter { $0.choose(next) } }),
+                                      agents: agentNames)
                         #if os(macOS)
                         .frame(width: 340, height: 520)
                         #endif
