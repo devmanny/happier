@@ -181,7 +181,32 @@ public enum MarkdownProse {
     }
 
     public static func lines(_ prose: String) -> [Line] {
-        prose.split(separator: "\n", omittingEmptySubsequences: false).map { line(String($0)) }
+        LineReader.shared.lines(prose)
+    }
+
+    /// Reads prose line by line, remembering each line's result. A line reads the same wherever it
+    /// is (`line` is a pure function of it), so a reply streaming in only reads its new lines
+    /// instead of every line again on each update.
+    public final class LineReader: @unchecked Sendable {
+        public static let shared = LineReader()
+
+        private let cache = TextCache<Line>(limit: 4_000)
+        private let lock = NSLock()
+        private var parsed = 0
+
+        public init() {}
+
+        /// Lines read for the first time (not remembered), for tests.
+        public var parsedLineCount: Int { lock.withLock { parsed } }
+
+        public func lines(_ prose: String) -> [Line] {
+            prose.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
+                cache.value(for: String(raw)) { text in
+                    lock.withLock { parsed += 1 }
+                    return MarkdownProse.line(text)
+                }
+            }
+        }
     }
 
     static func line(_ raw: String) -> Line {

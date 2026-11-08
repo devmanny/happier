@@ -47,6 +47,7 @@ final class MessageSpeaker: NSObject {
     @ObservationIgnored private var pausedForIdle = false
     #if os(iOS)
     @ObservationIgnored private var activity: Activity<ReadAloudAttributes>?
+    @ObservationIgnored private var requestingActivity = false
     #endif
 
     private static let rateKey = "happier.speech.rate"
@@ -484,11 +485,34 @@ final class MessageSpeaker: NSObject {
         if let activity {
             nonisolated(unsafe) let current = activity
             Task { await current.update(content) }
-        } else if ActivityAuthorizationInfo().areActivitiesEnabled {
-            activity = try? Activity.request(attributes: ReadAloudAttributes(), content: content)
+        } else if !requestingActivity {
+            // Requesting it is slow the first time (it held the first press of the microphone for
+            // up to a second): it's asked for off the main thread, and the latest state is applied
+            // once it exists.
+            requestingActivity = true
+            Task.detached(priority: .userInitiated) {
+                let created: Activity<ReadAloudAttributes>? = ActivityAuthorizationInfo().areActivitiesEnabled
+                    ? try? Activity.request(attributes: ReadAloudAttributes(), content: content)
+                    : nil
+                nonisolated(unsafe) let handle = created
+                await MainActor.run {
+                    MessageSpeaker.shared.activityRequested(handle)
+                }
+            }
         }
         #endif
     }
+
+    #if os(iOS)
+    /// The Live Activity asked for in `refreshActivity` exists (or couldn't be made): keep it if
+    /// reading is still on, and bring it to the current state.
+    fileprivate func activityRequested(_ created: Activity<ReadAloudAttributes>?) {
+        requestingActivity = false
+        guard let created else { return }
+        activity = created
+        refreshActivity() // Ends it again when reading stopped meanwhile.
+    }
+    #endif
 
     private func deactivateAudio() {
         guard recordingOwners.isEmpty else { return }

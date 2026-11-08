@@ -676,7 +676,9 @@ struct TasksView: View {
                 TaskDetailView(taskId: route.id, origin: route.origin) { if presentation == .sheet { dismiss() } }
             }
             .refreshable { await refresh() }
-            .task { await refresh() }
+            // Already read and kept live: reading them again here re-laid the list out while the
+            // sheet was still coming up.
+            .task { if !store.tasksLoaded || store.agentProfiles.isEmpty { await refresh() } }
             // A request from the My Tasks widget or a link: show that task, or the list.
             .onChange(of: store.tasksRequest, initial: true) { _, request in
                 guard let request else { return }

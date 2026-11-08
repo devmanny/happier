@@ -75,6 +75,17 @@ struct ReadAloudQueueTests {
 /// Which agent messages auto read takes: only ones that arrived after it was turned on, and only
 /// once complete (followed by something else, or the turn over), never the thinking.
 struct AutoReadCursorTests {
+    @Test func onlyMessagesThatChangedAreLookedAtAgain() {
+        var cursor = AutoReadCursor(existing: [])
+        var items = (0..<100).map { agent("m\($0)", "Mensaje \($0) completo.") }
+        items.append(agent("live", "Empieza"))
+        _ = cursor.take(items, turnActive: false)
+        let before = cursor.examinedCount
+        items[items.count - 1] = agent("live", "Empieza y sigue")
+        #expect(cursor.take(items, turnActive: false) == [.grew(id: "live", added: "y sigue", text: "Empieza y sigue")])
+        #expect(cursor.examinedCount - before == 1)
+    }
+
     @Test func recordingDiscardsAnUnfinishedPreviousReplyAndReadsTheNextAnswer() {
         var cursor = AutoReadCursor(existing: [])
         let unfinished = agent("old", "Earlier reply")

@@ -110,6 +110,11 @@ public struct AutoReadCursor: Equatable, Sendable {
     private var skipped: Set<String>
     /// The text of each message taken so far.
     private var taken: [String: String] = [:]
+    /// Each agent message's text as last seen, untrimmed: one that hasn't changed is passed over
+    /// without being looked at again (a conversation changes on every streamed piece).
+    private var seen: [String: String] = [:]
+    /// Messages whose text was looked at (trimmed and compared), for tests.
+    public private(set) var examinedCount = 0
 
     public init(existing items: [ChatItem]) {
         skipped = Set(items.map(\.id))
@@ -127,6 +132,9 @@ public struct AutoReadCursor: Equatable, Sendable {
             guard case .agentText(let message) = item, !message.isThinking, !skipped.contains(message.id) else { continue }
             // The last item of a running turn may still be growing.
             guard !turnActive || offset < items.count - 1 else { continue }
+            guard seen[message.id] != message.text else { continue }
+            seen[message.id] = message.text
+            examinedCount += 1
             let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             if let before = taken[message.id] {

@@ -438,6 +438,9 @@ public final class HappierStore {
     public private(set) var tasksError: String?
     /// False when the tasks listing came back full: some tasks may be missing from it.
     public private(set) var tasksComplete = true
+    /// Whether the tasks were read once since sign-in; after that they follow live changes (socket,
+    /// and the change cursor on reconnect), so opening the Tasks list doesn't read them again.
+    @ObservationIgnored public private(set) var tasksLoaded = false
 
     public func task(id: String?) -> AgentTask? {
         guard let id else { return nil }
@@ -565,6 +568,7 @@ public final class HappierStore {
             // Replaced only when something differs: every view reading the tasks redraws on a write.
             let read = AgentTask.records(fromList: listing, machineKey: machineKey)
             if read != tasks { tasks = read }
+            tasksLoaded = true
             tasksError = nil
         } catch {
             tasksError = UserFacingError.message(for: error)
@@ -1001,6 +1005,7 @@ public final class HappierStore {
         tasks = []
         tasksError = nil
         tasksComplete = true
+        tasksLoaded = false
         machines = []
         openSessionIds = OpenSessions()
         draftStates.values.forEach { $0.upload?.cancel() }
