@@ -27,25 +27,40 @@ struct SessionFilePreview: ViewModifier {
     @State private var requested: Request?
     @State private var progress: Double = 0
     @State private var error: String?
+    /// The handlers the conversation's rows read; made once, so the environment they read doesn't
+    /// change on every redraw (a new closure or `OpenURLAction` there re-ran every row with a link).
+    @State private var routes = Routes()
+
+    @MainActor
+    private final class Routes {
+        var request: (Request) -> Void = { _ in }
+        var webPage: (URL) -> Void = { _ in }
+        lazy var openFile: (URL) -> Void = { [unowned self] url in self.request(.local(url)) }
+        lazy var openURL = OpenURLAction { [unowned self] url in
+            switch ConversationLink(url) {
+            case .file(let file):
+                AppHaptics.light()
+                self.request(.remote(file))
+                return .handled
+            case .webPage(let page):
+                // Asks every time: open in a browser, copy, or share the full link.
+                AppHaptics.light()
+                self.webPage(page)
+                return .handled
+            case .other:
+                return .systemAction
+            }
+        }
+    }
 
     func body(content: Content) -> some View {
         content
-            .environment(\.openSessionFilePreview) { requested = .local($0) }
-            .environment(\.openURL, OpenURLAction { url in
-                switch ConversationLink(url) {
-                case .file(let file):
-                    AppHaptics.light()
-                    requested = .remote(file)
-                    return .handled
-                case .webPage(let page):
-                    // Asks every time: open in a browser, copy, or share the full link.
-                    AppHaptics.light()
-                    webLink = page
-                    return .handled
-                case .other:
-                    return .systemAction
-                }
-            })
+            .environment(\.openSessionFilePreview, routes.openFile)
+            .environment(\.openURL, routes.openURL)
+            .onAppear {
+                routes.request = { requested = $0 }
+                routes.webPage = { webLink = $0 }
+            }
             // Keep ShareLink alive while its system picker is presented. A confirmation
             // dialog dismisses its actions as soon as one is chosen.
             .popover(isPresented: linkPresented, attachmentAnchor: .point(.center), arrowEdge: .top) {
