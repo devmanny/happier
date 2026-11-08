@@ -140,9 +140,11 @@ public struct AutoReadCursor: Equatable, Sendable {
             if let before = taken[message.id] {
                 guard text != before else { continue }
                 taken[message.id] = text
-                // A rewrite rather than more text isn't read again.
-                guard text.hasPrefix(before) else { continue }
-                let added = text.dropFirst(before.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                // A rewrite rather than more text isn't read again. Compared and cut by bytes:
+                // character by character this walked the whole reply on every streamed piece.
+                guard text.utf8.starts(with: before.utf8) else { continue }
+                let cut = text.utf8.index(text.utf8.startIndex, offsetBy: before.utf8.count)
+                let added = text[cut...].trimmingCharacters(in: .whitespacesAndNewlines)
                 if !added.isEmpty { changes.append(.grew(id: message.id, added: added, text: text)) }
             } else {
                 taken[message.id] = text
