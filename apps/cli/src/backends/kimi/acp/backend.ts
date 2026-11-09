@@ -1,3 +1,4 @@
+import type { AcpSessionModelAdapter } from '@/agent/acp/AcpBackend';
 import { createCatalogDefinedAcpBackend, type CatalogDefinedAcpBackendOptions } from '@/agent/acp/catalog/createCatalogDefinedAcpBackend';
 import type { AgentBackend } from '@/agent/core';
 import { requireCurrentKimiRuntime } from '@/backends/kimi/cli/runtimeDiscovery';
@@ -6,10 +7,16 @@ import { buildKimiAutonomousTurnHandlers, KIMI_AUTONOMOUS_TURNS_CAPABILITY } fro
 
 export type KimiBackendOptions = CatalogDefinedAcpBackendOptions;
 
-/** Current Kimi uses the shared ACP backend; only executable classification is provider-owned. */
+/** Kimi Code advertises a thinking model's effort levels as its `thinking` select. */
+const kimiSessionModelAdapter: AcpSessionModelAdapter = {
+  configOptionIds: { reasoning_effort: 'thinking' },
+};
+
+/** Current Kimi uses the shared ACP backend; executable classification and option ids are provider-owned. */
 export function createKimiBackend(options: KimiBackendOptions): AgentBackend {
   return createCatalogDefinedAcpBackend('kimi', {
     ...options,
+    sessionModelAdapter: kimiSessionModelAdapter,
     initializeClientCapabilitiesMeta: {
       ...options.initializeClientCapabilitiesMeta,
       [KIMI_AUTONOMOUS_TURNS_CAPABILITY]: true,

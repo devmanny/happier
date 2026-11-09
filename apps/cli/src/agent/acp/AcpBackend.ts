@@ -400,6 +400,12 @@ export type SessionModelState = {
 };
 
 export type AcpSessionModelAdapter = Readonly<{
+  /**
+   * Provider config-option ids that carry a Happier canonical control under another name, keyed
+   * by the canonical id. Advertised options read as the canonical id; writes go out under the
+   * provider's id.
+   */
+  configOptionIds?: Readonly<Record<string, string>>;
   projectModelId?: (params: Readonly<{
     modelId: string;
     modelState: Readonly<SessionModelState> | null;
@@ -2689,9 +2695,24 @@ export class AcpBackend implements AgentBackend {
 
   private normalizeSupportedSessionConfigOptions(raw: ReadonlyArray<unknown>): SessionConfigOption[] {
     const options = normalizeSessionConfigOptions(raw);
-    return this.options.sessionModesEnabled === false
+    const supported = this.options.sessionModesEnabled === false
       ? options.filter((option) => !isAcpModeConfigOptionLike(option))
       : options;
+    if (!this.options.sessionModelAdapter?.configOptionIds) return supported;
+    return supported.map((option) => {
+      const canonicalId = this.canonicalConfigOptionId(option.id);
+      return canonicalId === option.id ? option : { ...option, id: canonicalId };
+    });
+  }
+
+  private canonicalConfigOptionId(configId: string): string {
+    const ids = this.options.sessionModelAdapter?.configOptionIds ?? {};
+    return Object.keys(ids).find((canonicalId) => ids[canonicalId] === configId) ?? configId;
+  }
+
+  private providerConfigOptionId(configId: string): string {
+    const ids = this.options.sessionModelAdapter?.configOptionIds;
+    return ids && Object.hasOwn(ids, configId) ? ids[configId]! : configId;
   }
 
   private seedSessionConfigOptionsFromSessionResponse(sessionResponse: unknown): void {
@@ -2732,7 +2753,8 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Session ID does not match the active ACP session');
     }
 
-    const normalizedConfigId = readNonBlankSessionControlIdentifier(configId) ?? '';
+    // A provider's own id for a canonical control (written by older clients) reads as the canonical id.
+    const normalizedConfigId = this.canonicalConfigOptionId(readNonBlankSessionControlIdentifier(configId) ?? '');
     if (!normalizedConfigId) {
       throw new Error('Config ID is required');
     }
@@ -2777,16 +2799,17 @@ export class AcpBackend implements AgentBackend {
       return;
     }
 
+    const providerConfigId = this.providerConfigOptionId(normalizedConfigId);
     const request: SetSessionConfigOptionRequest = typeof normalizedValueId === 'boolean'
       ? {
           sessionId: normalizedSessionId,
-          configId: normalizedConfigId,
+          configId: providerConfigId,
           type: 'boolean',
           value: normalizedValueId,
         }
       : {
           sessionId: normalizedSessionId,
-          configId: normalizedConfigId,
+          configId: providerConfigId,
           value: normalizedValueId,
         };
 
