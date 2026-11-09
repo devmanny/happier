@@ -18,6 +18,7 @@ import { normalizeClaudeToolUseNamesInSdkMessage } from './normalizeClaudeToolUs
 import { providers } from '@happier-dev/agents'
 import { buildClaudeSdkResultUsageTelemetry } from './sdkResultUsageTelemetry'
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers'
+import { isClaudeInternalTranscriptMessage } from './isClaudeInternalTranscriptMessage'
 import { createClaudeTaskNotificationToolResultProjector, readClaudeTaskLifecycleEnvelope } from '../taskNotifications/claudeTaskLifecycleEnvelope'
 import { formatClaudePeerMessageText, projectClaudePeerMessage } from '../attachments/claudePeerMessageProjection'
 
@@ -122,6 +123,13 @@ export class SDKToLogConverter {
         const rawType = (sdkMessage as any)?.type;
         if (providers.claude.isClaudeInternalEventType(rawType) && rawType !== 'attachment'
             && fact?.subtype !== 'task_notification') {
+            return null;
+        }
+
+        // Claude replays its local-command bookkeeping rows (e.g. the caveat, `/model` command and
+        // stdout written when setModel applies a model) as user messages. Same classifier as the JSONL
+        // readers; dropped before parent/sidechain bookkeeping so the next row keeps its real parent.
+        if (rawType === 'user' && isClaudeInternalTranscriptMessage(sdkMessage as RawJSONLines)) {
             return null;
         }
 

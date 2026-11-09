@@ -381,6 +381,34 @@ describe('SDKToLogConverter core conversion', () => {
   });
 
   describe('Internal Claude events', () => {
+    it('drops replayed local-command rows (caveat, command, stdout) and keeps the prompt that follows', () => {
+      const previous = converter.convert({ type: 'user', message: { role: 'user', content: 'earlier prompt' } });
+      // Real Claude Code 2.1.319 rows written (and replayed to the SDK consumer) when setModel applies a model.
+      const replay = (uuid: string, content: string) => ({
+        type: 'user',
+        message: { role: 'user', content },
+        parent_tool_use_id: null,
+        isReplay: true,
+        uuid,
+        session_id: 'c4db504f-7c47-492c-884a-87ece7ea0955',
+      }) as unknown as SDKMessage;
+      expect(converter.convert(replay('653bce0f-fc94-4882-9e3e-77286e7e9a9e',
+        '<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, '
+        + "and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"))).toBeNull();
+      expect(converter.convert(replay('fe0ec94b-eed8-41b1-bfca-ba24c39e2819',
+        '<command-name>/model</command-name>\n            <command-message>model</command-message>\n'
+        + '            <command-args>claude-opus-5-5</command-args>'))).toBeNull();
+      expect(converter.convert(replay('13e24246-56e5-41a7-b488-f41209b68e9a',
+        '<local-command-stdout>Set model to `claude-opus-5-5`</local-command-stdout>'))).toBeNull();
+
+      const prompt = converter.convert({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: 'Revisa en mi cliente de correos Park Spark' }] },
+      } as SDKUserMessage);
+      expect(prompt?.type).toBe('user');
+      expect(prompt?.parentUuid).toBe(previous?.uuid);
+    });
+
     it('omits command lifecycle control frames without changing the conversation parent', () => {
       const previous = converter.convert({ type: 'user', message: { role: 'user', content: 'hello' } });
       // Claude Agent SDK 0.3.206 introduced this raw frame after the bundled SDK type union.

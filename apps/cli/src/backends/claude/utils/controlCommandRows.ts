@@ -12,6 +12,7 @@ import type { RawJSONLines } from '../types';
  */
 export type ClaudeControlCommandRowShape =
   | Readonly<{ kind: 'command'; name: string; args: string }>
+  /** The command's `<local-command-stdout>` or `<local-command-stderr>` output row. */
   | Readonly<{ kind: 'stdout' }>
   | Readonly<{ kind: 'shell_command'; command: string }>
   | Readonly<{ kind: 'shell_output' }>
@@ -42,10 +43,10 @@ export function resolveClaudeControlCommandCompletionOwner(
     : 'external_lifecycle';
 }
 
-export const CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES = [
-  '<command-name>',
-  '<local-command-stdout>',
-] as const;
+// Claude writes the command tags in either order (`<command-name>` first for built-ins,
+// `<command-message>` first for skill commands), and a local command's output as stdout or stderr.
+const COMMAND_ROW_PREFIXES = ['<command-name>', '<command-message>', '<command-args>'] as const;
+const LOCAL_COMMAND_OUTPUT_PREFIXES = ['<local-command-stdout>', '<local-command-stderr>'] as const;
 
 const COMMAND_NAME_TAG = /<command-name>([^<]*)<\/command-name>/;
 const COMMAND_ARGS_TAG = /<command-args>([^<]*)<\/command-args>/;
@@ -73,8 +74,8 @@ export function readClaudeControlCommandRowShape(message: RawJSONLines): ClaudeC
   const shellInput = message.isMeta === true ? null : /^<bash-input>([\s\S]*)<\/bash-input>$/u.exec(trimmed);
   if (shellInput) return { kind: 'shell_command', command: `!${shellInput[1]}` };
   if (message.isMeta !== true && /^<bash-(?:stdout|stderr)>/u.test(trimmed)) return { kind: 'shell_output' };
-  if (trimmed.startsWith(CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES[1])) return { kind: 'stdout' };
-  if (!trimmed.startsWith(CLAUDE_CONTROL_COMMAND_TRANSCRIPT_PREFIXES[0])) return null;
+  if (LOCAL_COMMAND_OUTPUT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return { kind: 'stdout' };
+  if (!COMMAND_ROW_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return null;
   const nameMatch = COMMAND_NAME_TAG.exec(trimmed);
   if (!nameMatch) return null;
   return {

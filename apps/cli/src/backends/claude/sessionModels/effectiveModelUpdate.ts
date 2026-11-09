@@ -2,6 +2,8 @@ import type { reconcileClaudeSessionModelsState } from './reconcileClaudeSession
 import type { Metadata } from '@/api/types';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
 import { buildModelEffortChangeOutcome, type ModelEffortChangeOutcomeEvent } from '@/agent/runtime/configChange/modelEffortChangeOutcome';
+import { resolveModelOverrideFromMetadataSnapshot } from '@/agent/runtime/permission/permissionModeFromMetadata';
+import { resolveSessionConfigOptionOverridesFromMetadataSnapshot } from '@/agent/runtime/sessionConfigOptionOverrideSync';
 
 import { buildClaudeSessionModelsMetadataWithCurrentModelId } from '../remote/buildClaudeSessionModelsMetadataFromSupportedModels';
 
@@ -102,16 +104,40 @@ function buildMetadataRequestKey(params: Readonly<{
   return `${params.modelId}|${params.displayName ?? ''}|${params.contextWindowTokens ?? ''}|${params.reasoningEffort ?? ''}`;
 }
 
+/**
+ * The change's identity is the request it applied: the model/effort override's `updatedAt` when the
+ * applied value is what that override asks for. Retries and replays of one change keep its id (the
+ * transcript insertion dedupes them); the same switch requested again later is a new line. A change
+ * no override asked for (e.g. `/model` typed in the terminal) keeps the from/to identity.
+ */
 function buildModelChangedEventId(params: Readonly<{
   fromModelId: string;
   toModelId: string;
   fromEffort?: string | null;
   toEffort?: string | null;
+  modelRequestedAt: number | null;
+  effortRequestedAt: number | null;
 }>): string {
-  const effort = params.fromEffort && params.toEffort && params.fromEffort !== params.toEffort
-    ? `:effort:${encodeURIComponent(params.fromEffort)}:${encodeURIComponent(params.toEffort)}`
+  const modelChanged = params.fromModelId !== params.toModelId;
+  const effortChanged = !!params.fromEffort && !!params.toEffort && params.fromEffort !== params.toEffort;
+  const modelAt = modelChanged && params.modelRequestedAt !== null ? `:at:${params.modelRequestedAt}` : '';
+  const effort = effortChanged
+    ? `:effort:${encodeURIComponent(params.fromEffort!)}:${encodeURIComponent(params.toEffort!)}${params.effortRequestedAt !== null ? `:at:${params.effortRequestedAt}` : ''}`
     : '';
-  return `claude:model-changed:${encodeURIComponent(params.fromModelId)}:${encodeURIComponent(params.toModelId)}${effort}`;
+  return `claude:model-changed:${encodeURIComponent(params.fromModelId)}:${encodeURIComponent(params.toModelId)}${modelAt}${effort}`;
+}
+
+function readModelRequestedAt(metadata: Metadata | null | undefined, modelId: string): number | null {
+  const override = resolveModelOverrideFromMetadataSnapshot({ metadata });
+  return override && override.modelId === modelId ? override.updatedAt : null;
+}
+
+function readEffortRequestedAt(metadata: Metadata | null | undefined, effort: string | null): number | null {
+  if (!effort) return null;
+  const newest = resolveSessionConfigOptionOverridesFromMetadataSnapshot({ metadata })
+    .filter((override) => override.configId === 'reasoning_effort')
+    .at(-1);
+  return newest && newest.valueId.toLowerCase() === effort.toLowerCase() ? newest.updatedAt : null;
 }
 
 function resolveModelLabel(params: Readonly<{
@@ -199,7 +225,14 @@ export function applyClaudeEffectiveModelUpdate(params: Readonly<{
       state.lastEmittedTransitionKey = transitionKey;
       params.client.sendSessionEvent(
         event,
-        buildModelChangedEventId({ fromModelId: previousModelId, toModelId: modelId, fromEffort: previousEffort, toEffort: reasoningEffort }),
+        buildModelChangedEventId({
+          fromModelId: previousModelId,
+          toModelId: modelId,
+          fromEffort: previousEffort,
+          toEffort: reasoningEffort,
+          modelRequestedAt: readModelRequestedAt(metadataSnapshot, modelId),
+          effortRequestedAt: readEffortRequestedAt(metadataSnapshot, reasoningEffort),
+        }),
       );
     }
   }
