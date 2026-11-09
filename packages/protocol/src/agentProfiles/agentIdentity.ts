@@ -15,15 +15,18 @@ export const AgentIdentityV1Schema = z.object({
 export type AgentIdentityV1 = z.infer<typeof AgentIdentityV1Schema>;
 
 /**
- * What session metadata records about the agent: who the Session is, for lists and other threads.
- * The description is model-only and reaches the runner through the spawn hand-off instead.
+ * What session metadata records about the agent: the whole identity, description included. Metadata
+ * is the durable record every resume path starts the runner from, so it must be able to rebuild
+ * the identity prompt on its own; clients show only the name and emoji.
  */
-export function buildAgentIdentityMetadataV1(identity: AgentIdentityV1): Omit<AgentIdentityV1, 'description'> {
+export function buildAgentIdentityMetadataV1(identity: AgentIdentityV1): AgentIdentityV1 {
+  const description = identity.description?.trim();
   return {
     v: 1,
     id: identity.id,
     name: identity.name,
     ...(identity.emoji ? { emoji: identity.emoji } : {}),
+    ...(description ? { description } : {}),
   };
 }
 

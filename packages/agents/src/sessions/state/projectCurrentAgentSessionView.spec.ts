@@ -233,8 +233,8 @@ describe('projectCurrentAgentSessionView', () => {
         updatedAtMs: UPDATED_AT,
       },
     });
-    // Metadata names who the Session is; the description only reaches the model.
-    expect(becomes.agentIdentityV1).toEqual({ v: 1, id: 'julian', name: 'Julián', emoji: '🤖' });
+    // The whole identity, so any resume path can start the runner as this agent.
+    expect(becomes.agentIdentityV1).toEqual({ v: 1, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Only for the model.' });
 
     const cleared = projectCurrentAgentSessionView({
       metadata,

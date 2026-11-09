@@ -1858,11 +1858,9 @@ describe('runSessionAgentTransition', () => {
       expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
       expect(committedView()).toMatchObject({
         flavor: 'claude',
-        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖' },
+        agentIdentityV1: JULIAN,
         nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
       });
-      // The model-only description reaches the runner through the resume, never metadata.
-      expect(committedView().agentIdentityV1).not.toHaveProperty('description');
       expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0]).toMatchObject({
         agentIdentity: JULIAN,
         metadata: { nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' } },

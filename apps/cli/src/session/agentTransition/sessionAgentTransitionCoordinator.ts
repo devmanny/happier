@@ -362,8 +362,8 @@ async function admitInputAndActivateTarget(params: Readonly<{
       localId,
       rawSession: committedSession,
       metadata: params.targetMetadata,
-      // The full identity (with its model-only description) becomes the runner's
-      // identity env; the provider environment travels in the committed metadata.
+      // The chosen identity becomes the runner's identity env; the provider
+      // environment travels in the committed metadata.
       ...(request.selection.agentIdentityV1 ? { agentIdentity: request.selection.agentIdentityV1 } : {}),
     });
     if (!resumed.ok) {

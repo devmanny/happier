@@ -5,7 +5,10 @@ import { readPendingQueueV2ActivationEligibilityFromServer } from '@/api/session
 import { reportPendingSessionActivationFailure } from '@/api/session/pendingActivationTransport';
 import { SPAWN_SESSION_ERROR_CODES, type SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 
+import { projectCurrentAgentSessionView } from '@happier-dev/agents';
+
 import { activatePendingSessionRuntime } from './activatePendingInactiveSession';
+import { resolveSpawnChildEnvironment } from '@/daemon/spawn/resolveSpawnChildEnvironment';
 
 vi.mock('@/session/transport/http/sessionsHttp', () => ({
   fetchSessionByIdCompat: vi.fn(),
@@ -90,6 +93,44 @@ describe('activatePendingSessionRuntime', () => {
         requestedAt: 10,
       },
     }));
+  });
+
+  it('starts a just-transitioned Session as its full agent, description included, from metadata alone', async () => {
+    // The transition admits its input before it resumes, so this activation can win the start.
+    // It knows only what the cutover committed, which therefore has to carry the whole identity.
+    const tomas = { v: 1 as const, id: 'tomas', name: 'Tomás', emoji: '🤖', description: 'Works the Nomada account.' };
+    const committed = projectCurrentAgentSessionView({
+      metadata: { machineId: 'machine-1', path: '/repo', flavor: 'codex', codexSessionId: 'vendor-1' },
+      target: { agentId: 'claude', agentIdentity: tomas, nativeEnvironment: { CLAUDE_CONFIG_DIR: '/claude-b' }, updatedAtMs: 5 },
+    });
+    vi.mocked(fetchSessionByIdCompat).mockResolvedValue({
+      id: 'session-1', seq: 12, createdAt: 1, updatedAt: 1, active: false, activeAt: 1, encryptionMode: 'plain',
+      metadata: JSON.stringify(committed), metadataVersion: 2, agentState: null, agentStateVersion: 0,
+      pendingCount: 1, pendingVersion: 9,
+      pendingActivationAuthorization: { requestId: 'transition-input', requestedAt: 10, status: 'waiting' },
+      dataEncryptionKey: null, machineId: 'machine-1', path: '/repo',
+    });
+    vi.mocked(readPendingQueueV2ActivationEligibilityFromServer).mockResolvedValue('eligible');
+    const spawnSession = vi.fn(async (_options: Parameters<Parameters<typeof activatePendingSessionRuntime>[0]['spawnSession']>[0]) => (
+      { type: 'success' as const, sessionId: 'session-1' }));
+
+    await activatePendingSessionRuntime({
+      credentials, machineId: 'machine-1', sessionId: 'session-1', requestId: 'transition-input', pendingVersion: 9, spawnSession,
+    });
+
+    const options = spawnSession.mock.calls[0]![0];
+    const child = await resolveSpawnChildEnvironment({
+      options,
+      profileEnvironmentVariables: options.environmentVariables ?? {},
+      daemonSpawnHooks: null,
+      processEnv: {},
+      logDebug: () => {}, logInfo: () => {}, logWarn: () => {},
+      connectedServiceAuth: null,
+    });
+    expect(child.ok).toBe(true);
+    if (!child.ok) return;
+    expect(JSON.parse(child.extraEnvForChild.HAPPIER_AGENT_IDENTITY_JSON!)).toEqual(tomas);
+    expect(child.extraEnvForChild.CLAUDE_CONFIG_DIR).toBe('/claude-b');
   });
 
   it('does not spawn when exact durable authorization changes after initial eligibility validation', async () => {

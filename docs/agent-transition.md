@@ -154,8 +154,8 @@ fields up front for the same strict-schema reason.
   inspection and the coordinator use). A released-shape selection still
   compares only the backend target. A same-provider identity retry is told
   apart from a no-op by this operation's own divider.
-- The cutover projection writes or deletes `metadata.agentIdentityV1` (no
-  model-only description). On every transition it replaces
+- The cutover projection writes or deletes `metadata.agentIdentityV1`, with the
+  description included. On every transition it replaces
   `nativeAgentEnvironmentV1` with the selection's environment, or removes it.
   This includes released-shape transitions, so a Claude config dir never
   follows the Session to another provider or agent.
@@ -166,9 +166,16 @@ fields up front for the same strict-schema reason.
   when the caller has one. Otherwise it uses the identity recorded in metadata,
   so every resumer (pending-input activation, transition, message send) starts
   the same agent. The spawn RPC forwards it as `agentIdentityV1`, which becomes
-  `HAPPIER_AGENT_IDENTITY_JSON`. The respawn descriptor seals it
+  `HAPPIER_AGENT_IDENTITY_JSON`. This covers the pending-input activation, which
+  can start the target before the transition's own resume does. The respawn
+  descriptor seals it
   (`sealedAgentIdentity`) so a runner relaunched after a daemon restart keeps
   it. Descriptors without the field still read.
+- Known limit: an old client returning to Claude after Claude → Codex sends no
+  environment. The Session resumes without its previous `CLAUDE_CONFIG_DIR`, so
+  the native conversation is found only if that dir's `projects` folder is
+  shared with the default one (e.g. `~/.claude-tomas/projects` symlinked to
+  `~/.claude/projects`).
 
 ## Flow
 

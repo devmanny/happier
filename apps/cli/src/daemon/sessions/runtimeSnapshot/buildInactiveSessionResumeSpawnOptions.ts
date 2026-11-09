@@ -23,10 +23,8 @@ export type BuildInactiveSessionResumeSpawnOptionsParams = Readonly<{
   initialTranscriptAfterSeq?: number;
   executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;
   /**
-   * The user-defined agent the resumed runner works as. Absent, the agent the
-   * Session's metadata records is used, so every resumer starts the same agent.
-   * Metadata does not carry the model-only description; an explicit caller (a
-   * transition that just chose the agent) supplies the full identity.
+   * The user-defined agent the resumed runner works as. Absent, the full identity
+   * the Session's metadata records is used, so every resumer starts the same agent.
    */
   agentIdentity?: import('@happier-dev/protocol').AgentIdentityV1;
 }>;

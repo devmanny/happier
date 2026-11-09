@@ -187,8 +187,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         agentPath: sessionPath,
     });
     const nativeAgentEnvironmentV1 = readSessionNativeEnvironment(opts.nativeAgentEnvironment);
-    // Metadata carries who the session is (for lists and other threads); the description only
-    // goes to the model, through the coding prompt.
+    // Metadata carries the whole identity, so any later resume can hand the runner the same agent.
     const agentIdentity = readAgentIdentityFromEnvironment();
     const metadataBase: Metadata = {
         ...(nativeAgentEnvironmentV1 ? { nativeAgentEnvironmentV1 } : {}),
