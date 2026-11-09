@@ -104,6 +104,28 @@ import Testing
         #expect(call["params"]?["input"]?["meta"]?["model"] == nil)
     }
 
+    @Test func onAnOldDaemonTheSameBareProviderOnlyLeavesTheIdentity() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // Mateo on Codex; the machine's Happier can't carry an identity in a switch.
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: [
+            "agentIdentityV1": ["v": 1, "id": "a-mateo", "name": "Mateo"],
+        ])]
+        await store.refreshSessions()
+        store.armAgent(.init(agentId: "codex"), for: "s1")
+        #expect(store.armedAgents["s1"] != nil)
+
+        #expect(await store.send("sigue", to: "s1"))
+
+        // No switch (it would be refused as the same agent): the identity leaves the metadata and
+        // the message goes as any other, without an error.
+        #expect(!relay.log.values.contains("transition"))
+        #expect(relay.writtenMetadata?["agentIdentityV1"] == nil && relay.writtenMetadata != nil)
+        #expect(relay.log.values.contains("send"))
+        #expect(store.lastError == nil)
+        #expect(store.armedAgents["s1"] == nil)
+    }
+
     @Test func switchingToABareProviderLeavesTheAgentIdentityBehind() async throws {
         let relay = Relay()
         let store = relay.store()
@@ -120,6 +142,95 @@ import Testing
         #expect(relay.log.values.firstIndex(of: "metadata") ?? .max < relay.log.values.firstIndex(of: "transition") ?? -1)
         let written = try #require(relay.writtenMetadata)
         #expect(written["agentIdentityV1"] == nil && written["flavor"] == "codex")
+        // A daemon that can't take an identity in the switch gets the shape it knows.
+        let selection = try #require(relay.agentTransitionCall?["params"]?["selection"])
+        #expect(selection["agentIdentityV1"] == nil && selection["environmentVariables"] == nil)
+    }
+
+    // MARK: Switching to an agent profile
+
+    private static let ludo = AgentProfile(id: "a-ludo", name: "Ludo", emoji: "🎙️", providerId: "claude", modelId: "claude-opus-5-5",
+                                           effort: "high", account: .init(label: "Ludo", configDir: "~/.claude-ludo"))
+    private static let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: ""))
+
+    @Test func pickingAnAgentOnADaemonThatTakesIdentitiesSwitchesTheWholeIdentity() async throws {
+        let relay = Relay()
+        relay.supportsAgentIdentity = true
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        await store.refreshSessions()
+        store.armAgent(.init(profile: Self.ludo), for: "s1")
+
+        #expect(await store.send("hola", to: "s1"))
+
+        let selection = try #require(relay.agentTransitionCall?["params"]?["selection"])
+        #expect(selection["agentId"] == "claude" && selection["modelId"] == "claude-opus-5-5")
+        #expect(selection["sessionConfigOptionOverrides"]?["overrides"]?["reasoning_effort"]?["value"] == "high")
+        #expect(selection["agentIdentityV1"] == Self.ludo.identityJSON)
+        #expect(selection["environmentVariables"] == ["CLAUDE_CONFIG_DIR": "~/.claude-ludo"])
+        #expect(relay.writtenMetadata == nil)
+    }
+
+    @Test func pickingABareProviderOnADaemonThatTakesIdentitiesClearsItInTheSwitch() async throws {
+        let relay = Relay()
+        relay.supportsAgentIdentity = true
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: [
+            "agentIdentityV1": ["v": 1, "id": "a-mateo", "name": "Mateo"],
+        ])]
+        await store.refreshSessions()
+        store.armAgent(.init(agentId: "claude"), for: "s1")
+
+        #expect(await store.send("bien", to: "s1"))
+
+        let selection = try #require(relay.agentTransitionCall?["params"]?["selection"])
+        #expect(selection["agentIdentityV1"] == .null)
+        #expect(selection["environmentVariables"] == nil)
+        // The daemon clears it as part of the switch: no separate metadata write first.
+        #expect(relay.writtenMetadata == nil && !relay.log.values.contains("metadata"))
+    }
+
+    @Test func pickingAnAgentOnAnOlderDaemonIsRefusedBeforeAnythingChanges() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: [
+            "agentIdentityV1": ["v": 1, "id": "a-mateo", "name": "Mateo"],
+        ])]
+        await store.refreshSessions()
+        store.armAgent(.init(profile: Self.ludo), for: "s1")
+
+        #expect(await store.send("hola", to: "s1") == false)
+
+        #expect(store.lastError != nil)
+        #expect(relay.agentTransitionCall == nil && relay.writtenMetadata == nil)
+        #expect(store.armedAgents["s1"]?.profile == Self.ludo)
+        #expect(store.transcripts["s1"]?.isEmpty ?? true)
+    }
+
+    @Test func pickingTheSessionsOwnAgentAgainCancelsTheSwitch() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [
+            try relay.sessionRow(id: "s1", seq: 2, metadata: ["agentIdentityV1": ["v": 1, "id": "a-mateo", "name": "Mateo"]]),
+            try relay.sessionRow(id: "s2", seq: 2),
+        ]
+        await store.refreshSessions()
+
+        // Working as Mateo (Codex): Mateo again is no switch; bare Codex, or Mateo at another effort, is one.
+        store.armAgent(.init(profile: Self.mateo), for: "s1")
+        #expect(store.armedAgents["s1"] == nil)
+        store.armAgent(.init(agentId: "codex"), for: "s1")
+        #expect(store.armedAgents["s1"] == .init(agentId: "codex"))
+        store.armAgent(.init(profile: Self.mateo), for: "s1")
+        #expect(store.armedAgents["s1"] == nil)
+        store.armAgent(.init(profile: Self.mateo, modelId: nil, effort: "high"), for: "s1")
+        #expect(store.armedAgents["s1"]?.effort == "high")
+
+        // A bare Codex session: Mateo is another agent on the same provider; bare Codex cancels.
+        store.armAgent(.init(profile: Self.mateo), for: "s2")
+        #expect(store.armedAgents["s2"]?.profile == Self.mateo)
+        store.armAgent(.init(agentId: "codex"), for: "s2")
+        #expect(store.armedAgents["s2"] == nil)
     }
 
     @Test func afterSwitchingTheAgentTheUsageShownIsTheNewProvidersNotTheOldOnes() async throws {
@@ -258,7 +369,7 @@ private final class Relay: @unchecked Sendable {
     private let lock = NSLock()
     private var state = (sessionRows: [JSONValue](), messageTexts: ["m1": "hola", "m2": "adios"],
                          writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
-                         writtenMetadata: JSONValue?.none)
+                         writtenMetadata: JSONValue?.none, supportsAgentIdentity: false)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -272,6 +383,11 @@ private final class Relay: @unchecked Sendable {
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
     var agentTransitionCall: JSONValue? { lock.withLock { state.agentTransitionCall } }
     var writtenMetadata: JSONValue? { lock.withLock { state.writtenMetadata } }
+    /// Whether the machine's daemon takes an agent identity in a switch; false is an older daemon.
+    var supportsAgentIdentity: Bool {
+        get { lock.withLock { state.supportsAgentIdentity } }
+        set { lock.withLock { state.supportsAgentIdentity = newValue } }
+    }
     private var machineKey: Data { keys.content.secretKey }
     private var cipher: ContentCipher { .aesGCM(key: dataKey) }
 
@@ -319,6 +435,13 @@ private final class Relay: @unchecked Sendable {
             log.add("spawn")
             sessionRows = [try sessionRow(id: "s-new", seq: 0)]
             return [["ok": true, "result": ["type": "success", "sessionId": "s-new"]]]
+        case "rpc-call" where payload["method"]?.stringValue == "m1:capabilities.detect":
+            // `capabilities.ts`: an older daemon reports only the permission-intent support.
+            var data: [String: JSONValue] = ["supportsInputPermissionIntent": true]
+            if supportsAgentIdentity { data["supportsAgentIdentity"] = true }
+            return [["ok": true, "result": ["protocolVersion": 1, "results": [
+                "tool.sessionAgentTransition": ["ok": true, "checkedAt": 1, "data": .object(data)],
+            ]]]]
         case "rpc-call" where payload["method"]?.stringValue == "m1:session.agentTransition":
             // The relay's check (`rpcHandler.ts`): a session write without its proof is refused.
             log.add("transition")
@@ -377,7 +500,7 @@ private final class Relay: @unchecked Sendable {
         case ("GET", "/v2/sessions"):
             log.add("sessions")
             return (200, ["sessions": .array(sessionRows)])
-        case ("POST", "/v2/sessions/s-new/pending"):
+        case ("POST", let path) where path.hasPrefix("/v2/sessions/") && path.hasSuffix("/pending"):
             log.add("send")
             return (200, ["ok": true])
         case ("GET", let path) where path.hasSuffix("/pending"):

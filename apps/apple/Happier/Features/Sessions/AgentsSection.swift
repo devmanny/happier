@@ -253,8 +253,8 @@ private enum AgentsCard {
     }
 }
 
-/// The agent's icon, as in Settings: its emoji centered on a gray rounded square.
-private struct AgentIcon: View {
+/// The agent's icon, as in Settings: its emoji centered on a gray rounded square (also the model picker's).
+struct AgentIcon: View {
     let emoji: String?
 
     private var tile: Color {

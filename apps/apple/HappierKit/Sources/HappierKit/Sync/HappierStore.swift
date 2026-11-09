@@ -1770,30 +1770,54 @@ public final class HappierStore {
     // MARK: - Switching a session's agent
 
     /// An agent (and model and effort) for a session's next message. A `modelId` of nil or
-    /// `"default"` keeps the agent's CLI settings.
+    /// `"default"` keeps the agent's CLI settings. With a `profile` the session works as that agent
+    /// (its identity and account); without one it's the bare provider.
     public struct AgentSelection: Equatable, Sendable {
         public let agentId: String
         public let modelId: String?
         public let effort: String?
+        public let profile: AgentProfile?
 
         public init(agentId: String, modelId: String? = nil, effort: String? = nil) {
             self.agentId = agentId
             self.modelId = modelId
             self.effort = effort
+            profile = nil
+        }
+
+        /// The agent on its provider, with its own model and effort.
+        public init(profile: AgentProfile) {
+            self.init(profile: profile, modelId: profile.modelId, effort: profile.effort)
+        }
+
+        /// The agent on its provider with the model and effort picked for it.
+        public init(profile: AgentProfile, modelId: String?, effort: String?) {
+            agentId = profile.providerId
+            self.modelId = modelId
+            self.effort = effort
+            self.profile = profile
         }
     }
 
     /// Another agent picked for a session: its next message switches the session to it.
     public var armedAgents: [String: AgentSelection] = [:]
 
-    /// Picking the session's own agent again, with nothing else chosen, cancels the switch.
+    /// Picking the session's own agent again, with nothing else chosen, cancels the switch. The
+    /// session's own is the same provider working as the same agent (or as none): another agent on
+    /// the same provider is a switch.
     public func armAgent(_ selection: AgentSelection?, for sessionId: String) {
-        if let selection, selection.agentId == sessions[sessionId]?.agentId,
-           selection.modelId == nil || selection.modelId == "default", selection.effort == nil {
+        if let selection, let session = sessions[sessionId], selection.agentId == session.agentId,
+           selection.profile?.id == session.agentIdentity?.id,
+           Self.sameModel(selection.modelId, selection.profile?.modelId), selection.effort == selection.profile?.effort {
             armedAgents[sessionId] = nil
         } else {
             armedAgents[sessionId] = selection
         }
+    }
+
+    /// Nil and `"default"` both keep the CLI settings.
+    private static func sameModel(_ a: String?, _ b: String?) -> Bool {
+        (a == "default" ? nil : a) == (b == "default" ? nil : b)
     }
 
     /// Sends `text` as the first message of another agent in the session: the daemon stops the
@@ -1804,16 +1828,32 @@ public final class HappierStore {
             lastError = String(localized: "This session's machine or agent isn't known.")
             return false
         }
-        // A bare provider isn't the agent the session worked as: its identity leaves the metadata
-        // first, or the switch (which keeps metadata it doesn't know) would run the new provider
-        // under that agent's name.
-        if session.metadata["agentIdentityV1"].map({ !$0.isNull }) == true {
+        // A daemon that takes the identity in the switch sets it (an agent) or clears it (a bare
+        // provider) itself. An older one keeps the identity it has, so an agent can't be switched
+        // to there, and a bare provider needs the identity cleared from the metadata first, or the
+        // new provider would run under that agent's name.
+        let carriesIdentity = await supportsAgentIdentitySwitch(on: machineId)
+        if selection.profile != nil, !carriesIdentity {
+            lastError = String(localized: "This machine's Happier can't switch a session to an agent yet. Update Happier on it, or pick a provider.")
+            return false
+        }
+        if !carriesIdentity, session.metadata["agentIdentityV1"].map({ !$0.isNull }) == true {
             await editMetadata(id) { metadata, _ in
                 var object = metadata.objectValue ?? [:]
                 object["agentIdentityV1"] = nil
                 return .object(object)
             }
             guard sessions[id]?.metadata["agentIdentityV1"].map({ $0.isNull }) ?? true else { return false }
+        }
+        // The same provider, bare, on such a daemon: a switch would be refused as the same agent.
+        // Leaving the identity is all there is to do (the running agent keeps its prompt until it
+        // restarts, accepted until the machine's Happier carries identities); the message goes as
+        // any other, with the model and effort picked.
+        if !carriesIdentity, selection.profile == nil, selection.agentId == current {
+            armedAgents[id] = nil
+            if let model = selection.modelId, model != controls(for: id)?.selectedModelId { await setModel(model, in: id) }
+            if let effort = selection.effort, effort != controls(for: id)?.effort { await setEffort(effort, in: id) }
+            return await send(text, to: id)
         }
         let localId = UUID().uuidString.lowercased()
         if transcripts[id] == nil { transcripts[id] = Transcript() }
@@ -1825,7 +1865,7 @@ public final class HappierStore {
         meta["source"] = "ui"
         meta["sentFrom"] = .string(sentFrom)
         let params = AgentTransitionRequest.params(sessionId: id, currentAgentId: current, selection: selection,
-                                                   text: text, localId: localId, meta: meta)
+                                                   text: text, localId: localId, meta: meta, carriesIdentity: carriesIdentity)
         let failure: String
         do {
             let result = try await machineRPC(machineId, method: "session.agentTransition", params: params, timeout: .seconds(180))
@@ -2247,6 +2287,38 @@ public final class HappierStore {
     }
 
     @ObservationIgnored private var installedAgentsByMachine: [String: (agents: Set<String>, at: Date)] = [:]
+
+    /// Whether each machine's daemon takes an agent identity in a switch, as last read (the picker
+    /// shows agents as unavailable where it doesn't); absent until read.
+    public private(set) var agentIdentitySwitchSupport: [String: Bool] = [:]
+    @ObservationIgnored private var agentIdentitySwitchReadAt: [String: Date] = [:]
+
+    /// Whether the machine's daemon takes an agent identity in `session.agentTransition`
+    /// (`tool.sessionAgentTransition` → `supportsAgentIdentity`), as the official app reads the
+    /// transition's other abilities. Read once and reused for a few minutes like the installed
+    /// agents; false (and read again next time) when the machine can't be asked.
+    public func supportsAgentIdentitySwitch(on machineId: String) async -> Bool {
+        if let at = agentIdentitySwitchReadAt[machineId], Date.now.timeIntervalSince(at) < 300,
+           let known = agentIdentitySwitchSupport[machineId] { return known }
+        let supported: Bool
+        do {
+            let response = try await machineRPC(machineId, method: "capabilities.detect",
+                                                params: ["requests": [["id": "tool.sessionAgentTransition"]]], timeout: .seconds(15))
+            guard let answer = AgentTransitionRequest.supportsAgentIdentity(fromDetect: response) else {
+                log.error("agent identity switch: unreadable capabilities answer")
+                return false
+            }
+            supported = answer
+        } catch let error as RPCError where error.code == "RPC_METHOD_NOT_FOUND" {
+            supported = false
+        } catch {
+            log.error("agent identity switch: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        agentIdentitySwitchReadAt[machineId] = .now
+        if agentIdentitySwitchSupport[machineId] != supported { agentIdentitySwitchSupport[machineId] = supported }
+        return supported
+    }
 
     public enum SpawnOutcome: Equatable, Sendable {
         case created(sessionId: String)

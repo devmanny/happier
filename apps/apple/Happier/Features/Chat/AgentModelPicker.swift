@@ -1,12 +1,14 @@
 import HappierKit
 import SwiftUI
 
-/// What the model picker edits: an agent, its model (`"default"` keeps the agent's CLI settings)
-/// and, when that model has levels, the effort to run it at.
+/// What the model picker edits: a provider, its model (`"default"` keeps the agent's CLI settings)
+/// and, when that model has levels, the effort to run it at. `profileId` names the agent the
+/// session works as on that provider; nil is the bare provider.
 struct AgentModelChoice: Equatable {
     var agentId: String
     var modelId = "default"
     var effort: String?
+    var profileId: String?
 }
 
 /// The one agent → model → effort picker, the same for a live conversation (iPhone sheet and Mac
@@ -30,28 +32,54 @@ struct AgentModelPicker: View {
     var footer: String?
     /// The Agent section's title.
     var agentSectionTitle: LocalizedStringKey = "Agent"
+    /// Your agents, offered above the bare providers (a live conversation's picker only).
+    var profiles: [AgentProfile] = []
+    /// The agent the live conversation works as, tagged "Current"; nil when it's a bare provider.
+    var currentProfile: AgentIdentity?
+    /// Whether the machine can switch the conversation to an agent; where it can't, the agents other
+    /// than the current one are unavailable and `agentsFooter` says why.
+    var agentsSelectable = true
+    var agentsFooter: String?
 
     var body: some View {
         let choices = models(choice.agentId)
         let model = effortModel ?? choices.first { $0.id == choice.modelId }
         List {
-            Section(agentSectionTitle) {
+            if !profiles.isEmpty {
+                Section {
+                    ForEach(profiles) { profile in
+                        profileRow(profile)
+                    }
+                } header: {
+                    Text("Agents")
+                } footer: {
+                    if let agentsFooter { Text(agentsFooter) }
+                }
+            }
+            Section {
                 ForEach(agents, id: \.self) { agent in
                     Button {
-                        guard agent != choice.agentId else { return }
+                        guard agent != choice.agentId || choice.profileId != nil else { return }
                         AppHaptics.selection()
                         choice = AgentModelChoice(agentId: agent)
                     } label: {
                         HStack(spacing: 10) {
                             Image("Agents/\(agent)").resizable().scaledToFit().frame(width: 18, height: 18)
                             Text(Agent.displayNames[agent] ?? agent).foregroundStyle(.primary)
-                            if agent == currentAgentId { Text("Current").font(.footnote).foregroundStyle(.secondary) }
+                            if agent == currentAgentId, currentProfile == nil { Text("Current").font(.footnote).foregroundStyle(.secondary) }
                             Spacer()
-                            check(agent == choice.agentId)
+                            check(agent == choice.agentId && choice.profileId == nil)
                         }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.pressable)
+                }
+            } header: {
+                Text(profiles.isEmpty ? agentSectionTitle : "Providers")
+            } footer: {
+                // Leaving the agent the conversation works as for a bare provider.
+                if let currentProfile, choice.profileId == nil {
+                    Text("This session will stop working as \(currentProfile.name).")
                 }
             }
             Section {
@@ -84,6 +112,36 @@ struct AgentModelPicker: View {
             }
         }
         .animation(.smooth(duration: 0.2), value: choice)
+    }
+
+    private func profileRow(_ profile: AgentProfile) -> some View {
+        let isCurrent = profile.id == currentProfile?.id
+        return Button {
+            guard profile.id != choice.profileId else { return }
+            AppHaptics.selection()
+            // The agent's own model and effort, changeable below.
+            choice = AgentModelChoice(agentId: profile.providerId, modelId: profile.modelId ?? "default",
+                                      effort: profile.effort, profileId: profile.id)
+        } label: {
+            HStack(spacing: 10) {
+                AgentIcon(emoji: profile.emoji)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(profile.name).foregroundStyle(.primary).lineLimit(1)
+                        if isCurrent { Text("Current").font(.footnote).foregroundStyle(.secondary) }
+                    }
+                    Text(Agent.displayNames[profile.providerId] ?? profile.providerId)
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Spacer()
+                ProviderLogo(providerId: profile.providerId, size: 16)
+                check(profile.id == choice.profileId)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+        // Going back to the current agent stays possible: it cancels a switch.
+        .disabled(!agentsSelectable && !isCurrent)
     }
 
     private func modelRow(id: String, name: String, detail: String) -> some View {
@@ -130,19 +188,31 @@ struct SessionModelPicker: View {
         return Agent.ids.filter { known.contains($0) && $0 != "customAcp" }
     }
 
+    /// Your agents whose provider this machine has, in the list's order (and the current one always).
+    private func profiles(current: AgentIdentity?) -> [AgentProfile] {
+        let providers = Set(agents)
+        return AgentRoster.ordered(store.agentProfiles, by: store.accountSettings?.agentOrder ?? [])
+            .filter { providers.contains($0.providerId) || $0.id == current?.id }
+    }
+
     var body: some View {
         if let controls = store.controls(for: sessionId), let current = session?.agentId {
             let armed = store.armedAgents[sessionId]
             let sessions = Array(store.sessions.values)
+            let identity = session?.agentIdentity
+            let identitySupport = session?.machineId.flatMap { store.agentIdentitySwitchSupport[$0] }
             AgentModelPicker(
                 agents: agents,
                 currentAgentId: current,
                 choice: Binding(
                     get: {
-                        if let armed { return AgentModelChoice(agentId: armed.agentId, modelId: armed.modelId ?? "default", effort: armed.effort) }
-                        return AgentModelChoice(agentId: current, modelId: controls.selectedModelId, effort: controls.effort)
+                        if let armed {
+                            return AgentModelChoice(agentId: armed.agentId, modelId: armed.modelId ?? "default", effort: armed.effort,
+                                                    profileId: armed.profile?.id)
+                        }
+                        return AgentModelChoice(agentId: current, modelId: controls.selectedModelId, effort: controls.effort, profileId: identity?.id)
                     },
-                    set: { next in apply(next, controls: controls, current: current, wasArmed: armed != nil) }),
+                    set: { next in apply(next, controls: controls, current: current, currentProfileId: identity?.id, wasArmed: armed != nil) }),
                 models: { agent in
                     agent == current ? controls.models : SessionControls.newSessionModels(agentId: agent, sessions: sessions)
                 },
@@ -151,18 +221,32 @@ struct SessionModelPicker: View {
                 ultracode: armed == nil && controls.effortModel?.supportsUltracode == true
                     ? Binding(get: { controls.ultracode ?? false }, set: { on in Task { await store.setUltracode(on, in: sessionId) } })
                     : nil,
-                footer: armed.map { String(localized: "Your next message switches this session to \(Agent.displayNames[$0.agentId] ?? $0.agentId), keeping the conversation.") }
-                    ?? String(localized: "Applies from your next message."))
+                footer: armed.map { String(localized: "Your next message switches this session to \($0.profile?.name ?? Agent.displayNames[$0.agentId] ?? $0.agentId), keeping the conversation.") }
+                    ?? String(localized: "Applies from your next message."),
+                profiles: profiles(current: identity),
+                currentProfile: identity,
+                // Unknown until the machine answers: an agent isn't offered before it's known to work.
+                agentsSelectable: identitySupport == true,
+                agentsFooter: identitySupport == false
+                    ? String(localized: "Switching this session to an agent needs a newer Happier on its machine. You can still switch providers.")
+                    : nil)
             .task(id: session?.machineId) {
                 guard let machineId = session?.machineId else { return }
+                async let support = store.supportsAgentIdentitySwitch(on: machineId)
                 installed = await store.installedAgents(on: machineId)
+                _ = await support
             }
         }
     }
 
-    private func apply(_ next: AgentModelChoice, controls: SessionControls, current: String, wasArmed: Bool) {
-        guard next.agentId == current else {
-            store.armAgent(.init(agentId: next.agentId, modelId: next.modelId == "default" ? nil : next.modelId, effort: next.effort), for: sessionId)
+    private func apply(_ next: AgentModelChoice, controls: SessionControls, current: String, currentProfileId: String?, wasArmed: Bool) {
+        guard next.agentId == current, next.profileId == currentProfileId else {
+            if let profileId = next.profileId, let profile = store.agentProfile(id: profileId) {
+                // An agent keeps "default" as picked: its own model is already in the choice.
+                store.armAgent(.init(profile: profile, modelId: next.modelId, effort: next.effort), for: sessionId)
+            } else {
+                store.armAgent(.init(agentId: next.agentId, modelId: next.modelId == "default" ? nil : next.modelId, effort: next.effort), for: sessionId)
+            }
             return
         }
         // Back to the session's own agent: the switch is off and its model and effort stay as they were.
@@ -171,9 +255,10 @@ struct SessionModelPicker: View {
         if let effort = next.effort, effort != controls.effort { Task { await store.setEffort(effort, in: sessionId) } }
     }
 
-    /// "Codex · GPT-6 · High" for the composer's model pill while a switch is armed.
+    /// "Codex · GPT-6 · High" (or the agent's name for the provider) for the composer's model pill
+    /// while a switch is armed.
     static func label(_ selection: HappierStore.AgentSelection, sessions: [Session]) -> String {
-        let agent = Agent.displayNames[selection.agentId] ?? selection.agentId
+        let agent = selection.profile?.name ?? Agent.displayNames[selection.agentId] ?? selection.agentId
         guard let id = selection.modelId, id != "default",
               let model = SessionControls.newSessionModels(agentId: selection.agentId, sessions: sessions).first(where: { $0.id == id })
         else { return agent }

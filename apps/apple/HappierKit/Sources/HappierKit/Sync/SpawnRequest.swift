@@ -44,16 +44,38 @@ public enum SpawnRequest {
 /// session continues with another agent, whose first message is `text`. The picked model and effort
 /// travel like a new session's (`SpawnRequest`).
 public enum AgentTransitionRequest {
+    /// `carriesIdentity` (a daemon that says `supportsAgentIdentity`) adds who the session works as:
+    /// the agent's `agentIdentityV1`, or null for a bare provider, plus a Claude agent's own folder.
+    /// Without it the selection keeps the shape older daemons know.
     public static func params(sessionId: String, currentAgentId: String, selection: HappierStore.AgentSelection,
-                              text: String, localId: String, meta: [String: JSONValue], now: Double = ServerClock.nowMs()) -> JSONValue {
+                              text: String, localId: String, meta: [String: JSONValue], carriesIdentity: Bool = false,
+                              now: Double = ServerClock.nowMs()) -> JSONValue {
         let now = now.rounded(.down)
         var target: [String: JSONValue] = ["v": 1, "agentId": .string(selection.agentId)]
         if let model = selection.modelId, !model.isEmpty, model != "default" { target["modelId"] = .string(model) }
         if let overrides = SpawnRequest.effortOverrides(selection.effort, now: now) { target["sessionConfigOptionOverrides"] = overrides }
+        if carriesIdentity {
+            target["agentIdentityV1"] = selection.profile?.identityJSON ?? .null
+            if selection.agentId == "claude", let dir = selection.profile?.claudeConfigDir {
+                target["environmentVariables"] = ["CLAUDE_CONFIG_DIR": .string(dir)]
+            }
+        }
         return [
             "v": 1, "sessionId": .string(sessionId), "expectedCurrentAgentId": .string(currentAgentId),
             "selection": .object(target),
             "input": ["text": .string(text), "localId": .string(localId), "meta": .object(meta)],
         ]
+    }
+
+    /// `supportsAgentIdentity` from a `capabilities.detect` answer for `tool.sessionAgentTransition`:
+    /// false from a daemon that doesn't know the capability or the field; nil when it isn't an answer.
+    public static func supportsAgentIdentity(fromDetect response: JSONValue) -> Bool? {
+        guard let result = response["results"]?["tool.sessionAgentTransition"] else {
+            return response["results"]?.objectValue == nil ? nil : false
+        }
+        guard result["ok"]?.boolValue == true else {
+            return result["error"]?["code"] == "unknown-capability" ? false : nil
+        }
+        return result["data"]?["supportsAgentIdentity"]?.boolValue == true
     }
 }
