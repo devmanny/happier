@@ -9,6 +9,7 @@ struct ChatView: View {
 
     var body: some View {
         SessionChatHost(sessionId: sessionId, details: details).equatable()
+            .offlineNotice()
     }
 
     /// What the ⓘ menu shows, as plain values.
@@ -394,7 +395,8 @@ private struct ChatConversationContent: View, Equatable {
                 if store.transcripts[sessionId]?.minSeq == before { break }
             }
         }
-        .task(id: sessionId) {
+        // Read again when the session switches agent: the limits are the new provider's.
+        .task(id: "\(sessionId)|\(facts.agentId ?? "")") {
             // The provider's limits, read again as often as the daemon refreshes them.
             while !Task.isCancelled {
                 await store.refreshProviderUsage(sessionId)
@@ -828,7 +830,7 @@ private struct SessionUsageToolbar: ToolbarContent {
 
     var body: some ToolbarContent {
         let session = store.sessions[sessionId]
-        let usage = store.providerUsage[sessionId] ?? session?.lastRuntimeIssue.flatMap(ProviderUsage.init(runtimeIssue:))
+        let usage = store.usage(for: sessionId)
         let context = store.transcripts[sessionId]?.contextUsage
         let controls = store.controls(for: sessionId)
         let modelId = controls.flatMap { $0.selectedModelId != "default" ? $0.selectedModelId : $0.appliedModelId }

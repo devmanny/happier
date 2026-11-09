@@ -104,6 +104,24 @@ import Testing
         #expect(call["params"]?["input"]?["meta"]?["model"] == nil)
     }
 
+    @Test func afterSwitchingTheAgentTheUsageShownIsTheNewProvidersNotTheOldOnes() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // The session points at both providers' readings; Codex's is the newer one.
+        let refs: [String: JSONValue] = ["providerAccountUsageRefsV1": ["recordIds": ["r-claude", "r-codex"]]]
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: refs)]
+        await store.refreshSessions()
+        await store.refreshProviderUsage("s1")
+        #expect(store.usage(for: "s1")?.providerId == "codex")
+
+        // Now it's Claude's session: Codex's reading, still cached, isn't shown for it.
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 3, metadata: refs.merging(["flavor": "claude"]) { $1 }, metadataVersion: 4)]
+        await store.refreshSessions()
+        #expect(store.usage(for: "s1")?.providerId != "codex")
+        await store.refreshProviderUsage("s1")
+        #expect(store.usage(for: "s1")?.providerId == "claude")
+    }
+
     // MARK: This device cut off from the relay
 
     @Test func cutOffFromTheRelayWhatTheRelayReportedIsJudgedWhenTheLinkWasLost() throws {
@@ -256,14 +274,14 @@ private final class Relay: @unchecked Sendable {
         #expect(store.task(id: "t1") != nil && store.agentProfile(id: "a-mateo") != nil)
     }
 
-    func sessionRow(id: String, seq: Int, metadata extra: [String: JSONValue] = [:]) throws -> JSONValue {
+    func sessionRow(id: String, seq: Int, metadata extra: [String: JSONValue] = [:], metadataVersion: Int = 3) throws -> JSONValue {
         let envelope = try HappierCrypto.sealDataKeyEnvelope(dataKey, recipientPublicKey: keys.content.publicKey)
         let metadata: [String: JSONValue] = ["path": "/tmp/radar", "machineId": "m1", "flavor": "codex"]
         return [
             "id": .string(id), "seq": .number(Double(seq)), "createdAt": 1, "updatedAt": 2, "active": true, "activeAt": 1,
             "encryptionMode": "e2ee", "dataEncryptionKey": .string(envelope.base64EncodedString()),
             "metadata": .string(try cipher.encryptBase64(.object(metadata.merging(extra) { $1 }))),
-            "metadataVersion": 3, "agentState": .null, "agentStateVersion": 1,
+            "metadataVersion": .number(Double(metadataVersion)), "agentState": .null, "agentStateVersion": 1,
         ]
     }
 
@@ -321,6 +339,14 @@ private final class Relay: @unchecked Sendable {
         case ("GET", "/v1/machines/m1"):
             let plain = Data(#"{"t":"plain"}"#.utf8).base64EncodedString()
             return (200, ["machine": ["id": "m1", "active": true, "dataEncryptionKey": .string(plain)]])
+        case ("GET", let path) where path.hasPrefix("/v3/connect/provider-account-usage/"):
+            let provider = path.hasSuffix("r-claude") ? "claude" : "codex"
+            let snapshot: JSONValue = ["v": 1, "providerId": .string(provider), "fetchedAtMs": provider == "codex" ? 2_000 : 1_000,
+                                       "staleAfterMs": 300_000, "meters": [["meterId": "session", "utilizationPct": 40]]]
+            return (200, ["content": ["t": "plain", "v": snapshot]])
+        case ("GET", "/v2/changes"):
+            // The cursor is gone: the list is read again in full.
+            return (410, ["error": "cursor-expired"])
         case ("GET", "/v2/cursor"):
             return (200, ["cursor": 1])
         case ("GET", "/v2/sessions"):

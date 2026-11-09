@@ -44,14 +44,6 @@ struct StoreAlerts: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // Cut off from the relay: said once, at the top, not as an alert; gone on reconnecting.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if let notice = store.offlineNotice {
-                    OfflineBanner(notice: notice)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-            }
-            .animation(.smooth(duration: 0.3), value: store.offlineNotice)
             .confirmationDialog(
                 store.stopRequest?.thenArchive == true ? "Stop and archive this session?" : "Stop this session?",
                 isPresented: Binding(get: { appearsActive && store.stopRequest != nil }, set: { if !$0 { store.stopRequest = nil } }),
@@ -89,6 +81,28 @@ struct StoreAlerts: ViewModifier {
             } message: {
                 Text(store.lastError ?? "")
             }
+    }
+}
+
+extension View {
+    /// Cut off from the relay: said under the screen's own bar, not as an alert; gone on
+    /// reconnecting. Inside the navigation (the list, the conversation), so it never covers the
+    /// bar's buttons.
+    func offlineNotice() -> some View { modifier(OfflineNoticeInset()) }
+}
+
+private struct OfflineNoticeInset: ViewModifier {
+    @Environment(HappierStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let notice = store.offlineNotice {
+                    OfflineBanner(notice: notice)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: store.offlineNotice)
     }
 }
 

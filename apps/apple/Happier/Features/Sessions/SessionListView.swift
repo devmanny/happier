@@ -640,6 +640,10 @@ private struct SessionMenuPreview: View {
 
 extension SessionListView {
     var body: some View {
+        list.offlineNotice()
+    }
+
+    private var list: some View {
         List(selection: isDrawer ? .constant(nil) : Binding(get: { selection }, set: { next in
             if next != selection { AppHaptics.selection() }
             selection = next

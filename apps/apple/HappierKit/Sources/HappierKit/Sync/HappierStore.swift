@@ -3174,6 +3174,15 @@ public final class HappierStore {
 
     /// Reads the provider usage the daemon published for the session; the newest snapshot wins
     /// when it has several (`sync/domains/accountUsage/selectors.ts`).
+    /// The usage shown for a session: its current agent's provider only. A session switched to
+    /// another agent keeps the old provider's reading (and its record) until it's read again.
+    public func usage(for sessionId: String) -> ProviderUsage? {
+        guard let session = sessions[sessionId] else { return nil }
+        let belongs = { (usage: ProviderUsage) in usage.providerId == nil || usage.providerId == session.agentId }
+        if let reading = providerUsage[sessionId], belongs(reading) { return reading }
+        return session.lastRuntimeIssue.flatMap(ProviderUsage.init(runtimeIssue:)).flatMap { belongs($0) ? $0 : nil }
+    }
+
     public func refreshProviderUsage(_ sessionId: String) async {
         guard let api, let session = sessions[sessionId] else { return }
         var newest: ProviderUsage?
@@ -3184,6 +3193,8 @@ public final class HappierStore {
                     log.error("provider usage \(recordId, privacy: .public): unreadable snapshot")
                     continue
                 }
+                // A record of the session's previous agent isn't its usage now.
+                guard usage.providerId == nil || usage.providerId == session.agentId else { continue }
                 if (usage.fetchedAt ?? .distantPast) >= (newest?.fetchedAt ?? .distantPast) { newest = usage }
             } catch {
                 log.error("provider usage \(recordId, privacy: .public): \(String(describing: error), privacy: .public)")
