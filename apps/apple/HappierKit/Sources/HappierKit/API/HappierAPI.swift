@@ -11,7 +11,7 @@ public struct HappierAPI: Sendable {
 
     let http: HTTPClient
 
-    public init(server: URL, token: String, session: URLSession = .shared) {
+    public init(server: URL, token: String, session: URLSession = HTTPClient.relaySession) {
         http = HTTPClient(baseURL: server, token: token, session: session)
     }
 

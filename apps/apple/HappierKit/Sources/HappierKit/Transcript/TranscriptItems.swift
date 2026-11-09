@@ -131,6 +131,9 @@ public struct TranscriptEvent: Equatable, Sendable {
     public let kind: String
     public let data: JSONValue
     public let createdAt: Date
+
+    /// What it says in a preview or a work summary: its line's text when it has one.
+    public var summary: String { data["text"]?.stringValue ?? data["message"]?.stringValue ?? kind }
 }
 
 /// An outstanding `agentState.requests` entry.

@@ -43,6 +43,16 @@ import Testing
         #expect(shape(ChatRow.rows(from: more, working: true)) == ["user:q", "work1", "text:narration", "work1…"])
     }
 
+    @Test func modelChangeAndCommandLinesStayOutOfTheFoldedSteps() {
+        func event(_ kind: String) -> ChatItem {
+            .event(TranscriptEvent(id: kind, kind: kind, data: ["message": "Model changed to Opus 5.5", "text": "/mcp"], createdAt: .distantPast))
+        }
+        let items = [user("q"), tool("1"), event("runtime-config-outcome"), tool("2"), event("local-command"), text("done")]
+        #expect(shape(ChatRow.rows(from: items, working: false)) == ["user:q", "work1", "event", "work1", "event", "text:done"])
+        // Other events (a ready, a switch) still fold with the steps.
+        #expect(shape(ChatRow.rows(from: [user("q"), tool("1"), event("switch"), text("done")], working: false)) == ["user:q", "work2", "text:done"])
+    }
+
     @Test func pendingApprovalsStayVisible() {
         let items = [user("q"), tool("1"), tool("2", pending: true)]
         #expect(shape(ChatRow.rows(from: items, working: true)) == ["user:q", "work1…", "tool:2"])

@@ -16,7 +16,17 @@ public struct HTTPClient: Sendable {
     public var token: String?
     private let session: URLSession
 
-    public init(baseURL: URL, token: String? = nil, session: URLSession = .shared) {
+    /// The relay's session: no HTTP disk cache. Its responses are JSON (mostly sealed) the app
+    /// keeps itself where it needs to; the shared session's `URLCache` wrote every one of them to
+    /// `Cache.db` (about 330 KB a minute in the foreground, measured on 8 Nov 2026).
+    public static let relaySession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
+    public init(baseURL: URL, token: String? = nil, session: URLSession = HTTPClient.relaySession) {
         self.baseURL = baseURL
         self.token = token
         self.session = session

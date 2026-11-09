@@ -19,6 +19,7 @@ enum Normalizer {
         case "user":
             if meta?["happier"]?["kind"]?.stringValue == "tool-answer-delivery.v1" { return [] }
             guard let text = record["content"]?["text"]?.stringValue else { return [] }
+            if let command = LocalCommandLine.blocks(for: text) { return command }
             let attachments = MessageAttachment.list(in: meta)
             let preservesOriginal = SessionMessageOrigin.parse(meta) != nil || (attachments.isEmpty && SessionNotice.parse(text) != nil)
             let shown = preservesOriginal ? text : meta?["displayText"]?.stringValue ?? text
@@ -49,8 +50,10 @@ enum Normalizer {
             if let text = content?.stringValue { return [.text(text, thinking: false)] }
             return (content?.arrayValue ?? []).compactMap(contentBlock)
         case "user":
-            if let text = content?.stringValue { return [.userText(text, attachments: [])] }
+            if let text = content?.stringValue { return LocalCommandLine.blocks(for: text) ?? [.userText(text, attachments: [])] }
             let blocks = content?.arrayValue ?? []
+            if let text = blocks.first(where: { $0["type"]?.stringValue == "text" })?["text"]?.stringValue,
+               let command = LocalCommandLine.blocks(for: text) { return command }
             // `toolUseResult` describes the message's tool result; with several it can't be told apart.
             let resultCount = blocks.count { ["tool_result", "tool-call-result"].contains($0["type"]?.stringValue ?? "") }
             let structured = resultCount == 1 ? data["toolUseResult"].flatMap { $0.isNull ? nil : $0 } : nil

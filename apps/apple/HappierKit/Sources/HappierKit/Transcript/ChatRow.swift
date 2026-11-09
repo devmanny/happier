@@ -101,8 +101,13 @@ public enum ChatRow: Identifiable, Sendable, Equatable {
 
 private extension ChatItem {
     var staysVisible: Bool {
-        if case .toolCall(let tool) = self { return tool.isQuestion || tool.permission?.status == .pending }
-        return false
+        switch self {
+        case .toolCall(let tool): tool.isQuestion || tool.permission?.status == .pending
+        // A model or effort change and a command's line are said in the conversation, not
+        // folded into the steps it came between.
+        case .event(let event): event.kind == "runtime-config-outcome" || event.kind == LocalCommandLine.kind
+        default: false
+        }
     }
 
     /// Agent text that isn't thinking: always shown.

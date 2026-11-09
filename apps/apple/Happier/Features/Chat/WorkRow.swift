@@ -88,7 +88,7 @@ struct WorkRow: View {
         case .toolCall(let tool): [ToolPresentation.name(for: tool), ToolPresentation.summary(tool)].compactMap { $0 }.joined(separator: " ")
         case .agentText(let text): text.isThinking ? String(localized: "Thinking") : String(text.text.prefix(80))
         case .userText(let text): String(text.text.prefix(80))
-        case .event(let event): event.kind
+        case .event(let event): event.summary
         }
     }
 }
