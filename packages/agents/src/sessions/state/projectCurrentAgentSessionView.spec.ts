@@ -222,6 +222,57 @@ describe('projectCurrentAgentSessionView', () => {
     expect(next.acpConfigOptionOverridesV1).toEqual({ v: 1, updatedAt: UPDATED_AT, overrides: {} });
   });
 
+  it('writes, clears or leaves the user-defined agent identity as the target asks', () => {
+    const metadata = { ...sourceMetadata(), agentIdentityV1: { v: 1, id: 'mateo', name: 'Mateo', emoji: '🤖' } };
+
+    const becomes = projectCurrentAgentSessionView({
+      metadata,
+      target: {
+        agentId: 'claude',
+        agentIdentity: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Only for the model.' },
+        updatedAtMs: UPDATED_AT,
+      },
+    });
+    // Metadata names who the Session is; the description only reaches the model.
+    expect(becomes.agentIdentityV1).toEqual({ v: 1, id: 'julian', name: 'Julián', emoji: '🤖' });
+
+    const cleared = projectCurrentAgentSessionView({
+      metadata,
+      target: { agentId: 'codex', agentIdentity: null, updatedAtMs: UPDATED_AT },
+    });
+    expect(cleared).not.toHaveProperty('agentIdentityV1');
+
+    const untouched = projectCurrentAgentSessionView({
+      metadata,
+      target: { agentId: 'codex', updatedAtMs: UPDATED_AT },
+    });
+    expect(untouched.agentIdentityV1).toEqual(metadata.agentIdentityV1);
+  });
+
+  it('always resets the native provider environment to the target one, so a config dir never leaks', () => {
+    const metadata = { ...sourceMetadata(), nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' } };
+
+    const legacy = projectCurrentAgentSessionView({
+      metadata,
+      target: { agentId: 'codex', updatedAtMs: UPDATED_AT },
+    });
+    expect(legacy).not.toHaveProperty('nativeAgentEnvironmentV1');
+
+    const rebound = projectCurrentAgentSessionView({
+      metadata,
+      target: { agentId: 'claude', nativeEnvironment: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' }, updatedAtMs: UPDATED_AT },
+    });
+    expect(rebound.nativeAgentEnvironmentV1).toEqual({ CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' });
+
+    // A same-Agent machine move keeps the environment it already runs with.
+    const handoff = projectCurrentAgentSessionView({
+      metadata,
+      target: { agentId: 'claude', updatedAtMs: UPDATED_AT },
+      agentScopedCurrentState: 'carry',
+    });
+    expect(handoff.nativeAgentEnvironmentV1).toEqual({ CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' });
+  });
+
   it('does not mutate the source metadata record', () => {
     const metadata = sourceMetadata();
     projectCurrentAgentSessionView({

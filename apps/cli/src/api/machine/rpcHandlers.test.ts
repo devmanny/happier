@@ -7547,6 +7547,44 @@ describe('registerMachineRpcHandlers', () => {
     expect(registered.has((RPC_METHODS as any).DAEMON_DIRECT_SESSION_TAKEOVER_PERSIST)).toBe(true);
   });
 
+  it('refuses an agent transition carrying any env key beyond the allowlist before anything is touched', async () => {
+    const registered = new Map<string, (params: unknown) => Promise<unknown>>();
+    const stopSession = vi.fn(async () => true);
+    const spawnSession = vi.fn(async () => ({ type: 'success', sessionId: 's1' } as const));
+    registerMachineRpcHandlers({
+      rpcHandlerManager: {
+        registerHandler: (method: string, handler: (params: unknown) => Promise<unknown>) => {
+          registered.set(method, handler);
+        },
+      } as any,
+      handlers: { spawnSession, stopSession: stopSession as never, requestShutdown: () => {} },
+    });
+    readCredentialsMock.mockResolvedValue(null);
+    const transition = registered.get(RPC_METHODS.SESSION_AGENT_TRANSITION)!;
+    const transitionRequest = (environmentVariables: Record<string, string>) => ({
+      v: 1,
+      sessionId: 'session-1',
+      expectedCurrentAgentId: 'codex',
+      selection: {
+        v: 1,
+        agentId: 'claude',
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' },
+        environmentVariables,
+      },
+      input: { text: 'keep going', localId: 'local-1', meta: {} },
+    });
+
+    await expect(transition(transitionRequest({ CLAUDE_CONFIG_DIR: '/tmp/a', PATH: '/evil' })))
+      .resolves.toEqual({ type: 'rejected', code: 'unsupported_operation', sourceEffect: 'none' });
+    await expect(transition(transitionRequest({ ANTHROPIC_API_KEY: 'sk-x' })))
+      .resolves.toEqual({ type: 'rejected', code: 'unsupported_operation', sourceEffect: 'none' });
+    // The allowlisted shape passes validation and only then meets the credential gate.
+    await expect(transition(transitionRequest({ CLAUDE_CONFIG_DIR: '/tmp/a' })))
+      .resolves.toEqual({ type: 'rejected', code: 'forbidden', sourceEffect: 'none' });
+    expect(stopSession).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
+  });
+
   it('registers session handoff handlers', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {

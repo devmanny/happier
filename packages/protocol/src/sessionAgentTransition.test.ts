@@ -82,6 +82,39 @@ describe('session agent transition — portable selection', () => {
     expect(parsed.modelId).toBe('opus');
   });
 
+  it('carries a target agent identity, an explicit identity clear, and only the allowlisted environment', () => {
+    const identity = { v: 1, id: 'agent-julian', name: 'Julián', emoji: '🤖', description: 'Works on Happier.' };
+    const withIdentity = SessionAgentTransitionSelectionV1Schema.parse({
+      v: 1,
+      agentId: 'claude',
+      agentIdentityV1: identity,
+      environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/me/.claude-julian' },
+    });
+    expect(withIdentity.agentIdentityV1).toEqual(identity);
+    expect(withIdentity.environmentVariables).toEqual({ CLAUDE_CONFIG_DIR: '/Users/me/.claude-julian' });
+    expect(SessionAgentTransitionSelectionV1Schema.parse({ v: 1, agentId: 'codex', agentIdentityV1: null }).agentIdentityV1)
+      .toBeNull();
+    expect(SessionAgentTransitionSelectionV1Schema.parse({ v: 1, agentId: 'codex' })).not.toHaveProperty('agentIdentityV1');
+
+    // A closed allowlist: any other key, an empty value, or an unbounded value is refused.
+    for (const environmentVariables of [
+      { CLAUDE_CONFIG_DIR: '/a', PATH: '/usr/bin' },
+      { CODEX_HOME: '/codex' },
+      { CLAUDE_CONFIG_DIR: '   ' },
+      { CLAUDE_CONFIG_DIR: `/${'a'.repeat(5000)}` },
+    ]) {
+      expect(SessionAgentTransitionSelectionV1Schema.safeParse({ v: 1, agentId: 'claude', environmentVariables }).success)
+        .toBe(false);
+    }
+    expect(SessionAgentTransitionSelectionV1Schema.safeParse({ v: 1, agentId: 'claude', agentIdentityV1: { v: 1, id: 'x' } }).success)
+      .toBe(false);
+    // The request that carries it stays closed too.
+    expect(SessionAgentTransitionRequestV1Schema.safeParse({
+      ...V.request.valid.minimal,
+      selection: { v: 1, agentId: 'claude', environmentVariables: { HOME: '/tmp' } },
+    }).success).toBe(false);
+  });
+
   it('does not accept a builtInAgent target carrier as the selection shape', () => {
     expect(
       SessionAgentTransitionSelectionV1Schema.safeParse({

@@ -1481,6 +1481,9 @@ export {
   SessionAgentTransitionRequestV1Schema,
   SessionAgentTransitionResultV1Schema,
   SessionAgentTransitionSelectionV1Schema,
+  SessionAgentTransitionEnvironmentVariablesV1Schema,
+  SESSION_AGENT_TRANSITION_ENV_VALUE_MAX_LENGTH,
+  type SessionAgentTransitionEnvironmentVariablesV1,
   SessionAgentTransitionPartialCodeV1Schema,
   SessionAgentTransitionSourceStoppedCodeV1Schema,
   SessionContinuationInspectionRequestV1Schema,
@@ -3728,6 +3731,7 @@ export {
 export {
   AGENT_IDENTITY_ENV_KEY,
   AGENT_IDENTITY_METADATA_KEY,
+  buildAgentIdentityMetadataV1,
   AGENT_PROFILE_KV_PREFIX,
   AgentIdentityV1Schema,
   agentProfileKvKey,

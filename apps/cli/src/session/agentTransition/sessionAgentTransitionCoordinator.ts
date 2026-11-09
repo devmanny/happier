@@ -69,7 +69,10 @@ import {
 import { buildSessionAgentTransitionActivationBrief } from './buildSessionAgentTransitionActivationBrief';
 import {
   hasCanonicalHostedTranscript,
+  readSelectionNativeEnvironment,
   resolveSessionContinuationTargetAgent,
+  selectionCarriesAgentIdentity,
+  selectionKeepsSessionAgentIdentity,
 } from './sessionContinuationInspection';
 
 /**
@@ -359,6 +362,9 @@ async function admitInputAndActivateTarget(params: Readonly<{
       localId,
       rawSession: committedSession,
       metadata: params.targetMetadata,
+      // The full identity (with its model-only description) becomes the runner's
+      // identity env; the provider environment travels in the committed metadata.
+      ...(request.selection.agentIdentityV1 ? { agentIdentity: request.selection.agentIdentityV1 } : {}),
     });
     if (!resumed.ok) {
       logger.debug('[AGENT TRANSITION] Target activation failed', { code: resumed.code, message: resumed.message });
@@ -602,10 +608,32 @@ export async function runSessionAgentTransition(params: Readonly<{
   const requestedTarget = request.selection.backendTarget?.kind === 'configuredAcpBackend'
     ? request.selection.backendTarget
     : resolvedTarget.type === 'resolved' ? resolvedTarget.backendTarget : null;
-  if (requestedTarget && currentBackendTargetKey === buildBackendTargetKey(requestedTarget)) {
+  // A different user-defined agent or provider environment on the same provider
+  // is a different target; only provider, identity and environment all unchanged
+  // make the Session already the target.
+  if (
+    requestedTarget
+    && currentBackendTargetKey === buildBackendTargetKey(requestedTarget)
+    && selectionKeepsSessionAgentIdentity(request.selection, metadata)
+  ) {
     // Only a request that also EXPECTED the target is a genuine no-op.
     if (buildBackendTargetKey(expectedBackendTarget) === currentBackendTargetKey) {
-      return effects.rejected('same_target');
+      // A same-provider identity switch expects the provider it keeps, so a retry
+      // of one that already committed looks like a no-op; only this operation's
+      // own divider tells them apart.
+      const ownDivider = selectionCarriesAgentIdentity(request.selection)
+        ? await readDividerEvidence({
+          token: params.credentials.token,
+          sessionId: request.sessionId,
+          dividerLocalId: buildSessionAgentTransitionDividerLocalId(localId),
+          mode: sessionTarget.mode,
+          ctx: sessionTarget.ctx,
+          expected: { fromAgentId: request.expectedCurrentAgentId, toAgentId: currentAgentId },
+        })
+        : null;
+      if (ownDivider?.status !== 'present' || !ownDivider.matches) {
+        return effects.rejected('same_target');
+      }
     }
     return await reconcileAlreadyTargetedSession({
       credentials: params.credentials,
@@ -779,7 +807,13 @@ export async function runSessionAgentTransition(params: Readonly<{
   // inversion is a stated risk spot — choosing a narrower context bound and only
   // then discovering that native return is unavailable omits history the fresh
   // target needs, and nothing in the result would say so.
-  const nativeReturn = targetBackendTarget.kind === 'configuredAcpBackend' ? null : await resolveAgentNativeReturnIdentity({
+  // A native conversation lives in the provider environment (e.g. one Claude
+  // config dir) of the agent that held it, which the local record does not name.
+  // An identity-carrying target therefore starts fresh with the full replay
+  // rather than resuming another agent's conversation from the wrong directory.
+  const nativeReturn = targetBackendTarget.kind === 'configuredAcpBackend' || selectionCarriesAgentIdentity(request.selection)
+    ? null
+    : await resolveAgentNativeReturnIdentity({
     store: localAgentNativeResumeRecordStore,
     sessionId: request.sessionId,
     targetAgentId,
@@ -877,6 +911,10 @@ export async function runSessionAgentTransition(params: Readonly<{
         ...(request.selection.acpSessionModeId ? { sessionModeId: request.selection.acpSessionModeId } : {}),
         ...(request.selection.sessionConfigOptionOverrides
           ? { sessionConfigOptionOverrides: request.selection.sessionConfigOptionOverrides }
+          : {}),
+        ...(request.selection.agentIdentityV1 !== undefined ? { agentIdentity: request.selection.agentIdentityV1 } : {}),
+        ...(readSelectionNativeEnvironment(request.selection)
+          ? { nativeEnvironment: readSelectionNativeEnvironment(request.selection) }
           : {}),
         updatedAtMs: nowMs,
       },

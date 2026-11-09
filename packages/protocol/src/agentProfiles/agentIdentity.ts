@@ -14,6 +14,19 @@ export const AgentIdentityV1Schema = z.object({
 }).strip();
 export type AgentIdentityV1 = z.infer<typeof AgentIdentityV1Schema>;
 
+/**
+ * What session metadata records about the agent: who the Session is, for lists and other threads.
+ * The description is model-only and reaches the runner through the spawn hand-off instead.
+ */
+export function buildAgentIdentityMetadataV1(identity: AgentIdentityV1): Omit<AgentIdentityV1, 'description'> {
+  return {
+    v: 1,
+    id: identity.id,
+    name: identity.name,
+    ...(identity.emoji ? { emoji: identity.emoji } : {}),
+  };
+}
+
 /** Spawn → runner hand-off. Kept (not consumed) so a respawned runner still knows who it is. */
 export const AGENT_IDENTITY_ENV_KEY = 'HAPPIER_AGENT_IDENTITY_JSON';
 

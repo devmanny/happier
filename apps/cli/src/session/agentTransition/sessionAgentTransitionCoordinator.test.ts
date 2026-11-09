@@ -1821,4 +1821,169 @@ describe('runSessionAgentTransition', () => {
       expect(readCommittedTargetView().claudeSessionId).toBeUndefined();
     });
   });
+
+  describe('user-defined agent identity', () => {
+    const JULIAN = { v: 1 as const, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Architect for Manny.' };
+    const TOMAS = { v: 1 as const, id: 'tomas', name: 'Tomás', emoji: '🤖', description: 'Works the Nomada account.' };
+
+    function committedView(): Record<string, unknown> {
+      const cutover = mocks.commitSessionAgentTransitionCutover.mock.calls.at(-1)?.[0];
+      return JSON.parse(cutover.currentView.metadataCiphertext) as Record<string, unknown>;
+    }
+
+    function julianClaudeSource(): Record<string, unknown> {
+      return sourceMetadata({
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+    }
+
+    it('makes a Codex agent session the selected Claude agent, with its config dir, and resumes it as that agent', async () => {
+      primeHappyPath(sourceMetadata({
+        flavor: 'codex', claudeSessionId: undefined, claudeTranscriptPath: undefined, codexSessionId: 'codex-native-1',
+        agentIdentityV1: { v: 1, id: 'mateo', name: 'Mateo', emoji: '🤖' },
+      }));
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          expectedCurrentAgentId: 'codex',
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(committedView()).toMatchObject({
+        flavor: 'claude',
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+      // The model-only description reaches the runner through the resume, never metadata.
+      expect(committedView().agentIdentityV1).not.toHaveProperty('description');
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0]).toMatchObject({
+        agentIdentity: JULIAN,
+        metadata: { nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' } },
+      });
+    });
+
+    it('switches one Claude agent to another instead of calling it the same target, starting a fresh conversation', async () => {
+      primeHappyPath(julianClaudeSource());
+      // Julián's own Claude conversation lives in his config dir; Tomás must not resume it.
+      mocks.readAgentNativeResumeRecord.mockResolvedValue({
+        identity: { v: 1, vendorResumeId: 'claude-native-1' },
+        departureSeqInclusive: 55,
+      });
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: TOMAS,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      const written = committedView();
+      expect(written).toMatchObject({
+        flavor: 'claude',
+        agentIdentityV1: { id: 'tomas', name: 'Tomás' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' },
+      });
+      expect(written.claudeSessionId).toBeUndefined();
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toEqual(TOMAS);
+    });
+
+    it('turns a Codex agent session into bare Codex on the same provider', async () => {
+      primeHappyPath(sourceMetadata({
+        flavor: 'codex', claudeSessionId: undefined, claudeTranscriptPath: undefined, codexSessionId: 'codex-native-1',
+        agentIdentityV1: { v: 1, id: 'mateo', name: 'Mateo', emoji: '🤖' },
+      }));
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({ expectedCurrentAgentId: 'codex', selection: { v: 1, agentId: 'codex', agentIdentityV1: null } }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      expect(committedView()).toMatchObject({ flavor: 'codex' });
+      expect(committedView()).not.toHaveProperty('agentIdentityV1');
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toBeUndefined();
+    });
+
+    it('turns bare Claude into a Claude agent on the same provider', async () => {
+      primeHappyPath();
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      expect(committedView()).toMatchObject({
+        agentIdentityV1: { id: 'julian' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toEqual(JULIAN);
+    });
+
+    it('still rejects the same agent identity on the same provider and dir without stopping anything', async () => {
+      primeHappyPath(julianClaudeSource());
+      mocks.findTranscriptEncryptedMessageByLocalIdV2.mockResolvedValue({ type: 'not_found' });
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'rejected', code: 'same_target', sourceEffect: 'none' });
+      expect(mocks.requestSessionStop).not.toHaveBeenCalled();
+    });
+
+    it('turns an agent session into the bare provider: no identity, no config dir', async () => {
+      primeHappyPath(julianClaudeSource());
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({ selection: { v: 1, agentId: 'codex', agentIdentityV1: null } }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      const written = committedView();
+      expect(written).not.toHaveProperty('agentIdentityV1');
+      expect(written).not.toHaveProperty('nativeAgentEnvironmentV1');
+      const resumed = mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0];
+      expect(resumed.agentIdentity).toBeUndefined();
+      expect(resumed.metadata).not.toHaveProperty('nativeAgentEnvironmentV1');
+    });
+
+    it('drops the source config dir on a released-shape transition and leaves the identity as it was', async () => {
+      primeHappyPath(julianClaudeSource());
+
+      const result = await runSessionAgentTransition({ credentials, request: request() });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      const written = committedView();
+      expect(written).not.toHaveProperty('nativeAgentEnvironmentV1');
+      expect(written.agentIdentityV1).toEqual({ v: 1, id: 'julian', name: 'Julián', emoji: '🤖' });
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toBeUndefined();
+    });
+  });
 });

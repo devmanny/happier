@@ -30,6 +30,21 @@ const codexRuntimeDescriptor = {
 } as const;
 
 describe('buildInactiveSessionResumeSpawnOptions', () => {
+  it('resumes as the agent the Session records, whoever starts it, and lets an explicit identity win', () => {
+    // Every resumer (pending-input activation, transition, message send) builds through here, so
+    // the agent recorded in metadata must reach the runner even when nobody passes it explicitly.
+    const metadata = { flavor: 'claude', agentIdentityV1: { v: 1, id: 'tomas', name: 'Tomás', emoji: '🤖' } };
+    expect(build(metadata)?.agentIdentity).toEqual({ v: 1, id: 'tomas', name: 'Tomás', emoji: '🤖' });
+
+    const explicit = { v: 1 as const, id: 'tomas', name: 'Tomás', emoji: '🤖', description: 'Works the Nomada account.' };
+    expect(buildInactiveSessionResumeSpawnOptions({
+      sessionId: 'session-1', rawSession: rawSession(), metadata, agentIdentity: explicit,
+    })?.agentIdentity).toEqual(explicit);
+
+    expect(build({ flavor: 'claude' })).not.toHaveProperty('agentIdentity');
+    expect(build({ flavor: 'claude', agentIdentityV1: { v: 1, id: 'broken' } })).not.toHaveProperty('agentIdentity');
+  });
+
   it('resumes a flavor-identified session that still carries a stale foreign resume key', () => {
     expect(build({
       flavor: 'codex',

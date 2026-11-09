@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { BackendTargetRefSchema, matchesBackendTargetAgentId } from './backendTargets/backendTargetRef.js';
 
+import { AgentIdentityV1Schema } from './agentProfiles/agentIdentity.js';
 import { AcpConfigOptionOverridesV1Schema } from './sessionMetadata/metadataOverridesV1.js';
 import { isSessionAgentTransitionDividerLocalId } from './sessionAgentTransitionDivider.js';
 import { PendingLocalIdSchema } from './sessionMessages/pendingLocalId.js';
@@ -57,6 +58,21 @@ import { SessionUserMessageSendRequestSchema } from './sessionUserMessageRpc.js'
  *   unavailable and the final mutation rejects with `target_unavailable`; it is
  *   never silently dropped.
  */
+/**
+ * The provider environment a transition may hand the target runtime. It is a CLOSED
+ * allowlist: only the Claude config directory a user-defined agent is bound to may
+ * cross this boundary, and every other key fails the request before any effect.
+ * 4096 matches the path bound the handoff schemas already apply to directories.
+ */
+export const SESSION_AGENT_TRANSITION_ENV_VALUE_MAX_LENGTH = 4096;
+export const SessionAgentTransitionEnvironmentVariablesV1Schema = z
+  .object({
+    CLAUDE_CONFIG_DIR: z.string().trim().min(1).max(SESSION_AGENT_TRANSITION_ENV_VALUE_MAX_LENGTH).optional(),
+  })
+  .strict();
+export type SessionAgentTransitionEnvironmentVariablesV1 =
+  z.infer<typeof SessionAgentTransitionEnvironmentVariablesV1Schema>;
+
 export const SessionAgentTransitionSelectionV1Schema = z
   .object({
     v: z.literal(1),
@@ -73,6 +89,15 @@ export const SessionAgentTransitionSelectionV1Schema = z
     providerConnectionId: z.string().trim().min(1).max(128).nullable().optional(),
     acpSessionModeId: z.string().trim().min(1).max(128).nullable().optional(),
     sessionConfigOptionOverrides: AcpConfigOptionOverridesV1Schema.optional(),
+    /**
+     * The user-defined agent the Session works as after the transition. Absent
+     * leaves the current identity alone (the released behaviour); an object makes
+     * the Session that agent; `null` makes it no agent at all. Daemons advertise
+     * support with `tool.sessionAgentTransition.supportsAgentIdentity`.
+     */
+    agentIdentityV1: AgentIdentityV1Schema.nullable().optional(),
+    /** The target's allowlisted provider environment; see the schema above. */
+    environmentVariables: SessionAgentTransitionEnvironmentVariablesV1Schema.optional(),
   })
   .strict()
   .superRefine((selection, ctx) => {

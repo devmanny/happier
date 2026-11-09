@@ -10,6 +10,8 @@ import { adoptSessionsFromMarkers } from './reattach';
 import type { SessionRunnerRespawnDescriptorV1 } from './processSupervision/sessionRunnerRespawnDescriptor';
 import { resolveSessionRunnerRestartEligibility } from './sessionRunnerRuntime/resolveRestartEligibility';
 import type { Credentials } from '@/persistence';
+import { buildSessionRunnerRespawnDescriptorV1FromSpawnOptions } from './processSupervision/sessionRunnerRespawnDescriptor';
+import { resolveSpawnChildEnvironment } from './spawn/resolveSpawnChildEnvironment';
 
 describe('adoptSessionsFromMarkers respawn descriptor', () => {
   it('adopts a classified runner with command drift when its process-instance fingerprint matches', () => {
@@ -295,6 +297,64 @@ describe('adoptSessionsFromMarkers respawn descriptor', () => {
         OPENAI_API_KEY: 'sk-test',
       },
     });
+  });
+
+  it('keeps the agent identity and its Claude config dir for a runner respawned after a daemon restart', async () => {
+    const credentials = {
+      token: 't',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(6) },
+    } satisfies Credentials;
+    const agentIdentity = { v: 1 as const, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Architect.' };
+    // What the previous daemon persisted when it spawned the runner.
+    const respawn = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions({
+      directory: '/tmp/workspace',
+      existingSessionId: 'sess-789',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      environmentVariables: { CLAUDE_CONFIG_DIR: '/tmp/claude-julian' },
+      agentIdentity,
+    }, { encryptionMaterial: credentials.encryption });
+    const command = `${process.execPath} -e "setInterval(()=>{}, 1000)"`;
+    const marker = {
+      pid: 789,
+      happySessionId: 'sess-789',
+      happyHomeDir: '/tmp/happy-home',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      startedBy: 'daemon' as const,
+      cwd: '/tmp/workspace',
+      processCommandHash: hashProcessCommand(command),
+      processCommand: command,
+      metadata: { path: '/tmp/workspace', hostPid: 789 },
+      // The marker file is JSON on disk between the two daemons.
+      respawn: JSON.parse(JSON.stringify(respawn)),
+    };
+
+    // The restarted daemon adopts the marker...
+    const map = new Map<number, TrackedSession>();
+    adoptSessionsFromMarkers({
+      markers: [marker],
+      happyProcesses: [{ pid: 789, command, type: 'daemon-spawned-session' } satisfies HappyProcessInfo],
+      pidToTrackedSession: map,
+      credentials,
+    });
+    const restored = map.get(789)?.spawnOptions;
+    expect(restored).toBeDefined();
+
+    // ...and a respawn from those options hands the runner the same identity and dir.
+    const child = await resolveSpawnChildEnvironment({
+      options: restored!,
+      profileEnvironmentVariables: restored!.environmentVariables ?? {},
+      daemonSpawnHooks: null,
+      processEnv: {},
+      logDebug: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      connectedServiceAuth: null,
+    });
+    expect(child.ok).toBe(true);
+    if (!child.ok) return;
+    expect(JSON.parse(child.extraEnvForChild.HAPPIER_AGENT_IDENTITY_JSON!)).toEqual(agentIdentity);
+    expect(child.extraEnvForChild.CLAUDE_CONFIG_DIR).toBe('/tmp/claude-julian');
   });
 
   it('adopts daemon-started markers when command hash drifts but both commands are owned live daemon session commands', () => {

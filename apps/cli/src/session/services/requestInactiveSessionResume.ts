@@ -43,6 +43,12 @@ function buildMachineResumeRequest(
     ...(spawnNonce ? { spawnNonce } : {}),
     ...(options.resume ? { resume: options.resume } : {}),
     ...(options.agentRuntimeDescriptorV1 ? { agentRuntimeDescriptorV1: options.agentRuntimeDescriptorV1 } : {}),
+    // The spawn RPC's own carriers: the identity becomes the runner's identity env,
+    // and the environment is the snapshot's allowlisted provider dirs.
+    ...(options.agentIdentity ? { agentIdentityV1: options.agentIdentity } : {}),
+    ...(options.environmentVariables && Object.keys(options.environmentVariables).length > 0
+      ? { environmentVariables: options.environmentVariables }
+      : {}),
     ...(options.connectedServices ? { connectedServices: options.connectedServices } : {}),
     ...(typeof options.connectedServicesUpdatedAt === 'number'
       ? { connectedServicesUpdatedAt: options.connectedServicesUpdatedAt }
@@ -85,6 +91,8 @@ export type EnsureSessionRuntimeForPendingInputParams = Readonly<{
   metadata: Record<string, unknown>;
   timeoutMs?: number;
   waitForReady?: boolean;
+  /** The full agent identity for the resumed runner; see the resume builder. */
+  agentIdentity?: import('@happier-dev/protocol').AgentIdentityV1;
 }>;
 
 /** Canonical full-runtime ensure for an existing Session and its persisted provider thread. */
@@ -134,6 +142,7 @@ export async function ensureSessionRuntimeForPendingInput(
       requestId: params.localId,
     },
     ...(typeof params.rawSession.seq === 'number' ? { initialTranscriptAfterSeq: params.rawSession.seq } : {}),
+    ...(params.agentIdentity ? { agentIdentity: params.agentIdentity } : {}),
   });
   if (!options || options.machineId !== machineId || !options.backendTarget) {
     return {

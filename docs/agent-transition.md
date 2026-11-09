@@ -137,6 +137,39 @@ configured operation therefore disables only configured continuation; built-in
 batch/single inspection keeps its released shape. This adapter may retire once
 those strict peers are unsupported.
 
+### User-defined agent identity (development)
+
+A selection may also name who the Session works as. `agentIdentityV1` is the
+existing `AgentIdentityV1` shape (absent: identity unchanged, the released
+behaviour; object: the Session becomes that agent; `null`: no agent).
+`environmentVariables` is a closed allowlist, currently `{ CLAUDE_CONFIG_DIR }`
+(non-empty, at most 4096 characters). Any other key fails the strict selection
+schema, so the daemon answers `rejected / unsupported_operation` before any
+effect. Daemons advertise support with
+`tool.sessionAgentTransition.supportsAgentIdentity`. Older daemons reject both
+fields up front for the same strict-schema reason.
+
+- Same target: provider, identity id and allowlisted environment must all match
+  the committed metadata (`selectionKeepsSessionAgentIdentity`, which both
+  inspection and the coordinator use). A released-shape selection still
+  compares only the backend target. A same-provider identity retry is told
+  apart from a no-op by this operation's own divider.
+- The cutover projection writes or deletes `metadata.agentIdentityV1` (no
+  model-only description). On every transition it replaces
+  `nativeAgentEnvironmentV1` with the selection's environment, or removes it.
+  This includes released-shape transitions, so a Claude config dir never
+  follows the Session to another provider or agent.
+- An identity-carrying target never takes a native return. It starts fresh with
+  the full replay, because the local record does not name the provider directory
+  the earlier conversation lives in.
+- Resume: `buildInactiveSessionResumeSpawnOptions` uses an explicit identity
+  when the caller has one. Otherwise it uses the identity recorded in metadata,
+  so every resumer (pending-input activation, transition, message send) starts
+  the same agent. The spawn RPC forwards it as `agentIdentityV1`, which becomes
+  `HAPPIER_AGENT_IDENTITY_JSON`. The respawn descriptor seals it
+  (`sealedAgentIdentity`) so a runner relaunched after a daemon restart keeps
+  it. Descriptors without the field still read.
+
 ## Flow
 
 Numbered stages match the section comments in the coordinator.

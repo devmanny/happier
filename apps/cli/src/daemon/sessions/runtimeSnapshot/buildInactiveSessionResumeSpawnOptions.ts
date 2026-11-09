@@ -3,7 +3,9 @@ import {
   resolveSessionMetadataAgentIdentity,
 } from '@happier-dev/agents';
 import {
+  AGENT_IDENTITY_METADATA_KEY,
   AgentRuntimeDescriptorV1Schema,
+  parseAgentIdentityV1,
   readAcpConfiguredBackendV1FromMetadata,
 } from '@happier-dev/protocol';
 
@@ -20,6 +22,13 @@ export type BuildInactiveSessionResumeSpawnOptionsParams = Readonly<{
   metadata: Record<string, unknown>;
   initialTranscriptAfterSeq?: number;
   executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;
+  /**
+   * The user-defined agent the resumed runner works as. Absent, the agent the
+   * Session's metadata records is used, so every resumer starts the same agent.
+   * Metadata does not carry the model-only description; an explicit caller (a
+   * transition that just chose the agent) supplies the full identity.
+   */
+  agentIdentity?: import('@happier-dev/protocol').AgentIdentityV1;
 }>;
 
 function readNonEmptyString(value: unknown): string | null {
@@ -119,6 +128,7 @@ export function buildInactiveSessionResumeSpawnOptions(
   const machineId = rawMachineId ?? metadataMachineId ?? readNonEmptyString(params.fallbackMachineId);
   const runtimeIdentity = resolveSessionPersistedRuntimeIdentity(params.metadata);
   if (!runtimeIdentity || !directory || !machineId) return null;
+  const agentIdentity = params.agentIdentity ?? parseAgentIdentityV1(params.metadata[AGENT_IDENTITY_METADATA_KEY]);
 
   const baseOptions: SpawnSessionOptions = {
     existingSessionId: params.sessionId,
@@ -126,6 +136,7 @@ export function buildInactiveSessionResumeSpawnOptions(
     directory,
     backendTarget: runtimeIdentity.backendTarget,
     approvedNewDirectoryCreation: true,
+    ...(agentIdentity ? { agentIdentity } : {}),
     ...(runtimeIdentity.agentRuntimeDescriptorV1
       ? { agentRuntimeDescriptorV1: runtimeIdentity.agentRuntimeDescriptorV1 }
       : {}),
