@@ -82,4 +82,17 @@ import Testing
         let cleared = next.merging(next.delta(defaultPermissionMode: nil, for: "codex"))
         #expect(cleared.defaultPermissionMode(for: "codex") == nil && cleared.defaultPermissionMode(for: "claude") == .safeYolo)
     }
+    @Test func theAgentOrderRoundTripsThroughTheSealedDocumentAndKeepsOtherClientsKeys() throws {
+        let settings = AccountSettings(values: ["someRnKey": ["x"], "notificationsSettingsV1": ["v": 1, "pushEnabled": false]])
+        #expect(settings.agentOrder == [])
+        let next = settings.merging(settings.delta(agentOrder: ["tomas", "julian"]))
+        let sealed = try AccountSettingsContent.seal(next.values, keys: keys, plain: false)
+        let reopened = AccountSettings(values: try #require(AccountSettingsContent.open(sealed, keys: keys)))
+        #expect(reopened.agentOrder == ["tomas", "julian"])
+        #expect(reopened.values["someRnKey"] == ["x"])
+        #expect(reopened.values["notificationsSettingsV1"] == ["v": 1, "pushEnabled": false])
+        // Something unreadable under the key is no order, not a crash or a half order.
+        #expect(AccountSettings(values: ["nativeAgentOrderV1": "tomas"]).agentOrder == [])
+        #expect(AccountSettings(values: ["nativeAgentOrderV1": ["tomas", 3, "", "julian"]]).agentOrder == ["tomas", "julian"])
+    }
 }

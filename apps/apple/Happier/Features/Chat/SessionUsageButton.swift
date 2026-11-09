@@ -17,8 +17,9 @@ struct SessionUsageButton: View {
         guard let context, let window, window > 0 else { return nil }
         return min(max(Double(context.usedTokens) / Double(window), 0), 1)
     }
+    /// The one rule every usage ring and bar draws (`isNearLimit`): red from 80 % used.
     private func quotaTint(_ meter: ProviderUsage.Meter) -> Color {
-        meter.remainingPercent <= 10 ? .red : meter.remainingPercent <= 25 ? .orange : .userBubble
+        meter.isNearLimit ? .red : .primary
     }
 
     var body: some View {
@@ -123,7 +124,7 @@ struct SessionUsageButton: View {
                 .monospacedDigit()
             ProgressView(value: meter.usedPercent, total: 100).tint(quotaTint(meter))
             if let reset = meter.resetsAt {
-                Text("Resets \(reset, format: .relative(presentation: .named))")
+                Text("Resets \(reset.formatted(.dateTime.weekday(.wide))) at \(reset.formatted(date: .omitted, time: .shortened))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

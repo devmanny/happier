@@ -15,6 +15,8 @@ public struct ProviderUsage: Equatable, Sendable {
         public let modelId: String?
         /// Usage and rate limits rank; balances and the like are only listed.
         public let isLimit: Bool
+        /// The one rule every usage ring and bar draws: red from 80 % used, otherwise primary.
+        public var isNearLimit: Bool { usedPercent >= 80 }
     }
 
     public let providerId: String?

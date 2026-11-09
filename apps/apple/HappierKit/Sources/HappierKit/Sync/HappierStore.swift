@@ -1315,9 +1315,7 @@ public final class HappierStore {
         }
         snapshotCursor = after
         didUpdateSessions(Set(decoded.sessions.keys))
-        if let snapshot = await snapshots.load() {
-            await snapshots.save(snapshot.applying(changed: changed, removed: removed, cursor: after))
-        }
+        await snapshots.apply(changed: changed, removed: removed, cursor: after)
         return ids.count
     }
 

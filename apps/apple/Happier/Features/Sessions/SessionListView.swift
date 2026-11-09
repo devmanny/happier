@@ -58,6 +58,10 @@ struct SessionListView: View {
     @State private var movingInto: Session?
     /// A session started from a row's folder, with its machine preserved in the assistant.
     @State private var newSessionDraft: NewSessionDraft?
+    /// A session started from an agent's card, with that agent chosen.
+    @State private var newSessionAgent: AgentProfile?
+    /// The agents' Edit: their rows show drag handles.
+    @State private var editingAgents = false
     /// The row a dragged session is over.
     @State private var dropTarget: String?
     #if os(macOS)
@@ -137,11 +141,14 @@ struct SessionListView: View {
     private func openOlder(_ session: Session) {
         if session.archivedAt != nil {
             openArchived(session)
-        } else if let onOpen {
-            onOpen(session.id)
         } else {
-            selection = session.id
+            open(session.id)
         }
+    }
+
+    /// Opens a listed session: from the drawer, or by selecting it beside the conversation.
+    private func open(_ sessionId: String) {
+        if let onOpen { onOpen(sessionId) } else { selection = sessionId }
     }
 
     /// A session row; sessions started from inside it unfold beneath with their own button, so
@@ -346,7 +353,8 @@ struct SessionListView: View {
             Section {
                 outline(groups.active)
             } header: {
-                if !groups.pinned.isEmpty { Text("Active") }
+                // Set apart from Pinned, and from the agents above them.
+                if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty { Text("Active") }
             }
         }
         Section {
@@ -653,6 +661,10 @@ extension SessionListView {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            if query.isEmpty {
+                AgentsSection(sessions: listed.sessions ?? store.sessionList, open: open, newSession: { newSessionAgent = $0 },
+                              editing: $editingAgents)
+            }
             if !query.isEmpty {
                 searchResults()
             } else if filter.isDefault {
@@ -670,6 +682,8 @@ extension SessionListView {
         .modifier(SessionListStyle(drawer: isDrawer))
         // Compact drawer rows are shorter than the standard 44 pt list row.
         .environment(\.defaultMinListRowHeight, isDrawer ? 0 : 44)
+        // The agents' Edit: only their rows can move, so only they show handles.
+        .environment(\.editMode, .constant(editingAgents && query.isEmpty ? .active : .inactive))
         #endif
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // Claude/ChatGPT sidebar footer: the account, and starting a new session; the iPhone
@@ -837,6 +851,9 @@ extension SessionListView {
         .sheet(item: $newSessionDraft) { draft in
             NewSessionSheet(draft: draft)
         }
+        .sheet(item: $newSessionAgent) { agent in
+            NewSessionSheet(preselectedAgentId: agent.id)
+        }
         #if os(macOS)
         .task(id: springTarget) {
             guard let target = springTarget else { return }
@@ -876,6 +893,8 @@ extension SessionListView {
                 #endif
         }
         .task { await inbox.refresh() }
+        // The agents atop the list are read when it shows; later changes come with the account's KV catch-up.
+        .task { await store.refreshAgentProfiles() }
         .task { await listed.follow(store) }
         .onChange(of: selection) { closed, now in
             guard now == nil, let closed, closed != NewChat.id else { return }

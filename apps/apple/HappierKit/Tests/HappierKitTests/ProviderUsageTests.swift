@@ -20,6 +20,17 @@ import Testing
         return .object(meter)
     }
 
+    @Test func aWeeklyMeterIsNearItsLimitFromEightyPercent() throws {
+        func used(_ pct: Double) throws -> ProviderUsage.Meter {
+            let snapshot: JSONValue = ["v": 1, "providerId": "claude", "fetchedAtMs": 1_000, "meters": [
+                meter("weekly", ["utilizationPct": .number(pct), "windowDurationMs": 604_800_000])]]
+            return try #require(ProviderUsage(snapshot: snapshot)?.weeklyLimit(modelId: nil))
+        }
+        #expect(try !used(79).isNearLimit)
+        #expect(try used(80).isNearLimit)
+        #expect(try used(100).isNearLimit)
+    }
+
     @Test func picksTheMostConstrainedUsableMeter() throws {
         let snapshot: JSONValue = ["v": 1, "providerId": "codex", "planLabel": "pro", "fetchedAtMs": 1_000, "staleAfterMs": 300_000, "meters": [
             meter("weekly", ["remainingPct": 97, "windowDurationMs": 604_800_000, "resetsAt": 2_000_000]),

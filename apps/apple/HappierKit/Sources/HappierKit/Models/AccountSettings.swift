@@ -115,6 +115,20 @@ public struct AccountSettings: Sendable, Equatable {
         [Self.statusPositionKey: .string(position.rawValue)]
     }
 
+    // MARK: Agent order
+
+    /// The order of the agents atop the session list, as profile ids, the same on every device
+    /// (native app only; other apps keep the key as it is).
+    static let agentOrderKey = "nativeAgentOrderV1"
+
+    public var agentOrder: [String] {
+        (values[Self.agentOrderKey]?.arrayValue ?? []).compactMap { $0.stringValue.flatMap { $0.isEmpty ? nil : $0 } }
+    }
+
+    public func delta(agentOrder order: [String]) -> [String: JSONValue] {
+        [Self.agentOrderKey: .array(order.map(JSONValue.string))]
+    }
+
     // MARK: Folder colors
 
     /// A project folder's color, so each window shows which project it's in (native app only;
