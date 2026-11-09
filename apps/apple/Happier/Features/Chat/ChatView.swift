@@ -93,7 +93,7 @@ private struct ChatConversationView: View {
         let session = store.sessions[sessionId]
         let facts = ConversationFacts(
             exists: session != nil,
-            working: session?.status(at: .now) == .working,
+            working: session?.status(at: store.presenceDate()) == .working,
             title: session?.title ?? "",
             displayPath: session?.displayPath ?? "",
             folderColor: store.folderColor(of: session),
@@ -104,10 +104,10 @@ private struct ChatConversationView: View {
             .task(id: sessionId) {
                 // "Working" ends by itself once the session stops signalling: check every 15 s and
                 // redraw only if it flipped.
-                var shown = store.sessions[sessionId]?.status(at: .now) == .working
+                var shown = store.sessions[sessionId]?.status(at: store.presenceDate()) == .working
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(15))
-                    let now = store.sessions[sessionId]?.status(at: .now) == .working
+                    let now = store.sessions[sessionId]?.status(at: store.presenceDate()) == .working
                     if now != shown { statusClock &+= 1 }
                     shown = now
                 }
@@ -150,6 +150,8 @@ private struct ChatConversationContent: View, Equatable {
     @State private var lastBlankRepair = Date.distantPast
     /// How many of the newest rows are drawn (`ChatWindow`).
     @State private var windowLimit = ChatWindow.initial
+    /// The first row drawn when the reader left the end: kept in the window while they read up.
+    @State private var windowStart: String?
     @State private var revealingOlder = false
     /// Search inside this conversation.
     @Binding var finding: Bool
@@ -184,7 +186,7 @@ private struct ChatConversationContent: View, Equatable {
             // `ChatWindow` keeps how many rows are drawn bounded.
             VStack(spacing: 2) {
                 let allRows = ChatRow.rows(from: items, working: working)
-                let rows = Array(ChatWindow.visible(allRows, limit: windowLimit))
+                let rows = Array(ChatWindow.visible(allRows, limit: windowLimit, keeping: windowStart))
                 if rows.count < allRows.count || store.hasOlderMessages[sessionId] == true {
                     // One step back in history each time it comes into view.
                     HappierSpinner()
@@ -271,9 +273,15 @@ private struct ChatConversationContent: View, Equatable {
                 pinnedToEnd = ChatScroll.isPinned(afterUserScrollTo: Self.chatGeometry(context.geometry))
             }
         }
+        // Away from the end, new rows mustn't push the first drawn one out of the window: it's
+        // kept from leaving the end, and again each time the window widens (load older, find).
+        .onChange(of: pinnedToEnd) { _, _ in keepWindowStart() }
+        .onChange(of: windowLimit) { _, _ in keepWindowStart() }
         .onChange(of: items.last?.id) { _, _ in
-            // Your own message just landed (optimistic bubble): follow it to the bottom.
-            if case .userText(let message)? = items.last, message.isPending {
+            // Your own message just landed (optimistic bubble): follow it to the bottom. One queued
+            // from another device (it's in the server's queue) leaves a reader up in the history.
+            if case .userText(let message)? = items.last, message.isPending,
+               !queue.contains(where: { $0.localId == message.localId }) {
                 pinnedToEnd = true
                 scrollToBottom()
             }
@@ -598,6 +606,11 @@ private struct ChatConversationContent: View, Equatable {
         }
     }
 
+    private func keepWindowStart() {
+        windowStart = pinnedToEnd ? nil : ChatWindow.visible(ChatRow.rows(from: items, working: facts.working),
+                                                             limit: windowLimit, keeping: windowStart).first?.id
+    }
+
     private func scrollToBottom(animated: Bool = true) {
         Task { @MainActor in
             await Task.yield()
@@ -631,9 +644,10 @@ private struct ChatConversationContent: View, Equatable {
         for _ in 0..<20 {
             let filled = scrollState.geometry?.fitsOnScreen == false
             let allRows = ChatRow.rows(from: items, working: false)
-            let anchor = ChatWindow.visible(allRows, limit: windowLimit).first { if case .item = $0 { true } else { false } }?.id
-            if allRows.count > windowLimit {
-                windowLimit += ChatWindow.step
+            let shown = ChatWindow.visible(allRows, limit: windowLimit, keeping: windowStart)
+            let anchor = shown.first { if case .item = $0 { true } else { false } }?.id
+            if allRows.count > shown.count {
+                windowLimit = shown.count + ChatWindow.step
             } else if store.hasOlderMessages[sessionId] == true {
                 await store.loadOlder(sessionId)
                 windowLimit = ChatRow.rows(from: items, working: false).count

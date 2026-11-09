@@ -72,12 +72,18 @@ public enum SessionRunner {
 
 /// The `rpc-call` envelope for a machine-scoped RPC (`apiSocket.ts`).
 public enum MachineRPCCall {
-    public static func payload(machineId: String, method: String, params: JSONValue, timeoutMs: Int,
-                               authorizingSession sessionId: String?) -> JSONValue {
+    /// Session writes over a machine (`SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS`,
+    /// `packages/protocol/src/rpc.ts`): the relay refuses them without a `session.write` proof.
+    static let sessionWriteMethods: Set<String> = ["stop-session", "daemon.sessionRunner.restart", "session.agentTransition"]
+
+    /// `params` in plain text (the session a write acts on is read from them), `encoded` as sent.
+    public static func payload(machineId: String, method: String, params: JSONValue, encoded: JSONValue, timeoutMs: Int) -> JSONValue {
         var call: [String: JSONValue] = [
-            "method": .string("\(machineId):\(method)"), "params": params, "timeoutMs": .number(Double(timeoutMs)),
+            "method": .string("\(machineId):\(method)"), "params": encoded, "timeoutMs": .number(Double(timeoutMs)),
         ]
-        if let sessionId { call["authorization"] = ["kind": "session.write", "sessionId": .string(sessionId)] }
+        if sessionWriteMethods.contains(method), let sessionId = params["sessionId"]?.stringValue {
+            call["authorization"] = ["kind": "session.write", "sessionId": .string(sessionId)]
+        }
         return .object(call)
     }
 }

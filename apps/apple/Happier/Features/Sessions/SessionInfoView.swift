@@ -27,11 +27,11 @@ struct SessionInfoView: View {
                                         HStack(spacing: 6) {
                                             Text(providerName(session))
                                             Text("·").accessibilityHidden(true)
-                                            status(session, at: context.date)
+                                            status(session, at: store.presenceDate(context.date))
                                         }
                                         VStack(alignment: .leading, spacing: 4) {
                                             Text(providerName(session))
-                                            status(session, at: context.date)
+                                            status(session, at: store.presenceDate(context.date))
                                         }
                                     }
                                     .font(.subheadline)

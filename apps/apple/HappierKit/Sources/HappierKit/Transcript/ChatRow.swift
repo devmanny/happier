@@ -119,8 +119,12 @@ public enum ChatWindow {
     public static let initial = 40
     public static let step = 40
 
-    public static func visible(_ rows: [ChatRow], limit: Int) -> ArraySlice<ChatRow> {
-        rows.suffix(max(limit, 0))
+    /// The newest `limit` rows, reaching back to `keeping` when it's older: a reader scrolled up in
+    /// the history keeps the first row drawn, so a new message doesn't drop the oldest one and
+    /// slide the content up under them.
+    public static func visible(_ rows: [ChatRow], limit: Int, keeping: String? = nil) -> ArraySlice<ChatRow> {
+        let kept = keeping.flatMap { id in rows.firstIndex { $0.id == id } }.map { rows.count - $0 } ?? 0
+        return rows.suffix(max(limit, kept, 0))
     }
 
     /// The window wide enough to draw `id` (a search match) with a few rows above it.

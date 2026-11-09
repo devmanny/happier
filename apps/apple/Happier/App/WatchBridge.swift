@@ -50,7 +50,7 @@ final class WatchBridge: NSObject {
         switch message {
         case .permission, .reply:
             guard let tap = message.pushTap else { return .failed("") }
-            return await store.handle(tap) ? .done(sessionId: tap.sessionId) : .failed(String(localized: "Couldn't reach the agent."))
+            return await store.handle(tap) ? .done(sessionId: tap.sessionId) : .failed(store.reachesRelay ? String(localized: "Couldn't reach the agent.") : store.notConnectedMessage)
         case .newSession(let text):
             return await QuickSessionStart.start(text, store: store)
         }

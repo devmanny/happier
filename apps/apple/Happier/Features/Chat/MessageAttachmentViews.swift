@@ -61,7 +61,8 @@ struct MessageAttachmentTile: View {
         .alert("Can't Open the File", isPresented: $failed) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The computer that has it may be offline.")
+            // Cut off from the relay, it's this device, not the computer.
+            Text(store.reachesRelay ? String(localized: "The computer that has it may be offline.") : store.notConnectedMessage)
         }
     }
 
@@ -121,7 +122,8 @@ struct MessageAttachmentChip: View {
         .alert("Can't Open the File", isPresented: $failed) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The computer that has it may be offline.")
+            // Cut off from the relay, it's this device, not the computer.
+            Text(store.reachesRelay ? String(localized: "The computer that has it may be offline.") : store.notConnectedMessage)
         }
     }
 }

@@ -990,7 +990,7 @@ private struct RowTrailing: View {
     var body: some View {
         if let fraction = store.uploadFraction(inSession: session.id) {
             UploadRing(fraction: fraction)
-        } else if StatusMark.shows(session.status(at: now)) {
+        } else if StatusMark.shows(session.status(at: store.presenceDate(now))) {
             StatusMark(session: session, now: now)
         } else {
             Text(ChatDate.listLabel(session.sortDate, now: now))
@@ -1008,9 +1008,10 @@ private struct RowTrailing: View {
 private struct StatusMark: View {
     let session: Session
     let now: Date
+    @Environment(HappierStore.self) private var store
 
     var body: some View {
-        switch session.status(at: now) {
+        switch session.status(at: store.presenceDate(now)) {
         case .working:
             HappierSpinner(size: HappierSpinner.mini, color: .userBubble)
                 .accessibilityLabel(Text("Working"))

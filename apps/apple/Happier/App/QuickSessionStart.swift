@@ -13,8 +13,9 @@ enum QuickSessionStart {
         guard store.phase == .ready else { return .failed(String(localized: "Sign in to Happier on your iPhone first.")) }
         await store.refreshMachines()
         if !store.hasLoadedSessions { await store.refreshSessions() }
-        guard let choice = NewSessionDefaults.resolve(machines: store.machines, sessions: Array(store.sessions.values), defaults: .standard) else {
-            return .failed(String(localized: "No machine is online."))
+        guard let choice = NewSessionDefaults.resolve(machines: store.machines, sessions: Array(store.sessions.values), defaults: .standard,
+                                                      now: store.presenceDate()) else {
+            return .failed(store.reachesRelay ? String(localized: "No machine is online.") : store.notConnectedMessage)
         }
         if store.accountSettings == nil { await store.refreshAccountSettings() }
         let mode = store.accountSettings?.defaultPermissionMode(for: choice.agentId) ?? .yolo

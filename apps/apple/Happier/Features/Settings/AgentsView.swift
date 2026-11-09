@@ -1774,7 +1774,9 @@ private struct TaskDetailView: View {
         guard let task = stored else { return }
         let machine = store.machines.first { $0.id == task.machineId } ?? store.machines.first { $0.active }
         guard let machine else {
-            alert = String(localized: "No machine is online to start \(agent.name) on. Choose the task's machine when one is connected.")
+            alert = store.reachesRelay
+                ? String(localized: "No machine is online to start \(agent.name) on. Choose the task's machine when one is connected.")
+                : store.notConnectedMessage
             return
         }
         let directory = task.directory

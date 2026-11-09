@@ -45,14 +45,34 @@ import Testing
     }
 }
 
-/// The server only relays session-scoped machine RPCs (`stop-session`, runner restart) with a
-/// `session.write` authorization context (`rpcHandler.ts`).
+/// The relay only forwards session writes over a machine (`stop-session`, runner restart, agent
+/// switch) with a `session.write` proof naming the session (`rpcHandler.ts`); the daemon checks
+/// that it names the session in the params (`machineRpcAuthorization.ts`).
 @Suite struct MachineRPCCallTests {
-    @Test func sessionScopedCallsCarryTheAuthorizationContext() {
-        #expect(MachineRPCCall.payload(machineId: "m1", method: "stop-session", params: "enc", timeoutMs: 30000, authorizingSession: "s1") == [
-            "method": "m1:stop-session", "params": "enc", "timeoutMs": 30000,
-            "authorization": ["kind": "session.write", "sessionId": "s1"],
-        ])
-        #expect(MachineRPCCall.payload(machineId: "m1", method: "daemon.filesystem.listRoots", params: "enc", timeoutMs: 30000, authorizingSession: nil)["authorization"] == nil)
+    @Test func sessionWritesCarryTheProofForTheSessionInTheirParams() {
+        for method in ["stop-session", "daemon.sessionRunner.restart", "session.agentTransition"] {
+            #expect(MachineRPCCall.payload(machineId: "m1", method: method, params: ["sessionId": "s1"], encoded: "enc", timeoutMs: 30000) == [
+                "method": .string("m1:\(method)"), "params": "enc", "timeoutMs": 30000,
+                "authorization": ["kind": "session.write", "sessionId": "s1"],
+            ])
+        }
+        #expect(MachineRPCCall.payload(machineId: "m1", method: "daemon.filesystem.listRoots", params: ["sessionId": "s1"], encoded: "enc",
+                                       timeoutMs: 30000)["authorization"] == nil)
+    }
+
+    /// The same methods as the protocol's list, so the two can't drift apart again.
+    @Test func theSessionWriteMethodsAreTheProtocols() throws {
+        let rpc = URL(filePath: #filePath).deletingLastPathComponent()
+            .appending(path: "../../../../../packages/protocol/src/rpc.ts").standardized
+        let source = try String(contentsOf: rpc, encoding: .utf8)
+        let list = try #require(source.firstMatch(of: /SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS = new Set<string>\(\[([^\]]*)\]\)/)?.1)
+        let names = list.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let methods = try names.map { name -> String in
+            let key = String(name.dropFirst("RPC_METHODS.".count))
+            let regex = try Regex("\\b\(key): '([^']+)'")
+            return try #require(source.firstMatch(of: regex)?.output[1].substring).description
+        }
+        #expect(!methods.isEmpty)
+        #expect(Set(methods) == MachineRPCCall.sessionWriteMethods)
     }
 }

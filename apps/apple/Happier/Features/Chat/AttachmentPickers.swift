@@ -144,6 +144,8 @@ private struct PickedMovie: Transferable {
 /// Picked attachments inside the composer card, removable before sending.
 struct AttachmentStrip: View {
     @Binding var attachments: [AttachmentDraft]
+    /// Picked files still being read: drawn as placeholders until they arrive.
+    var loading = 0
     #if os(macOS)
     @State private var lookingAt: URL?
     #endif
@@ -171,6 +173,13 @@ struct AttachmentStrip: View {
                             .offset(x: 6, y: -6)
                             .accessibilityLabel("Remove \(draft.name)")
                         }
+                }
+                ForEach(0..<loading, id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.quaternary)
+                        .frame(width: 64, height: 64)
+                        .overlay { HappierSpinner(size: HappierSpinner.mini) }
+                        .accessibilityLabel(Text("Loading attachment"))
                 }
             }
             .padding(.top, 6)
@@ -417,6 +426,9 @@ struct AttachmentSources: ViewModifier {
     @Binding var showFiles: Bool
     @Binding var showCamera: Bool
     @Binding var showCameraPermission: Bool
+    /// Picked photos and videos still being read. While it isn't zero, the message must not go:
+    /// it would leave without them.
+    @Binding var loading: Int
     let onAdd: ([AttachmentDraft]) -> Void
     @Environment(HappierStore.self) private var store
     @Environment(\.openURL) private var openURL
@@ -438,7 +450,20 @@ struct AttachmentSources: ViewModifier {
             .onChange(of: photoItems) { _, items in
                 guard !items.isEmpty else { return }
                 photoItems = []
-                Task { onAdd(await AttachmentLoader.drafts(from: items)) }
+                loading += items.count
+                Task {
+                    let drafts = await AttachmentLoader.drafts(from: items)
+                    loading -= items.count
+                    // One that can't be read (an iCloud original that won't download) is said, not dropped.
+                    let missing = items.count - drafts.count
+                    if missing > 0 {
+                        AppHaptics.error()
+                        store.lastError = missing == items.count
+                            ? String(localized: "The selected photos couldn't be loaded. Try picking them again.")
+                            : String(localized: "\(missing) of the selected items couldn't be loaded.")
+                    }
+                    onAdd(drafts)
+                }
             }
             .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
                 onAdd(((try? result.get()) ?? []).compactMap(AttachmentLoader.file(at:)))

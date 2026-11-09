@@ -39,6 +39,7 @@ struct NewSessionView: View {
     @State private var trashX: CGFloat?
     @State private var micX: CGFloat?
     @State private var attachments: [AttachmentDraft] = []
+    @State private var loadingAttachments = 0
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var showCamera = false
@@ -153,7 +154,7 @@ struct NewSessionView: View {
         .animation(.smooth(duration: 0.2), value: mentionQuery != nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .modifier(AttachmentSources(showPhotos: $showPhotos, showFiles: $showFiles, showCamera: $showCamera,
-                                    showCameraPermission: $showCameraPermission) { add($0) })
+                                    showCameraPermission: $showCameraPermission, loading: $loadingAttachments) { add($0) })
         // Files dropped anywhere on the empty chat go with the first message, as in a conversation.
         .dropDestination(for: DroppedAttachment.self) { items, _ in
             let files = items.map(\.draft).filter { !SessionDrag.isPayload($0.data) }
@@ -356,7 +357,8 @@ struct NewSessionView: View {
     }
 
     private var canStart: Bool {
-        !starting && machineId != nil && machine?.active == true
+        // Not while picked photos are still loading: it would start without them.
+        !starting && loadingAttachments == 0 && machineId != nil && machine?.active == true
             && !directory.trimmingCharacters(in: .whitespaces).isEmpty
             && (draft?.group != nil || !firstMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
@@ -369,8 +371,8 @@ struct NewSessionView: View {
     /// The same card as a live conversation's composer (`Composer.card`).
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !attachments.isEmpty {
-                AttachmentStrip(attachments: $attachments)
+            if !attachments.isEmpty || loadingAttachments > 0 {
+                AttachmentStrip(attachments: $attachments, loading: loadingAttachments)
             }
             if let goal {
                 // The goal it will start with, removable before sending.
@@ -552,7 +554,8 @@ struct NewSessionView: View {
                     machineId = item.id
                     directory = Machine.recentDirectories(machineId: item.id, sessions: Array(store.sessions.values)).first ?? item.homeDir ?? ""
                 } label: {
-                    checked(item.name + (item.active ? "" : String(localized: " (offline)")), item.id == machineId)
+                    // Cut off from the relay, a machine's last known state isn't called offline.
+                    checked(item.name + (item.active || !store.reachesRelay ? "" : String(localized: " (offline)")), item.id == machineId)
                 }
             }
         } label: {
@@ -607,7 +610,7 @@ struct NewSessionView: View {
     }
 
     private func start(approve: Bool) {
-        guard let machineId else { return }
+        guard let machineId, loadingAttachments == 0 else { return }
         // Sending ends a dictation, as in a live conversation.
         if dictation.isRecording { dictation.stop() }
         AppHaptics.confirm()

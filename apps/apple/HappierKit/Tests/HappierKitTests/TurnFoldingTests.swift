@@ -85,4 +85,18 @@ import Testing
         #expect(ChatWindow.visible(rows, limit: limit).contains { $0.id == "u100" })
         #expect(ChatWindow.limit(including: "u480", in: rows, current: ChatWindow.initial) == ChatWindow.initial)
     }
+
+    @Test func aReaderScrolledUpKeepsTheFirstDrawnRowAsNewRowsArrive() {
+        let rows = (0..<100).map { ChatRow.item(user("u\($0)")) }
+        let start = ChatWindow.visible(rows, limit: ChatWindow.initial).first?.id
+        // Two new messages arrive while the reader is up in the history: nothing drawn above them
+        // is dropped, so the content doesn't slide under the reader.
+        let grown = rows + [ChatRow.item(user("u100")), ChatRow.item(user("u101"))]
+        #expect(ChatWindow.visible(grown, limit: ChatWindow.initial, keeping: start).first?.id == start)
+        // Back at the end (no row kept) the window is the newest rows again.
+        #expect(ChatWindow.visible(grown, limit: ChatWindow.initial, keeping: nil).first?.id == "u62")
+        // A kept row inside the newest rows doesn't shrink the window, and one that's gone is ignored.
+        #expect(ChatWindow.visible(grown, limit: ChatWindow.initial, keeping: "u90").count == ChatWindow.initial)
+        #expect(ChatWindow.visible(grown, limit: ChatWindow.initial, keeping: "gone").count == ChatWindow.initial)
+    }
 }

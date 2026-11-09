@@ -2,6 +2,9 @@ import CryptoKit
 import Foundation
 import Observation
 import os
+#if os(iOS)
+import UIKit
+#endif
 
 /// App-wide state: credentials, the session list, open transcripts and the realtime connection.
 ///
@@ -13,7 +16,22 @@ import os
 @Observable
 public final class HappierStore {
     public enum Phase: Equatable { case launching, signedOut, ready }
+    /// The relay link: `.offline` once an attempt failed (and through the retries after it), so it
+    /// means "this device can't reach the relay"; `.connecting` before the first answer.
     public enum Connection: Equatable { case connecting, online, offline }
+    /// Why this device is cut off from the relay, as the offline notice says it.
+    public enum OfflineNotice: Equatable {
+        case noNetwork, serverNotResponding
+
+        @MainActor public var message: String {
+            switch self {
+            case .noNetwork:
+                String(localized: "This \(HappierStore.deviceKind) has no network connection. Your sessions keep running on their computers.")
+            case .serverNotResponding:
+                String(localized: "This \(HappierStore.deviceKind) can't reach the server. Your sessions keep running on their computers.")
+            }
+        }
+    }
 
     public struct RPCError: LocalizedError {
         public let message: String
@@ -24,7 +42,11 @@ public final class HappierStore {
     public static let defaultServer = URL(string: "https://happier.nomada.cloud")!
 
     public internal(set) var phase: Phase = .launching
-    public private(set) var connection: Connection = .offline
+    public private(set) var connection: Connection = .connecting
+    /// When the relay link was lost, while it's down; nil while connected (`relayLinkChanged`).
+    public private(set) var linkLostAt: Date?
+    /// From the system's path monitor; it only words `offlineNotice`.
+    public private(set) var hasNetworkPath = true
     public private(set) var server: URL
     /// Observed per session: activity in one session doesn't redraw views showing another.
     public let sessions = KeyedStore<Session>()
@@ -547,8 +569,9 @@ public final class HappierStore {
 
     /// Signed in to `api` with `keys` without the sync loop or a socket: acknowledged socket emits
     /// (machine RPCs, metadata edits) go to `socketAck`, and updates arrive through `handleUpdate`.
-    func installForTesting(api: HappierAPI, keys: AccountKeys, snapshotDirectory: URL,
+    func installForTesting(api: HappierAPI, keys: AccountKeys, snapshotDirectory: URL, networkPath: NetworkPathMonitor? = nil,
                            socketAck: @escaping (_ event: String, _ payload: JSONValue) async throws -> [JSONValue]) {
+        if let networkPath { watchNetworkPath(networkPath) }
         self.api = api
         self.keys = keys
         snapshots = SessionSnapshotStore(directory: snapshotDirectory, scope: "test")
@@ -1072,7 +1095,9 @@ public final class HappierStore {
         snapshotCursor = nil
         sessionSync?.task.cancel()
         sessionSync = nil
-        connection = .offline
+        relayLinkChanged(to: .offline)
+        pathMonitor?.cancel()
+        pathMonitor = nil
         phase = .signedOut
     }
 
@@ -1113,6 +1138,7 @@ public final class HappierStore {
         snapshots = SessionSnapshotStore(directory: Self.cacheDirectory, scope: scope)
         snapshotCursor = nil
         phase = .ready
+        if pathMonitor == nil { watchNetworkPath(SystemNetworkPathMonitor()) }
         syncTask?.cancel()
         syncTask = Task { await runSync() }
         resumeSessionLink()
@@ -1344,13 +1370,82 @@ public final class HappierStore {
         syncTask = nil
         let socket = self.socket
         Task { await socket?.disconnect() }
-        connection = .offline
+        relayLinkChanged(to: .connecting)
     }
 
     public func appDidBecomeActive() {
         inBackground = false
         guard phase == .ready, syncTask == nil else { return }
         syncTask = Task { await runSync() }
+    }
+
+    // MARK: - Relay link
+
+    /// The one place `connection` changes. Leaving `.online` records when the link was lost.
+    func relayLinkChanged(to new: Connection, at now: Date = .now) {
+        if new == .online {
+            linkLostAt = nil
+        } else if connection == .online || linkLostAt == nil && new == .offline {
+            linkLostAt = now
+        }
+        connection = new
+    }
+
+    /// This device reaches the relay now. Until it does, nothing is blamed on a machine or a
+    /// session: what the relay last reported stands (`presenceDate`) and `offlineNotice` explains.
+    public var reachesRelay: Bool { connection == .online }
+
+    /// The time relay-fed presence (machine heartbeats, session freshness) is judged at: `now`
+    /// while connected, the moment the link was lost while cut off, so nothing decays meanwhile.
+    public func presenceDate(_ now: Date = .now) -> Date {
+        linkLostAt.map { min($0, now) } ?? now
+    }
+
+    /// Shown (not as an alert) while this device can't reach the relay; nil once it does.
+    public var offlineNotice: OfflineNotice? {
+        guard phase == .ready, connection == .offline else { return nil }
+        return hasNetworkPath ? .serverNotResponding : .noNetwork
+    }
+
+    /// For an action that needs the relay while it isn't reached.
+    public var notConnectedMessage: String {
+        (offlineNotice ?? (hasNetworkPath ? .serverNotResponding : .noNetwork)).message
+    }
+
+    static var deviceKind: String {
+        #if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        #elseif os(macOS)
+        "Mac"
+        #else
+        "device"
+        #endif
+    }
+
+    @ObservationIgnored private var pathMonitor: NetworkPathMonitor?
+    @ObservationIgnored private var reconnectWait: Task<Void, Never>?
+
+    private func watchNetworkPath(_ monitor: NetworkPathMonitor) {
+        pathMonitor?.cancel()
+        pathMonitor = monitor
+        monitor.start { [weak self] satisfied in
+            Task { @MainActor in self?.networkPathChanged(satisfied: satisfied) }
+        }
+    }
+
+    private func networkPathChanged(satisfied: Bool) {
+        guard satisfied != hasNetworkPath else { return }
+        hasNetworkPath = satisfied
+        if satisfied {
+            // The network is back: try the relay now rather than at the end of the backoff.
+            reconnectWait?.cancel()
+        } else if phase == .ready, connection != .offline {
+            // No network path means no relay: the link is lost now, not when the socket times out
+            // (up to a minute later). The sync loop then waits for the path to come back.
+            let socket = self.socket
+            Task { await socket?.disconnect() }
+            relayLinkChanged(to: .offline)
+        }
     }
 
     // MARK: - Realtime
@@ -1360,7 +1455,8 @@ public final class HappierStore {
         await showCachedSessions()
         await refreshSessions()
         while !Task.isCancelled, let token = credentials?.token {
-            connection = .connecting
+            // Retrying after a failure stays offline until the relay answers.
+            if connection != .offline { relayLinkChanged(to: .connecting) }
             let socket = SocketIOClient(
                 serverURL: server, path: "/v1/updates",
                 auth: ["token": .string(token), "clientType": "user-scoped", "clientPurpose": "sync",
@@ -1374,11 +1470,13 @@ public final class HappierStore {
             }
             do {
                 try await socket.connect()
-                connection = .online
+                relayLinkChanged(to: .online)
                 backoff = .seconds(1)
                 tokenUsageQueue.formUnion(sessionTokenUsage.keys)
                 Task { await drainTokenUsageQueue() }
                 await syncDeviceBrowserRegistrations()
+                // Heartbeats missed while cut off: machines are read again rather than decaying.
+                if !machines.isEmpty { await refreshMachines() }
                 await refreshSessions()
                 // Tasks, agents and memory changed while offline arrive through the change cursor.
                 Task { await catchUpAccountKV() }
@@ -1398,8 +1496,12 @@ public final class HappierStore {
             } catch {
                 log.notice("socket failed: \(String(describing: error), privacy: .public)")
             }
-            connection = .offline
-            try? await Task.sleep(for: backoff)
+            relayLinkChanged(to: .offline)
+            // Cut short when the network comes back.
+            let wait = Task { _ = try? await Task.sleep(for: backoff) }
+            reconnectWait = wait
+            await wait.value
+            reconnectWait = nil
             backoff = min(backoff * 2, .seconds(30))
         }
     }
@@ -1707,7 +1809,10 @@ public final class HappierStore {
         let localId = UUID().uuidString.lowercased()
         if transcripts[id] == nil { transcripts[id] = Transcript() }
         transcripts[id]?.addPending(localId: localId, text: text)
+        // The current agent's choices that don't carry over: the new one's model and effort travel
+        // in the selection, and a model meta would override it for the first turn.
         var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
+        for key in ["model", "reasoningEffort", "ultracode"] { meta[key] = nil }
         meta["source"] = "ui"
         meta["sentFrom"] = .string(sentFrom)
         let params = AgentTransitionRequest.params(sessionId: id, currentAgentId: current, selection: selection,
@@ -1878,11 +1983,9 @@ public final class HappierStore {
     }
 
     /// Machine-scoped RPC (`apiSocket.ts:410-443`): params/result use the machine's content key.
-    /// `authorizingSession` names the session a session-scoped call acts on (stop, runner restart);
-    /// the server refuses those without it.
-    public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30),
-                           authorizingSession: String? = nil) async throws -> JSONValue {
-        guard let emit = acknowledgedEmit, let api else { throw RPCError(message: "Not connected", code: nil) }
+    /// Session writes (stop, runner restart, agent switch) carry their proof (`MachineRPCCall`).
+    public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
+        guard let emit = acknowledgedEmit, let api else { throw RPCError(message: notConnectedMessage, code: nil) }
         let machine: Machine
         if let cached = machines.first(where: { $0.id == machineId }) {
             machine = cached
@@ -1894,8 +1997,8 @@ public final class HappierStore {
         }
         let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
         let ack = try await emit("rpc-call", MachineRPCCall.payload(
-            machineId: machineId, method: method, params: encoded, timeoutMs: Int(timeout.components.seconds * 1000),
-            authorizingSession: authorizingSession), timeout + .seconds(5))
+            machineId: machineId, method: method, params: params, encoded: encoded,
+            timeoutMs: Int(timeout.components.seconds * 1000)), timeout + .seconds(5))
         guard let response = ack.first, response["ok"]?.boolValue == true else {
             throw RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.", code: ack.first?["errorCode"]?.stringValue)
         }
@@ -1907,12 +2010,16 @@ public final class HappierStore {
 
     // MARK: - Machines and new sessions
 
-    public func refreshMachines() async {
+    /// `reportErrors`: only for the user's own refresh; automatic ones (screens opening, socket
+    /// events, reconnects) log their failures, the connection notice shows the state.
+    public func refreshMachines(reportErrors: Bool = false) async {
         guard let api else { return }
         do {
             let rows = try await api.machines()
-            machines = Machine.visible(rows.compactMap { try? Machine(row: $0, keys: keys) })
-        } catch { report(error) }
+            machines = Machine.visible(rows.compactMap { try? Machine(row: $0, keys: keys) }, now: presenceDate())
+        } catch {
+            if reportErrors { report(error) } else { logBackground(error, "machines refresh") }
+        }
         await syncDeviceBrowserRegistrations(loadMachines: false)
     }
 
@@ -1957,7 +2064,7 @@ public final class HappierStore {
     /// metadata over the expected version, retried on top of a newer one (`machineMetadataMerge.ts`).
     public func renameMachine(_ machineId: String, to name: String) async {
         guard let socket, connection == .online else {
-            lastError = String(localized: "Not connected. Try again when the connection is back.")
+            lastError = notConnectedMessage
             return
         }
         do {
@@ -2321,6 +2428,8 @@ public final class HappierStore {
         let url = Self.attachmentCacheURL(for: file, sessionId: sessionId)
         if !refresh, FileManager.default.fileExists(atPath: url.path) { return url }
         if let running = attachmentDownloads[url] { return try await running.value }
+        // Cut off from the relay, the computer isn't to blame for the missing file.
+        guard acknowledgedEmit != nil else { throw RPCError(message: notConnectedMessage, code: nil) }
         let task = Task { () throws -> URL in
             try await download(path: path, sessionId: sessionId, to: url, progress: progress)
             return url
@@ -2615,8 +2724,7 @@ public final class HappierStore {
         defer { restartingRunners.remove(sessionId) }
         do {
             let result = try await machineRPC(stale.machineId, method: SessionRunner.restartMethod,
-                                              params: SessionRunner.restartRequest(stale), timeout: .seconds(90),
-                                              authorizingSession: sessionId)
+                                              params: SessionRunner.restartRequest(stale), timeout: .seconds(90))
             switch SessionRunner.outcome(result) {
             case .restarted:
                 replacedRunnerPids[sessionId] = stale.expectedRunnerPid
@@ -2993,7 +3101,7 @@ public final class HappierStore {
 
     /// A subagent's own thread: its latest messages, for reading what it did.
     public func subagentThread(_ sessionId: String, subagentId: String) async throws -> Transcript {
-        guard let api, let session = sessions[sessionId] else { throw RPCError(message: "Not connected", code: nil) }
+        guard let api, let session = sessions[sessionId] else { throw RPCError(message: notConnectedMessage, code: nil) }
         let page = try await api.messages(sessionId: sessionId, limit: 200, sidechainId: subagentId)
         var thread = Transcript(sidechain: true)
         thread.apply(page.rows.compactMap { try? TranscriptMessage(row: $0, session: session) })
@@ -3111,8 +3219,7 @@ public final class HappierStore {
         var outcome = SessionStop.Outcome.fallback
         if let machineId = sessions[sessionId]?.machineId {
             do {
-                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)],
-                                                                         authorizingSession: sessionId))
+                outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)]))
             } catch is RPCError {
                 outcome = .fallback
             } catch {
@@ -3169,7 +3276,7 @@ public final class HappierStore {
     /// (`update-metadata`, retried on version mismatch like `updateSessionMetadataWithRetry.ts`).
     private func editMetadata(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async {
         guard let emit = acknowledgedEmit else {
-            lastError = "Not connected. Try again when the connection is back."
+            lastError = notConnectedMessage
             return
         }
         do {
@@ -3226,7 +3333,7 @@ public final class HappierStore {
     private func connectedSocket(until deadline: ContinuousClock.Instant, clock: ContinuousClock) async throws -> SocketIOClient {
         while true {
             if let socket, connection == .online { return socket }
-            guard phase == .ready, clock.now < deadline else { throw RPCError(message: "Not connected", code: nil) }
+            guard phase == .ready, clock.now < deadline else { throw RPCError(message: notConnectedMessage, code: nil) }
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -3333,7 +3440,7 @@ public final class HappierStore {
             return
         }
         log.error("\(String(describing: error), privacy: .public)")
-        lastError = UserFacingError.message(for: error)
+        lastError = UserFacingError.message(for: error, hasNetworkPath: hasNetworkPath)
     }
 
     /// Failure of automatic sync work: logged only; the sync loop retries and the connection

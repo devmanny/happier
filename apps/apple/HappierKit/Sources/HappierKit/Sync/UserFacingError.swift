@@ -10,12 +10,15 @@ public enum UserFacingError {
         error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
-    public static func message(for error: Error) -> String {
+    /// `hasNetworkPath`: whether this device has a network at all; without one, a server that
+    /// can't be found or reached means this device is offline, not that the server is down.
+    public static func message(for error: Error, hasNetworkPath: Bool = true) -> String {
         if let url = error as? URLError {
             switch url.code {
             case .timedOut: return timedOut
             case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff: return offline
-            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed: return String(localized: "Can't reach the server.")
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+                return hasNetworkPath ? String(localized: "Can't reach the server.") : offline
             case .secureConnectionFailed, .serverCertificateUntrusted: return String(localized: "The server's secure connection failed.")
             default: return String(localized: "A network error occurred. Try again.")
             }

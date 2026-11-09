@@ -19,7 +19,7 @@ struct MachinesView: View {
                             NavigationLink {
                                 MachineDetailView(machineId: machine.id)
                             } label: {
-                                MachineRow(machine: machine, online: machine.isOnline(at: context.date))
+                                MachineRow(machine: machine, online: machine.isOnline(at: store.presenceDate(context.date)))
                             }
                         }
                     } footer: {
@@ -30,7 +30,7 @@ struct MachinesView: View {
             .formStyle(.grouped)
         }
         .navigationTitle("Machines")
-        .refreshable { await store.refreshMachines() }
+        .refreshable { await store.refreshMachines(reportErrors: true) }
         .task { await store.refreshMachines() }
     }
 }
@@ -86,7 +86,7 @@ private struct MachineDetailView: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             if let machine {
-                content(machine, online: machine.isOnline(at: context.date))
+                content(machine, online: machine.isOnline(at: store.presenceDate(context.date)))
             } else {
                 ContentUnavailableView("Machine Not Found", systemImage: "desktopcomputer",
                                        description: Text("It may have been removed from your account."))
@@ -226,7 +226,7 @@ private struct MachineDetailView: View {
         case .unsupported:
             Text("Update Happier on this machine to see its agents.").foregroundStyle(.secondary)
         case .failed(let message):
-            Text(online ? message : String(localized: "The machine is offline.")).foregroundStyle(.secondary)
+            Text(online || !store.reachesRelay ? message : String(localized: "The machine is offline.")).foregroundStyle(.secondary)
         case .loaded(let detected):
             ForEach(detected.agents) { cli in
                 toolRow(Agent.displayNames[cli.id] ?? cli.id, agentId: cli.id, state: cli.state)
@@ -263,7 +263,12 @@ private struct MachineDetailView: View {
     }
 
     private func loadTools(refresh: Bool) async {
-        guard machine?.isOnline() == true else {
+        // Cut off from the relay, it's this device that can't ask, not the machine that's offline.
+        guard store.reachesRelay else {
+            tools = .failed(store.notConnectedMessage)
+            return
+        }
+        guard machine?.isOnline(at: store.presenceDate()) == true else {
             tools = .failed(String(localized: "The machine is offline."))
             return
         }
@@ -271,7 +276,7 @@ private struct MachineDetailView: View {
         do {
             tools = try await store.detectTools(on: machineId, refresh: refresh).map(ToolsState.loaded) ?? .unsupported
         } catch {
-            tools = .failed(UserFacingError.message(for: error))
+            tools = .failed(UserFacingError.message(for: error, hasNetworkPath: store.hasNetworkPath))
         }
     }
 }

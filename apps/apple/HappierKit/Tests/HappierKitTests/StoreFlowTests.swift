@@ -80,6 +80,88 @@ import Testing
         #expect(!queueNotified.value, "the same pending queue was written again")
     }
 
+    // MARK: Switching the session's agent
+
+    @Test func switchingTheAgentCarriesTheSessionWriteProofAndNotTheOldAgentsModel() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // A Codex session running a model of its own.
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: [
+            "modelOverrideV1": ["v": 1, "updatedAt": 5, "modelId": "gpt-6-astra"],
+        ])]
+        await store.refreshSessions()
+        store.armAgent(.init(agentId: "claude", modelId: "claude-sonnet-5-5"), for: "s1")
+
+        let sent = await store.send("bien", to: "s1")
+
+        // The relay refuses a session write without the proof ("Forbidden").
+        #expect(store.lastError == nil)
+        #expect(sent)
+        let call = try #require(relay.agentTransitionCall)
+        #expect(call["authorization"] == ["kind": "session.write", "sessionId": "s1"])
+        // Claude's first message doesn't ask for Codex's model.
+        #expect(call["params"]?["selection"]?["modelId"] == "claude-sonnet-5-5")
+        #expect(call["params"]?["input"]?["meta"]?["model"] == nil)
+    }
+
+    // MARK: This device cut off from the relay
+
+    @Test func cutOffFromTheRelayWhatTheRelayReportedIsJudgedWhenTheLinkWasLost() throws {
+        let store = Relay().store()
+        let lost = Date(timeIntervalSince1970: 1_000_000)
+        store.relayLinkChanged(to: .online, at: lost.addingTimeInterval(-60))
+        store.relayLinkChanged(to: .offline, at: lost)
+        let later = lost.addingTimeInterval(600)
+        #expect(!store.reachesRelay)
+        #expect(store.presenceDate(later) == lost)
+        // A machine last heard from just before isn't "offline" ten minutes into the outage.
+        let plain = Data(#"{"t":"plain"}"#.utf8).base64EncodedString()
+        let machine = try Machine(row: ["id": "m1", "active": true, "activeAt": .number((lost.timeIntervalSince1970 - 30) * 1000),
+                                        "dataEncryptionKey": .string(plain)], keys: nil)
+        #expect(machine.isOnline(at: store.presenceDate(later)))
+        // Retrying keeps the time the link was lost; back online, time runs again.
+        store.relayLinkChanged(to: .offline, at: lost.addingTimeInterval(30))
+        #expect(store.presenceDate(later) == lost)
+        store.relayLinkChanged(to: .online, at: later)
+        #expect(store.reachesRelay && store.presenceDate(later) == later)
+    }
+
+    @Test func theOfflineNoticeSaysWhetherThisDeviceHasNoNetworkOrTheServerDoesntAnswer() async throws {
+        let path = SimulatedNetworkPath()
+        let store = Relay().store(networkPath: path)
+        store.relayLinkChanged(to: .online)
+        #expect(store.offlineNotice == nil)
+        store.relayLinkChanged(to: .offline)
+        #expect(store.offlineNotice == .serverNotResponding)
+        path.send(satisfied: false)
+        try await until { store.offlineNotice == .noNetwork }
+        // A reconnect attempt in progress after the loss still shows it; connecting clears it.
+        path.send(satisfied: true)
+        try await until { store.offlineNotice == .serverNotResponding }
+        store.relayLinkChanged(to: .online)
+        #expect(store.offlineNotice == nil)
+    }
+
+    @Test func losingTheNetworkPathLosesTheRelayLinkAtOnce() async throws {
+        let path = SimulatedNetworkPath()
+        let store = Relay().store(networkPath: path)
+        store.relayLinkChanged(to: .online)
+        // No network path: the relay can't be reached, without waiting for the socket to time out.
+        path.send(satisfied: false)
+        try await until { !store.reachesRelay }
+        #expect(store.connection == .offline && store.linkLostAt != nil)
+        #expect(store.offlineNotice == .noNetwork)
+    }
+
+    @Test func automaticMachineRefreshesDontRaiseAlerts() async {
+        // The relay doesn't answer `/v1/machines` here: a failure.
+        let store = Relay().store()
+        await store.refreshMachines()
+        #expect(store.lastError == nil)
+        await store.refreshMachines(reportErrors: true)
+        #expect(store.lastError != nil)
+    }
+
     @MainActor private func openSession() async throws -> (Relay, HappierStore) {
         let relay = Relay()
         let store = relay.store()
@@ -115,6 +197,15 @@ private final class Flag: @unchecked Sendable {
     #expect(condition())
 }
 
+/// The system's network path monitor, driven by the test.
+final class SimulatedNetworkPath: NetworkPathMonitor, @unchecked Sendable {
+    private let lock = NSLock()
+    private var onChange: (@Sendable (Bool) -> Void)?
+    func start(_ onChange: @escaping @Sendable (Bool) -> Void) { lock.withLock { self.onChange = onChange } }
+    func cancel() { lock.withLock { onChange = nil } }
+    func send(satisfied: Bool) { lock.withLock { onChange }?(satisfied) }
+}
+
 final class EventLog: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String] = []
@@ -130,7 +221,7 @@ private final class Relay: @unchecked Sendable {
     private let dataKey = Data(repeating: 9, count: 32)
     private let lock = NSLock()
     private var state = (sessionRows: [JSONValue](), messageTexts: ["m1": "hola", "m2": "adios"],
-                         writtenTask: AgentTask?.none, writtenTitle: String?.none)
+                         writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -142,17 +233,18 @@ private final class Relay: @unchecked Sendable {
     }
     var writtenTask: AgentTask? { lock.withLock { state.writtenTask } }
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
+    var agentTransitionCall: JSONValue? { lock.withLock { state.agentTransitionCall } }
     private var machineKey: Data { keys.content.secretKey }
     private var cipher: ContentCipher { .aesGCM(key: dataKey) }
 
-    @MainActor func store() -> HappierStore {
+    @MainActor func store(networkPath: NetworkPathMonitor? = nil) -> HappierStore {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RelayURLProtocol.self]
         RelayURLProtocol.relay = self
         let api = HappierAPI(server: URL(string: "https://relay.invalid")!, token: "t", session: URLSession(configuration: configuration))
         let store = HappierStore(server: URL(string: "https://relay.invalid")!)
         let directory = FileManager.default.temporaryDirectory.appending(path: "store-flow-\(UUID().uuidString)")
-        store.installForTesting(api: api, keys: keys, snapshotDirectory: directory) { [self] event, payload in
+        store.installForTesting(api: api, keys: keys, snapshotDirectory: directory, networkPath: networkPath) { [self] event, payload in
             try socketAck(event, payload)
         }
         return store
@@ -164,12 +256,13 @@ private final class Relay: @unchecked Sendable {
         #expect(store.task(id: "t1") != nil && store.agentProfile(id: "a-mateo") != nil)
     }
 
-    func sessionRow(id: String, seq: Int) throws -> JSONValue {
+    func sessionRow(id: String, seq: Int, metadata extra: [String: JSONValue] = [:]) throws -> JSONValue {
         let envelope = try HappierCrypto.sealDataKeyEnvelope(dataKey, recipientPublicKey: keys.content.publicKey)
+        let metadata: [String: JSONValue] = ["path": "/tmp/radar", "machineId": "m1", "flavor": "codex"]
         return [
             "id": .string(id), "seq": .number(Double(seq)), "createdAt": 1, "updatedAt": 2, "active": true, "activeAt": 1,
             "encryptionMode": "e2ee", "dataEncryptionKey": .string(envelope.base64EncodedString()),
-            "metadata": .string(try cipher.encryptBase64(["path": "/tmp/radar", "machineId": "m1", "flavor": "codex"])),
+            "metadata": .string(try cipher.encryptBase64(.object(metadata.merging(extra) { $1 }))),
             "metadataVersion": 3, "agentState": .null, "agentStateVersion": 1,
         ]
     }
@@ -188,6 +281,11 @@ private final class Relay: @unchecked Sendable {
             log.add("spawn")
             sessionRows = [try sessionRow(id: "s-new", seq: 0)]
             return [["ok": true, "result": ["type": "success", "sessionId": "s-new"]]]
+        case "rpc-call" where payload["method"]?.stringValue == "m1:session.agentTransition":
+            // The relay's check (`rpcHandler.ts`): a session write without its proof is refused.
+            lock.withLock { state.agentTransitionCall = payload }
+            guard payload["authorization"]?["kind"] == "session.write" else { return [["ok": false, "error": "Forbidden", "errorCode": "RPC_FORBIDDEN"]] }
+            return [["ok": true, "result": ["type": "accepted"]]]
         case "update-metadata":
             log.add("title")
             let ciphertext = payload["metadata"]?.stringValue ?? ""

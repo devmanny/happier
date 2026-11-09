@@ -10,6 +10,13 @@ import Testing
         #expect(!UserFacingError.message(for: URLError(.badServerResponse)).contains("NSURLErrorDomain"))
     }
 
+    @Test func anUnresolvableServerWithNoNetworkOnThisDeviceMeansOffline() {
+        for code in [URLError.Code.cannotFindHost, .dnsLookupFailed, .cannotConnectToHost] {
+            #expect(UserFacingError.message(for: URLError(code), hasNetworkPath: false) == UserFacingError.offline)
+            #expect(UserFacingError.message(for: URLError(code), hasNetworkPath: true) != UserFacingError.offline)
+        }
+    }
+
     @Test func serverAndRpcErrorsKeepTheirOwnMessage() {
         let server = HTTPClient.ServerError(status: 409, path: "/v2/x", body: ["error": "requested-action-conflict"])
         #expect(UserFacingError.message(for: server).contains("requested-action-conflict"))

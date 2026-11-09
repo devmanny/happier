@@ -37,7 +37,7 @@ struct AttentionWidgetPublisher: View {
 
     /// What the Working Now, Recent and Usage widgets show, per session and provider.
     private var activity: [String] {
-        let now = Date.now
+        let now = store.presenceDate()
         let sessions = store.sessions.values.filter(\.isUserFacing).map { session in
             "\(session.id)|\(session.status(at: now))|\(session.unreadSince != nil)|\(session.title)|\(session.thinkingAt?.timeIntervalSince1970 ?? 0)"
         }
@@ -128,7 +128,7 @@ struct AttentionWidgetPublisher: View {
     private func publish() {
         let sessions = store.sessionList
         let attention = AttentionSnapshot(sessions: sessions, server: store.server, limit: 6, excerpts: excerpts)
-        let activity = ActivitySnapshot(sessions: sessions, usage: Array(store.providerUsage.values), server: store.server)
+        let activity = ActivitySnapshot(sessions: sessions, usage: Array(store.providerUsage.values), server: store.server, now: store.presenceDate())
         let attentionChanged = !attention.looksLike(AttentionSnapshot.load())
         let activityChanged = !activity.looksLike(ActivitySnapshot.load())
         if attentionChanged { attention.save() }

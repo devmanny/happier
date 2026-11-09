@@ -141,8 +141,9 @@ struct MainView: View {
                 if let selection, deleted.contains(selection) { self.selection = nil }
             }
             .onChange(of: restoredSessionId.flatMap { store.transcriptErrors[$0] }) { _, error in
-                // A restored conversation that can't load sends you back to the list.
-                guard error != nil else { return }
+                // A restored conversation that can't load sends you back to the list; cut off from
+                // the relay it stays, with what's cached and the offline notice.
+                guard error != nil, store.reachesRelay else { return }
                 selection = nil
                 restoredSessionId = nil
             }

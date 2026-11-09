@@ -30,6 +30,7 @@ struct Composer: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
     @State private var showPhotos = false
+    @State private var loadingAttachments = 0
     @State private var showFiles = false
     // Only iOS has a camera to open; the pickers take these everywhere.
     /// Holding the mic: push to talk.
@@ -64,7 +65,10 @@ struct Composer: View {
 
     private var session: Session? { store.sessions[sessionId] }
     private var controls: SessionControls? { store.controls(for: sessionId) }
-    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
+    /// Not while picked photos are still loading: the message would leave without them.
+    private var canSend: Bool {
+        loadingAttachments == 0 && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    }
 
     private func add(_ drafts: [AttachmentDraft]) {
         AttachmentLoader.add(drafts, to: $attachments, store: store)
@@ -193,7 +197,7 @@ struct Composer: View {
         .onChange(of: focused, initial: true) { _, isFocused in paste.composerFocused = isFocused }
         #endif
         .modifier(AttachmentSources(showPhotos: $showPhotos, showFiles: $showFiles, showCamera: $showCamera,
-                                    showCameraPermission: $showCameraPermission) { add($0) })
+                                    showCameraPermission: $showCameraPermission, loading: $loadingAttachments) { add($0) })
         .alert("Goal", isPresented: Binding(get: { goalDraft != nil }, set: { if !$0 { goalDraft = nil } })) {
             TextField("What should the agent keep working toward?", text: Binding(get: { goalDraft ?? "" }, set: { goalDraft = $0 }), axis: .vertical)
             Button("Set Goal") {
@@ -219,8 +223,8 @@ struct Composer: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !attachments.isEmpty {
-                AttachmentStrip(attachments: $attachments)
+            if !attachments.isEmpty || loadingAttachments > 0 {
+                AttachmentStrip(attachments: $attachments, loading: loadingAttachments)
             }
             ComposerTextField(
                 text: $text,
@@ -560,6 +564,7 @@ struct Composer: View {
 /// inactive), as wide as what it says.
 struct SessionStatusRow: View {
     let session: Session
+    @Environment(HappierStore.self) private var store
     /// Who works in the session: its name leads, and the state follows it.
     var agent: AgentIdentity?
 
@@ -573,7 +578,7 @@ struct SessionStatusRow: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let look = look(status: session.status(at: context.date))
+            let look = look(status: session.status(at: store.presenceDate(context.date)))
             HStack(spacing: 5) {
                 // The state's color is in the mark; the pill only takes a hint of it.
                 Group {
@@ -606,7 +611,7 @@ struct SessionStatusRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .glassEffect(look.tint.map { .regular.tint($0.opacity(0.28)) } ?? .regular, in: Capsule())
-            .animation(.smooth(duration: 0.25), value: session.status(at: context.date))
+            .animation(.smooth(duration: 0.25), value: session.status(at: store.presenceDate(context.date)))
             .animation(.smooth(duration: 0.25), value: session.archivedAt)
         }
     }

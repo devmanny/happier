@@ -44,6 +44,14 @@ struct StoreAlerts: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // Cut off from the relay: said once, at the top, not as an alert; gone on reconnecting.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let notice = store.offlineNotice {
+                    OfflineBanner(notice: notice)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: store.offlineNotice)
             .confirmationDialog(
                 store.stopRequest?.thenArchive == true ? "Stop and archive this session?" : "Stop this session?",
                 isPresented: Binding(get: { appearsActive && store.stopRequest != nil }, set: { if !$0 { store.stopRequest = nil } }),
@@ -81,5 +89,25 @@ struct StoreAlerts: ViewModifier {
             } message: {
                 Text(store.lastError ?? "")
             }
+    }
+}
+
+/// This device can't reach the relay: what it means for the sessions, without blaming them.
+private struct OfflineBanner: View {
+    let notice: HappierStore.OfflineNotice
+
+    var body: some View {
+        Label {
+            Text(notice.message)
+        } icon: {
+            Image(systemName: notice == .noNetwork ? "wifi.slash" : "icloud.slash")
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .accessibilityElement(children: .combine)
     }
 }
