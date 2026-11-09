@@ -24,8 +24,13 @@ struct AgentsSection: View {
         let profiles = profiles
         if !profiles.isEmpty {
             Section {
-                ForEach(profiles) { profile in
+                // One rounded card of rows, as in Settings, whatever the list's own style.
+                ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
                     AgentRow(profile: profile, sessions: sessions, open: open, newSession: newSession)
+                        .listRowInsets(EdgeInsets(top: 0, leading: AgentsCard.inset + AgentsCard.padding,
+                                                  bottom: 0, trailing: AgentsCard.inset + AgentsCard.padding))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(AgentsCard.RowBackground(isFirst: index == 0, isLast: index == profiles.count - 1))
                 }
                 .onMove { offsets, destination in
                     let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
@@ -81,6 +86,12 @@ private struct AgentRow: View {
     let newSession: (AgentProfile) -> Void
     @Environment(HappierStore.self) private var store
     @Environment(\.sessionListOnScreen) private var onScreen
+    #if os(iOS)
+    @Environment(\.editMode) private var editMode
+    private var isEditing: Bool { editMode?.wrappedValue.isEditing == true }
+    #else
+    private let isEditing = false
+    #endif
     @State private var showCard = false
 
     var body: some View {
@@ -115,8 +126,9 @@ private struct AgentRow: View {
     }
 
     private func label(_ summary: AgentSummary) -> some View {
-        HStack(spacing: 10) {
-            AgentEmoji(emoji: profile.emoji, size: SessionListView.drawerAvatar)
+        HStack(spacing: 8) {
+            AgentIcon(emoji: profile.emoji)
+                .padding(.trailing, AgentsCard.iconGap - 8)
             VStack(alignment: .leading, spacing: 1) {
                 // The provider's logo right after the name, on its line.
                 HStack(spacing: 6) {
@@ -129,15 +141,23 @@ private struct AgentRow: View {
                     .font(.caption)
                     .lineLimit(1)
             }
-            // The text never reaches the indicators: a 14 pt gap before them at the least.
-            .padding(.trailing, 14)
-            Spacer(minLength: 0)
-            if summary.open > 0 {
-                OpenSessionsBadge(count: summary.open, needsYou: summary.needsYou > 0)
+            // The text takes the room the indicators leave and never reaches them: a 14 pt gap.
+            .padding(.trailing, 14 - 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+            // While reordering, the drag handles take the indicators' place.
+            if !isEditing {
+                if summary.open > 0 {
+                    OpenSessionsBadge(count: summary.open, needsYou: summary.needsYou > 0)
+                }
+                AgentUsageRing(meter: summary.weekly)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
-            AgentUsageRing(meter: summary.weekly)
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 7)
         .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
     }
@@ -169,10 +189,86 @@ private struct AgentActivityLine: View {
                 }
             }
         } else if let last = summary.lastActivity {
-            Text("Last activity \(last, format: .relative(presentation: .named))").foregroundStyle(.secondary)
+            Text("Last activity \(last, format: .relative(presentation: .named, unitsStyle: .abbreviated))").foregroundStyle(.secondary)
         } else {
             Text("No open sessions").foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The section's look: one rounded card of rows on the grouped cell color, inset from the list's
+/// edges, with separators that start after the icon, as in Settings.
+private enum AgentsCard {
+    static let inset: CGFloat = 16
+    static let padding: CGFloat = 10
+    static let iconSize: CGFloat = 30
+    static let iconGap: CGFloat = 12
+    static let radius: CGFloat = 14
+
+    /// The grouped cell color in dark mode; in light mode a light gray, since the drawer itself is
+    /// white and a white card wouldn't show on it.
+    static var cellColor: Color {
+        #if os(iOS)
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? .secondarySystemGroupedBackground : .systemGray6 })
+        #else
+        Color(nsColor: .quaternarySystemFill)
+        #endif
+    }
+
+    /// The open-sessions badge: a neutral gray that a white number reads on, light or dark.
+    static var badgeColor: Color {
+        #if os(iOS)
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.47, alpha: 0.32) : .systemGray2 })
+        #else
+        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.47, alpha: 0.32) : .systemGray })
+        #endif
+    }
+
+    static var separatorColor: Color {
+        #if os(iOS)
+        Color(uiColor: .separator)
+        #else
+        Color(nsColor: .separatorColor)
+        #endif
+    }
+
+    struct RowBackground: View {
+        let isFirst: Bool
+        let isLast: Bool
+
+        var body: some View {
+            let r = AgentsCard.radius
+            UnevenRoundedRectangle(topLeadingRadius: isFirst ? r : 0, bottomLeadingRadius: isLast ? r : 0,
+                                   bottomTrailingRadius: isLast ? r : 0, topTrailingRadius: isFirst ? r : 0,
+                                   style: .continuous)
+                .fill(AgentsCard.cellColor)
+                .overlay(alignment: .top) {
+                    if !isFirst {
+                        Rectangle().fill(AgentsCard.separatorColor).frame(height: 0.5)
+                            .padding(.leading, AgentsCard.padding + AgentsCard.iconSize + AgentsCard.iconGap)
+                    }
+                }
+                .padding(.horizontal, AgentsCard.inset)
+        }
+    }
+}
+
+/// The agent's icon, as in Settings: its emoji centered on a gray rounded square.
+private struct AgentIcon: View {
+    let emoji: String?
+
+    private var tile: Color {
+        #if os(iOS)
+        Color(uiColor: .systemGray2)
+        #else
+        Color(nsColor: .systemGray)
+        #endif
+    }
+
+    var body: some View {
+        AgentEmoji(emoji: emoji, size: 24)
+            .frame(width: AgentsCard.iconSize, height: AgentsCard.iconSize)
+            .background(tile, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -233,7 +329,7 @@ private struct OpenSessionsBadge: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 6)
             .frame(minWidth: 22, minHeight: 22)
-            .background(Color(white: 0.47, opacity: 0.32), in: Capsule())
+            .background(AgentsCard.badgeColor, in: Capsule())
             // The dot is cut out of the badge first, so a 2 pt ring of whatever is behind it (the
             // cell, in the list and in the sidebar alike) sets it apart.
             .overlay(alignment: .topTrailing) {
