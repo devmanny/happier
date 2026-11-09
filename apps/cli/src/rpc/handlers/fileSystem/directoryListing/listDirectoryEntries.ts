@@ -13,6 +13,8 @@ type ListDirectoryEntriesInput = Readonly<{
   maxEntries: number | null
   statConcurrency: number
   includeGitIgnore?: boolean
+  /** Keeps only children whose name contains it (case-insensitive), before `maxEntries` applies. */
+  nameQuery?: string
 }>
 
 function resolveEntryType(entry: Pick<Dirent, 'isDirectory' | 'isFile'>): DirectoryListingEntryType {
@@ -45,6 +47,7 @@ async function mapWithConcurrency<TInput, TOutput>(
 
 export async function listDirectoryEntries(input: ListDirectoryEntriesInput): Promise<DirectoryListingResult> {
   const dirents = await readdir(input.directoryPath, { withFileTypes: true })
+  const nameQuery = input.nameQuery?.trim().toLocaleLowerCase() ?? ''
 
   const listedEntries = dirents
     .map((dirent) => {
@@ -56,6 +59,7 @@ export async function listDirectoryEntries(input: ListDirectoryEntriesInput): Pr
       } satisfies Pick<DirectoryListingEntry, 'name' | 'absolutePath' | 'type'>
     })
     .filter((entry) => {
+      if (nameQuery && !entry.name.toLocaleLowerCase().includes(nameQuery)) return false
       if (input.includeFiles) return true
       return entry.type === 'directory'
     })

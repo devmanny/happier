@@ -101,6 +101,34 @@ describe('registerMachineFileBrowserHandlers', () => {
     });
   });
 
+  it('searches every folder by name, including ones past the entry limit', async () => {
+    const root = createTempDirectory();
+    for (const name of ['alpha', 'beta', 'gamma', 'delta', 'sukarro', 'sukarro-video']) {
+      mkdirSync(join(root, name));
+    }
+    writeFileSync(join(root, 'sukarro-notes.txt'), 'file, not a folder');
+    const { handlers, registrar } = createRegistrar();
+    registerMachineFileBrowserHandlers({
+      rpcHandlerManager: registrar,
+      deps: {
+        resolveRoots: async () => [{ id: root, label: root, path: root }],
+        maxEntries: 3,
+        statConcurrency: 4,
+        platform: 'darwin',
+      },
+    });
+    const listDirectory = handlers.get(RPC_METHODS.DAEMON_FILESYSTEM_LIST_DIRECTORY);
+    if (!listDirectory) throw new Error('expected the list directory handler to be registered');
+
+    const all = await listDirectory({ path: root, includeFiles: false }) as { entries: Array<{ name: string }>; truncated: boolean };
+    expect(all.truncated).toBe(true);
+    expect(all.entries.map((entry) => entry.name)).not.toContain('sukarro');
+
+    const found = await listDirectory({ path: root, includeFiles: false, query: 'SUKAR' }) as { entries: Array<{ name: string }>; truncated: boolean };
+    expect(found.entries.map((entry) => entry.name)).toEqual(['sukarro', 'sukarro-video']);
+    expect(found.truncated).toBe(false);
+  });
+
   it('uses the injected platform consistently for both roots and directory browsing', async () => {
     const { handlers, registrar } = createRegistrar();
     const seenPlatforms: Array<NodeJS.Platform | undefined> = [];

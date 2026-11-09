@@ -95,9 +95,18 @@ private struct FolderListView: View {
     @State private var naming = false
     @State private var newName = ""
     @State private var creating = false
+    /// The daemon's own search, only needed when `folders` is cut off at its entry limit.
+    @State private var searchResults: [RemoteFolder]?
+    @State private var searchTruncated = false
+    @State private var searching = false
 
     private var visible: [RemoteFolder] {
-        folders.filter { (showHidden || !$0.isHidden) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
+        let source = query.isEmpty ? folders : (searchResults ?? folders)
+        return source.filter { (showHidden || !$0.isHidden) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
+    }
+
+    private var showsLimitNote: Bool {
+        query.isEmpty || searchResults == nil ? truncated : searchTruncated
     }
 
     var body: some View {
@@ -108,7 +117,7 @@ private struct FolderListView: View {
                         .opacity(child.isHidden ? 0.6 : 1)
                 }
             }
-            if truncated {
+            if showsLimitNote {
                 Text("Only the first folders are shown. Search to narrow it down.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -130,6 +139,8 @@ private struct FolderListView: View {
                         .buttonStyle(.glassProminent)
                         .glassHover()
                 }
+            } else if visible.isEmpty, searching {
+                HappierSpinner()
             } else if visible.isEmpty {
                 ContentUnavailableView(query.isEmpty ? "No Folders" : "No Results", systemImage: "folder",
                                        description: Text(query.isEmpty ? "Create one or use this folder." : "No folder matches “\(query)”."))
@@ -180,7 +191,31 @@ private struct FolderListView: View {
             Text("Inside \(folder.name)")
         }
         .task { await load() }
+        .task(id: "\(truncated)|\(query)") { await search() }
         .refreshable { await load() }
+    }
+
+    /// When the listing is cut off, asks the machine to search every child so a folder past the
+    /// limit can still be found; otherwise the local filter over `folders` is already complete.
+    private func search() async {
+        searchResults = nil
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard truncated, !text.isEmpty else {
+            searching = false
+            return
+        }
+        searching = true
+        do {
+            try await Task.sleep(for: .milliseconds(250))
+            let listing = try await store.folders(in: folder.path, on: machine.id, matching: text)
+            guard !Task.isCancelled else { return }
+            searchResults = listing.folders
+            searchTruncated = listing.truncated
+        } catch {
+            guard !Task.isCancelled else { return }
+            store.lastError = UserFacingError.message(for: error)
+        }
+        searching = false
     }
 
     private func load() async {

@@ -2190,9 +2190,12 @@ public final class HappierStore {
         }
     }
 
-    public func folders(in path: String, on machineId: String) async throws -> (folders: [RemoteFolder], truncated: Bool) {
-        try RemoteFolder.listing(from: try await machineRPC(machineId, method: "daemon.filesystem.listDirectory",
-                                                            params: ["path": .string(path), "includeFiles": false]))
+    /// Subfolders of `path`. A `query` makes the daemon search every child by name before its entry
+    /// limit applies; daemons older than that ignore it and return the usual first page.
+    public func folders(in path: String, on machineId: String, matching query: String? = nil) async throws -> (folders: [RemoteFolder], truncated: Bool) {
+        var params: [String: JSONValue] = ["path": .string(path), "includeFiles": false]
+        if let query, !query.isEmpty { params["query"] = .string(query) }
+        return try RemoteFolder.listing(from: try await machineRPC(machineId, method: "daemon.filesystem.listDirectory", params: .object(params)))
     }
 
     /// Folders and files in `path`, for picking a file to mention.
