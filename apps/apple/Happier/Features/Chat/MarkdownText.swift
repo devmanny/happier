@@ -164,7 +164,7 @@ private struct MarkdownTableView: View {
         case .trailing: .trailing
         case .default, .leading: .leading
         }
-        return Text(MarkdownText.attributed(text))
+        return MarkdownText.inline(MarkdownText.attributed(text))
             .font(.callout)
             .fixedSize(horizontal: false, vertical: true)
             .frame(width: width - 2 * Self.cellPadding, alignment: alignment)
@@ -234,7 +234,7 @@ private struct ProseView: View {
     }
 
     private func plain(_ text: String) -> some View {
-        Text(MarkdownText.attributed(text))
+        MarkdownText.inline(MarkdownText.attributed(text))
             .textSelectable(selectable)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -243,7 +243,7 @@ private struct ProseView: View {
     private func line(_ line: MarkdownProse.Line) -> some View {
         switch line {
         case .heading(let level, let text):
-            Text(MarkdownText.attributed(text))
+            MarkdownText.inline(MarkdownText.attributed(text))
                 .font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
                 .textSelectable(selectable)
                 .fixedSize(horizontal: false, vertical: true)

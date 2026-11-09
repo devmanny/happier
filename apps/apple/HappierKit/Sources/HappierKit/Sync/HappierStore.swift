@@ -1804,6 +1804,17 @@ public final class HappierStore {
             lastError = String(localized: "This session's machine or agent isn't known.")
             return false
         }
+        // A bare provider isn't the agent the session worked as: its identity leaves the metadata
+        // first, or the switch (which keeps metadata it doesn't know) would run the new provider
+        // under that agent's name.
+        if session.metadata["agentIdentityV1"].map({ !$0.isNull }) == true {
+            await editMetadata(id) { metadata, _ in
+                var object = metadata.objectValue ?? [:]
+                object["agentIdentityV1"] = nil
+                return .object(object)
+            }
+            guard sessions[id]?.metadata["agentIdentityV1"].map({ $0.isNull }) ?? true else { return false }
+        }
         let localId = UUID().uuidString.lowercased()
         if transcripts[id] == nil { transcripts[id] = Transcript() }
         transcripts[id]?.addPending(localId: localId, text: text)

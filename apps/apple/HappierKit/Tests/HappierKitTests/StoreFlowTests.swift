@@ -104,6 +104,24 @@ import Testing
         #expect(call["params"]?["input"]?["meta"]?["model"] == nil)
     }
 
+    @Test func switchingToABareProviderLeavesTheAgentIdentityBehind() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // A session working as Mateo (Codex).
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: [
+            "agentIdentityV1": ["v": 1, "id": "a-mateo", "name": "Mateo"],
+        ])]
+        await store.refreshSessions()
+        store.armAgent(.init(agentId: "claude", modelId: "claude-opus-5-5"), for: "s1")
+
+        #expect(await store.send("bien", to: "s1"))
+
+        // The identity is gone from the metadata before the switch, so Claude isn't named Mateo.
+        #expect(relay.log.values.firstIndex(of: "metadata") ?? .max < relay.log.values.firstIndex(of: "transition") ?? -1)
+        let written = try #require(relay.writtenMetadata)
+        #expect(written["agentIdentityV1"] == nil && written["flavor"] == "codex")
+    }
+
     @Test func afterSwitchingTheAgentTheUsageShownIsTheNewProvidersNotTheOldOnes() async throws {
         let relay = Relay()
         let store = relay.store()
@@ -239,7 +257,8 @@ private final class Relay: @unchecked Sendable {
     private let dataKey = Data(repeating: 9, count: 32)
     private let lock = NSLock()
     private var state = (sessionRows: [JSONValue](), messageTexts: ["m1": "hola", "m2": "adios"],
-                         writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none)
+                         writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
+                         writtenMetadata: JSONValue?.none)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -252,6 +271,7 @@ private final class Relay: @unchecked Sendable {
     var writtenTask: AgentTask? { lock.withLock { state.writtenTask } }
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
     var agentTransitionCall: JSONValue? { lock.withLock { state.agentTransitionCall } }
+    var writtenMetadata: JSONValue? { lock.withLock { state.writtenMetadata } }
     private var machineKey: Data { keys.content.secretKey }
     private var cipher: ContentCipher { .aesGCM(key: dataKey) }
 
@@ -301,13 +321,18 @@ private final class Relay: @unchecked Sendable {
             return [["ok": true, "result": ["type": "success", "sessionId": "s-new"]]]
         case "rpc-call" where payload["method"]?.stringValue == "m1:session.agentTransition":
             // The relay's check (`rpcHandler.ts`): a session write without its proof is refused.
+            log.add("transition")
             lock.withLock { state.agentTransitionCall = payload }
             guard payload["authorization"]?["kind"] == "session.write" else { return [["ok": false, "error": "Forbidden", "errorCode": "RPC_FORBIDDEN"]] }
             return [["ok": true, "result": ["type": "accepted"]]]
         case "update-metadata":
-            log.add("title")
             let ciphertext = payload["metadata"]?.stringValue ?? ""
-            lock.withLock { state.writtenTitle = (try? cipher.decryptBase64(ciphertext))?["summary"]?["text"]?.stringValue }
+            let written = try? cipher.decryptBase64(ciphertext)
+            log.add(written?["summary"] != nil ? "title" : "metadata")
+            lock.withLock {
+                state.writtenTitle = written?["summary"]?["text"]?.stringValue
+                state.writtenMetadata = written
+            }
             return [["result": "success", "version": 4, "metadata": .string(ciphertext)]]
         default:
             return [["ok": false, "error": "not simulated"]]
