@@ -175,24 +175,12 @@ struct SessionListView: View {
             }
             if childCount > 0 { subSessionsButton(session.id, count: childCount) }
         }
-        .padding(.leading, CGFloat(depth) * indent)
-        // The row's breathing room sits inside it, so tree lines run on into the next row.
-        .padding(.vertical, isDrawer ? 5 : 4)
-        // Two compact lines, still a full touch target.
-        .frame(minHeight: 44)
-        // Lights up under the Apple Pencil or pointer on iPad, like a system list row.
-        .pointerHoverRow()
+        .sessionListRow(drawer: isDrawer, indent: CGFloat(depth) * indent)
         .background(alignment: .leading) {
             if let tree { TreeLines(tree: tree, indent: Self.drawerIndent, radius: Self.drawerAvatar / 2) }
         }
         .overlay {
-            if dropTarget == session.id {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.userBubble, lineWidth: 2)
-                    .background(Color.userBubble.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(.horizontal, -6)
-                    .allowsHitTesting(false)
-            }
+            if dropTarget == session.id { RowDropHighlight() }
         }
         #if os(iOS)
         // Drop a session on another to nest it there or group the two. Not on the Mac, where
@@ -216,20 +204,13 @@ struct SessionListView: View {
         #endif
         if onOpen != nil {
             content
-                .listRowInsets(EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 12))
-                // iOS hairlines between rows, starting where the text does (past the icon).
-                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + CGFloat(depth) * indent + 36 }
-                .listRowSeparatorTint(Self.separatorTint)
-                .listRowBackground(selection == session.id
-                    ? RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.1)).padding(.horizontal, 8)
-                    : nil)
+                .listRowBackground(selection == session.id ? DrawerRowHighlight().fill(Color.primary.opacity(0.1)) : nil)
                 .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
         } else {
             content
-                .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                 // The row's own background with the tint over it, so the list keeps its shape (the
                 // section's rounded corners) while the glow fades.
                 .listRowBackground(justClosed == session.id
@@ -312,6 +293,13 @@ struct SessionListView: View {
     /// Hairlines just off the background: they order the list without drawing the eye.
     static let separatorTint = Color.primary.opacity(0.08)
     static let drawerAvatar: CGFloat = 24
+    /// The gap between a row's avatar and its text.
+    static let avatarGap: CGFloat = 10
+
+    /// A row's content insets: in the drawer, and in the sidebar (where the list adds its own margins).
+    static func rowInsets(drawer: Bool) -> EdgeInsets {
+        drawer ? EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 12) : EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10)
+    }
 
     struct TreeRow: Identifiable {
         let session: Session
@@ -662,8 +650,8 @@ extension SessionListView {
                     .foregroundStyle(.secondary)
             }
             if query.isEmpty {
-                AgentsSection(sessions: listed.sessions ?? store.sessionList, open: open, newSession: { newSessionAgent = $0 },
-                              editing: $editingAgents)
+                AgentsSection(sessions: listed.sessions ?? store.sessionList, drawer: isDrawer, selection: selection, open: open,
+                              newSession: { newSessionAgent = $0 }, editing: $editingAgents)
             }
             if !query.isEmpty {
                 searchResults()
@@ -887,7 +875,7 @@ extension SessionListView {
             if request != nil, !tasksPanelAvailable { showTasks = true }
         }
         .sheet(isPresented: $showTasks) {
-            TasksView(openSessionId: selection == NewChat.id ? nil : selection)
+            TasksView(openSessionId: selection == NewChat.id || AgentProfile.id(inSelection: selection) != nil ? nil : selection)
                 #if os(macOS)
                 .frame(minWidth: 520, minHeight: 560)
                 #endif
@@ -947,7 +935,7 @@ struct SessionRow: View, Equatable {
     }
 
     private func row(now: Date) -> some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: SessionListView.avatarGap) {
             SessionAvatar(session: session, size: SessionListView.drawerAvatar)
                 .overlay(alignment: .topLeading) {
                     if session.unreadSince != nil {
@@ -1145,6 +1133,64 @@ private struct TreeLines: View {
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// A row of the session list, a session's or an agent's alike, so the two line up: the room
+    /// above and below its two lines (inside the row, so tree lines run on into the next one), a
+    /// full touch target, the pointer highlight, the list's insets and, in the drawer, a hairline
+    /// that starts where the text does. `indent` moves a sub-session in, its hairline with it.
+    func sessionListRow(drawer: Bool, indent: CGFloat = 0) -> some View {
+        padding(.leading, indent)
+            .padding(.vertical, drawer ? 5 : 4)
+            // Two compact lines, still a full touch target.
+            .frame(minHeight: 44)
+            // Lights up under the Apple Pencil or pointer on iPad, like a system list row.
+            .pointerHoverRow()
+            .listRowInsets(SessionListView.rowInsets(drawer: drawer))
+            // iOS hairlines between the drawer's rows, past the icon (the sidebar draws none).
+            .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + indent + 36 }
+            .listRowSeparatorTint(drawer ? SessionListView.separatorTint : nil)
+    }
+
+    /// A drawer row lifted to be reordered (touch and hold) shows as the drawer's highlight, rounded
+    /// and inset like the selected session's, not as the list's square, edge-to-edge cell. The
+    /// sidebar already lifts its rows rounded and inset, like its selection.
+    @ViewBuilder
+    func sessionListRowLift(drawer: Bool) -> some View {
+        if drawer {
+            contentShape(.dragPreview, DrawerRowHighlight(inset: SessionListView.rowInsets(drawer: true)))
+        } else {
+            self
+        }
+    }
+}
+
+/// The drawer's row highlight (the selected session, a lifted agent): rounded, 8 pt in from the
+/// screen's edges, which the drawer's rows reach. The sidebar draws its own, already inset.
+/// A row something can be dropped on, while it's over it: a session (to nest or group) or an agent
+/// (a task, to assign it).
+struct RowDropHighlight: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.userBubble, lineWidth: 2)
+            .background(Color.userBubble.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, -6)
+            .allowsHitTesting(false)
+    }
+}
+
+struct DrawerRowHighlight: Shape {
+    /// How far the frame it's drawn in sits in from those edges: none for a row's background, the
+    /// row's insets for its content.
+    var inset = EdgeInsets()
+
+    func path(in rect: CGRect) -> Path {
+        let edge: CGFloat = 8
+        let frame = CGRect(x: rect.minX - inset.leading + edge, y: rect.minY,
+                           width: rect.width + inset.leading + inset.trailing - 2 * edge, height: rect.height)
+        return RoundedRectangle(cornerRadius: 12, style: .continuous).path(in: frame)
     }
 }
 

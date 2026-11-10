@@ -93,6 +93,24 @@ import Testing
         #expect(sections.map(\.kind) == [.assignee(Self.task().assignee), .assignee(.unassigned)])
     }
 
+    @Test func aTaskDroppedOnAnAgentIsOnlyAssignedToItNothingStarts() {
+        let tomas = AgentProfile(id: "a-tomas", name: "Tomas", emoji: "🧭", providerId: "claude", account: .init(label: "Claude"))
+        let payload = AgentTask.dragPayload(id: "T1")
+        #expect(AgentTask.id(inDragPayload: payload) == "t1")
+        #expect(AgentTask.id(inDragPayload: "happier-session:s1") == nil)
+        #expect(AgentTask.id(inDragPayload: "just text") == nil)
+
+        let inProgress = Self.task(["status": "in_progress"])
+        let update = try! #require(inProgress.dropped(on: tomas))
+        #expect(update == .assigning(.agent(tomas)))
+        let dropped = inProgress.applying(update, now: 5)
+        #expect(dropped.assignee.agentId == "a-tomas")
+        #expect(dropped.status == .inProgress)
+        #expect(dropped.log.isEmpty && dropped.threads.isEmpty)
+        // Already its task: nothing to write.
+        #expect(dropped.dropped(on: tomas) == nil)
+    }
+
     @Test func rejectsATaskWithoutTitleOrWithAnUnknownStatus() {
         #expect(AgentTask(json: Self.task().json.merging(["title": " "])) == nil)
         #expect(AgentTask(json: Self.task().json.merging(["status": "later"])) == nil)

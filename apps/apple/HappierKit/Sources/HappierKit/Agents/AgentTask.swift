@@ -604,6 +604,26 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         return hours < 48 ? "\(Int(hours)) h" : "\(Int((hours / 24).rounded())) days"
     }
 
+    // MARK: Drag and drop (a Tasks row onto an agent)
+
+    private static let dragPrefix = "happier-task:"
+
+    /// What a task row carries when dragged: its id, marked so a session or a file drop isn't read as one.
+    public static func dragPayload(id: String) -> String { dragPrefix + id.lowercased() }
+
+    /// The task a dropped text names; nil for anything else.
+    public static func id(inDragPayload text: String) -> String? {
+        guard text.hasPrefix(dragPrefix) else { return nil }
+        let id = String(text.dropFirst(dragPrefix.count)).lowercased()
+        return id.isEmpty ? nil : id
+    }
+
+    /// Dropped on `agent`: only who it's for changes ("Assign to…"); its status stays and nothing
+    /// starts. Nil when it's that agent's already.
+    public func dropped(on agent: AgentProfile) -> Update? {
+        assignee.agentId == agent.id ? nil : .assigning(.agent(agent))
+    }
+
     // MARK: Assign to an agent
 
     /// The message that starts the task: the first one of the session an agent starts it in, or the

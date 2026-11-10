@@ -97,6 +97,24 @@ public enum AgentCard {
                         hasMore: sorted.count > shownTasks)
     }
 
+    /// One status of an agent's backlog on its profile.
+    public struct BacklogGroup: Identifiable, Equatable, Sendable {
+        public let status: AgentTask.Status
+        public let tasks: [AgentTask]
+        public var id: AgentTask.Status { status }
+    }
+
+    /// The agent's profile: every task assigned to it by status, in the order work goes (to do,
+    /// in progress, blocked, in review, done), each in the Tasks list's order (soonest due, then
+    /// oldest). Archived tasks are left out; a status with none has no group.
+    public static func backlog(_ all: [AgentTask], agentId: String) -> [BacklogGroup] {
+        let mine = AgentTask.filter(all.filter { $0.assignee.agentId == agentId }, assignee: .all, status: .all)
+        return AgentTask.Status.allCases.compactMap { status in
+            let tasks = mine.filter { $0.status == status }
+            return tasks.isEmpty ? nil : BacklogGroup(status: status, tasks: tasks)
+        }
+    }
+
     /// The newest journal entries ("See memory" shows the rest).
     public static func recentMemory(_ memory: AgentMemory?) -> [AgentMemory.JournalEntry] {
         Array((memory?.journal ?? []).sorted { $0.at > $1.at }.prefix(3))

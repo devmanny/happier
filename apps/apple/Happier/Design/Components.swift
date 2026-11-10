@@ -59,10 +59,10 @@ struct ProviderLogo: View {
     }
 }
 
-/// The one agent avatar, wherever an agent is shown (session rows, previews, notifications, the
-/// new conversation): its logo on a Liquid Glass disc with a faint wash of its brand colour
-/// (Claude's orange, ChatGPT's classic green), so agents tell apart at a glance; a neutral disc
-/// and the sparkle for a session with no agent.
+/// The one agent avatar, wherever an agent is shown (session rows, the Agents section, previews,
+/// notifications, the new conversation): its logo (or an agent's emoji) on a Liquid Glass disc
+/// with a faint wash of its brand colour (Claude's orange, ChatGPT's classic green), so agents
+/// tell apart at a glance; a neutral disc and the sparkle for a session with no agent.
 struct AgentAvatar: View {
     let agentId: String?
     var size: CGFloat = 26
@@ -70,6 +70,8 @@ struct AgentAvatar: View {
     var interactive = false
     /// The project folder's color, for the disc behind the logo (instead of the brand's hint).
     var folderTint: Color? = nil
+    /// An agent's own emoji, drawn on the disc in place of the logo (the disc keeps the brand's hint).
+    var emoji: String? = nil
 
     /// Brand colours, muted: the disc is mostly the neutral glass with a hint of the brand, the
     /// logo in the brand colour itself.
@@ -88,7 +90,9 @@ struct AgentAvatar: View {
                 .fill(folderTint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.clear))
                 .frame(width: size * 0.82, height: size * 0.82)
                 .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
-            if let agentId {
+            if let emoji, !emoji.isEmpty {
+                Text(emoji).font(.system(size: size * 0.5))
+            } else if let agentId {
                 Image("Agents/\(agentId)")
                     .resizable()
                     .scaledToFit()

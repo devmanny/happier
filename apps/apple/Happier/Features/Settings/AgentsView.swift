@@ -580,6 +580,7 @@ struct TasksView: View {
                             TaskRow(task: result.task, openSessionId: openSessionId, match: result) { open($0) }
                         }
                         .tag(result.id)
+                        .modifier(PanelTaskDrag(task: result.task, enabled: presentation == .panel && !selecting))
                         .contextMenu { rowMenu(result.task) }
                     }
                 }
@@ -608,6 +609,7 @@ struct TasksView: View {
                                         toggleDone: selecting ? nil : { toggleDone(task) }) { open($0) }
                             }
                             .tag(task.id)
+                            .modifier(PanelTaskDrag(task: task, enabled: presentation == .panel && !selecting))
                             .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                 if task.completesFromList {
                                     Button("Complete", systemImage: "checkmark") { toggleDone(task) }
@@ -692,7 +694,7 @@ struct TasksView: View {
                 store.tasksRequest = nil
             }
             .searchable(text: $query, prompt: "Search Tasks")
-            .navigationTitle(onlyThisSession ? "Session Tasks" : "Tasks")
+            .modifier(TasksTitle(presentation: presentation, title: onlyThisSession ? "Session Tasks" : "Tasks"))
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -914,7 +916,28 @@ struct TasksView: View {
     }
 }
 
-private struct TaskRow: View {
+/// "Tasks" titles the sheet. The panel shares the window's bar with the detail beside it, where a
+/// title of its own replaced the open conversation's or agent's: it has none.
+private struct TasksTitle: ViewModifier {
+    let presentation: TasksPresentation
+    let title: LocalizedStringKey
+
+    func body(content: Content) -> some View {
+        if presentation == .panel { content } else { content.navigationTitle(title) }
+    }
+}
+
+/// The Tasks panel beside the conversation (iPad and Mac): its rows drag onto an agent.
+private struct PanelTaskDrag: ViewModifier {
+    let task: AgentTask
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled { content.taskDrag(task) } else { content }
+    }
+}
+
+struct TaskRow: View {
     let task: AgentTask
     var openSessionId: String?
     /// Completed with the circle moments ago (can be undone).
@@ -1258,7 +1281,7 @@ private struct TaskDateField: View {
     }
 }
 
-private struct NewTaskSheet: View {
+struct NewTaskSheet: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var task: AgentTask
@@ -1311,7 +1334,7 @@ private struct NewTaskSheet: View {
 /// One task: every field editable, its comments and history, the sessions that worked on it,
 /// "Assign to…" (an agent or a session; it only assigns), and, once assigned, "Start Now" and
 /// "Schedule…" (a one-time start on the relay's Automations).
-private struct TaskDetailView: View {
+struct TaskDetailView: View {
     let taskId: String
     /// Where it was opened from: inside a session, it shows what the task already does there
     /// instead of offering it again.
@@ -1330,7 +1353,8 @@ private struct TaskDetailView: View {
     @State private var scheduling: ScheduleDraft?
     /// A new scheduled start for a Claude agent, held until the Consumer Terms warning is answered.
     @State private var termsWarning: Date?
-    @State private var approveFolder: (agent: AgentProfile, machineId: String, directory: String)?
+    /// "Start Now" pressed: `taskStart` starts it (and asks about a new folder).
+    @State private var startRequest: String?
 
     /// The task as it was when these edits started: what "changes" are measured against, so a
     /// change made elsewhere meanwhile is kept, not reverted, when this screen saves.
@@ -1481,14 +1505,12 @@ private struct TaskDetailView: View {
         } message: {
             Text(alert ?? "")
         }
-        .alert("Create the folder?", isPresented: Binding(get: { approveFolder != nil }, set: { if !$0 { approveFolder = nil } })) {
-            Button("Create and Start") {
-                guard let pending = approveFolder else { return }
-                spawn(pending.agent, machineId: pending.machineId, directory: pending.directory, approve: true)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(approveFolder?.directory ?? "")
+        .taskStart($startRequest, working: $working) { sessionId in
+            if let fresh = store.task(id: taskId) { draft = fresh }
+            // Close what shows the task first, then open the session: opening it first took away
+            // the screen that presented this sheet, and closing afterwards closed the new session.
+            close()
+            await store.openRelatedSession(sessionId)
         }
     }
 
@@ -1508,7 +1530,7 @@ private struct TaskDetailView: View {
                 Picker("Status", selection: task.status) {
                     ForEach(AgentTask.Status.allCases) { Text($0.label).tag($0) }
                 }
-                if task.wrappedValue.assignee != .user {
+                if task.wrappedValue.assignee.agentId != nil || task.wrappedValue.assignee.sessionId != nil {
                     TaskPermissionPicker(mode: task.permissionMode, agentId: permissionAgentId(task.wrappedValue))
                 }
                 if let due = task.wrappedValue.due(), task.wrappedValue.status != .done {
@@ -1727,33 +1749,7 @@ private struct TaskDetailView: View {
     }
 
     private func startNow() {
-        guard let task = stored else { return }
-        if let sessionId = task.assignee.sessionId {
-            guard store.sessions[sessionId] != nil else {
-                alert = String(localized: "The task's session isn't on this device anymore. Assign the task again.")
-                return
-            }
-            working = true
-            Task {
-                let sent = await store.startTaskInSession(id: taskId)
-                working = false
-                if sent {
-                    // Close what shows the task first, then open the session: opening it first
-                    // took away the screen that presented this sheet, and closing afterwards
-                    // then closed the session that had just opened.
-                    close()
-                    await store.openRelatedSession(sessionId)
-                } else {
-                    alert = String(localized: "The task couldn't be sent to its session. If the message failed there, retry it from the session.")
-                }
-            }
-            return
-        }
-        guard let agent = task.assignee.agentId.flatMap({ store.agentProfile(id: $0) }) else {
-            alert = String(localized: "This task's agent isn't on this device. Assign it again.")
-            return
-        }
-        startAgent(agent)
+        startRequest = taskId
     }
 
     /// Creates or moves the pending start; a new one for a Claude engine warns about automated access first.
@@ -1768,44 +1764,6 @@ private struct TaskDetailView: View {
         Task {
             await store.scheduleTaskStart(id: taskId, at: date)
             working = false
-        }
-    }
-
-    /// The task's machine (or the first one online) and folder (or that machine's latest one).
-    private func startAgent(_ agent: AgentProfile) {
-        guard let task = stored else { return }
-        let machine = store.machines.first { $0.id == task.machineId } ?? store.machines.first { $0.active }
-        guard let machine else {
-            alert = store.reachesRelay
-                ? String(localized: "No machine is online to start \(agent.name) on. Choose the task's machine when one is connected.")
-                : store.notConnectedMessage
-            return
-        }
-        let directory = task.directory
-            ?? Machine.recentDirectories(machineId: machine.id, sessions: Array(store.sessions.values)).first
-            ?? machine.homeDir
-        guard let directory, !directory.isEmpty else {
-            alert = String(localized: "Set the task's folder first, so \(agent.name) knows where to work.")
-            return
-        }
-        spawn(agent, machineId: machine.id, directory: directory, approve: false)
-    }
-
-    private func spawn(_ agent: AgentProfile, machineId: String, directory: String, approve: Bool) {
-        working = true
-        Task {
-            // Linked and named by the store first; this screen closes, then the session opens.
-            let outcome = await store.startTaskNow(id: taskId, machineId: machineId, directory: directory,
-                                                   approveNewDirectory: approve, opensSession: false)
-            working = false
-            if let fresh = store.task(id: taskId) { draft = fresh }
-            switch outcome {
-            case .created(let sessionId):
-                close()
-                await store.openRelatedSession(sessionId)
-            case .needsDirectoryApproval(let path): approveFolder = (agent, machineId, path)
-            case .failed(let message): alert = message
-            }
         }
     }
 }

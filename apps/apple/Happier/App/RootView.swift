@@ -118,8 +118,8 @@ struct MainView: View {
     var body: some View {
         layout
             .onChange(of: selection) { _, id in
-                // A new, unsent conversation isn't one to reopen.
-                lastOpenSessionId = id == NewChat.id ? "" : id ?? ""
+                // A new, unsent conversation or an agent's profile isn't one to reopen.
+                lastOpenSessionId = id == NewChat.id || AgentProfile.id(inSelection: id) != nil ? "" : id ?? ""
                 if let id { inbox.remove(sessionId: id) }
                 if id != restoredSessionId { restoredSessionId = nil }
                 #if os(iOS)
@@ -196,7 +196,7 @@ struct MainView: View {
         if tasksPanelAvailable {
             detail
                 .inspector(isPresented: $tasksPanelOpen) {
-                    TasksView(presentation: .panel, openSessionId: selection == NewChat.id ? nil : selection)
+                    TasksView(presentation: .panel, openSessionId: openSessionId)
                         .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
                 }
                 .toolbar {
@@ -216,10 +216,19 @@ struct MainView: View {
         }
     }
 
+    /// The conversation open in the detail, if what's selected is one.
+    private var openSessionId: String? {
+        selection == NewChat.id || AgentProfile.id(inSelection: selection) != nil ? nil : selection
+    }
+
     @ViewBuilder
     private var detail: some View {
         if selection == NewChat.id {
             NewSessionView()
+        } else if let agentId = AgentProfile.id(inSelection: selection) {
+            // Straight in the detail column, as a conversation is: its title and Edit are the column's.
+            AgentProfileView(agentId: agentId)
+                .id(agentId)
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

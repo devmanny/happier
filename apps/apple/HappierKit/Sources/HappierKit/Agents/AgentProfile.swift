@@ -46,6 +46,19 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
     /// (`identityJSON`), never drawn in the UI.
     public var label: String { name }
 
+    /// The sidebar's selection for this agent's profile, which opens like a session (sessions are
+    /// selected by their own id, so this one can never name a session).
+    public static func selection(id: String) -> String { selectionPrefix + id }
+
+    /// The agent whose profile `selection` names; nil for a session or nothing.
+    public static func id(inSelection selection: String?) -> String? {
+        guard let selection, selection.hasPrefix(selectionPrefix) else { return nil }
+        let id = String(selection.dropFirst(selectionPrefix.count))
+        return id.isEmpty ? nil : id
+    }
+
+    private static let selectionPrefix = "happier.agent:"
+
     /// The Claude Code folder this agent signs in with, when it has its own.
     public var claudeConfigDir: String? {
         guard providerId == "claude", let dir = account.configDir?.trimmingCharacters(in: .whitespaces), !dir.isEmpty else { return nil }

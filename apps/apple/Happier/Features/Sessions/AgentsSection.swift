@@ -2,13 +2,18 @@ import HappierKit
 import SwiftUI
 
 /// "Agents" atop the session list: one compact row per agent with its open sessions, the weekly
-/// usage of its account and how many need you. Tapping one shows its card (a sheet on iPhone, a
-/// popover on iPad and Mac). The order is the account's (`AccountSettings.agentOrder`): Edit, or
-/// touching and holding a row, drags it into place. Nothing shows without agents.
+/// usage of its account and how many need you. Tapping one opens its whole profile the way a
+/// session opens (selected in the sidebar, the profile in the detail; full screen on the iPhone).
+/// The order is the account's (`AccountSettings.agentOrder`): Edit, or touching and holding a row,
+/// drags it into place. Nothing shows without agents.
 struct AgentsSection: View {
     /// The list's sessions (throttled by the list), every state but archived.
     let sessions: [Session]
-    /// Opens a session the way the list does (the drawer's `onOpen`, or the split view's selection).
+    /// Shown in the iPhone drawer (rather than the sidebar): the rows take the drawer's session-row look.
+    let drawer: Bool
+    /// What the list has selected: a session, or an agent's profile (`AgentProfile.selection(id:)`).
+    let selection: String?
+    /// Opens a session or a profile the way the list does (the drawer's `onOpen`, or the split view's selection).
     let open: (String) -> Void
     /// "New Session with…": the list presents the new-session sheet for this agent.
     let newSession: (AgentProfile) -> Void
@@ -24,13 +29,10 @@ struct AgentsSection: View {
         let profiles = profiles
         if !profiles.isEmpty {
             Section {
-                // One rounded card of rows, as in Settings, whatever the list's own style.
-                ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
-                    AgentRow(profile: profile, sessions: sessions, open: open, newSession: newSession)
-                        .listRowInsets(EdgeInsets(top: 0, leading: AgentsCard.inset + AgentsCard.padding,
-                                                  bottom: 0, trailing: AgentsCard.inset + AgentsCard.padding))
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(AgentsCard.RowBackground(isFirst: index == 0, isLast: index == profiles.count - 1))
+                // Plain rows, exactly like the session rows below: no card or background of their own.
+                ForEach(profiles) { profile in
+                    AgentRow(profile: profile, sessions: sessions, drawer: drawer,
+                             selected: selection == AgentProfile.selection(id: profile.id), open: open, newSession: newSession)
                 }
                 .onMove { offsets, destination in
                     let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
@@ -82,6 +84,8 @@ struct AgentsSection: View {
 private struct AgentRow: View {
     let profile: AgentProfile
     let sessions: [Session]
+    let drawer: Bool
+    let selected: Bool
     let open: (String) -> Void
     let newSession: (AgentProfile) -> Void
     @Environment(HappierStore.self) private var store
@@ -92,43 +96,58 @@ private struct AgentRow: View {
     #else
     private let isEditing = false
     #endif
-    @State private var showCard = false
+    private var selection: String { AgentProfile.selection(id: profile.id) }
+    /// A task from the Tasks panel is being dragged over it.
+    @State private var dropTargeted = false
 
     var body: some View {
-        Button {
-            AppHaptics.selection()
-            showCard = true
-        } label: {
-            // "Working" fades after two minutes without news, as in the session rows.
-            TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
-                label(AgentRoster.summary(of: profile, sessions: sessions, context: SessionListFilter.Context(tasks: store.tasks),
-                                          now: store.presenceDate(context.date), usage: { store.usage(for: $0.id) }))
+        Group {
+            if drawer {
+                // The drawer's rows are buttons, as its session rows are; the selected one keeps
+                // their rounded highlight.
+                Button {
+                    AppHaptics.selection()
+                    open(selection)
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+                .sessionListRow(drawer: drawer)
+                .listRowBackground(selected ? DrawerRowHighlight().fill(Color.primary.opacity(0.1)) : nil)
+            } else {
+                // The sidebar selects it like a session row: the list's own selection highlight.
+                content
+                    .sessionListRow(drawer: drawer)
+                    .tag(selection)
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        // A task dropped on the row is assigned to the agent (nothing starts), lit like a session
+        // row taking a session.
+        .overlay {
+            if dropTargeted { RowDropHighlight() }
+        }
+        .taskDrop(onto: profile, targeted: $dropTargeted)
+        .sessionListRowLift(drawer: drawer)
         .accessibilityIdentifier("agent-row-\(profile.id)")
-        .popover(isPresented: $showCard) {
-            AgentCard(profile: profile, sessions: sessions) { sessionId in
-                showCard = false
-                open(sessionId)
-            } newSession: {
-                showCard = false
-                newSession(profile)
-            }
-            .presentationDetents([.medium, .large])
-            #if os(macOS)
-            .frame(width: 360, height: 460)
-            #else
-            .frame(minWidth: 340, minHeight: 420)
-            #endif
+        .contextMenu {
+            Button("New Session with \(profile.name)", systemImage: "plus") { newSession(profile) }
         }
+    }
+
+    private var content: some View {
+        // "Working" fades after two minutes without news, as in the session rows.
+        TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
+            label(AgentRoster.summary(of: profile, sessions: sessions, context: SessionListFilter.Context(tasks: store.tasks),
+                                      now: store.presenceDate(context.date), usage: { store.usage(for: $0.id) }))
+        }
+        .contentShape(Rectangle())
     }
 
     private func label(_ summary: AgentSummary) -> some View {
         HStack(spacing: 8) {
-            AgentIcon(emoji: profile.emoji)
-                .padding(.trailing, AgentsCard.iconGap - 8)
+            // The session rows' avatar: the emoji on the provider's glass disc, at their size.
+            AgentAvatar(agentId: profile.providerId, size: SessionListView.drawerAvatar, emoji: profile.emoji)
+                .padding(.trailing, SessionListView.avatarGap - 8)
             VStack(alignment: .leading, spacing: 1) {
                 // The provider's logo right after the name, on its line.
                 HStack(spacing: 6) {
@@ -157,8 +176,6 @@ private struct AgentRow: View {
                     .accessibilityHidden(true)
             }
         }
-        .padding(.vertical, 7)
-        .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
     }
 }
@@ -196,64 +213,7 @@ private struct AgentActivityLine: View {
     }
 }
 
-/// The section's look: one rounded card of rows on the grouped cell color, inset from the list's
-/// edges, with separators that start after the icon, as in Settings.
-private enum AgentsCard {
-    static let inset: CGFloat = 16
-    static let padding: CGFloat = 10
-    static let iconSize: CGFloat = 30
-    static let iconGap: CGFloat = 12
-    static let radius: CGFloat = 14
-
-    /// The grouped cell color in dark mode; in light mode a light gray, since the drawer itself is
-    /// white and a white card wouldn't show on it.
-    static var cellColor: Color {
-        #if os(iOS)
-        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? .secondarySystemGroupedBackground : .systemGray6 })
-        #else
-        Color(nsColor: .quaternarySystemFill)
-        #endif
-    }
-
-    /// The open-sessions badge: a neutral gray that a white number reads on, light or dark.
-    static var badgeColor: Color {
-        #if os(iOS)
-        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.47, alpha: 0.32) : .systemGray2 })
-        #else
-        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.47, alpha: 0.32) : .systemGray })
-        #endif
-    }
-
-    static var separatorColor: Color {
-        #if os(iOS)
-        Color(uiColor: .separator)
-        #else
-        Color(nsColor: .separatorColor)
-        #endif
-    }
-
-    struct RowBackground: View {
-        let isFirst: Bool
-        let isLast: Bool
-
-        var body: some View {
-            let r = AgentsCard.radius
-            UnevenRoundedRectangle(topLeadingRadius: isFirst ? r : 0, bottomLeadingRadius: isLast ? r : 0,
-                                   bottomTrailingRadius: isLast ? r : 0, topTrailingRadius: isFirst ? r : 0,
-                                   style: .continuous)
-                .fill(AgentsCard.cellColor)
-                .overlay(alignment: .top) {
-                    if !isFirst {
-                        Rectangle().fill(AgentsCard.separatorColor).frame(height: 0.5)
-                            .padding(.leading, AgentsCard.padding + AgentsCard.iconSize + AgentsCard.iconGap)
-                    }
-                }
-                .padding(.horizontal, AgentsCard.inset)
-        }
-    }
-}
-
-/// The agent's icon, as in Settings: its emoji centered on a gray rounded square (also the model picker's).
+/// The model picker's agent icon, as in Settings: its emoji centered on a gray rounded square.
 struct AgentIcon: View {
     let emoji: String?
 
@@ -267,7 +227,7 @@ struct AgentIcon: View {
 
     var body: some View {
         AgentEmoji(emoji: emoji, size: 24)
-            .frame(width: AgentsCard.iconSize, height: AgentsCard.iconSize)
+            .frame(width: 30, height: 30)
             .background(tile, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
@@ -322,6 +282,15 @@ private struct OpenSessionsBadge: View {
     let count: Int
     let needsYou: Bool
 
+    /// A neutral gray that a white number reads on, light or dark.
+    private static var fill: Color {
+        #if os(iOS)
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.47, alpha: 0.32) : .systemGray2 })
+        #else
+        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.47, alpha: 0.32) : .systemGray })
+        #endif
+    }
+
     var body: some View {
         Text(count, format: .number)
             .font(.caption2.weight(.bold))
@@ -329,7 +298,7 @@ private struct OpenSessionsBadge: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 6)
             .frame(minWidth: 22, minHeight: 22)
-            .background(AgentsCard.badgeColor, in: Capsule())
+            .background(Self.fill, in: Capsule())
             // The dot is cut out of the badge first, so a 2 pt ring of whatever is behind it (the
             // cell, in the list and in the sidebar alike) sets it apart.
             .overlay(alignment: .topTrailing) {
@@ -341,169 +310,5 @@ private struct OpenSessionsBadge: View {
             }
             .accessibilityElement()
             .accessibilityLabel(needsYou ? Text("\(count) open, something needs you") : Text("\(count) open"))
-    }
-}
-
-/// The agent's card: who it is and on which account, the account's weekly usage, its open
-/// sessions (tap to open one) and a new session with it.
-private struct AgentCard: View {
-    let profile: AgentProfile
-    let sessions: [Session]
-    let open: (String) -> Void
-    let newSession: () -> Void
-    @Environment(HappierStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            let now = store.presenceDate(context.date)
-            let filterContext = SessionListFilter.Context(tasks: store.tasks)
-            let summary = AgentRoster.summary(of: profile, sessions: sessions, context: filterContext, now: now,
-                                              usage: { store.usage(for: $0.id) })
-            VStack(spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        header
-                        usage(summary.weekly)
-                        sessionList(summary, context: filterContext, now: now)
-                    }
-                    .padding(20)
-                }
-                Button {
-                    AppHaptics.light()
-                    newSession()
-                } label: {
-                    Label("New Session with \(profile.name)", systemImage: "plus")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .controlSize(.large)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 16)
-                .accessibilityIdentifier("agent-new-session")
-            }
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            AgentEmoji(emoji: profile.emoji, size: 40)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(profile.name).font(.title3.weight(.semibold)).lineLimit(1)
-                HStack(spacing: 5) {
-                    ProviderLogo(providerId: profile.providerId, size: 13)
-                    Text(accountLine).lineLimit(1)
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            #if os(iOS)
-            Button {
-                AppHaptics.light()
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel(Text("Close"))
-            #endif
-        }
-    }
-
-    /// "Claude Code · Claude DevManny": the engine and the account it's tied to.
-    private var accountLine: String {
-        let provider = Agent.displayNames[profile.providerId] ?? profile.providerId
-        let account = profile.account.label.trimmingCharacters(in: .whitespaces)
-        return account.isEmpty ? provider : "\(provider) · \(account)"
-    }
-
-    private func usage(_ weekly: ProviderUsage.Meter?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Weekly Usage").font(.subheadline.weight(.medium))
-                Spacer()
-                if let weekly {
-                    Text("\(Int(weekly.usedPercent.rounded()))% used")
-                        .font(.subheadline.weight(.semibold))
-                        .monospacedDigit()
-                }
-            }
-            ProgressView(value: (weekly?.usedPercent ?? 0) / 100).tint(weekly?.isNearLimit == true ? .red : .primary)
-            Group {
-                if let reset = weekly?.resetsAt {
-                    Text("Resets \(reset.formatted(.dateTime.weekday(.wide))) at \(reset.formatted(date: .omitted, time: .shortened))")
-                } else if weekly == nil {
-                    Text("Weekly usage is not available yet.")
-                }
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    @ViewBuilder
-    private func sessionList(_ summary: AgentSummary, context: SessionListFilter.Context, now: Date) -> some View {
-        Text("Open Sessions · \(summary.open)")
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-        if summary.sessions.isEmpty {
-            Text("No open sessions").font(.subheadline).foregroundStyle(.secondary)
-        } else {
-            VStack(spacing: 0) {
-                ForEach(summary.sessions) { session in
-                    Button {
-                        AppHaptics.selection()
-                        open(session.id)
-                    } label: {
-                        sessionRow(session, state: AgentRoster.state(of: session, context: context, now: now))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("agent-session-\(session.id)")
-                    if session.id != summary.sessions.last?.id { Divider().padding(.leading, 30) }
-                }
-            }
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-    }
-
-    private func sessionRow(_ session: Session, state: AgentSummary.SessionState) -> some View {
-        HStack(spacing: 10) {
-            Group {
-                switch state {
-                case .working: HappierSpinner(size: HappierSpinner.mini, color: .userBubble)
-                case .needsYou: Circle().fill(Color.orange).frame(width: 8, height: 8)
-                case .idle: Circle().fill(Color.secondary.opacity(0.6)).frame(width: 8, height: 8)
-                }
-            }
-            .frame(width: 14)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(session.listDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-            }
-            Spacer(minLength: 8)
-            Group {
-                switch state {
-                case .working: Text("Working").foregroundStyle(Color.userBubble)
-                case .needsYou: Text("Needs you").foregroundStyle(Color.orange)
-                case .idle: Text(session.sortDate, format: .relative(presentation: .named)).foregroundStyle(.secondary)
-                }
-            }
-            .font(.caption)
-            .lineLimit(1)
-            .fixedSize()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
     }
 }

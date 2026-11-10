@@ -86,6 +86,9 @@ struct SessionDrawer: View {
         // Only membership: observing the session's contents rebuilt the navigation stack on each message.
         if selection == NewChat.id {
             NewSessionView()
+        } else if let agentId = AgentProfile.id(inSelection: selection) {
+            AgentProfileView(agentId: agentId)
+                .id(agentId)
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

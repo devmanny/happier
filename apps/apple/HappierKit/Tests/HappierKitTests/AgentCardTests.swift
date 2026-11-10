@@ -75,6 +75,38 @@ import Testing
         #expect(list.openCount == 1)
     }
 
+    // MARK: The agent's profile
+
+    @Test func theProfileListsTheAgentsBacklogByStatusInWorkOrderSoonestDueFirst() {
+        var archived = task("archived", agent: "mateo")
+        archived.archivedAt = 5
+        let tasks = [
+            task("review", agent: "mateo", status: .inReview),
+            task("todo later", agent: "mateo", dueAt: 900),
+            task("todo soon", agent: "mateo", dueAt: 100),
+            task("doing", agent: "mateo", status: .inProgress),
+            task("stuck", agent: "mateo", status: .blocked),
+            task("finished", agent: "mateo", status: .done),
+            archived,
+            task("leo's", agent: "leo"),
+            task("a session's", session: "s1"),
+        ]
+        let backlog = AgentCard.backlog(tasks, agentId: "mateo")
+        #expect(backlog.map(\.status) == [.todo, .inProgress, .blocked, .inReview, .done])
+        #expect(backlog.first?.tasks.map(\.id) == ["todo soon", "todo later"])
+        #expect(backlog.flatMap(\.tasks).count == 6)
+        // Nothing in a status, no group for it.
+        #expect(AgentCard.backlog([task("doing", agent: "mateo", status: .inProgress)], agentId: "mateo").map(\.status) == [.inProgress])
+    }
+
+    @Test func theProfileIsSelectedInTheSidebarLikeASessionButNeverReadAsOne() {
+        let selection = AgentProfile.selection(id: "a-mateo")
+        #expect(AgentProfile.id(inSelection: selection) == "a-mateo")
+        #expect(AgentProfile.id(inSelection: "cmuenhmmr0isvpe01pzj907ri") == nil)
+        #expect(AgentProfile.id(inSelection: nil) == nil)
+        #expect(selection != "a-mateo")
+    }
+
     @Test func theCardShowsAFewTasksAndSaysThereAreMore() {
         let tasks = (0..<5).map { task("t\($0)", agent: "mateo", createdAt: Double($0)) }
         let list = AgentCard.tasks(tasks, agentId: "mateo", sessionId: "s1", lingering: [])

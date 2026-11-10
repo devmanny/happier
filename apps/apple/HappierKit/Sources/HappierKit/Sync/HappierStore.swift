@@ -850,6 +850,56 @@ public final class HappierStore {
         return outcome
     }
 
+    /// What "Start Now" did, for whatever shows the task (its detail, the agent's profile).
+    public enum TaskStart: Equatable, Sendable {
+        /// Running in this session (a new one as the agent, or the one it's assigned to); the
+        /// caller opens it, after closing what showed the task.
+        case started(sessionId: String)
+        /// The folder doesn't exist on the machine yet: ask, then start again approving it.
+        case needsFolderApproval(machineId: String, directory: String)
+        case failed(String)
+    }
+
+    /// "Start Now": a task assigned to a session is sent to it; one assigned to an agent starts a
+    /// session as that agent on the task's machine (else the first one online), in the task's folder
+    /// (else that machine's latest one, else its home). `approvedFolder` answers `needsFolderApproval`.
+    public func startTask(id: String, approvedFolder: (machineId: String, directory: String)? = nil) async -> TaskStart {
+        guard let task = task(id: id) else { return .failed(String(localized: "This task isn't on this device anymore.")) }
+        if let sessionId = task.assignee.sessionId {
+            guard sessions[sessionId] != nil else {
+                return .failed(String(localized: "The task's session isn't on this device anymore. Assign the task again."))
+            }
+            return await startTaskInSession(id: id)
+                ? .started(sessionId: sessionId)
+                : .failed(String(localized: "The task couldn't be sent to its session. If the message failed there, retry it from the session."))
+        }
+        guard let agent = task.assignee.agentId.flatMap({ agentProfile(id: $0) }) else {
+            return .failed(String(localized: "This task's agent isn't on this device. Assign it again."))
+        }
+        var place = approvedFolder
+        if place == nil {
+            guard let machine = machines.first(where: { $0.id == task.machineId }) ?? machines.first(where: { $0.active }) else {
+                return .failed(reachesRelay
+                    ? String(localized: "No machine is online to start \(agent.name) on. Choose the task's machine when one is connected.")
+                    : notConnectedMessage)
+            }
+            let directory = task.directory
+                ?? Machine.recentDirectories(machineId: machine.id, sessions: Array(sessions.values)).first
+                ?? machine.homeDir
+            guard let directory, !directory.isEmpty else {
+                return .failed(String(localized: "Set the task's folder first, so \(agent.name) knows where to work."))
+            }
+            place = (machine.id, directory)
+        }
+        guard let place else { return .failed(notConnectedMessage) }
+        switch await startTaskNow(id: id, machineId: place.machineId, directory: place.directory,
+                                  approveNewDirectory: approvedFolder != nil, opensSession: false) {
+        case .created(let sessionId): return .started(sessionId: sessionId)
+        case .needsDirectoryApproval(let path): return .needsFolderApproval(machineId: place.machineId, directory: path)
+        case .failed(let message): return .failed(message)
+        }
+    }
+
     /// "Start Now" for a task assigned to a session: sends that session the task as a message (the
     /// composer's path, which also reaches a session that isn't running), links it and puts the task
     /// in progress. False after reporting why not.
