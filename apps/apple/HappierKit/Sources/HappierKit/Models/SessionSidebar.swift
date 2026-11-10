@@ -13,8 +13,12 @@ public enum SessionSidebar {
     /// Sessions started from inside another one stay under it; a family with any running member
     /// counts as running. Pinned conversations are always top-level rows. Every section is ordered
     /// by each family's latest activity, so a message in a child brings its whole family up.
-    public static func groups(_ sessions: [Session], pinned: [String], date: (Session) -> Date = \.sortDate) -> Groups {
+    /// `shows` is the list's filter; a pinned conversation is listed whatever it says, since
+    /// pinning is explicit (a task session you pinned stays in Pinned).
+    public static func groups(_ sessions: [Session], pinned: [String], date: (Session) -> Date = \.sortDate,
+                              shows: (Session) -> Bool = { _ in true }) -> Groups {
         let pinnedSet = Set(pinned)
+        let sessions = sessions.filter { pinnedSet.contains($0.id) || shows($0) }
         let roots = SessionTree.build(sessions, parent: { pinnedSet.contains($0.id) ? nil : $0.parentSessionId }, date: date)
         let unpinned = roots.filter { !pinnedSet.contains($0.id) }
         return Groups(pinned: roots.filter { pinnedSet.contains($0.id) },

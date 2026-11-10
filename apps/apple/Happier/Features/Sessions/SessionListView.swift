@@ -330,11 +330,13 @@ struct SessionListView: View {
         ForEach(treeRows(nodes)) { tree in row(tree.session, tree: tree) }
     }
 
-    /// The usual list (the default filter, which leaves out the sessions tasks started).
+    /// The usual list (the default filter, which leaves out the sessions tasks started, except the
+    /// ones you pinned).
     @ViewBuilder
     private func groupedList() -> some View {
-        let now = Date.now
-        let groups = SessionSidebar.groups(filteredSessions, pinned: store.pinnedSessionIds) { store.listDate($0, now: now) }
+        let now = Date.now, filter = filter, context = filterContext
+        let groups = SessionSidebar.groups(sessions, pinned: store.pinnedSessionIds, date: { store.listDate($0, now: now) },
+                                           shows: { filter.includes($0, context: context) })
         if !groups.pinned.isEmpty {
             Section("Pinned") { outline(groups.pinned) }
         }

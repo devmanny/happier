@@ -54,6 +54,20 @@ import Testing
         #expect(ids(groups.active) == ["loud(loudChild)", "quiet"])
     }
 
+    @Test func aPinnedSessionStaysInPinnedWhenTheFilterLeavesItOut() throws {
+        // Pinning is explicit: the filter (no task sessions by default) shapes the rest of the list.
+        let hidden: Set<String> = ["pinnedTask", "task", "taskChild"]
+        let groups = SessionSidebar.groups([
+            try session("pinnedTask", active: false, at: 10),
+            try session("taskChild", active: true, at: 15, parent: "pinnedTask"),
+            try session("task", active: true, at: 20),
+            try session("run", active: true, at: 30),
+        ], pinned: ["pinnedTask"], shows: { !hidden.contains($0.id) })
+        #expect(ids(groups.pinned) == ["pinnedTask"])
+        #expect(ids(groups.active) == ["run"])
+        #expect(ids(groups.inactive).isEmpty)
+    }
+
     @Test func searchMatchesTitleAndFolder() throws {
         let s = try session("s", active: false, at: 1, title: "Facturación de octubre", path: "/Users/m/Projects/kelpi")
         #expect(s.matches("FACTURA"))
