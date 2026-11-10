@@ -119,7 +119,7 @@ struct MainView: View {
         layout
             .onChange(of: selection) { _, id in
                 // A new, unsent conversation or an agent's profile isn't one to reopen.
-                lastOpenSessionId = id == NewChat.id || AgentProfile.id(inSelection: id) != nil ? "" : id ?? ""
+                lastOpenSessionId = Self.sessionId(in: id) ?? ""
                 if let id { inbox.remove(sessionId: id) }
                 if id != restoredSessionId { restoredSessionId = nil }
                 #if os(iOS)
@@ -217,8 +217,13 @@ struct MainView: View {
     }
 
     /// The conversation open in the detail, if what's selected is one.
-    private var openSessionId: String? {
-        selection == NewChat.id || AgentProfile.id(inSelection: selection) != nil ? nil : selection
+    private var openSessionId: String? { Self.sessionId(in: selection) }
+
+    /// The session a sidebar selection names: not a new chat, an agent's profile or a room.
+    static func sessionId(in selection: String?) -> String? {
+        guard let selection, selection != NewChat.id, AgentProfile.id(inSelection: selection) == nil,
+              AgentRoom.id(inSelection: selection) == nil else { return nil }
+        return selection
     }
 
     @ViewBuilder
@@ -229,6 +234,9 @@ struct MainView: View {
             // Straight in the detail column, as a conversation is: its title and Edit are the column's.
             AgentProfileView(agentId: agentId)
                 .id(agentId)
+        } else if let roomId = AgentRoom.id(inSelection: selection) {
+            RoomView(roomId: roomId)
+                .id(roomId)
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

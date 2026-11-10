@@ -147,8 +147,8 @@ public final class HappierStore {
     public var lastError: String?
 
     @ObservationIgnored private var credentials: Credentials?
-    @ObservationIgnored private var keys: AccountKeys?
-    @ObservationIgnored private var api: HappierAPI?
+    @ObservationIgnored private(set) var keys: AccountKeys?
+    @ObservationIgnored private(set) var api: HappierAPI?
     @ObservationIgnored private var socket: SocketIOClient?
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var openSessionIds = OpenSessions()
@@ -483,6 +483,11 @@ public final class HappierStore {
 
     /// The user's and the agents' tasks, once loaded.
     public private(set) var tasks: [AgentTask] = []
+    /// The account's rooms (`room/`), and the messages and members' seats of those opened here.
+    public internal(set) var rooms: [AgentRoom] = []
+    public internal(set) var roomMessages: [String: [AgentRoomMessage]] = [:]
+    public internal(set) var roomSeats: [String: [AgentRoomSeat]] = [:]
+    public internal(set) var roomsError: String?
     public private(set) var tasksError: String?
     /// False when the tasks listing came back full: some tasks may be missing from it.
     public private(set) var tasksComplete = true
@@ -554,6 +559,8 @@ public final class HappierStore {
                 } else if !legacy {
                     agentProfileVersions[id] = nil
                 }
+            } else if applyRoomChange(change, machineKey: machineKey) {
+                continue
             } else if change.key.hasPrefix("agent/") {
                 let agentId = change.key.split(separator: "/").dropFirst().first.map(String.init) ?? ""
                 guard let memory = agentMemories[agentId] else { continue }
@@ -620,6 +627,10 @@ public final class HappierStore {
             if refresh.tasks { await refreshTasks() }
             if refresh.profiles { await refreshAgentProfiles() }
             if refresh.memory { for agentId in agentMemories.keys { await refreshAgentMemory(agentId: agentId) } }
+            if refresh.rooms {
+                await refreshRooms()
+                for roomId in roomMessages.keys { await loadRoom(id: roomId) }
+            }
         } catch {
             logBackground(error, "account kv catch-up")
         }
@@ -3582,7 +3593,7 @@ public final class HappierStore {
         openRequest = sessionId
     }
 
-    private func report(_ error: Error) {
+    func report(_ error: Error) {
         if UserFacingError.isSilent(error) {
             log.notice("operation cancelled")
             return

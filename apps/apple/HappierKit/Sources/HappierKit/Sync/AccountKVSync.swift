@@ -37,20 +37,24 @@ public enum AccountKVSync {
         public var profiles: Bool
         /// Agent memory (only the agents open here).
         public var memory: Bool
+        /// Rooms, and the messages and seats of those open here.
+        public var rooms: Bool
 
-        public init(tasks: Bool, profiles: Bool, memory: Bool) {
+        public init(tasks: Bool, profiles: Bool, memory: Bool, rooms: Bool = false) {
             self.tasks = tasks
             self.profiles = profiles
             self.memory = memory
+            self.rooms = rooms
         }
 
         public static let none = Refresh(tasks: false, profiles: false, memory: false)
-        public static let all = Refresh(tasks: true, profiles: true, memory: true)
+        public static let all = Refresh(tasks: true, profiles: true, memory: true, rooms: true)
 
         public var isEmpty: Bool { self == .none }
 
         func union(_ other: Refresh) -> Refresh {
-            Refresh(tasks: tasks || other.tasks, profiles: profiles || other.profiles, memory: memory || other.memory)
+            Refresh(tasks: tasks || other.tasks, profiles: profiles || other.profiles, memory: memory || other.memory,
+                    rooms: rooms || other.rooms)
         }
 
         /// A KV change row's family (`accountKvChangeFamily` in the protocol): presence is never
@@ -61,6 +65,7 @@ public enum AccountKVSync {
             case "task": Refresh(tasks: true, profiles: false, memory: false)
             case "agentprofile": Refresh(tasks: false, profiles: true, memory: false)
             case "agent": Refresh(tasks: false, profiles: true, memory: true)
+            case "room", "roommsg", "roomseat": Refresh(tasks: false, profiles: false, memory: false, rooms: true)
             default: .all
             }
         }

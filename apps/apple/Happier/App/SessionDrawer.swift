@@ -89,6 +89,9 @@ struct SessionDrawer: View {
         } else if let agentId = AgentProfile.id(inSelection: selection) {
             AgentProfileView(agentId: agentId)
                 .id(agentId)
+        } else if let roomId = AgentRoom.id(inSelection: selection) {
+            RoomView(roomId: roomId)
+                .id(roomId)
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

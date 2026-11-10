@@ -232,6 +232,58 @@ extension HappierAPI {
 }
 
 extension HappierAPI {
+    public enum KVMutate: Equatable, Sendable {
+        /// Every key was written: their new versions.
+        case saved([String: Int])
+        /// Nothing was written (the mutation is atomic): the keys someone else wrote first, with their
+        /// current version and value (nil when deleted or absent), to retry on.
+        case conflict([String: KVConflict])
+    }
+
+    public struct KVConflict: Equatable, Sendable {
+        public let version: Int
+        public let value: String?
+    }
+
+    /// Several keys written together or not at all (`kvMutate`), each only if still at its version.
+    func kvMutate(_ mutations: [(key: String, value: String?, version: Int)]) async throws -> KVMutate {
+        let body: JSONValue = ["mutations": .array(mutations.map { mutation in
+            ["key": .string(mutation.key), "value": mutation.value.map(JSONValue.string) ?? .null, "version": .number(Double(mutation.version))]
+        })]
+        do {
+            let response = try await http.post("/v1/kv", body)
+            var versions: [String: Int] = [:]
+            for result in response["results"]?.arrayValue ?? [] {
+                if let key = result["key"]?.stringValue, let version = result["version"]?.intValue { versions[key] = version }
+            }
+            return .saved(versions)
+        } catch let error as HTTPClient.ServerError where error.status == 409 {
+            var conflicts: [String: KVConflict] = [:]
+            for entry in error.body?["errors"]?.arrayValue ?? [] where entry["error"]?.stringValue == "version-mismatch" {
+                guard let key = entry["key"]?.stringValue else { continue }
+                conflicts[key] = KVConflict(version: entry["version"]?.intValue ?? -1, value: entry["value"]?.stringValue)
+            }
+            guard !conflicts.isEmpty else { throw error }
+            return .conflict(conflicts)
+        }
+    }
+
+    /// The stored values of `keys` that exist (`POST /v1/kv/bulk`, at most 100 keys a call).
+    func kvBulkGet(_ keys: [String]) async throws -> [(key: String, value: String, version: Int)] {
+        var rows: [(key: String, value: String, version: Int)] = []
+        for start in stride(from: 0, to: keys.count, by: 100) {
+            let chunk = Array(keys[start..<min(start + 100, keys.count)])
+            let response = try await http.post("/v1/kv/bulk", ["keys": .array(chunk.map(JSONValue.string))])
+            for row in response["values"]?.arrayValue ?? [] {
+                if let key = row["key"]?.stringValue, let value = row["value"]?.stringValue, !value.isEmpty,
+                   let version = row["version"]?.intValue {
+                    rows.append((key, value, version))
+                }
+            }
+        }
+        return rows
+    }
+
     /// The `POST /v1/kv` body `kvWrite` sends, so a writer can tell its size before sending it.
     static func kvWriteBody(key: String, value: String?, version: Int) -> JSONValue {
         ["mutations": [["key": .string(key), "value": value.map(JSONValue.string) ?? .null, "version": .number(Double(version))]]]

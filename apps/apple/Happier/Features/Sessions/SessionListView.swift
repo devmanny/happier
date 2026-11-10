@@ -60,6 +60,7 @@ struct SessionListView: View {
     @State private var newSessionDraft: NewSessionDraft?
     /// A session started from an agent's card, with that agent chosen.
     @State private var newSessionAgent: AgentProfile?
+    @State private var creatingRoom = false
     /// The agents' Edit: their rows show drag handles.
     @State private var editingAgents = false
     /// The row a dragged session is over.
@@ -652,6 +653,7 @@ extension SessionListView {
             if query.isEmpty {
                 AgentsSection(sessions: listed.sessions ?? store.sessionList, drawer: isDrawer, selection: selection, open: open,
                               newSession: { newSessionAgent = $0 }, editing: $editingAgents)
+                RoomsSection(drawer: isDrawer, selection: selection, open: open, newRoom: { creatingRoom = true })
             }
             if !query.isEmpty {
                 searchResults()
@@ -842,6 +844,12 @@ extension SessionListView {
         .sheet(item: $newSessionAgent) { agent in
             NewSessionSheet(preselectedAgentId: agent.id)
         }
+        .sheet(isPresented: $creatingRoom) {
+            NewRoomSheet { room in open(AgentRoom.selection(id: room.id)) }
+                #if os(macOS)
+                .frame(minWidth: 480, minHeight: 600)
+                #endif
+        }
         #if os(macOS)
         .task(id: springTarget) {
             guard let target = springTarget else { return }
@@ -875,7 +883,7 @@ extension SessionListView {
             if request != nil, !tasksPanelAvailable { showTasks = true }
         }
         .sheet(isPresented: $showTasks) {
-            TasksView(openSessionId: selection == NewChat.id || AgentProfile.id(inSelection: selection) != nil ? nil : selection)
+            TasksView(openSessionId: MainView.sessionId(in: selection))
                 #if os(macOS)
                 .frame(minWidth: 520, minHeight: 560)
                 #endif
