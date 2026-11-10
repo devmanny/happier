@@ -141,6 +141,22 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(room.lastSeq == 2)
     }
 
+    @Test func theUsersNameInARoomChangesAndClearsWithoutTouchingTheRest() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        #expect(await store.setRoomUserName(roomId: "r1", "  Manny Ruiz ")?.userName == "Manny Ruiz")
+        var stored = try #require(server.row(AgentRoom.kvKey(id: "r1")).flatMap { AgentRoom.open($0.value, machineKey: machineKey) })
+        #expect(stored.userName == "Manny Ruiz")
+        #expect(stored.lastSeq == 2 && stored.members.count == 2)
+        // Empty: the agents go back to calling the user "User" (no name stored).
+        _ = await store.setRoomUserName(roomId: "r1", " ")
+        stored = try #require(server.row(AgentRoom.kvKey(id: "r1")).flatMap { AgentRoom.open($0.value, machineKey: machineKey) })
+        #expect(stored.userName == nil)
+        #expect(stored.json["userName"] == nil)
+    }
+
     @Test func pausingWritesTheRoomAtItsVersionAndKeepsTheOthersChanges() async throws {
         let server = RoomKVServer()
         try seed(server, lastSeq: 2, version: 5)

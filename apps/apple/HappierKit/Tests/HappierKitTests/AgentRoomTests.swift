@@ -127,6 +127,26 @@ import Testing
         #expect(invited.json["wakeByAgents"] == true)
     }
 
+    @Test func aNewMemberWorksInItsAgentsLatestFolderOnThatMachineElseTheHome() throws {
+        func session(_ id: String, agent: String?, machine: String, path: String, at: Double) throws -> Session {
+            var metadata: [String: JSONValue] = ["path": .string(path), "machineId": .string(machine)]
+            if let agent { metadata["agentIdentityV1"] = ["v": 1, "id": .string(agent), "name": "x"] }
+            return try Session(row: ["id": .string(id), "seq": 1, "createdAt": 1, "updatedAt": .number(at), "active": false, "encryptionMode": "plain",
+                                     "metadata": .string(String(decoding: try JSONValue.object(metadata).encoded(), as: UTF8.self)), "metadataVersion": 1],
+                               keys: nil)
+        }
+        let sessions = [try session("a", agent: "a-mateo", machine: "m1", path: "/p/movil", at: 10),
+                        try session("b", agent: "a-mateo", machine: "m1", path: "/p/radar", at: 30),
+                        try session("c", agent: "a-mateo", machine: "m2", path: "/p/otra", at: 50),
+                        try session("d", agent: "a-tomas", machine: "m1", path: "/p/escritorio", at: 40),
+                        try session("e", agent: nil, machine: "m1", path: "/p/sin-agente", at: 60)]
+        #expect(AgentRoom.Member.suggestedDirectory(agentId: "a-mateo", machineId: "m1", sessions: sessions, home: "/Users/m") == "/p/radar")
+        #expect(AgentRoom.Member.suggestedDirectory(agentId: "a-tomas", machineId: "m1", sessions: sessions, home: "/Users/m") == "/p/escritorio")
+        // An agent with no session on that machine starts at its home.
+        #expect(AgentRoom.Member.suggestedDirectory(agentId: "a-leo", machineId: "m1", sessions: sessions, home: "/Users/m") == "/Users/m")
+        #expect(AgentRoom.Member.suggestedDirectory(agentId: "a-leo", machineId: "m1", sessions: sessions, home: nil) == nil)
+    }
+
     @Test func withoutAMentionTheLastAgentWhoSpokeIsSuggested() {
         let messages = [Self.message(1, by: Self.user, mentions: ["a-tomas"]), Self.message(2, by: Self.agent("a-tomas")),
                         Self.message(3, by: Self.agent("a-mateo")), Self.message(4, by: Self.user)]

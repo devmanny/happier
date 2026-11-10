@@ -194,6 +194,13 @@ extension HappierStore {
         }
     }
 
+    /// How the agents call the user in the room (and mention them); empty clears it ("User").
+    @discardableResult
+    public func setRoomUserName(roomId: String, _ name: String) async -> AgentRoom? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await updateRoom(id: roomId) { room in room.userName = name.isEmpty ? nil : name }
+    }
+
     /// "Let It Answer": the user's message that mentions the member, which wakes it like any of theirs.
     @discardableResult
     public func letRoomMemberAnswer(roomId: String, agentId: String) async -> Bool {

@@ -96,7 +96,7 @@ struct NewRoomSheet: View {
         if let invite = invited[agent.id] {
             Picker("Machine", selection: Binding(get: { invite.machineId }, set: { machine in
                 invited[agent.id]?.machineId = machine
-                invited[agent.id]?.directory = recentDirectory(machine) ?? ""
+                invited[agent.id]?.directory = suggestedDirectory(agent, machine) ?? ""
             })) {
                 ForEach(store.machines) { Text($0.name).tag($0.id) }
             }
@@ -120,13 +120,14 @@ struct NewRoomSheet: View {
 
     private func defaultInvite(_ agent: AgentProfile) -> Invite {
         let machine = store.machines.first { $0.active } ?? store.machines.first
-        return Invite(machineId: machine?.id ?? "", directory: machine.flatMap { recentDirectory($0.id) } ?? "",
+        return Invite(machineId: machine?.id ?? "", directory: machine.flatMap { suggestedDirectory(agent, $0.id) } ?? "",
                       wakeByAgents: AgentRoom.Member.answersAgentsByDefault(providerId: agent.providerId))
     }
 
-    private func recentDirectory(_ machineId: String) -> String? {
-        Machine.recentDirectories(machineId: machineId, sessions: Array(store.sessions.values)).first
-            ?? store.machines.first { $0.id == machineId }?.homeDir
+    /// The agent's latest folder on that machine, else the machine's home (it can be changed).
+    private func suggestedDirectory(_ agent: AgentProfile, _ machineId: String) -> String? {
+        AgentRoom.Member.suggestedDirectory(agentId: agent.id, machineId: machineId, sessions: Array(store.sessions.values),
+                                            home: store.machines.first { $0.id == machineId }?.homeDir)
     }
 
     private func create() {

@@ -360,6 +360,14 @@ private struct RoomMembersSheet: View {
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var warning: String?
+    /// "Your name here" while it is edited; saved on Return or Done.
+    @State private var userName = ""
+
+    private func saveUserName() {
+        guard let room = store.room(id: roomId),
+              userName.trimmingCharacters(in: .whitespaces) != (room.userName ?? "") else { return }
+        Task { await store.setRoomUserName(roomId: roomId, userName) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -383,7 +391,12 @@ private struct RoomMembersSheet: View {
                         }
                     }
                     Section {
-                        LabeledContent("Your name here", value: room.userName ?? String(localized: "User"))
+                        TextField("Your name here", text: $userName, prompt: Text("User"))
+                            .textContentType(.name)
+                            .onSubmit(saveUserName)
+                            .accessibilityIdentifier("room-user-name")
+                    } header: {
+                        Text("How the agents call you")
                     } footer: {
                         Text("Another agent's mention only wakes the agents that answer other agents; the others wait for you to let them answer.")
                     }
@@ -394,7 +407,15 @@ private struct RoomMembersSheet: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        saveUserName()
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear { userName = store.room(id: roomId)?.userName ?? "" }
             .alert("Automated Access with Claude", isPresented: Binding(get: { warning != nil }, set: { if !$0 { warning = nil } })) {
                 Button("Allow") {
                     if let id = warning { Task { await store.setRoomMemberAnswersAgents(roomId: roomId, agentId: id, true) } }

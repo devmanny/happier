@@ -41,6 +41,13 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
                       wakeByAgents: wakeByAgents ?? Self.answersAgentsByDefault(providerId: agent.providerId))
         }
 
+        /// Where a new member works on `machineId`: the folder of its agent's latest session there, else
+        /// the machine's home. Proposed in New Room; the user can change it.
+        public static func suggestedDirectory(agentId: String, machineId: String, sessions: [Session], home: String?) -> String? {
+            sessions.filter { $0.machineId == machineId && $0.agentIdentity?.id == agentId && $0.path?.isEmpty == false }
+                .max { $0.sortDate < $1.sortDate }?.path ?? home
+        }
+
         /// Another agent's mention wakes a new member, except a Claude one: that is automated access
         /// (Consumer Terms 3.7), allowed only past the warning (`needsAutomatedAccessWarning`).
         public static func answersAgentsByDefault(providerId: String?) -> Bool {
