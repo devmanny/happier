@@ -25,6 +25,8 @@ public struct ProviderUsage: Equatable, Sendable {
     public let fetchedAt: Date?
     /// How long the provider's numbers hold before the daemon reads them again.
     public let staleAfter: TimeInterval?
+    /// The usage record this reading came from; nil for one taken from a runtime issue.
+    public internal(set) var recordId: String?
 
     public init?(snapshot: JSONValue) {
         guard let rows = snapshot["meters"]?.arrayValue else { return nil }
@@ -33,6 +35,7 @@ public struct ProviderUsage: Equatable, Sendable {
         fetchedAt = snapshot["fetchedAtMs"]?.doubleValue.map { Date(timeIntervalSince1970: $0 / 1000) }
         staleAfter = snapshot["staleAfterMs"]?.doubleValue.map { $0 / 1000 }
         meters = rows.compactMap(Self.meter)
+        recordId = snapshot["recordId"]?.stringValue
     }
 
     /// The limits a session ran into (`lastRuntimeIssue.usageLimit`,

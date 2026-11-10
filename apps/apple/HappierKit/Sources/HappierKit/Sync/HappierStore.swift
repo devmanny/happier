@@ -3263,7 +3263,9 @@ public final class HappierStore {
     public func usage(for sessionId: String) -> ProviderUsage? {
         guard let session = sessions[sessionId] else { return nil }
         let belongs = { (usage: ProviderUsage) in usage.providerId == nil || usage.providerId == session.agentId }
-        if let reading = providerUsage[sessionId], belongs(reading) { return reading }
+        // A reading the session no longer points at (it moved to another account) isn't its usage.
+        if let reading = providerUsage[sessionId], belongs(reading),
+           reading.recordId.map(ProviderUsage.recordIds(in: session.metadata).contains) ?? true { return reading }
         return session.lastRuntimeIssue.flatMap(ProviderUsage.init(runtimeIssue:)).flatMap { belongs($0) ? $0 : nil }
     }
 
@@ -3273,12 +3275,13 @@ public final class HappierStore {
         for recordId in ProviderUsage.recordIds(in: session.metadata) {
             do {
                 guard let snapshot = try await api.providerAccountUsage(recordId: recordId, machineKey: keys?.content.secretKey),
-                      let usage = ProviderUsage(snapshot: snapshot) else {
+                      var usage = ProviderUsage(snapshot: snapshot) else {
                     log.error("provider usage \(recordId, privacy: .public): unreadable snapshot")
                     continue
                 }
                 // A record of the session's previous agent isn't its usage now.
                 guard usage.providerId == nil || usage.providerId == session.agentId else { continue }
+                usage.recordId = recordId
                 if (usage.fetchedAt ?? .distantPast) >= (newest?.fetchedAt ?? .distantPast) { newest = usage }
             } catch {
                 log.error("provider usage \(recordId, privacy: .public): \(String(describing: error), privacy: .public)")

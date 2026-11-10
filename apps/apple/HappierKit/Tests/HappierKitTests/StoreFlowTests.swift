@@ -251,6 +251,22 @@ import Testing
         #expect(store.usage(for: "s1")?.providerId == "claude")
     }
 
+    @Test func aReadingTheSessionNoLongerPointsAtIsNotItsUsage() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // The session ran on another account; that account's reading is cached here.
+        let claude: [String: JSONValue] = ["flavor": "claude"]
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: claude.merging(["providerAccountUsageRefsV1": ["recordIds": ["r-claude"]]]) { $1 })]
+        await store.refreshSessions()
+        await store.refreshProviderUsage("s1")
+        #expect(store.usage(for: "s1")?.providerId == "claude")
+
+        // Its reading is dropped (it now runs on its own account): the old account's numbers go too.
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 3, metadata: claude.merging(["providerAccountUsageRefsV1": ["recordIds": []]]) { $1 }, metadataVersion: 4)]
+        await store.refreshSessions()
+        #expect(store.usage(for: "s1") == nil)
+    }
+
     // MARK: This device cut off from the relay
 
     @Test func cutOffFromTheRelayWhatTheRelayReportedIsJudgedWhenTheLinkWasLost() throws {
