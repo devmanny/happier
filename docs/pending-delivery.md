@@ -227,6 +227,46 @@ must not replace the daemon's Happier session identity. Otherwise a subsequent
 wake can miss the live runner and attach a second one; replacing the publisher
 turns unresolved delivery claims into `delivery_outcome_uncertain`.
 
+## Inherited uncertain deliveries (development)
+
+When a runner registers as the session publisher, the server marks every
+`delivering` row `blocked / delivery_outcome_uncertain`
+(`providerDeliveryClaimStaleness.ts`): a possible provider effect becomes
+durable uncertainty at once. This also happens on a socket reconnect of the same
+runner, which keeps its custody and still settles the row from late provider
+evidence. A replacement runner (after a restart or a runner crash) holds no
+custody for these rows, so the provider decides each from its own evidence once
+its runtime is established. The session client lists them, decoded, in server
+order; the provider leaf classifies them; the client resolves them through the
+existing Pending resolutions.
+
+Claude unified terminal reads the transcript of the session it resumes, backwards
+only as far as the oldest inherited row's creation (these files reach hundreds of
+megabytes). Only rows between the row's creation and this runtime's start count:
+
+- exactly one main-chain consumption of the exact prompt (a user prompt or a
+  consumed `queued_command`; the stored text, optionally followed by the
+  provider-only context Happier appends) settles the row through the ordinary
+  accepted settlement, so it commits to the transcript with its `localId`;
+- no consumption at all, in a transcript that already existed when the row was
+  created and once the predecessor's terminal host is gone, sends the row again once
+  through `delivery/send-as-new`. A prompt only held in Claude's native queue
+  (`queue-operation enqueue`) died with that process. The host is gone when this
+  runner confirms the saved host dead, or when no host is recorded for the session at
+  all: the terminal attachment registry drops a record only after the host is
+  confirmed dead or torn down (the daemon does this before a Resume and on stop). A
+  borrowed or adopted live host keeps the row with its owner;
+- identical prompts, the prompt inside a larger one, a native-queue release
+  without its consumption, an unreadable transcript, or a predecessor host that may
+  still be alive leave the row blocked for its owner.
+
+An ordinary row settles only after every queued row ahead of it; exact actions
+settle out of order, as the server allows. Other providers and runtimes leave
+inherited rows to the owner. RN and the native app present them as possibly
+delivered and resolve them through the same server actions: send again as a new
+message (`delivery/send-as-new`) or remove (`delivery/dismiss`). The server refuses
+ordinary retry, edit, and delete for them.
+
 ## Current Queue V2 activation ownership
 
 Pending Queue V2 remains the sole durable owner of message custody, ordering, and exact-row actions. An inactive-session start request is a small session-level authorization for one exact eligible queued row; it is not another message-delivery state machine and does not change that row's delivery priority.

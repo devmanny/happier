@@ -31,6 +31,10 @@ const TURN_CONTEXT_CACHE_MS = 30_000;
  */
 export type MemoryListing<T> = Readonly<{ items: T[]; complete: boolean }>;
 
+/** First line of the turn-start block about the agent's other threads (provider-only context). */
+export const AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER =
+  '[Happier · your other threads right now. You are one agent across them: check memoria_buscar or mis_hilos before answering about their work.]';
+
 export class AgentMemory {
   private nowText: string | null = null;
   private nowVersion = -1;
@@ -137,7 +141,7 @@ export class AgentMemory {
       + (threads.complete ? '' : `\n- (more threads than one listing holds; use mis_hilos)`);
     const block = summary
       ? [
-          '[Happier · your other threads right now. You are one agent across them: check memoria_buscar or mis_hilos before answering about their work.]',
+          AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER,
           summary,
         ].join('\n')
       : null;

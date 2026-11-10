@@ -2,7 +2,11 @@ import { createClaudeReadyHandler } from '../ready/createClaudeReadyHandler';
 import { createClaudePendingAwareInputConsumer } from '../createClaudePendingAwareInputConsumer';
 import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import type { EnhancedMode } from '../loop';
+import { basename } from 'node:path';
+
 import type { Session } from '../session';
+import { resolveClaudeSessionTranscriptPath } from '../utils/claudeCheckSession';
+import { recoverClaudeUnifiedInheritedPendingDeliveries } from './inheritedPendingDeliveryRecovery';
 import type { LauncherResult } from '../claudeLocalLauncher';
 import { createClaudeSessionTranscriptProjector } from '../localControl/createClaudeSessionTranscriptProjector';
 import { createClaudeWorkflowActivitySourceForSession } from '../workflows/createClaudeWorkflowActivitySourceForSession';
@@ -222,6 +226,14 @@ function asStandaloneUnifiedMode(mode: EnhancedMode): EnhancedMode {
     ...mode,
     claudeUnifiedTerminalEnabled: true,
   };
+}
+
+/** The transcript of the Claude session this launch resumes: the one its predecessor wrote. */
+function resolveInheritedDeliveryTranscriptPath(session: Session, resumeSessionId: string | null): string | null {
+  if (!resumeSessionId) return null;
+  const reported = session.client.getMetadataSnapshot?.()?.claudeTranscriptPath;
+  const reportedForSession = typeof reported === 'string' && basename(reported) === `${resumeSessionId}.jsonl` ? reported : null;
+  return resolveClaudeSessionTranscriptPath(resumeSessionId, session.path, reportedForSession);
 }
 
 function readActiveUnifiedTerminalHost(session: Session): 'tmux' | 'zellij' | 'herdr' | null {
@@ -988,6 +1000,17 @@ export async function claudeUnifiedTerminalLauncher(
       statuslineForwarder: session.claudeStatuslineForwarder ?? undefined,
       happierMcpConfigJson: mcpConfigJson,
       systemPromptText: session.defaultSystemPromptText,
+      recoverInheritedPendingDeliveries: (input) => {
+        void recoverClaudeUnifiedInheritedPendingDeliveries({
+          client: session.client,
+          transcriptPath: resolveInheritedDeliveryTranscriptPath(session, resumeSessionId),
+          ...input,
+        }).catch((error: unknown) => {
+          logger.infoFile('[unified]: inherited uncertain delivery recovery failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      },
       // A parked message (post-runtime-issue relaunch) must drive the relaunch mode itself,
       // so initialMode stays undefined and the parked batch becomes the first message.
       initialMode: initialPromptPending || parkedMessage || !opts.initialMode

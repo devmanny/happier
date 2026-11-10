@@ -10,7 +10,9 @@ import {
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
+    listPendingQueueV2RowsFromServer,
     markPendingQueueV2DeliveryHandled,
+    sendPendingQueueV2DeliveryAsNew,
     materializeNextPendingQueueV2Message,
     materializeNextPendingQueueV2MessageOnReleasedServer,
     materializeNextPendingQueueV2MessageViaHttp,
@@ -1736,6 +1738,70 @@ describe('pendingQueueV2Transport', () => {
 
         expect(mockPost).toHaveBeenCalledWith(
             expect.stringContaining('/v2/sessions/session-1/pending/local-1/delivery/handled'),
+            {},
+            expect.objectContaining({
+                headers: expect.objectContaining({ Authorization: 'Bearer token' }),
+            }),
+        );
+    });
+
+    it('lists queued rows in server order with their stored content and creation time', async () => {
+        mockGet.mockResolvedValueOnce({
+            data: {
+                pending: [
+                    {
+                        localId: 'inherited-1',
+                        messageRole: 'user',
+                        content: { t: 'encrypted', c: 'Y2lwaGVy' },
+                        requestedAction: { v: 1, kind: 'steer_if_active' },
+                        status: 'queued',
+                        deliveryState: 'blocked',
+                        deliveryBlockedReason: 'delivery_outcome_uncertain',
+                        deliveryStatus: { status: 'blocked', reason: 'delivery_outcome_uncertain' },
+                        position: 1,
+                        createdAt: 1_794_328_591_459,
+                    },
+                    // A row whose content or timestamps this reader cannot use stays listed for ordering.
+                    { localId: 'later-1', status: 'queued', deliveryStatus: { status: 'queued' }, content: { t: 'unknown' } },
+                ],
+            },
+        });
+
+        await expect(listPendingQueueV2RowsFromServer({ token: 'token', sessionId: 'session-1' })).resolves.toEqual([
+            {
+                localId: 'inherited-1',
+                messageRole: 'user',
+                requestedAction: { v: 1, kind: 'steer_if_active' },
+                deliveryStatus: { status: 'blocked', reason: 'delivery_outcome_uncertain' },
+                content: { t: 'encrypted', c: 'Y2lwaGVy' },
+                createdAt: 1_794_328_591_459,
+            },
+            {
+                localId: 'later-1',
+                messageRole: null,
+                requestedAction: null,
+                deliveryStatus: { status: 'queued' },
+                content: null,
+                createdAt: null,
+            },
+        ]);
+    });
+
+    it('posts send-as-new to the dedicated delivery route with an empty body', async () => {
+        mockPost.mockResolvedValueOnce({
+            data: { ok: true, didWrite: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 7 },
+        });
+
+        await expect(sendPendingQueueV2DeliveryAsNew({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: 'inherited-1',
+        })).resolves.toEqual({
+            pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 7 },
+        });
+
+        expect(mockPost).toHaveBeenCalledWith(
+            expect.stringContaining('/v2/sessions/session-1/pending/inherited-1/delivery/send-as-new'),
             {},
             expect.objectContaining({
                 headers: expect.objectContaining({ Authorization: 'Bearer token' }),

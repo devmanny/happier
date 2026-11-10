@@ -1,7 +1,7 @@
 import type { RpcHandlerManagerLike } from '@/api/rpc/types';
 import type { RawJSONLines } from '@/backends/claude/types';
 import type { ACPMessageData, ACPProvider, SessionEventMessage } from './sessionMessageTypes';
-import type { AgentState, Metadata } from '../types';
+import type { AgentState, Metadata, UserMessage } from '../types';
 import type { AgentStateWriteOptions } from './sessionWritesBestEffort';
 import type { TurnAssistantTextSnapshot } from './turnAssistantTextSnapshot';
 import type { CommittedUserMessageSeqWaitOptions } from './committedUserMessageSeqTracker';
@@ -35,6 +35,21 @@ import type {
 import type { EphemeralSendResult } from './ephemeralSendOutcome';
 import type { RuntimeActivitySnapshotTail } from './mutations/createSessionMutationOutbox';
 import type { SessionPermissionRpcRouter } from '@/agent/permissions/sessionPermissionRpcRouter';
+
+/**
+ * A row a replaced runner left `blocked / delivery_outcome_uncertain`: the server writes that when
+ * a new publisher registers while the row was `delivering`. Its provider-owned evidence decides it.
+ */
+export type InheritedUncertainPendingDelivery = Readonly<{
+  localId: string;
+  /** When the row was enqueued (ms); provider evidence before this cannot be this row's. */
+  createdAt: number | null;
+  requestedAction: PendingRequestedActionV1 | null;
+  /** The decoded user prompt, or null when this runner cannot read it as one. */
+  message: UserMessage | null;
+  /** Queued rows ahead of it, in server order: an `enqueue` row settles only after them. */
+  earlierQueuedLocalIds: readonly string[];
+}>;
 
 export type MaterializeNextPendingResult =
   | {
@@ -163,6 +178,11 @@ export interface SessionClientPort {
   getMetadataSnapshot(): Metadata | null;
   hasPendingProviderInputAcceptance?(localId: string): boolean;
   hasCanonicalPendingProviderInputDelivery?(localId: string): boolean;
+  listInheritedUncertainPendingDeliveries?(): Promise<InheritedUncertainPendingDelivery[]>;
+  /** Settles an inherited row the provider proved it accepted; true once the server committed it. */
+  settleInheritedPendingDeliveryAccepted?(localId: string): Promise<boolean>;
+  /** Queues an inherited row the provider proved it never received again as a new message. */
+  resendInheritedPendingDeliveryAsNew?(localId: string): Promise<boolean>;
   blockPendingMessageDelivery?(params: Readonly<{
     localIds: readonly string[] | null | undefined;
     reason: PendingQueueDeliveryBlockedReason;

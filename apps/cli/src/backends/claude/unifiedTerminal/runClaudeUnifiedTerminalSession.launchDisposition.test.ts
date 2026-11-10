@@ -755,6 +755,40 @@ describe('runClaudeUnifiedTerminalSession launch disposition', () => {
     expect(storedAttachment).not.toBeNull();
   });
 
+  it('tells inherited-delivery recovery whether a predecessor terminal host could still act', async () => {
+    const runWith = async (
+      adapterOverrides: Partial<TerminalHostAdapter>,
+      options: Partial<Parameters<typeof runClaudeUnifiedTerminalSession>[0]>,
+    ): Promise<boolean[]> => {
+      const abortController = new AbortController();
+      // Recovery runs once the host is established; the session is not needed past that point.
+      const recover = vi.fn((_input: Readonly<{ predecessorConfirmedDead: boolean; evidenceBeforeMs: number }>) => {
+        abortController.abort();
+      });
+      await runClaudeUnifiedTerminalSession({
+        ...baseOptions(createAdapter(adapterOverrides), abortController),
+        persistTerminalHostAttachmentInfo: async () => {},
+        ...options,
+        recoverInheritedPendingDeliveries: recover,
+      });
+      return recover.mock.calls.map(([input]) => input.predecessorConfirmedDead);
+    };
+
+    // No host recorded for the session: the system only drops a host record once that host is gone.
+    expect(await runWith({}, {})).toEqual([true]);
+    // The recorded host is confirmed dead and retired here.
+    let stored: TerminalAttachmentInfo | null = existingAttachment;
+    expect(await runWith(
+      { evaluateLiveness: vi.fn(async () => ({ paneAlive: false, paneDead: true, observedAt: 1 })) },
+      { readTerminalHostAttachmentInfo: async () => stored, removeTerminalHostAttachmentInfo: async () => { stored = null; } },
+    )).toEqual([true]);
+    // The recorded host is alive and adopted: its Claude may still hold the prompt.
+    expect(await runWith(
+      { adoptExistingHost: vi.fn(async () => existingHandle) },
+      { expectedExistingTerminalHostAttachmentId: attachmentId, readTerminalHostAttachmentInfo: async () => existingAttachment },
+    )).toEqual([false]);
+  });
+
   it('does not report a provider launch when it adopts the exact live terminal attachment', async () => {
     const abortController = new AbortController();
     const onProviderLaunchStarting = vi.fn(async () => undefined);

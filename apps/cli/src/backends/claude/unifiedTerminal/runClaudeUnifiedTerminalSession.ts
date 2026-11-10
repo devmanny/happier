@@ -217,6 +217,15 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   path: string;
   happySessionId?: string | null | undefined;
   sessionId?: string | null | undefined;
+  /**
+   * Resolves rows a replaced runner left `delivery_outcome_uncertain` once this runtime's terminal
+   * host is established: whether the saved predecessor host was confirmed dead, and the instant
+   * after which transcript rows belong to this runtime. Must not block startup.
+   */
+  recoverInheritedPendingDeliveries?: ((params: Readonly<{
+    predecessorConfirmedDead: boolean;
+    evidenceBeforeMs: number;
+  }>) => void) | undefined;
   /** Exact provider identity a newly launched native resume must prove before input is admitted. */
   expectedProviderResumeSessionId?: string | null | undefined;
   transcriptPath?: string | null | undefined;
@@ -697,26 +706,33 @@ type ExistingTerminalHostAttachment = Readonly<{
 async function readExistingTerminalHostAttachment(params: Readonly<{
   sessionId?: string | null | undefined;
   readAttachmentInfo: typeof readTerminalAttachmentInfo;
-}>): Promise<ExistingTerminalHostAttachment | null> {
+}>): Promise<Readonly<{
+  /** Whether any host is recorded for the session, recoverable or not. */
+  recorded: boolean;
+  existing: ExistingTerminalHostAttachment | null;
+}>> {
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId.trim() : '';
-  if (!sessionId) return null;
+  if (!sessionId) return { recorded: false, existing: null };
   const info = await params.readAttachmentInfo({
     happyHomeDir: configuration.happyHomeDir,
     sessionId,
   });
-  if (!info) return null;
+  if (!info) return { recorded: false, existing: null };
   // Borrowed terminals are tied to the live wrapper process and are never recovery candidates.
   // The current invocation may borrow its own verified foreground terminal below.
-  if (info.version === 3) return null;
+  if (info.version === 3) return { recorded: true, existing: null };
   const handle = info.version === 2
     ? info.handle
     : buildLegacyTerminalAttachmentHostHandle(info, configuration.happyHomeDir);
-  if (!handle) return null;
+  if (!handle) return { recorded: true, existing: null };
   return {
-    attachmentInfo: info,
-    handle,
-    terminal: info.terminal,
-    attachmentId: info.version === 2 ? info.attachmentId : null,
+    recorded: true,
+    existing: {
+      attachmentInfo: info,
+      handle,
+      terminal: info.terminal,
+      attachmentId: info.version === 2 ? info.attachmentId : null,
+    },
   };
 }
 
@@ -1042,10 +1058,17 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     maybeEmitClaudeUnifiedWindowsGuardTriggered(telemetry, hostResolution.reason);
     throw new ClaudeUnifiedTerminalHostUnavailableError(hostResolution.message);
   }
-  const savedTerminalHost = await readExistingTerminalHostAttachment({
+  // Transcript rows from here on are this runtime's own; earlier ones are the predecessor's.
+  const inheritedDeliveryEvidenceBeforeMs = Date.now();
+  const savedTerminalHostRecord = await readExistingTerminalHostAttachment({
     sessionId: opts.happySessionId,
     readAttachmentInfo: opts.readTerminalHostAttachmentInfo ?? readTerminalAttachmentInfo,
   });
+  const savedTerminalHost = savedTerminalHostRecord.existing;
+  // The attachment registry owns which host exists for this session and drops a record only once
+  // that host is confirmed dead or torn down (here, by the daemon before a Resume, or on stop).
+  // With no record at all, nothing a predecessor started can still act.
+  let predecessorHostConfirmedDead = !savedTerminalHostRecord.recorded;
   let existingTerminalHost = savedTerminalHost;
   if (existingTerminalHost && existingTerminalHost.handle.kind !== hostResolution.adapter.kind) {
     const attachedKind = existingTerminalHost.handle.kind;
@@ -1114,6 +1137,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         diagnostics: { reason, sessionName: existing.handle.sessionName, probeCount: proof.probeCount },
       });
     }
+    predecessorHostConfirmedDead = true;
     if (existing.attachmentId) {
       const endpointRetirement = await retireClaudeEndpointArtifactsForTerminalAttachment({
         happyHomeDir: configuration.happyHomeDir,
@@ -1443,6 +1467,10 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     return;
   }
   const activeHandle = handle;
+  opts.recoverInheritedPendingDeliveries?.({
+    predecessorConfirmedDead: predecessorHostConfirmedDead,
+    evidenceBeforeMs: inheritedDeliveryEvidenceBeforeMs,
+  });
   const activeHookSubscription = hookSubscription ?? ensureHookSubscription();
   let borrowedHostRelease: Promise<void> | null = null;
   const releaseBorrowedTerminalHost = (

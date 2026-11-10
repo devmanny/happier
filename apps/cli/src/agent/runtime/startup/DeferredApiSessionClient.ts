@@ -43,6 +43,9 @@ export type DeferredApiSessionTarget = Readonly<{
   hasPendingProviderInputAcceptance?: SessionClientPort['hasPendingProviderInputAcceptance'];
   hasCanonicalPendingProviderInputDelivery?: SessionClientPort['hasCanonicalPendingProviderInputDelivery'];
   blockPendingMessageDelivery?: SessionClientPort['blockPendingMessageDelivery'];
+  listInheritedUncertainPendingDeliveries?: SessionClientPort['listInheritedUncertainPendingDeliveries'];
+  settleInheritedPendingDeliveryAccepted?: SessionClientPort['settleInheritedPendingDeliveryAccepted'];
+  resendInheritedPendingDeliveryAsNew?: SessionClientPort['resendInheritedPendingDeliveryAsNew'];
   hasOnlyBlockedPendingWork?: SessionClientPort['hasOnlyBlockedPendingWork'];
   hasActiveCanonicalTurn?: () => boolean;
   fetchRecentTranscriptTextItemsForAcpImport?: (opts?: { take?: number }) => Promise<Array<{ role: 'user' | 'agent'; text: string }>>;
@@ -276,6 +279,18 @@ export class DeferredApiSessionClient {
     params: Parameters<NonNullable<SessionClientPort['blockPendingMessageDelivery']>>[0],
   ): Promise<boolean> {
     return await this.withAttachedTarget((target) => target.blockPendingMessageDelivery?.(params) ?? false, false);
+  }
+
+  async listInheritedUncertainPendingDeliveries(): ReturnType<NonNullable<SessionClientPort['listInheritedUncertainPendingDeliveries']>> {
+    return await this.withAttachedTarget((target) => target.listInheritedUncertainPendingDeliveries?.() ?? [], []);
+  }
+
+  async settleInheritedPendingDeliveryAccepted(localId: string): Promise<boolean> {
+    return await this.withAttachedTarget((target) => target.settleInheritedPendingDeliveryAccepted?.(localId) ?? false, false);
+  }
+
+  async resendInheritedPendingDeliveryAsNew(localId: string): Promise<boolean> {
+    return await this.withAttachedTarget((target) => target.resendInheritedPendingDeliveryAsNew?.(localId) ?? false, false);
   }
 
   hasActiveCanonicalTurn(): boolean {

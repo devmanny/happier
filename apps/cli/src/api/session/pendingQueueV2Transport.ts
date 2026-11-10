@@ -466,11 +466,15 @@ function readPendingRowDeliveryStatus(record: Record<string, unknown>): PendingD
     return typedStatus ?? legacyStatus;
 }
 
-type PendingQueueV2ProjectionEntry = Readonly<{
+export type PendingQueueV2ProjectionEntry = Readonly<{
     localId: string;
     deliveryStatus: PendingDeliveryStatusV1;
     messageRole: SessionMessageRole | null;
     requestedAction: PendingRequestedActionV1 | null;
+    /** The stored envelope (`{t:'encrypted',c}` / `{t:'plain',v}`), null when unusable. */
+    content: SessionMessageContent | null;
+    /** When the row was enqueued (ms), null when absent. */
+    createdAt: number | null;
 }>;
 
 function parsePendingQueueV2Projection(value: unknown): PendingQueueV2ProjectionEntry[] {
@@ -492,6 +496,7 @@ function parsePendingQueueV2Projection(value: unknown): PendingQueueV2Projection
         const deliveryStatus = readPendingRowDeliveryStatus(pendingRecord);
         const messageRole = SessionMessageRoleSchema.safeParse(pendingRecord.messageRole);
         const requestedAction = PendingRequestedActionV1Schema.safeParse(pendingRecord.requestedAction);
+        const content = SessionMessageContentSchema.safeParse(pendingRecord.content);
         if (
             localId === null
             || seenLocalIds.has(localId)
@@ -505,6 +510,8 @@ function parsePendingQueueV2Projection(value: unknown): PendingQueueV2Projection
             deliveryStatus,
             messageRole: messageRole.success ? messageRole.data : null,
             requestedAction: requestedAction.success ? requestedAction.data : null,
+            content: content.success ? content.data : null,
+            createdAt: parseMaterializedMessageTimestamp(pendingRecord.createdAt),
         });
     }
     return entries;
@@ -722,6 +729,29 @@ function isProviderDeliveryMaterializationValid(params: {
         && message.deliveryState?.mode === 'provider'
         && message.deliveryState.unresolved === true;
     return isLegacyProviderClaim || isRowFirstProviderDelivery;
+}
+
+export async function listPendingQueueV2RowsFromServer(params: {
+    token: string;
+    sessionId: string;
+}): Promise<PendingQueueV2ProjectionEntry[]> {
+    return await fetchPendingQueueV2Projection(params);
+}
+
+/**
+ * For a row whose provider effect may have occurred: the server queues a copy as a new `enqueue`
+ * row (deterministic `send-as-new-…` localId, idempotent) and hides the original as `resent_as_new`.
+ */
+export async function sendPendingQueueV2DeliveryAsNew(params: {
+    token: string;
+    sessionId: string;
+    localId: string;
+}): Promise<{ pendingQueueState?: KnownPendingQueueState }> {
+    return postPendingQueueV2DeliveryAction({
+        ...params,
+        action: 'send-as-new',
+        body: {},
+    });
 }
 
 export async function listPendingQueueV2LocalIdsFromServer(params: {
@@ -957,7 +987,7 @@ async function postPendingQueueV2DeliveryAction(params: {
     token: string;
     sessionId: string;
     localId: string;
-    action: 'block' | 'handled';
+    action: 'block' | 'handled' | 'send-as-new';
     body: Record<string, unknown>;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null; didResolve?: boolean }> {
     const localId = requirePendingLocalId(params.localId);

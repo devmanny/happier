@@ -21,6 +21,29 @@ function createMetadataStub(overrides?: Partial<Metadata>): Metadata {
 }
 
 describe('DeferredApiSessionClient', () => {
+  it('routes inherited uncertain delivery recovery to the attached session client', async () => {
+    const deferred = new DeferredApiSessionClient({
+      placeholderSessionId: 'PID-inherited-recovery', limits: { maxEntries: 10, maxBytes: 10_000 },
+    });
+    const inherited = [{ localId: 'inherited-1', createdAt: 1, requestedAction: null, message: null, earlierQueuedLocalIds: [] }];
+    const settle = vi.fn(async () => true);
+    const resend = vi.fn(async () => true);
+    // Before attach there is no owner to ask: nothing is inherited and nothing is resolved.
+    await expect(deferred.listInheritedUncertainPendingDeliveries()).resolves.toEqual([]);
+    await deferred.attach({
+      sessionId: 'session-inherited-recovery',
+      rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
+      listInheritedUncertainPendingDeliveries: vi.fn(async () => inherited),
+      settleInheritedPendingDeliveryAccepted: settle,
+      resendInheritedPendingDeliveryAsNew: resend,
+    } as unknown as DeferredApiSessionTarget);
+
+    await expect(deferred.listInheritedUncertainPendingDeliveries()).resolves.toEqual(inherited);
+    await expect(deferred.settleInheritedPendingDeliveryAccepted('inherited-1')).resolves.toBe(true);
+    await expect(deferred.resendInheritedPendingDeliveryAsNew('inherited-2')).resolves.toBe(true);
+    expect(settle).toHaveBeenCalledWith('inherited-1');
+    expect(resend).toHaveBeenCalledWith('inherited-2');
+  });
   it('admits request settlement only through its attached durable owner and rejects startup cancellation', async () => {
     const deferred = new DeferredApiSessionClient({
       placeholderSessionId: 'PID-request-settlement', limits: { maxEntries: 10, maxBytes: 10_000 },

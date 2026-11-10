@@ -19,7 +19,8 @@ import {
  * tools; embedding a snapshot here would be stale by construction and unbounded in size.
  */
 
-const OPEN_TAG = '<happier_session_reference>';
+export const HAPPIER_SESSION_REFERENCE_OPEN_TAG = '<happier_session_reference>';
+const OPEN_TAG = HAPPIER_SESSION_REFERENCE_OPEN_TAG;
 const CLOSE_TAG = '</happier_session_reference>';
 
 const HEADER = 'The user referenced other Happier session(s) in this message. Use them only if the request calls for it.';

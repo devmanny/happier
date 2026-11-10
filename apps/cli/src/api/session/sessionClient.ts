@@ -209,6 +209,8 @@ import {
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
+    listPendingQueueV2RowsFromServer,
+    sendPendingQueueV2DeliveryAsNew,
     materializeNextPendingQueueV2Message,
     blockPendingQueueV2Delivery,
     PendingQueueAcceptedSettlementError,
@@ -298,6 +300,7 @@ import { updateAgentStateBestEffort, updateMetadataBestEffort, type AgentStateWr
 import { readCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 import { normalizeAgentPromptPayload } from '@/agent/core/AgentPromptPayload';
 import type {
+    InheritedUncertainPendingDelivery,
     MaterializeNextPendingOptions,
     MaterializeNextPendingResult,
     PendingMaterializationDiagnosticPhase,
@@ -5648,6 +5651,95 @@ export class ApiSessionClient extends EventEmitter {
             reason: outcome.reason,
             providerEffect: 'none',
         });
+    }
+
+    /**
+     * Rows a replaced runner left `blocked / delivery_outcome_uncertain`, decoded, in server order.
+     * The server writes that state when this runner registered while they were `delivering`, so
+     * this runner holds no custody for them; only provider-owned evidence can decide them.
+     */
+    async listInheritedUncertainPendingDeliveries(): Promise<InheritedUncertainPendingDelivery[]> {
+        if (this.closed) return [];
+        const request = () => listPendingQueueV2RowsFromServer({ token: this.token, sessionId: this.sessionId });
+        const supervisor = this.sessionConnectionSupervisor;
+        const rows = supervisor
+            ? await runSupervisedRequest({ supervisor, requireAuth: true, requireOnline: false, request })
+            : await request();
+        const inherited: InheritedUncertainPendingDelivery[] = [];
+        const earlierQueuedLocalIds: string[] = [];
+        for (const row of rows) {
+            if (row.deliveryStatus.status === 'discarded') continue;
+            if (row.deliveryStatus.status === 'blocked' && row.deliveryStatus.reason === 'delivery_outcome_uncertain') {
+                inherited.push({
+                    localId: row.localId,
+                    createdAt: row.createdAt,
+                    requestedAction: row.requestedAction,
+                    message: this.readPendingQueueUserMessage({
+                        id: null,
+                        seq: null,
+                        localId: row.localId,
+                        messageRole: row.messageRole,
+                        content: row.content,
+                        createdAt: row.createdAt,
+                        updatedAt: null,
+                    }),
+                    earlierQueuedLocalIds: [...earlierQueuedLocalIds],
+                });
+            }
+            earlierQueuedLocalIds.push(row.localId);
+        }
+        return inherited;
+    }
+
+    /**
+     * Settles an inherited row the provider proved it accepted through the ordinary accepted
+     * settlement: the row is adopted as accepted custody for that one operation. A settlement the
+     * server does not commit releases the adoption, so the row stays blocked for its owner and
+     * never holds this runner's queue.
+     */
+    async settleInheritedPendingDeliveryAccepted(localId: string): Promise<boolean> {
+        const exactLocalId = readPendingLocalId(localId);
+        // A row this runner claimed itself is already settled by its live provider evidence.
+        if (!exactLocalId || this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return false;
+        const authority = this.captureAcceptedCanonicalPendingDeliveryOperationAuthority();
+        if (!authority) return false;
+        this.canonicalPendingDeliveryByLocalId.set(exactLocalId, { state: { mode: 'provider', unresolved: true } });
+        this.serverBlockedCanonicalPendingDeliveryLocalIds.add(exactLocalId);
+        this.providerInputTerminalOutcomeByLocalId.set(exactLocalId, 'accepted');
+        const resolution = this.resolveAcceptedCanonicalPendingDelivery(exactLocalId, authority);
+        this.trackAcceptedCanonicalPendingDeliveryResolution(exactLocalId, resolution);
+        await resolution.catch(() => undefined);
+        // A committed settlement clears the adopted custody; anything left means it did not commit.
+        if (!this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return true;
+        this.clearCanonicalPendingDeliveryLocalState(exactLocalId);
+        this.acceptedProviderInputLocalIds.delete(exactLocalId);
+        return false;
+    }
+
+    /**
+     * Queues an inherited row the provider proved it never received again, through the server's
+     * delivery resolution for effect-possible rows (a new `enqueue` copy; the original is hidden).
+     */
+    async resendInheritedPendingDeliveryAsNew(localId: string): Promise<boolean> {
+        const exactLocalId = readPendingLocalId(localId);
+        if (!exactLocalId || this.closed || this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return false;
+        const request = () => sendPendingQueueV2DeliveryAsNew({
+            token: this.token,
+            sessionId: this.sessionId,
+            localId: exactLocalId,
+        });
+        const supervisor = this.sessionConnectionSupervisor;
+        const result = supervisor
+            ? await runSupervisedRequest({ supervisor, purpose: 'durable_write', requireAuth: true, requireOnline: false, request })
+            : await request();
+        if (result.pendingQueueState) {
+            this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+        } else if (!this.closed) {
+            this.pendingWakeSeq += 1;
+            this.emit('metadata-updated');
+            this.emitPendingEligibilityUpdated();
+        }
+        return true;
     }
 
     hasPendingProviderInputAcceptance(localId: string): boolean {

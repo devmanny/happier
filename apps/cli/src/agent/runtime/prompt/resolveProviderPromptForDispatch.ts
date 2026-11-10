@@ -15,7 +15,8 @@ import {
     resolveStructuredInputProviderContextInMeta,
     type StructuredInputCatalogReaders,
 } from '@/agent/runtime/prompt/resolveStructuredInputProviderContext';
-import { buildSessionReferenceBlockV1 } from '@/agent/runtime/prompt/sessionReferenceBlock';
+import { buildSessionReferenceBlockV1, HAPPIER_SESSION_REFERENCE_OPEN_TAG } from '@/agent/runtime/prompt/sessionReferenceBlock';
+import { AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER } from '@/session/agentMemory/agentMemory';
 import { logger } from '@/ui/logger';
 import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
 import { getAgentTasks } from '@/session/agentTasks/startAgentTasks';
@@ -108,6 +109,18 @@ async function readAdvisory(label: string, read: () => Promise<string | null>): 
     }
 }
 
+const AGENT_TASK_BOARD_HEADER = '[Happier · your open tasks (update them with tarea_actualizar and their id).]';
+
+/**
+ * Whether `suffix` is the provider-only context this owner appends after the prompt body, joined
+ * by a blank line: Session references, then the agent turn context. It lets recovery recognize a
+ * delivered prompt in a provider transcript without reproducing that context.
+ */
+export function isHappierProviderOnlyPromptSuffix(suffix: string): boolean {
+    return [HAPPIER_SESSION_REFERENCE_OPEN_TAG, AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER, AGENT_TASK_BOARD_HEADER]
+        .some((header) => suffix.startsWith(header));
+}
+
 /** What an agent thread hears at each turn start: its other threads, then its open tasks. */
 async function readAgentTurnContext(sessionId: string | undefined): Promise<string | null> {
     const memory = getAgentMemory(sessionId);
@@ -117,9 +130,7 @@ async function readAgentTurnContext(sessionId: string | undefined): Promise<stri
         // Tasks assigned to this thread's agent, or to the session itself (with or without an agent).
         tasks ? readAdvisory('task board', () => tasks.store.boardFor({ agentId: tasks.caller.agent?.id, sessionId: tasks.caller.sessionId })) : null,
     ]);
-    const boardBlock = board
-        ? `[Happier · your open tasks (update them with tarea_actualizar and their id).]\n${board}`
-        : null;
+    const boardBlock = board ? `${AGENT_TASK_BOARD_HEADER}\n${board}` : null;
     return [threads, boardBlock].filter(Boolean).join('\n\n') || null;
 }
 
