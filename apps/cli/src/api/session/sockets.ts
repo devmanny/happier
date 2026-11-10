@@ -25,7 +25,18 @@ export function createSessionScopedSocket(opts: { token: string; sessionId: stri
     });
 }
 
-export function createUserScopedSocket(opts: { token: string }): Socket<ServerToClientEvents, ClientToServerEvents> {
+/**
+ * Asks the relay for lean updates (`apps/server/sources/app/api/socketRooms.ts`): no heartbeats or
+ * transcript streams, and new messages of sessions it doesn't have open without their content.
+ */
+export const UPDATES_LEAN_V1_CAPABILITY = 'updates-lean-v1';
+
+export function createUserScopedSocket(opts: {
+    token: string;
+    capabilities?: readonly string[];
+    /** A long-lived listener lets socket.io reconnect; one-shot callers (the default) don't. */
+    reconnection?: boolean;
+}): Socket<ServerToClientEvents, ClientToServerEvents> {
     const serverUrl = resolveServerHttpBaseUrl();
     const transports = configuration.socketIoTransports;
     return io(serverUrl, {
@@ -33,9 +44,10 @@ export function createUserScopedSocket(opts: { token: string }): Socket<ServerTo
             [CONNECTED_SERVICE_READER_SUPPORT_SOCKET_AUTH_FIELD]: ConnectedServiceIdSchema.options,
             token: opts.token,
             clientType: 'user-scoped' as const,
+            ...(opts.capabilities ? { capabilities: [...opts.capabilities] } : {}),
         },
         path: '/v1/updates',
-        reconnection: false,
+        reconnection: opts.reconnection === true,
         ...(transports ? { transports } : null),
         withCredentials: true,
         autoConnect: false,

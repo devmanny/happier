@@ -7,6 +7,7 @@ import { buildActivityNotificationContent } from '@/activity/notifications/build
 import { dispatchActivityNotificationAsync } from '@/activity/notifications/dispatchActivityNotification'
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot'
 import { notifyParentSessionInBackground } from '@/session/lineage/notifyParentSession'
+import { notifyRoomTurnReady } from '@/session/agentRooms/startAgentRooms'
 
 import type { ExpoPushActivityNotificationOptions } from '@/activity/notifications/sendExpoPushActivityNotification'
 
@@ -72,6 +73,9 @@ export function sendReadyWithPushNotification(opts: {
       turnKey: opts.turnKey ?? null,
     },
   })
+
+  // A room turn (a delivery from one of the user's rooms) posts its final text to the room.
+  void notifyRoomTurnReady(opts.session.sessionId)
 
   if (!opts.pushSender) return
 

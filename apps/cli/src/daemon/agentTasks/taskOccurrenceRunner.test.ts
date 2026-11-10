@@ -4,7 +4,9 @@ import { sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
 
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 
-import { readAgentProfileFromKv, readLiveThreadIds, startOccurrenceThread } from './taskOccurrenceRunner';
+import { readAgentProfileFromKv } from '@/daemon/agents/agentThreadSpawn';
+
+import { readLiveThreadIds, startOccurrenceThread } from './taskOccurrenceRunner';
 
 const material = { type: 'dataKey', machineKey: new Uint8Array(32).fill(5) } as const;
 const seal = (kind: 'agent_profile' | 'agent_presence', payload: unknown) =>

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { SESSION_PERMISSION_INTENT_INPUTS } from '../sessionMetadata/sessionPermissionModes.js';
+
 /**
  * A room ("sala"): a group chat of the user and the agents they invite, sealed in the account's
  * UserKVStore under kind `agent_room`. Keys stay opaque (titles and text live in the sealed value),
@@ -42,6 +44,18 @@ export function agentRoomSeatKvKey(roomId: string, agentId: string): string {
   return `${agentRoomSeatsKvPrefix(roomId)}${agentId}`;
 }
 
+/** Which room a UserKVStore key belongs to, and which of its rows it is; null for other keys. */
+export function parseAgentRoomKvKey(key: string): Readonly<{ kind: 'room' | 'message' | 'seat'; roomId: string }> | null {
+  const [head, roomId, ...rest] = key.split('/');
+  if (!roomId) return null;
+  const prefix = `${head}/`;
+  if (prefix === AGENT_ROOM_KV_PREFIX && rest.length === 0) return { kind: 'room', roomId };
+  if (rest.length !== 1 || !rest[0]) return null;
+  if (prefix === AGENT_ROOM_MESSAGE_KV_PREFIX) return { kind: 'message', roomId };
+  if (prefix === AGENT_ROOM_SEAT_KV_PREFIX) return { kind: 'seat', roomId };
+  return null;
+}
+
 const SeqSchema = z.number().int().min(1).max(AGENT_ROOM_MAX_SEQ);
 
 /** An invited agent: it works in the room from its own folder on one machine. */
@@ -51,6 +65,13 @@ const AgentRoomMemberSchema = z.object({
   emoji: z.string().optional(),
   machineId: z.string().min(1),
   directory: z.string().min(1),
+  /**
+   * Whether another agent's mention starts a turn for it. The app sets it (after the Consumer Terms
+   * warning for the providers that need one); absent means only the user's mentions wake it.
+   */
+  wakeByAgents: z.boolean().optional(),
+  /** How its turns in the room run; absent means YOLO, as for tasks. */
+  permissionMode: z.enum(SESSION_PERMISSION_INTENT_INPUTS).optional(),
 }).passthrough();
 export type AgentRoomMember = z.infer<typeof AgentRoomMemberSchema>;
 
@@ -58,9 +79,15 @@ export const AgentRoomV1Schema = z.object({
   v: z.literal(1),
   id: z.string().min(1),
   title: z.string().trim().min(1),
+  /** How the members call the user (and mention them: `@<userName>`); "User" when absent. */
+  userName: z.string().optional(),
   members: z.array(AgentRoomMemberSchema),
   /** The seq of the room's last message; 0 before the first one. */
   lastSeq: z.number().int().min(0).max(AGENT_ROOM_MAX_SEQ),
+  /** Set by the user's pause button: nothing is delivered until it is cleared; running turns finish. */
+  pausedAt: z.number().optional(),
+  /** Set when the user archived it: nothing is delivered. */
+  archivedAt: z.number().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 }).passthrough();
@@ -88,6 +115,8 @@ export const AgentRoomMessageV1Schema = z.object({
   text: z.string().min(1),
   /** The members it mentions (agent ids), in the order they appear. */
   mentions: z.array(z.string().min(1)),
+  /** An agent's message that mentions the user (`@<userName>`). */
+  mentionsUser: z.boolean().optional(),
 }).passthrough();
 export type AgentRoomMessageV1 = z.infer<typeof AgentRoomMessageV1Schema>;
 
@@ -99,6 +128,16 @@ export const AgentRoomSeatV1Schema = z.object({
   sessionId: z.string().optional(),
   /** Every message up to this seq is read; 0 before the first. */
   readThroughSeq: z.number().int().min(0).max(AGENT_ROOM_MAX_SEQ),
+  /**
+   * The delivery its thread is working: sent with `localId` (once `sent`), reading through
+   * `throughSeq`. Cleared, with the marker moved to `throughSeq`, when that turn ends.
+   */
+  inFlight: z.object({
+    localId: z.string().min(1),
+    throughSeq: z.number().int().min(0).max(AGENT_ROOM_MAX_SEQ),
+    at: z.number(),
+    sent: z.boolean().optional(),
+  }).passthrough().optional(),
   updatedAt: z.number(),
 }).passthrough();
 export type AgentRoomSeatV1 = z.infer<typeof AgentRoomSeatV1Schema>;
@@ -122,6 +161,7 @@ export type AgentRoomMessageDraft = Readonly<{
   author: AgentRoomAuthor;
   text: string;
   mentions?: readonly string[];
+  mentionsUser?: boolean;
 }>;
 
 /**
@@ -148,6 +188,7 @@ export function appendRoomMessage(
       author: draft.author,
       text,
       mentions: [...new Set(draft.mentions ?? [])],
+      ...(draft.mentionsUser ? { mentionsUser: true } : {}),
     },
   };
 }
@@ -189,6 +230,11 @@ export function agentRoomUnreadRange(
 ): Readonly<{ fromSeq: number; toSeq: number }> | null {
   const fromSeq = (seat?.readThroughSeq ?? 0) + 1;
   return fromSeq <= room.lastSeq ? { fromSeq, toSeq: room.lastSeq } : null;
+}
+
+/** How the room's members call the user. */
+export function roomUserLabel(room: AgentRoomV1): string {
+  return room.userName?.trim() || 'User';
 }
 
 /** Who wrote a message: the user's label, or the agent's name and emoji. */

@@ -793,8 +793,8 @@ export class ApiClient {
     startAgentMemory(client, this.credential);
     // Any runner can leave tasks; an agent's open tasks become its board each turn.
     startAgentTasks(client, this.credential);
-    // A runner working as an agent can read the rooms (salas) its agent is a member of.
-    startAgentRooms(client, this.credential);
+    // A runner working as an agent reads the rooms (salas) its agent is in and posts its room turns' replies.
+    startAgentRooms(client, this.credential, { push: this.pushClient });
     return client;
   }
 

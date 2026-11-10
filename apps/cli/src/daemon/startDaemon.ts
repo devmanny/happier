@@ -466,6 +466,7 @@ import { warmActiveAccountSettingsSnapshotBestEffort } from '@/settings/accountS
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 import { startTaskDueNotifier } from '@/daemon/agentTasks/taskDueNotifier';
 import { createTaskOccurrenceRunner } from '@/daemon/agentTasks/taskOccurrenceRunner';
+import { startAgentRoomWorker, type AgentRoomWorkerHandle } from '@/daemon/agentRooms/agentRoomWorker';
 import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
 import { createAccountKvHttpTransport } from '@/api/kv/accountKvHttpTransport';
 import { isBackendEnabledByAccountSettings } from '@/settings/backendEnabled';
@@ -2067,6 +2068,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       });
       let apiMachineForSessions: ApiMachineClient | null = null;
       let automationWorker: AutomationWorkerHandle | null = null;
+      let agentRoomWorker: AgentRoomWorkerHandle | null = null;
       let memoryWorker: MemoryWorkerHandle | null = null;
       let cliUpdateMetadataPublisher: CliUpdateMetadataPublisher | null = null;
       let apiMachine: ApiMachineClient | null = null;
@@ -8540,6 +8542,15 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               });
             }
 
+            // Rooms (salas): this machine's members get their mentions with the app closed.
+            agentRoomWorker = startAgentRoomWorker({
+              credentials,
+              machineId,
+              spawnSession,
+              resolveSpawnSessionByNonce: resolveDaemonSpawnSessionByNonce,
+              push: api.push(),
+            });
+
             memoryWorker = await (async () => {
               try {
                 return await startMemoryWorker({
@@ -9158,6 +9169,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       if (automationWorker) {
         automationWorker.stop();
       }
+      agentRoomWorker?.stop();
       cliUpdateMetadataPublisher?.stop();
       if (memoryWorker) {
         memoryWorker.stop();

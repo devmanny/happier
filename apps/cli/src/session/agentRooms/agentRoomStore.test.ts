@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   agentRoomKvKey,
   agentRoomMessageKvKey,
+  agentRoomSeatKvKey,
   openAccountScopedBlobCiphertext,
   parseAgentRoomMessageV1,
   sealAccountScopedBlobCiphertext,
@@ -99,5 +100,49 @@ describe('AgentRoomStore', () => {
     const messages = await store.readMessages('r1', { fromSeq: 3, toSeq: 125 });
     expect(messages.map((message) => message.seq)).toEqual(Array.from({ length: 123 }, (_, index) => index + 3));
     expect(messages[0]!.text).toBe('mensaje 3');
+  });
+
+  it('finishes a turn in one write: the reply posted, the marker on what the turn got, the delivery cleared', async () => {
+    const kv = createInMemoryAccountKv();
+    await seedRoom(kv, { ...baseRoom, userName: 'Manny', members: [...baseRoom.members, { agentId: 'a-tomas', name: 'Tomás', machineId: 'm2', directory: '/w' }] });
+    const store = new AgentRoomStore({ transport: kv.transport, material, now: () => 50 });
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo ¿cómo vas?', mentions: ['a-mateo'] });
+    expect(await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n', throughSeq: 1 }, null)).toBe(true);
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: 'mientras trabaja' });
+
+    const author = { kind: 'agent' as const, agentId: 'a-mateo', name: 'Mateo', sessionId: 's1' };
+    const finished = await store.finishTurn({ roomId: 'r1', agentId: 'a-mateo', localId: 'room.r1.a-mateo.n', author, text: 'Listo. @Tomás revisa; @Manny decide' });
+
+    expect(finished).toMatchObject({ finished: true, message: { seq: 3, mentions: ['a-tomas'], mentionsUser: true, author } });
+    const seat = (await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat;
+    expect(seat.readThroughSeq).toBe(1);
+    expect(seat.inFlight).toBeUndefined();
+    expect((await store.getRoom('r1'))!.room.lastSeq).toBe(3);
+  });
+
+  it('finishes a delivery only once, and never one that is not in flight', async () => {
+    const kv = createInMemoryAccountKv();
+    await seedRoom(kv);
+    const store = new AgentRoomStore({ transport: kv.transport, material });
+    await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n', throughSeq: 0 }, null);
+    const author = { kind: 'agent' as const, agentId: 'a-mateo', name: 'Mateo' };
+    const finish = (localId: string) => store.finishTurn({ roomId: 'r1', agentId: 'a-mateo', localId, author, text: 'Hecho' });
+
+    expect(await finish('room.r1.a-mateo.other')).toEqual({ finished: false });
+    expect((await finish('room.r1.a-mateo.n')).finished).toBe(true);
+    expect(await finish('room.r1.a-mateo.n')).toEqual({ finished: false });
+    expect((await store.getRoom('r1'))!.room.lastSeq).toBe(1);
+  });
+
+  it('lets only one of two concurrent deliveries claim a member', async () => {
+    const kv = createInMemoryAccountKv();
+    await seedRoom(kv);
+    const store = new AgentRoomStore({ transport: kv.transport, material });
+    const claims = await Promise.all([
+      store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.a', throughSeq: 0 }, null),
+      store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.b', throughSeq: 0 }, null),
+    ]);
+    expect(claims.sort()).toEqual([false, true]);
+    expect(kv.rows.has(agentRoomSeatKvKey('r1', 'a-mateo'))).toBe(true);
   });
 });

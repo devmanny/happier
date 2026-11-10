@@ -7,6 +7,7 @@ import {
   agentRoomMessageKvKey,
   agentRoomSeatKvKey,
   agentRoomUnreadRange,
+  parseAgentRoomKvKey,
   appendRoomMessage,
   formatRoomMessages,
   parseAgentRoomMessageV1,
@@ -44,6 +45,14 @@ describe('agent room keys', () => {
     const keys = [10, 9, 100].map((seq) => agentRoomMessageKvKey('r1', seq));
     expect([...keys].sort()).toEqual([agentRoomMessageKvKey('r1', 9), agentRoomMessageKvKey('r1', 10), agentRoomMessageKvKey('r1', 100)]);
     expect(agentRoomMessageKvKey('r1', 9)).toBe('roommsg/r1/0000000009');
+  });
+
+  it('tells which room a key belongs to', () => {
+    expect(parseAgentRoomKvKey('room/r1')).toEqual({ kind: 'room', roomId: 'r1' });
+    expect(parseAgentRoomKvKey(agentRoomMessageKvKey('r1', 3))).toEqual({ kind: 'message', roomId: 'r1' });
+    expect(parseAgentRoomKvKey('roomseat/r1/a-mateo')).toEqual({ kind: 'seat', roomId: 'r1' });
+    expect(parseAgentRoomKvKey('task/t1')).toBeNull();
+    expect(parseAgentRoomKvKey('room/')).toBeNull();
   });
 
   it('refuses a seq its key cannot order', () => {

@@ -161,6 +161,45 @@ prefixes:
   key only after its file is written. `diag` is not a change family the relay knows, so a write
   marks the `self` KV family: the native app's next catch-up after a reconnect re-reads its tasks,
   profiles and open memories once; the RN client filters it out by prefix (`todo.`).
+- `room/<uuid>`, `roommsg/<uuid>/<seq10>`, `roomseat/<uuid>/<agentId>` — rooms (salas): group chats
+  of the user and the agents they invite, kind `agent_room`
+  (`packages/protocol/src/rooms/agentRoom.ts`, delivery policy in `agentRoomDelivery.ts`). The room
+  holds `{title, userName?, members [{agentId, name?, emoji?, machineId, directory, wakeByAgents?,
+  permissionMode?}], lastSeq, pausedAt?, archivedAt?}`; each message is its own row
+  `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?}`
+  created with version -1 in the same atomic write that moves the room's `lastSeq` to its seq, so
+  concurrent writers (the app, every member's thread) get gap-free ordered seqs and re-run on a
+  conflict. Messages are read by exact key through `POST /v1/kv/bulk` (≤100 keys per call), never
+  listed, so a long room never crowds a listing. A member's seat holds its thread (`sessionId`), its
+  read marker (`readThroughSeq`) and the delivery in flight (`inFlight {localId, throughSeq, at,
+  sent?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
+  picker; "Que conteste" is the user's own message mentioning that member); the daemon of each
+  member's machine writes that member's seat; the member's thread posts its replies.
+  Delivery runs in the daemon of the member's machine (`apps/cli/src/daemon/agentRooms/`), so a room
+  may span machines without a coordinator and works with the app closed. The machine socket does
+  not carry KV writes, so the daemon keeps a lean user-scoped socket (`updates-lean-v1`) and
+  reconciles a room on each of its `kv-batch-update`s and every room it has a member in on each
+  (re)connect. A member mentioned with `@` by a message it may answer gets everything it hadn't read,
+  from others, in order with who said what, as one message to its thread in the room (opened the
+  first time in its folder as its agent, YOLO unless `permissionMode` says otherwise), sent with the
+  localId `room.<roomId>.<agentId>.<nonce8>` (URL-safe and under the relay's 100-character route
+  parameter, since readers look messages up by localId) through the canonical send path; a send
+  that failed is retried with the same localId, so it lands once. Over 15 unread messages, the newest
+  15 go in full, the 50 before as one line each (≤160 characters) and the rest only counted, with a
+  pointer to `sala_leer` (`room.read`, a member reads its room by seq range). A member mid-turn gets
+  nothing new: what arrives meanwhile is delivered together once that turn ends. The user's messages
+  without `@` go to no one. When a room turn is ready (`sendReadyWithPushNotification`, after the
+  transcript is flushed) the thread posts the turn's final assistant text as its reply (mentions
+  resolved by name, `@<userName>` sets `mentionsUser`), moves its marker to what the delivery read
+  through (messages that came during the turn stay unread) and clears the delivery, all in one
+  atomic write; the daemon finishes a turn from the thread's transcript when its runner ended
+  without doing so. An agent's mention wakes a member only when that member's `wakeByAgents` is true
+  (the app sets it, after the Consumer Terms 3.7 warning for Claude members; the CLI never decides
+  by provider) and fewer than 6 agent messages came in a row since the user's last one (the brake);
+  otherwise it waits for the user. `pausedAt` stops deliveries (running turns finish). The user gets
+  a push (the daemon's and runner's push channel, honoring `pushEnabled`) when a reply mentions them
+  and when a hand-off hits the brake. `room*` are not change families the relay knows, so writes mark
+  the `self` KV family (the native app's catch-up re-reads what it shows).
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
 stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per

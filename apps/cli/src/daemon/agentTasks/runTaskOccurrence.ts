@@ -1,26 +1,14 @@
 import {
-  agentIdentityFromProfile,
   buildTaskOccurrencePrompt,
   decideTaskOccurrence,
   taskSessionPermissionMode,
-  type AgentIdentityV1,
   type AgentProfileV1,
   type AgentTaskV1,
   type TaskOccurrence,
 } from '@happier-dev/protocol';
 
+import { spawnAsAgent, type AgentThreadSpawn } from '@/daemon/agents/agentThreadSpawn';
 import type { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
-
-/** What a new occurrence thread is spawned with: the agent's identity, account and engine. */
-export type TaskOccurrenceSpawn = Readonly<{
-  directory: string;
-  backendTarget: Readonly<{ kind: 'builtInAgent'; agentId: string }>;
-  agentIdentity: AgentIdentityV1;
-  environmentVariables?: Record<string, string>;
-  modelId?: string;
-  effort?: string;
-  permissionMode?: string;
-}>;
 
 export type TaskOccurrenceDeps = Readonly<{
   store: AgentTaskStore;
@@ -28,7 +16,7 @@ export type TaskOccurrenceDeps = Readonly<{
   readAgentProfile: (agentId: string) => Promise<AgentProfileV1 | null>;
   /** Sessions with a live presence record: a turn is running there right now. */
   liveThreadIds: () => Promise<ReadonlySet<string>>;
-  startNewThread: (spawn: TaskOccurrenceSpawn, firstMessage: string, occurrenceId: string) => Promise<
+  startNewThread: (spawn: AgentThreadSpawn, firstMessage: string, occurrenceId: string) => Promise<
     Readonly<{ ok: true; sessionId: string }> | Readonly<{ ok: false; code: string; message: string }>
   >;
   /**
@@ -69,17 +57,8 @@ function recordOccurrence(
 }
 
 /** A new thread for the task, as its agent and with the task's permission mode. */
-export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1): TaskOccurrenceSpawn {
-  const configDir = profile.account.configDir?.trim();
-  return {
-    directory: task.directory!,
-    backendTarget: { kind: 'builtInAgent', agentId: profile.providerId },
-    agentIdentity: agentIdentityFromProfile(profile),
-    ...(profile.providerId === 'claude' && configDir ? { environmentVariables: { CLAUDE_CONFIG_DIR: configDir } } : {}),
-    ...(profile.modelId && profile.modelId !== 'default' ? { modelId: profile.modelId } : {}),
-    ...(profile.effort ? { effort: profile.effort } : {}),
-    permissionMode: taskSessionPermissionMode(task),
-  };
+export function spawnForTask(task: AgentTaskV1, profile: AgentProfileV1): AgentThreadSpawn {
+  return spawnAsAgent(profile, task.directory!, taskSessionPermissionMode(task));
 }
 
 /**

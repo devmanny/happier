@@ -3394,6 +3394,8 @@ export class ApiSessionClient extends EventEmitter {
             }
             this.markAgentQueueEchoSuppressedLocalId(localId);
             this.markAgentQueueDeliveredLocalId(localId);
+            // Features that answer a specific message (a room delivery) learn it reached this runner.
+            this.emit('provider-input-delivered', { localId });
         }
         const deliveryInfo: SessionUserMessageDeliveryInfo = {
             seq: typeof message?.seq === 'number' && Number.isFinite(message.seq) ? message.seq : null,

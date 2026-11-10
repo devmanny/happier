@@ -81,7 +81,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.trunc(ms))));
 }
 
-function decryptTranscriptRowContent(params: Readonly<{
+export function decryptTranscriptRowContent(params: Readonly<{
   content: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
   ctx: SessionEncryptionContext;
 }>): unknown | null {
@@ -98,7 +98,7 @@ function decryptTranscriptRowContent(params: Readonly<{
   }
 }
 
-function isAssistantTurnCompletionProof(value: unknown): boolean {
+export function isAssistantTurnCompletionProof(value: unknown): boolean {
   if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
     return false;
   }
@@ -153,7 +153,7 @@ function formatStructuredTurnFailureMessage(
   return `Current turn failed${suffix}`;
 }
 
-function readAssistantTurnFailure(value: unknown): string | null {
+export function readAssistantTurnFailure(value: unknown): string | null {
   if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
     return null;
   }
