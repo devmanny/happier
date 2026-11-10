@@ -3,14 +3,17 @@ import SwiftUI
 
 /// A room's chat: who said what, oldest first; the agents replying now; the members another agent
 /// mentioned that wait for you ("Let … Answer"); the brake after six agent turns in a row; and the
-/// pause. Your message reaches the members you mention with @; with no one mentioned, the last agent
-/// who spoke is suggested. Delivery is the members' daemons' (`decideRoomDelivery`).
+/// pause. Your message reaches the members you mention with @ (`@todos` is everyone); with no one
+/// mentioned, @todos and the last agent who spoke are suggested. An agent's `<options>` show as the
+/// session chat's buttons; picking one answers only that agent. Delivery is the members' daemons'
+/// (`decideRoomDelivery`).
 struct RoomView: View {
     let roomId: String
     @Environment(HappierStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft = ""
     @State private var sending = false
+    @State private var showMembers = false
     @FocusState private var composing: Bool
 
     private var room: AgentRoom? { store.room(id: roomId) }
@@ -32,6 +35,12 @@ struct RoomView: View {
             if store.room(id: roomId) == nil { await store.refreshRooms() }
             await store.loadRoom(id: roomId)
         }
+        .sheet(isPresented: $showMembers) {
+            RoomMembersSheet(roomId: roomId)
+                #if os(macOS)
+                .frame(minWidth: 420, minHeight: 420)
+                #endif
+        }
     }
 
     private func chat(_ room: AgentRoom) -> some View {
@@ -39,14 +48,17 @@ struct RoomView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     if messages.isEmpty {
-                        Text("Mention an agent with @ to start: \(room.members.compactMap(\.name).map { "@\($0)" }.joined(separator: ", ")).")
+                        Text("Mention an agent with @ to start, or everyone with @todos: \(room.members.compactMap(\.name).map { "@\($0)" }.joined(separator: ", ")).")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                             .padding(.top, 40)
                     }
                     ForEach(messages) { message in
-                        RoomMessageRow(message: message, room: room).id(message.seq)
+                        RoomMessageRow(message: message, room: room, messages: messages) { option in
+                            Task { await store.answerRoomOption(roomId: roomId, message: message, option: option) }
+                        }
+                        .id(message.seq)
                     }
                     ForEach(replying(room)) { member in
                         Label("\(member.name ?? member.agentId) is replying…", systemImage: "ellipsis.bubble")
@@ -71,6 +83,15 @@ struct RoomView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    AppHaptics.light()
+                    showMembers = true
+                } label: {
+                    Label("Members", systemImage: "person.2")
+                }
+                .accessibilityIdentifier("room-members")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     AppHaptics.light()
@@ -138,32 +159,22 @@ struct RoomView: View {
         let mentioned = AgentRoom.mentions(in: draft, members: room.members)
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         VStack(alignment: .leading, spacing: 6) {
-            if let partial = partialMention(), !suggestions(room, partial).isEmpty {
-                // Completing the @ being typed.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(suggestions(room, partial)) { member in
-                            Button("@\(member.name ?? member.agentId)") { complete(partial, with: member) }
-                                .buttonStyle(.glass)
-                                .controlSize(.small)
-                        }
-                    }
-                }
-            } else if !typed.isEmpty, mentioned.isEmpty, let last = AgentRoom.lastAgentSpeaker(messages),
-                      let member = room.members.first(where: { $0.agentId == last }) {
-                // Without @ it reaches no one: the last agent who spoke is suggested.
+            if let partial = partialMention(), case let chips = AgentRoom.mentionSuggestions(for: partial, members: room.members), !chips.isEmpty {
+                // Completing the @ being typed: everyone first.
+                chipRow(chips, room: room) { complete(with: $0.label(members: room.members)) }
+            } else if !typed.isEmpty, mentioned.isEmpty {
+                // Without @ it reaches no one: everyone, and the last agent who spoke, are suggested.
+                let last = AgentRoom.lastAgentSpeaker(messages).map { AgentRoom.MentionSuggestion.member($0) }
                 HStack(spacing: 6) {
                     Text("No one is mentioned.").font(.caption).foregroundStyle(.secondary)
-                    Button("Mention @\(member.name ?? member.agentId)") {
-                        draft = "@\(member.name ?? member.agentId) " + draft
+                    chipRow([.everyone] + (last.map { [$0] } ?? []), room: room) { chip in
+                        draft = chip.label(members: room.members) + " " + draft
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
-                    .accessibilityIdentifier("room-suggest-mention")
                 }
+                .accessibilityIdentifier("room-suggest-mention")
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message the room · @ to mention", text: $draft, axis: .vertical)
+                TextField("Message the room · @ to mention, @todos for everyone", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($composing)
                     .padding(.horizontal, 14)
@@ -185,6 +196,20 @@ struct RoomView: View {
         }
     }
 
+    private func chipRow(_ chips: [AgentRoom.MentionSuggestion], room: AgentRoom,
+                         pick: @escaping (AgentRoom.MentionSuggestion) -> Void) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(chips, id: \.self) { chip in
+                    Button(chip.label(members: room.members)) { pick(chip) }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .accessibilityIdentifier(chip == .everyone ? "room-chip-everyone" : "room-chip-\(chip.label(members: room.members))")
+                }
+            }
+        }
+    }
+
     /// The `@word` being typed at the end of the draft, without the `@`.
     private func partialMention() -> String? {
         guard let at = draft.lastIndex(of: "@") else { return nil }
@@ -193,17 +218,9 @@ struct RoomView: View {
         return word.contains(where: \.isWhitespace) ? nil : String(word)
     }
 
-    private func suggestions(_ room: AgentRoom, _ partial: String) -> [AgentRoom.Member] {
-        room.members.filter { member in
-            guard let name = member.name else { return false }
-            return partial.isEmpty || name.range(of: partial, options: [.caseInsensitive, .diacriticInsensitive, .anchored]) != nil
-        }
-        .filter { member in member.name.map { "@\($0)".caseInsensitiveCompare("@\(partial)") != .orderedSame } ?? false }
-    }
-
-    private func complete(_ partial: String, with member: AgentRoom.Member) {
+    private func complete(with label: String) {
         guard let at = draft.lastIndex(of: "@") else { return }
-        draft = String(draft[..<at]) + "@\(member.name ?? member.agentId) "
+        draft = String(draft[..<at]) + label + " "
     }
 
     private func send() {
@@ -221,18 +238,22 @@ struct RoomView: View {
     }
 }
 
-/// One message: yours on the right in your color; an agent's on the left under its emoji and name.
+/// One message: yours on the right in your color (with the message it answers quoted above); an
+/// agent's on the left under its emoji and name, Markdown like the session chat, with its
+/// `<options>` as the chat's buttons. Mentions are in bold.
 private struct RoomMessageRow: View {
     let message: AgentRoomMessage
     let room: AgentRoom
+    let messages: [AgentRoomMessage]
+    let pick: (String) -> Void
     @Environment(HappierStore.self) private var store
 
     private var isUser: Bool { message.author == .user }
 
-    private var authorName: String {
-        switch message.author {
-        case .user: return room.userName ?? String(localized: "You")
-        case .agent(let id, let name, _, _): return name ?? room.members.first { $0.agentId == id }?.name ?? id
+    private func name(of author: AgentRoomMessage.Author) -> String {
+        switch author {
+        case .user: room.userName ?? String(localized: "You")
+        case .agent(let id, let name, _, _): name ?? room.members.first { $0.agentId == id }?.name ?? id
         }
     }
 
@@ -245,9 +266,13 @@ private struct RoomMessageRow: View {
         message.author.agentId.flatMap { store.agentProfile(id: $0)?.providerId }
     }
 
-    private var text: AttributedString {
-        (try? AttributedString(markdown: message.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(message.text)
+    /// The text with its mentions in bold (Markdown), outside code.
+    private func boldMentions(_ prose: String) -> String {
+        var text = prose
+        for range in AgentRoom.mentionRanges(in: prose, members: room.members).reversed() {
+            text.replaceSubrange(range, with: "**\(prose[range])**")
+        }
+        return text
     }
 
     var body: some View {
@@ -258,15 +283,12 @@ private struct RoomMessageRow: View {
             }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 if !isUser {
-                    Text(authorName).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(name(of: message.author)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 }
-                Text(text)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .foregroundStyle(isUser ? Color.white : Color.primary)
-                    .background(isUser ? AnyShapeStyle(Color.userBubble) : AnyShapeStyle(Color.primary.opacity(0.07)),
-                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                if let replyTo = message.replyTo, let answered = messages.first(where: { $0.seq == replyTo }) {
+                    quote(answered)
+                }
+                if isUser { userBubble } else { agentBubble }
                 Text(Date(timeIntervalSince1970: message.at / 1000), format: .dateTime.hour().minute())
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -274,7 +296,117 @@ private struct RoomMessageRow: View {
             if !isUser { Spacer(minLength: 48) }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("room-message-\(message.seq)")
+    }
+
+    /// "↩︎ Julián: …": the message this one answers, in a line.
+    private func quote(_ answered: AgentRoomMessage) -> some View {
+        let prose = MarkdownSegments.cached(answered.text).compactMap { segment -> String? in
+            if case .prose(let text) = segment { return text }
+            return nil
+        }.joined(separator: " ")
+        return Text("↩︎ \(name(of: answered.author)): \(prose.replacingOccurrences(of: "\n", with: " "))")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
+    }
+
+    private var userBubble: some View {
+        var text = AttributedString(message.text)
+        for range in AgentRoom.mentionRanges(in: message.text, members: room.members) {
+            if let lower = AttributedString.Index(range.lowerBound, within: text), let upper = AttributedString.Index(range.upperBound, within: text) {
+                text[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
+            }
+        }
+        return Text(text)
+            .textSelection(.enabled)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundStyle(Color.white)
+            .background(Color.userBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var agentBubble: some View {
+        let segments = MarkdownSegments.cached(message.text)
+        let content = segments.compactMap { segment -> MarkdownSegments.Segment? in
+            switch segment {
+            case .options: nil
+            case .prose(let text): .prose(boldMentions(text))
+            default: segment
+            }
+        }
+        let options = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
+        if !content.isEmpty {
+            MarkdownText(segments: content)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.agentBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        if !options.isEmpty {
+            ReplyOptions(options: options, chosen: AgentRoom.chosenOption(on: message, options: options, messages: messages), onSelect: pick)
+                .accessibilityIdentifier("room-options-\(message.seq)")
+        }
+    }
+}
+
+/// The room's info: who is in it, where each one works, and whether another agent's mention wakes
+/// it ("Answers other agents"; for Claude only past the Consumer Terms 3.7 warning).
+private struct RoomMembersSheet: View {
+    let roomId: String
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var warning: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let room = store.room(id: roomId) {
+                    ForEach(room.members) { member in
+                        Section {
+                            LabeledContent("Machine", value: store.machines.first { $0.id == member.machineId }?.name ?? member.machineId)
+                            LabeledContent("Folder", value: member.directory)
+                            Toggle("Answers other agents", isOn: Binding(get: { member.wakeByAgents == true }, set: { on in
+                                let providerId = store.agentProfile(id: member.agentId)?.providerId
+                                if on, TaskRecurrence.needsAutomatedAccessWarning(providerId: providerId) {
+                                    warning = member.agentId
+                                } else {
+                                    Task { await store.setRoomMemberAnswersAgents(roomId: roomId, agentId: member.agentId, on) }
+                                }
+                            }))
+                            .accessibilityIdentifier("room-member-wake-\(member.agentId)")
+                        } header: {
+                            Text([member.emoji, member.name ?? member.agentId].compactMap { $0 }.joined(separator: " "))
+                        }
+                    }
+                    Section {
+                        LabeledContent("Your name here", value: room.userName ?? String(localized: "User"))
+                    } footer: {
+                        Text("Another agent's mention only wakes the agents that answer other agents; the others wait for you to let them answer.")
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Members")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .alert("Automated Access with Claude", isPresented: Binding(get: { warning != nil }, set: { if !$0 { warning = nil } })) {
+                Button("Allow") {
+                    if let id = warning { Task { await store.setRoomMemberAnswersAgents(roomId: roomId, agentId: id, true) } }
+                    warning = nil
+                }
+                Button("Cancel", role: .cancel) { warning = nil }
+            } message: {
+                Text("""
+                When another agent mentions it, it answers without you, which is automated access. Anthropic's Consumer Terms \
+                (section 3.7) ask for an API key for that, not a Claude subscription. Otherwise it waits for you to let it answer.
+                """)
+            }
+        }
     }
 }

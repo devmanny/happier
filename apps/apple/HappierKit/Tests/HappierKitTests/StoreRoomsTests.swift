@@ -128,6 +128,19 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(store.roomMessages["r1"]?.map(\.seq) == [1, 2, 3, 4])
     }
 
+    @Test func aMembersAnswersOtherAgentsChangesInARoomAlreadyMade() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        // Tomás (stored without it) now answers other agents; Mateo keeps his.
+        let updated = await store.setRoomMemberAnswersAgents(roomId: "r1", agentId: "a-tomas", true)
+        #expect(updated?.members.first { $0.agentId == "a-tomas" }?.wakeByAgents == true)
+        let room = try #require(server.row(AgentRoom.kvKey(id: "r1")).flatMap { AgentRoom.open($0.value, machineKey: machineKey) })
+        #expect(room.members.map(\.wakeByAgents) == [true, true])
+        #expect(room.lastSeq == 2)
+    }
+
     @Test func pausingWritesTheRoomAtItsVersionAndKeepsTheOthersChanges() async throws {
         let server = RoomKVServer()
         try seed(server, lastSeq: 2, version: 5)

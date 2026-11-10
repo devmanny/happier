@@ -121,7 +121,7 @@ struct NewRoomSheet: View {
     private func defaultInvite(_ agent: AgentProfile) -> Invite {
         let machine = store.machines.first { $0.active } ?? store.machines.first
         return Invite(machineId: machine?.id ?? "", directory: machine.flatMap { recentDirectory($0.id) } ?? "",
-                      wakeByAgents: !TaskRecurrence.needsAutomatedAccessWarning(providerId: agent.providerId))
+                      wakeByAgents: AgentRoom.Member.answersAgentsByDefault(providerId: agent.providerId))
     }
 
     private func recentDirectory(_ machineId: String) -> String? {

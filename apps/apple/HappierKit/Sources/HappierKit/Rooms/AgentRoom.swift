@@ -34,10 +34,17 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
             self.permissionMode = permissionMode
         }
 
-        /// The member for an agent of the account.
-        public init(_ agent: AgentProfile, machineId: String, directory: String, wakeByAgents: Bool) {
+        /// The member for an agent of the account; it answers other agents by default unless it is
+        /// Claude (`answersAgentsByDefault`).
+        public init(_ agent: AgentProfile, machineId: String, directory: String, wakeByAgents: Bool? = nil) {
             self.init(agentId: agent.id, name: agent.name, emoji: agent.emoji, machineId: machineId, directory: directory,
-                      wakeByAgents: wakeByAgents)
+                      wakeByAgents: wakeByAgents ?? Self.answersAgentsByDefault(providerId: agent.providerId))
+        }
+
+        /// Another agent's mention wakes a new member, except a Claude one: that is automated access
+        /// (Consumer Terms 3.7), allowed only past the warning (`needsAutomatedAccessWarning`).
+        public static func answersAgentsByDefault(providerId: String?) -> Bool {
+            !TaskRecurrence.needsAutomatedAccessWarning(providerId: providerId)
         }
 
         init?(json: JSONValue) {
@@ -156,43 +163,120 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
 
     /// The room after the user's message, and the message: it takes the next seq, with the members
     /// it mentions. Both are written together (`appendRoomMessage`); nil for an empty text.
-    public func appendingUserMessage(_ text: String, now: Double) -> (room: AgentRoom, message: AgentRoomMessage)? {
+    /// `mentions` overrides the ones found in the text (an option's answer reaches only its author).
+    public func appendingUserMessage(_ text: String, now: Double, replyTo: Int? = nil,
+                                     mentions: [String]? = nil) -> (room: AgentRoom, message: AgentRoomMessage)? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         var room = self
         room.lastSeq += 1
         room.updatedAt = now
         let message = AgentRoomMessage(roomId: id, seq: room.lastSeq, at: now, author: .user, text: text,
-                                       mentions: Self.mentions(in: text, members: members))
+                                       mentions: mentions ?? Self.mentions(in: text, members: members), replyTo: replyTo)
         return (room, message)
     }
 
+    /// The user's pick of an `<options>` option on an agent's message: "@Name option", mentioning only
+    /// that agent (whatever the option says) and answering that message, so only it is woken.
+    public func answering(_ message: AgentRoomMessage, with option: String, now: Double) -> (room: AgentRoom, message: AgentRoomMessage)? {
+        guard let author = message.author.agentId else { return nil }
+        let name = message.author.name ?? members.first { $0.agentId == author }?.name ?? author
+        return appendingUserMessage("@\(name) \(option)", now: now, replyTo: message.seq, mentions: [author])
+    }
+
+    /// The option the user picked on `message`, from the answer that replies to it; nil while none is.
+    public static func chosenOption(on message: AgentRoomMessage, options: [String], messages: [AgentRoomMessage]) -> String? {
+        guard let answer = messages.first(where: { $0.author == .user && $0.replyTo == message.seq }) else { return nil }
+        return options.first { answer.text.hasSuffix(" " + $0) || answer.text == $0 } ?? answer.text
+    }
+
     /// The members `text` mentions with `@` and their whole name, any case or accents, in the order
-    /// they first appear (`resolveRoomMentions`): an `@` inside a word, or before a longer word, is no one.
+    /// they first appear (`resolveRoomMentions`); `@todos` or `@all` mentions every member there. An `@`
+    /// inside a word, or before a longer word, is no one.
     public static func mentions(in text: String, members: [Member]) -> [String] {
-        func fold(_ value: String) -> [Character] {
-            Array(value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased())
-        }
-        func isWord(_ character: Character?) -> Bool {
-            guard let character else { return false }
-            return character.isLetter || character.isNumber || character == "_"
-        }
-        let candidates = members.compactMap { member -> (id: String, name: [Character])? in
-            guard let name = member.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return nil }
-            return (member.agentId, fold(name))
-        }.sorted { $0.name.count > $1.name.count }
-        let folded = fold(text)
         var mentioned: [String] = []
-        for at in folded.indices where folded[at] == "@" {
-            if at > 0, isWord(folded[at - 1]) { continue }
-            let start = at + 1
-            let match = candidates.first { candidate in
-                let end = start + candidate.name.count
-                return end <= folded.count && Array(folded[start..<end]) == candidate.name && !isWord(end < folded.count ? folded[end] : nil)
+        for (_, token) in scanMentions(in: text, members: members) {
+            switch token {
+            case .member(let id):
+                if !mentioned.contains(id) { mentioned.append(id) }
+            case .everyone:
+                for member in members where !mentioned.contains(member.agentId) { mentioned.append(member.agentId) }
             }
-            if let match, !mentioned.contains(match.id) { mentioned.append(match.id) }
         }
         return mentioned
+    }
+
+    /// What a mention names: a member, or every member (`@todos` / `@all`).
+    private enum MentionToken { case member(String), everyone }
+
+    /// `@todos` / `@all`, folded (`EVERYONE_MENTIONS`).
+    private static let everyoneWords = ["todos", "all"]
+
+    private static func fold(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
+    }
+
+    /// Each `@name` and `@todos` in `text`, where it is: whole names (any case or accents, the longest
+    /// first) before the words for everyone; never an `@` inside a word or before a longer word.
+    private static func scanMentions(in text: String, members: [Member]) -> [(range: Range<String.Index>, token: MentionToken)] {
+        let characters = Array(text)
+        let indices = Array(text.indices) + [text.endIndex]
+        let folded = characters.map { fold(String($0)) }
+        func isWord(_ character: Character) -> Bool { character.isLetter || character.isNumber || character == "_" }
+        let names = members.compactMap { member -> (token: MentionToken, word: [String])? in
+            guard let name = member.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return nil }
+            return (.member(member.agentId), name.map { fold(String($0)) })
+        }.sorted { $0.word.count > $1.word.count }
+        let everyone = everyoneWords.map { word in (token: MentionToken.everyone, word: word.map { String($0) }) }
+        var found: [(range: Range<String.Index>, token: MentionToken)] = []
+        for at in characters.indices where characters[at] == "@" {
+            if at > 0, isWord(characters[at - 1]) { continue }
+            let start = at + 1
+            func matches(_ word: [String]) -> Bool {
+                let end = start + word.count
+                return end <= characters.count && Array(folded[start..<end]) == word && !(end < characters.count && isWord(characters[end]))
+            }
+            if let match = names.first(where: { matches($0.word) }) ?? everyone.first(where: { matches($0.word) }) {
+                found.append((indices[at]..<indices[start + match.word.count], match.token))
+            }
+        }
+        return found
+    }
+
+    /// Where the mentions are in a message, to highlight them.
+    public static func mentionRanges(in text: String, members: [Member]) -> [Range<String.Index>] {
+        scanMentions(in: text, members: members).map(\.range)
+    }
+
+    /// A chip that completes the `@word` being typed.
+    public enum MentionSuggestion: Hashable, Sendable {
+        /// `@todos`: every agent in the room.
+        case everyone
+        case member(String)
+
+        public func label(members: [Member]) -> String {
+            switch self {
+            case .everyone: "@todos"
+            case .member(let id): "@" + (members.first { $0.agentId == id }?.name ?? id)
+            }
+        }
+    }
+
+    /// The chips for the `@word` being typed (`partial`, without the `@`): everyone first, then the
+    /// members whose name starts with it; none for a word already typed whole.
+    public static func mentionSuggestions(for partial: String, members: [Member]) -> [MentionSuggestion] {
+        let typed = fold(partial)
+        func offers(_ word: String) -> Bool {
+            let folded = fold(word)
+            return folded.hasPrefix(typed) && folded != typed
+        }
+        var suggestions: [MentionSuggestion] = everyoneWords.contains(where: offers) ? [.everyone] : []
+        for member in members {
+            if let name = member.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty, offers(name) {
+                suggestions.append(.member(member.agentId))
+            }
+        }
+        return suggestions
     }
 
     /// Who to suggest when the user writes without mentioning anyone (it reaches no one): the
@@ -241,6 +325,12 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
             return nil
         }
 
+        /// The agent's name as it wrote, if it gave one.
+        public var name: String? {
+            if case .agent(_, let name, _, _) = self { return name }
+            return nil
+        }
+
         public static func == (lhs: Author, rhs: Author) -> Bool {
             switch (lhs, rhs) {
             case (.user, .user): true
@@ -282,11 +372,14 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
     public let mentions: [String]
     /// An agent's message that mentions the user.
     public let mentionsUser: Bool
+    /// The message this one answers (an option the user picked on it).
+    public let replyTo: Int?
     var extra: [String: JSONValue] = [:]
 
     public var id: Int { seq }
 
-    init(roomId: String, seq: Int, at: Double, author: Author, text: String, mentions: [String], mentionsUser: Bool = false) {
+    init(roomId: String, seq: Int, at: Double, author: Author, text: String, mentions: [String], mentionsUser: Bool = false,
+         replyTo: Int? = nil) {
         self.roomId = roomId
         self.seq = seq
         self.at = at
@@ -294,6 +387,7 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
         self.text = text
         self.mentions = mentions
         self.mentionsUser = mentionsUser
+        self.replyTo = replyTo
     }
 
     init?(json: JSONValue) {
@@ -302,8 +396,8 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
               let text = json["text"]?.stringValue, !text.isEmpty else { return nil }
         self.init(roomId: roomId, seq: seq, at: json["at"]?.doubleValue ?? 0, author: author, text: text,
                   mentions: json["mentions"]?.arrayValue?.compactMap(\.stringValue) ?? [],
-                  mentionsUser: json["mentionsUser"]?.boolValue == true)
-        let known: Set<String> = ["v", "roomId", "seq", "at", "author", "text", "mentions", "mentionsUser"]
+                  mentionsUser: json["mentionsUser"]?.boolValue == true, replyTo: json["replyTo"]?["seq"]?.intValue)
+        let known: Set<String> = ["v", "roomId", "seq", "at", "author", "text", "mentions", "mentionsUser", "replyTo"]
         extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
     }
 
@@ -317,6 +411,7 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
         object["text"] = .string(text)
         object["mentions"] = .array(mentions.map(JSONValue.string))
         if mentionsUser { object["mentionsUser"] = true }
+        if let replyTo { object["replyTo"] = ["seq": .number(Double(replyTo))] }
         return .object(object)
     }
 

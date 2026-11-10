@@ -170,9 +170,11 @@ private struct AgentBubble: View {
 }
 
 /// `<options>` reply suggestions: tap sends the text as your message; drag one into the composer
-/// (or pick "Edit before sending") to change it first; long-press also copies it.
-private struct ReplyOptions: View {
+/// (or pick "Edit before sending") to change it first; long-press also copies it. In a room, the
+/// one already picked (`chosen`) is marked and the rest can't be picked again.
+struct ReplyOptions: View {
     let options: [String]
+    var chosen: String? = nil
     let onSelect: (String) -> Void
     @Environment(\.chatRowActions) private var rowActions
 
@@ -183,8 +185,14 @@ private struct ReplyOptions: View {
                     AppHaptics.confirm()
                     onSelect(option)
                 } label: {
-                    pill(option)
+                    if option == chosen {
+                        Label { pill(option) } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.userBubble) }
+                    } else {
+                        pill(option)
+                    }
                 }
+                .disabled(chosen != nil)
+                .opacity(chosen != nil && option != chosen ? 0.45 : 1)
                 // Blue text on clear glass, like the composer's pills. Not `.tint`: on the Mac it
                 // fills the glass with the tint and the blue text vanishes into it.
                 .buttonStyle(.glass)

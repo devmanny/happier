@@ -100,11 +100,24 @@ extension HappierStore {
     /// reporting why not.
     @discardableResult
     public func sendRoomMessage(roomId: String, text: String) async -> Bool {
+        await appendRoomMessage(roomId: roomId) { room, now in room.appendingUserMessage(text, now: now) }
+    }
+
+    /// An `<options>` option the user picked on an agent's message: answers only that agent.
+    @discardableResult
+    public func answerRoomOption(roomId: String, message: AgentRoomMessage, option: String) async -> Bool {
+        await appendRoomMessage(roomId: roomId) { room, now in room.answering(message, with: option, now: now) }
+    }
+
+    /// Writes the user's next message (`make` on the latest room) and the room together, again on a
+    /// newer room after a conflict.
+    private func appendRoomMessage(roomId: String,
+                                   _ make: (AgentRoom, Double) -> (room: AgentRoom, message: AgentRoomMessage)?) async -> Bool {
         guard let api, let machineKey = keys?.content.secretKey, var base = room(id: roomId) else { return false }
         let roomKey = AgentRoom.kvKey(id: roomId)
         do {
             for _ in 0..<4 {
-                guard let (room, message) = base.appendingUserMessage(text, now: ServerClock.nowMs()) else { return false }
+                guard let (room, message) = make(base, ServerClock.nowMs()) else { return false }
                 let messageKey = AgentRoomMessage.kvKey(roomId: roomId, seq: message.seq)
                 switch try await api.kvMutate([(roomKey, try room.sealed(machineKey: machineKey), base.version),
                                                (messageKey, try message.sealed(machineKey: machineKey), -1)]) {
@@ -169,6 +182,16 @@ extension HappierStore {
     @discardableResult
     public func setRoomPaused(id: String, _ paused: Bool) async -> AgentRoom? {
         await updateRoom(id: id) { room in room.pausedAt = paused ? (room.pausedAt ?? ServerClock.nowMs()) : nil }
+    }
+
+    /// A member's "Answers other agents" in a room already made (the room's info). Turning it on for
+    /// Claude follows the Consumer Terms warning, which the caller shows first.
+    @discardableResult
+    public func setRoomMemberAnswersAgents(roomId: String, agentId: String, _ on: Bool) async -> AgentRoom? {
+        await updateRoom(id: roomId) { room in
+            guard let index = room.members.firstIndex(where: { $0.agentId == agentId }) else { return }
+            room.members[index].wakeByAgents = on
+        }
     }
 
     /// "Let It Answer": the user's message that mentions the member, which wakes it like any of theirs.

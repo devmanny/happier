@@ -59,6 +59,33 @@ import Testing
         #expect(AgentRoom.mentions(in: "escríbele a manny@mateo.dev o a @Mateo2", members: members) == [])
     }
 
+    @Test func atTodosOrAtAllMentionsEveryMemberAsTheProtocolDoes() {
+        let members = Self.room().members
+        let everyone = members.map(\.agentId)
+        #expect(AgentRoom.mentions(in: "@todos ¿cómo van?", members: members) == everyone)
+        #expect(AgentRoom.mentions(in: "hola @ALL", members: members) == everyone)
+        #expect(AgentRoom.mentions(in: "@Tódos", members: members) == everyone)
+        #expect(AgentRoom.mentions(in: "@Tomás primero y luego @todos", members: members) == ["a-tomas", "a-mateo"])
+        #expect(AgentRoom.mentions(in: "escribe a todos@all.com, @allison o @todosbien", members: members) == [])
+    }
+
+    @Test func suggestionsOfferEveryoneFirstThenTheMembersTheTypedWordStarts() {
+        let members = Self.room().members
+        #expect(AgentRoom.mentionSuggestions(for: "", members: members) == [.everyone, .member("a-mateo"), .member("a-tomas")])
+        #expect(AgentRoom.mentionSuggestions(for: "to", members: members) == [.everyone, .member("a-tomas")])
+        #expect(AgentRoom.mentionSuggestions(for: "AL", members: members) == [.everyone])
+        #expect(AgentRoom.mentionSuggestions(for: "ma", members: members) == [.member("a-mateo")])
+        // A whole name already typed needs no chip.
+        #expect(AgentRoom.mentionSuggestions(for: "Mateo", members: members) == [])
+        #expect(AgentRoom.MentionSuggestion.everyone.label(members: members) == "@todos")
+    }
+
+    @Test func theMentionsInAMessageAreFoundToHighlightThem() {
+        let text = "Hola @tomás, y luego @todos (no manny@mateo.dev)"
+        let ranges = AgentRoom.mentionRanges(in: text, members: Self.room().members)
+        #expect(ranges.map { String(text[$0]) } == ["@tomás", "@todos"])
+    }
+
     @Test func theUsersMessageTakesTheNextSeqWithItsMentions() throws {
         let (room, message) = try #require(Self.room(["lastSeq": 4]).appendingUserMessage("  @Tomás revisa esto  ", now: 50))
         #expect(room.lastSeq == 5)
@@ -69,6 +96,35 @@ import Testing
         #expect(message.mentions == ["a-tomas"])
         #expect(message.json["mentionsUser"] == nil)
         #expect(Self.room().appendingUserMessage("   ", now: 1) == nil)
+    }
+
+    @Test func pickingAnOptionAnswersOnlyItsAuthorAndSaysWhichMessageItAnswers() throws {
+        let tomas: JSONValue = ["kind": "agent", "agentId": "a-tomas", "name": "Tomás"]
+        let asked = Self.message(4, by: tomas, text: "¿Cuál sigue?")
+        // Even an option that says @todos reaches only the agent that offered it.
+        let (room, answer) = try #require(Self.room(["lastSeq": 4]).answering(asked, with: "Avisa a @todos", now: 9))
+        #expect(room.lastSeq == 5)
+        #expect(answer.text == "@Tomás Avisa a @todos")
+        #expect(answer.mentions == ["a-tomas"])
+        #expect(answer.replyTo == 4)
+        #expect(answer.json["replyTo"] == ["seq": 4])
+        #expect(AgentRoomMessage(json: answer.json)?.replyTo == 4)
+
+        // The option picked on a message is the one its answer carries; the others are done.
+        let options = ["Retomar GasCorp", "Avisa a @todos"]
+        #expect(AgentRoom.chosenOption(on: asked, options: options, messages: [asked, answer]) == "Avisa a @todos")
+        #expect(AgentRoom.chosenOption(on: asked, options: options, messages: [asked]) == nil)
+    }
+
+    @Test func anInvitedAgentAnswersOtherAgentsUnlessItIsClaude() {
+        // Codex or Kimi are woken by other agents from the start; Claude only past the 3.7 warning.
+        #expect(AgentRoom.Member.answersAgentsByDefault(providerId: "codex"))
+        #expect(AgentRoom.Member.answersAgentsByDefault(providerId: "kimi"))
+        #expect(!AgentRoom.Member.answersAgentsByDefault(providerId: "claude"))
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", emoji: "🤖", providerId: "codex", account: .init(label: "ChatGPT"))
+        let invited = AgentRoom.Member(mateo, machineId: "m1", directory: "/p")
+        #expect(invited.wakeByAgents == true)
+        #expect(invited.json["wakeByAgents"] == true)
     }
 
     @Test func withoutAMentionTheLastAgentWhoSpokeIsSuggested() {
