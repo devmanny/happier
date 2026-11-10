@@ -117,6 +117,8 @@ export const AgentRoomMessageV1Schema = z.object({
   mentions: z.array(z.string().min(1)),
   /** An agent's message that mentions the user (`@<userName>`). */
   mentionsUser: z.boolean().optional(),
+  /** The message this one answers: an option the user picked on it (it mentions only its author). */
+  replyTo: z.object({ seq: SeqSchema }).passthrough().optional(),
 }).passthrough();
 export type AgentRoomMessageV1 = z.infer<typeof AgentRoomMessageV1Schema>;
 
@@ -162,6 +164,7 @@ export type AgentRoomMessageDraft = Readonly<{
   text: string;
   mentions?: readonly string[];
   mentionsUser?: boolean;
+  replyTo?: Readonly<{ seq: number }>;
 }>;
 
 /**
@@ -189,6 +192,7 @@ export function appendRoomMessage(
       text,
       mentions: [...new Set(draft.mentions ?? [])],
       ...(draft.mentionsUser ? { mentionsUser: true } : {}),
+      ...(draft.replyTo ? { replyTo: { seq: draft.replyTo.seq } } : {}),
     },
   };
 }
@@ -200,14 +204,20 @@ function fold(value: string): string {
 
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
+/** `@todos` / `@all`: every agent of the room (folded, as names are compared). */
+const EVERYONE_MENTIONS = ['todos', 'all'];
+
 /**
  * The members `text` mentions with `@` and their whole name (any case or accents), in the order
- * they first appear. An `@` inside a word (an email) or followed by a longer word mentions no one.
+ * they first appear. `@todos` or `@all` mentions `everyone` (by default every member given) at that
+ * point. An `@` inside a word (an email) or followed by a longer word mentions no one.
  */
 export function resolveRoomMentions(
   text: string,
   members: ReadonlyArray<Readonly<{ agentId: string; name?: string }>>,
+  options: Readonly<{ everyone?: readonly string[] }> = {},
 ): string[] {
+  const everyone = options.everyone ?? members.map((member) => member.agentId);
   const candidates = members
     .flatMap((member) => (member.name?.trim() ? [{ agentId: member.agentId, name: fold(member.name.trim()) }] : []))
     .sort((a, b) => b.name.length - a.name.length);
@@ -218,7 +228,13 @@ export function resolveRoomMentions(
     const start = at + 1;
     const match = candidates.find((candidate) => folded.startsWith(candidate.name, start)
       && !WORD_CHAR.test(folded[start + candidate.name.length] ?? ''));
-    if (match && !mentioned.includes(match.agentId)) mentioned.push(match.agentId);
+    if (match) {
+      if (!mentioned.includes(match.agentId)) mentioned.push(match.agentId);
+      continue;
+    }
+    if (EVERYONE_MENTIONS.some((word) => folded.startsWith(word, start) && !WORD_CHAR.test(folded[start + word.length] ?? ''))) {
+      for (const agentId of everyone) if (!mentioned.includes(agentId)) mentioned.push(agentId);
+    }
   }
   return mentioned;
 }
@@ -249,6 +265,6 @@ export function formatRoomMessages(params: Readonly<{ messages: readonly AgentRo
   const bySeq = new Map(params.messages.map((message) => [message.seq, message]));
   return [...bySeq.values()]
     .sort((a, b) => a.seq - b.seq)
-    .map((message) => `[#${message.seq}] ${roomMessageAuthorLabel(message.author, params.userLabel)}: ${message.text}`)
+    .map((message) => `[#${message.seq}] ${roomMessageAuthorLabel(message.author, params.userLabel)}${message.replyTo ? ` (answer to #${message.replyTo.seq})` : ''}: ${message.text}`)
     .join('\n\n');
 }

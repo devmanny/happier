@@ -136,6 +136,8 @@ describe('resolveRoomReply', () => {
     expect(resolveRoomReply({ room: room(), agentId: 'a-mateo', text: '@Mateo terminé; @Tomás revisa y @manny decide' }))
       .toEqual({ mentions: ['a-tomas'], mentionsUser: true });
     expect(resolveRoomReply({ room: room(), agentId: 'a-mateo', text: 'Listo.' })).toEqual({ mentions: [], mentionsUser: false });
+    // An agent's @todos is every other agent; it doesn't mention the user.
+    expect(resolveRoomReply({ room: room(), agentId: 'a-mateo', text: '@todos terminé' })).toEqual({ mentions: ['a-tomas'], mentionsUser: false });
   });
 });
 

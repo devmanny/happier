@@ -126,6 +126,19 @@ describe('resolveRoomMentions', () => {
   it('ignores an @ inside a word or a longer name', () => {
     expect(resolveRoomMentions('escríbele a manny@mateo.dev o a @Mateo2', members)).toEqual([]);
   });
+
+  it('mentions every member with @todos or @all, any case or accents, after those named before it', () => {
+    const everyone = members.map((member) => member.agentId);
+    expect(resolveRoomMentions('@todos ¿cómo van?', members)).toEqual(everyone);
+    expect(resolveRoomMentions('hola @ALL', members)).toEqual(everyone);
+    expect(resolveRoomMentions('@Tódos', members)).toEqual(everyone);
+    expect(resolveRoomMentions('@Tomás primero y luego @todos', members))
+      .toEqual(['a-tomas', ...everyone.filter((id) => id !== 'a-tomas')]);
+    // Only the whole word: an address, a longer word or a name that starts with it is no one.
+    expect(resolveRoomMentions('escribe a todos@all.com, @allison o @todosbien', members)).toEqual([]);
+    // @todos reaches the members it is given, not every entry that can be mentioned.
+    expect(resolveRoomMentions('@todos', members, { everyone: ['a-mateo', 'a-tomas'] })).toEqual(['a-mateo', 'a-tomas']);
+  });
 });
 
 describe('agentRoomUnreadRange', () => {
@@ -150,5 +163,13 @@ describe('formatRoomMessages', () => {
       ],
     });
     expect(text).toBe('[#1] Manny: @Mateo ¿cómo vamos?\n\n[#2] Mateo 🤖: Casi.\nFalta el login. @Tomás\n\n[#3] Tomás: Va.');
+  });
+
+  it('says which message a reply answers (an option the user picked on it)', () => {
+    const { message: answer } = appendRoomMessage(room({ lastSeq: 2 }),
+      { author: { kind: 'user' }, text: '@Mateo Retomar GasCorp', mentions: ['a-mateo'], replyTo: { seq: 2 } }, 9);
+    expect(answer.replyTo).toEqual({ seq: 2 });
+    expect(parseAgentRoomMessageV1(answer)?.replyTo).toEqual({ seq: 2 });
+    expect(formatRoomMessages({ userLabel: 'Manny', messages: [answer] })).toBe('[#3] Manny (answer to #2): @Mateo Retomar GasCorp');
   });
 });

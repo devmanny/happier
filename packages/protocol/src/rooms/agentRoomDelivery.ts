@@ -80,7 +80,8 @@ export function decideRoomDelivery(params: Readonly<{
 }
 
 function oneLine(label: string, message: AgentRoomMessageV1): string {
-  const line = `[#${message.seq}] ${label}: ${message.text.replace(/\s+/g, ' ').trim()}`;
+  const answer = message.replyTo ? ` (answer to #${message.replyTo.seq})` : '';
+  const line = `[#${message.seq}] ${label}${answer}: ${message.text.replace(/\s+/g, ' ').trim()}`;
   return line.length <= ROOM_DELIVERY_LINE_CHARS ? line : `${line.slice(0, ROOM_DELIVERY_LINE_CHARS - 1)}…`;
 }
 
@@ -122,7 +123,7 @@ export function buildRoomDeliveryPrompt(params: Readonly<{
   parts.push(`${lines.length > 0 ? 'Latest, in full' : 'New messages'}:\n\n${formatRoomMessages({ messages: full, userLabel })}`);
   parts.push([
     'The final message of your turn is posted to the room as your reply.',
-    `To hand the floor to someone, mention them (${others.length > 0 ? `@${others[0]}` : '@Name'}); mention @${userLabel} to ask the user.`,
+    `To hand the floor to someone, mention them (${others.length > 0 ? `@${others[0]}` : '@Name'}), or everyone with @todos; mention @${userLabel} to ask the user.`,
     'Use sala_leer to read more of the room.',
   ].join(' '));
   return parts.join('\n\n');
@@ -153,7 +154,7 @@ export function resolveRoomReply(params: Readonly<{ room: AgentRoomV1; agentId: 
   const mentioned = resolveRoomMentions(params.text, [
     ...params.room.members,
     { agentId: USER_MENTION_ID, name: roomUserLabel(params.room) },
-  ]);
+  ], { everyone: params.room.members.map((member) => member.agentId) });
   return {
     mentions: mentioned.filter((id) => id !== USER_MENTION_ID && id !== params.agentId),
     mentionsUser: mentioned.includes(USER_MENTION_ID),
