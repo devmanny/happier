@@ -2515,9 +2515,23 @@ public final class HappierStore {
         }
     }
 
-    public func removePending(_ localId: String, in id: String) async {
+    /// A message the agent may already have goes in line again as a new message (RN's "Send as new").
+    public func sendPendingAgain(_ localId: String, in id: String) async {
         await pendingMutation(id, localId) { api in
-            try await api.removePending(sessionId: id, localId: localId)
+            try await self.unarchiveForDelivery(id, api: api)
+            try await api.sendPendingDeliveryAsNew(sessionId: id, localId: localId)
+        }
+    }
+
+    /// The relay refuses deleting a message the agent may already have; that one is dismissed instead.
+    public func removePending(_ localId: String, in id: String) async {
+        let uncertain = if case .uncertain = pendingQueues[id]?.first(where: { $0.localId == localId })?.state { true } else { false }
+        await pendingMutation(id, localId) { api in
+            if uncertain {
+                try await api.dismissPendingDelivery(sessionId: id, localId: localId)
+            } else {
+                try await api.removePending(sessionId: id, localId: localId)
+            }
         }
     }
 

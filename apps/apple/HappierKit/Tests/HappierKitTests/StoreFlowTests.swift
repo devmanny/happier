@@ -325,14 +325,34 @@ import Testing
         #expect(store.lastError != nil)
     }
 
-    @MainActor private func openSession() async throws -> (Relay, HappierStore) {
+    // MARK: A delivery the agent may already have
+
+    /// The relay refuses ordinary changes to a message the agent may already have (`pendingMessageService.ts`):
+    /// sending it again and removing it go through its delivery resolutions, as in RN.
+    @Test func aMessageTheAgentMayHaveIsSentAgainOrRemovedThroughItsDeliveryResolutions() async throws {
+        let (relay, store) = try await openSession(pending: [Relay.uncertainPendingRow("p1"), Relay.uncertainPendingRow("p2")])
+        #expect(store.pendingQueues["s1"]?.map(\.state) == [.uncertain(reason: "delivery_outcome_uncertain"),
+                                                            .uncertain(reason: "delivery_outcome_uncertain")])
+
+        await store.sendPendingAgain("p1", in: "s1")
+        await store.removePending("p2", in: "s1")
+        try await until { store.pendingQueues["s1"]?.map(\.localId) == ["send-as-new-p1", "p2"] }
+
+        #expect(store.lastError == nil)
+        #expect(relay.log.values.filter { $0.hasPrefix("pending ") } == ["pending send-as-new p1", "pending dismiss p2"])
+        // The copy waits in line as a new message; the original is hidden and the removed one kept as discarded.
+        #expect(store.pendingQueues["s1"]?.map(\.state) == [.queued, .discarded])
+    }
+
+    @MainActor private func openSession(pending: [JSONValue] = []) async throws -> (Relay, HappierStore) {
         let relay = Relay()
         let store = relay.store()
         relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        relay.pendingRows = pending
         await store.refreshSessions()
         store.open("s1")
         try await until { store.transcripts["s1"]?.isLoaded == true && !store.loadingTranscripts.contains("s1") }
-        try await until { store.pendingQueues["s1"] != nil && !store.loadingTranscripts.contains("s1") }
+        try await until { store.pendingQueues["s1"]?.count == pending.count && !store.loadingTranscripts.contains("s1") }
         try await Task.sleep(for: .milliseconds(200))
         return (relay, store)
     }
@@ -385,7 +405,7 @@ private final class Relay: @unchecked Sendable {
     private let lock = NSLock()
     private var state = (sessionRows: [JSONValue](), messageTexts: ["m1": "hola", "m2": "adios"],
                          writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
-                         writtenMetadata: JSONValue?.none, supportsAgentIdentity: false)
+                         writtenMetadata: JSONValue?.none, supportsAgentIdentity: false, pendingRows: [JSONValue]())
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -394,6 +414,11 @@ private final class Relay: @unchecked Sendable {
     var messageTexts: [String: String] {
         get { lock.withLock { state.messageTexts } }
         set { lock.withLock { state.messageTexts = newValue } }
+    }
+    /// The session's server pending queue (`GET /v2/sessions/s1/pending`).
+    var pendingRows: [JSONValue] {
+        get { lock.withLock { state.pendingRows } }
+        set { lock.withLock { state.pendingRows = newValue } }
     }
     var writtenTask: AgentTask? { lock.withLock { state.writtenTask } }
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
@@ -520,7 +545,9 @@ private final class Relay: @unchecked Sendable {
             log.add("send")
             return (200, ["ok": true])
         case ("GET", let path) where path.hasSuffix("/pending"):
-            return (200, ["pending": []])
+            return (200, ["pending": .array(pendingRows)])
+        case (let method, let path) where path.hasPrefix("/v2/sessions/s1/pending/"):
+            return pendingMutation(method, String(path.dropFirst("/v2/sessions/s1/pending/".count)))
         case ("GET", "/v1/sessions/s1/messages"):
             if let after = query["afterSeq"] {
                 log.add("messages after=\(after)")
@@ -528,6 +555,64 @@ private final class Relay: @unchecked Sendable {
             }
             log.add("messages latest")
             return (200, ["messages": [try messageRow(id: "m1", seq: 1), try messageRow(id: "m2", seq: 2)], "hasMore": false])
+        default:
+            return (404, ["error": "not simulated"])
+        }
+    }
+
+    // MARK: Pending queue
+
+    static func uncertainPendingRow(_ localId: String) -> JSONValue {
+        let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string("mensaje \(localId)")]]
+        return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": 1,
+                "createdAt": 1, "updatedAt": 1, "deliveryState": "blocked", "deliveryBlockedReason": "delivery_outcome_uncertain",
+                "deliveryStatus": ["status": "blocked", "reason": "delivery_outcome_uncertain"]]
+    }
+
+    /// `pendingMessageService.ts`: once the agent may have a message, only its delivery resolutions
+    /// apply (`delivery/send-as-new`, `delivery/dismiss`); an ordinary change or delete is refused.
+    private func pendingMutation(_ method: String, _ rest: String) -> (Int, JSONValue) {
+        let parts = rest.split(separator: "/").map(String.init)
+        guard let localId = parts.first, let index = pendingRows.firstIndex(where: { $0["localId"]?.stringValue == localId }) else {
+            return (404, ["error": "not-found"])
+        }
+        let row = pendingRows[index]
+        let mayHaveArrived = row["status"] == "queued" && row["deliveryStatus"]?["status"] == "blocked"
+            && ["delivery_outcome_uncertain", "ambiguous_terminal_delivery", "unknown"].contains(row["deliveryStatus"]?["reason"]?.stringValue ?? "")
+        func discarded(_ reason: String) -> JSONValue {
+            var object = row.objectValue ?? [:]
+            object["status"] = "discarded"
+            object["deliveryState"] = .null
+            object["deliveryBlockedReason"] = .null
+            object["discardedAt"] = 2
+            object["discardedReason"] = .string(reason)
+            object["deliveryStatus"] = ["status": "discarded", "reason": .string(reason)]
+            return .object(object)
+        }
+        switch (method, Array(parts.dropFirst())) {
+        case ("POST", ["delivery", "send-as-new"]) where mayHaveArrived:
+            log.add("pending send-as-new \(localId)")
+            var copy = row.objectValue ?? [:]
+            copy["localId"] = .string("send-as-new-\(localId)")
+            copy["position"] = 9
+            copy["deliveryState"] = .null
+            copy["deliveryBlockedReason"] = .null
+            copy["deliveryStatus"] = ["status": "queued"]
+            pendingRows[index] = discarded("resent_as_new")
+            pendingRows.insert(.object(copy), at: 0)
+            return (200, ["ok": true, "didWrite": true])
+        case ("POST", ["delivery", "dismiss"]) where mayHaveArrived:
+            log.add("pending dismiss \(localId)")
+            pendingRows[index] = discarded("dismissed_uncertain")
+            return (200, ["ok": true, "didDismiss": true])
+        case ("POST", let tail) where tail.first == "delivery":
+            return (409, ["error": "delivery-settlement-conflict"])
+        case ("DELETE", []) where mayHaveArrived:
+            log.add("pending delete \(localId)")
+            return (409, ["error": "delivery-settlement-conflict"])
+        case ("PATCH", ["action"]) where mayHaveArrived:
+            log.add("pending action \(localId)")
+            return (409, ["error": "action-conflict"])
         default:
             return (404, ["error": "not simulated"])
         }

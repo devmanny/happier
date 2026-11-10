@@ -159,6 +159,16 @@ public struct HappierAPI: Sendable {
         _ = try await http.delete("/v2/sessions/\(sessionId)/pending/\(localId)")
     }
 
+    /// For a message the agent may already have: queues a copy as a new message and hides this one.
+    public func sendPendingDeliveryAsNew(sessionId: String, localId: String) async throws {
+        _ = try await http.post("/v2/sessions/\(sessionId)/pending/\(localId)/delivery/send-as-new")
+    }
+
+    /// For a message the agent may already have: stops waiting for it (kept as discarded).
+    public func dismissPendingDelivery(sessionId: String, localId: String) async throws {
+        _ = try await http.post("/v2/sessions/\(sessionId)/pending/\(localId)/delivery/dismiss")
+    }
+
     public func restorePending(sessionId: String, localId: String) async throws {
         _ = try await http.post("/v2/sessions/\(sessionId)/pending/\(localId)/restore")
     }

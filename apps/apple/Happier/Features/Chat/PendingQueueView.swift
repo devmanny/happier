@@ -4,7 +4,7 @@ import SwiftUI
 /// A message waiting in the server queue. Tap opens the same actions as the RN pending block
 /// (`PendingMessagesTranscriptBlock.tsx`): Steer now, Send now (interrupt), Edit, Remove, Copy —
 /// or Re-queue / Steer now / Send now / Copy / Remove for discarded ones. One already being
-/// delivered can only be copied.
+/// delivered can only be copied; one the agent may already have can be sent again or removed.
 struct PendingBubble: View {
     let message: PendingMessage
     let sessionId: String
@@ -45,6 +45,8 @@ struct PendingBubble: View {
         } message: {
             if message.state == .delivering {
                 Text("It's on its way to the agent and can't be changed now.")
+            } else if case .uncertain = message.state {
+                Text("The connection to the agent dropped while this was being delivered, so it may or may not have arrived. Send it again if the agent didn't get it, or remove it if it did.")
             }
         }
         .alert(sendNowTitle, isPresented: $confirmSendNow) {
@@ -132,6 +134,11 @@ struct PendingBubble: View {
             Button("Edit") { AppHaptics.light(); beginEdit() }
             Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
             Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
+        case .uncertain:
+            // The server refuses ordinary changes now; only its delivery resolutions apply.
+            Button("Send Again") { AppHaptics.confirm(); Task { await store.sendPendingAgain(message.localId, in: sessionId) } }
+            Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
+            Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
         case .delivering:
             // The runner has taken it; the server refuses changes from here on (no double send).
             Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
@@ -151,7 +158,12 @@ struct PendingBubble: View {
         editing = true
     }
 
-    private var isBlocked: Bool { if case .blocked = message.state { true } else { false } }
+    private var isBlocked: Bool {
+        switch message.state {
+        case .blocked, .uncertain: true
+        default: false
+        }
+    }
 
     private var sendNowLabel: LocalizedStringKey { working ? "Send Now (Interrupt)" : "Send Now" }
     private var sendNowTitle: LocalizedStringKey { working ? "Send now (interrupt)?" : "Send now?" }
@@ -162,6 +174,7 @@ struct PendingBubble: View {
         case .delivering: String(localized: "Delivering…")
         case .discarded: String(localized: "Discarded")
         case .blocked(let reason): String(localized: "Blocked · \(Self.reasonLabel(reason))")
+        case .uncertain: String(localized: "Not sure it reached the agent")
         }
     }
 

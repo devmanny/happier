@@ -45,6 +45,7 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
         case queued
         case delivering
         case blocked(reason: String)
+        case uncertain(reason: String)
         case discarded
     }
 
@@ -69,6 +70,11 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
         return SessionNotice.parse(text)
     }
 
+    /// Blocked reasons after which the agent may already have the message
+    /// (`isPendingDeliveryProviderEffectPossibleV1` in the protocol). The relay then accepts only
+    /// its delivery resolutions: send it again as a new message, or dismiss it.
+    static let mayHaveReachedAgentReasons: Set<String> = ["delivery_outcome_uncertain", "ambiguous_terminal_delivery", "unknown"]
+
     public static func list(_ rows: [JSONValue], session: Session) -> [PendingMessage] {
         var queued: [(position: Double, created: Double, item: PendingMessage)] = []
         var discarded: [(at: Double, item: PendingMessage)] = []
@@ -90,7 +96,9 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
             } else {
                 switch row["deliveryStatus"]?["status"]?.stringValue ?? row["deliveryState"]?.stringValue {
                 case "blocked":
-                    state = .blocked(reason: row["deliveryBlockedReason"]?.stringValue ?? row["deliveryStatus"]?["reason"]?.stringValue ?? "unknown")
+                    // The relay's normalized reason first: it maps a reason it doesn't know to `unknown`.
+                    let reason = row["deliveryStatus"]?["reason"]?.stringValue ?? row["deliveryBlockedReason"]?.stringValue ?? "unknown"
+                    state = Self.mayHaveReachedAgentReasons.contains(reason) ? .uncertain(reason: reason) : .blocked(reason: reason)
                 case "delivering", "external_handoff": state = .delivering
                 default: state = .queued
                 }

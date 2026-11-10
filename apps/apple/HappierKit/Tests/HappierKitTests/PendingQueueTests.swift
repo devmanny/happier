@@ -56,6 +56,36 @@ import Testing
         #expect(items[2].state == .discarded)
     }
 
+    /// A delivery the agent may already have (`isPendingDeliveryProviderEffectPossibleV1`): the
+    /// relay refuses Retry/Send now/Edit/Remove on it, so it is its own state, read from the
+    /// relay's normalized `deliveryStatus` rather than the raw column.
+    @Test func aDeliveryTheAgentMayHaveIsUncertainNotBlocked() throws {
+        let s = try session()
+        let record: JSONValue = ["role": "user", "content": ["type": "text", "text": "hola"]]
+        var position = 0.0
+        func row(_ localId: String, _ status: JSONValue, raw: JSONValue = .null) -> JSONValue {
+            position += 1
+            return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": .number(position), "createdAt": 1,
+             "updatedAt": 1, "deliveryState": "blocked", "deliveryBlockedReason": raw, "deliveryStatus": status]
+        }
+        let items = PendingMessage.list([
+            row("u", ["status": "blocked", "reason": "delivery_outcome_uncertain"], raw: "delivery_outcome_uncertain"),
+            row("a", ["status": "blocked", "reason": "ambiguous_terminal_delivery"], raw: "ambiguous_terminal_delivery"),
+            // A raw reason this relay doesn't know is normalized to `unknown`: it may have arrived.
+            row("k", ["status": "blocked", "reason": "unknown"], raw: "some_future_reason"),
+            row("s", ["status": "blocked", "reason": "steering_unavailable"], raw: "steering_unavailable"),
+            // A malformed requested action: the relay reports it unsupported, with no raw reason.
+            row("m", ["status": "blocked", "reason": "unsupported_action"]),
+        ], session: s)
+        #expect(items.map(\.state) == [
+            .uncertain(reason: "delivery_outcome_uncertain"),
+            .uncertain(reason: "ambiguous_terminal_delivery"),
+            .uncertain(reason: "unknown"),
+            .blocked(reason: "steering_unavailable"),
+            .blocked(reason: "unsupported_action"),
+        ])
+    }
+
     @Test func editReplacesTextAndDropsAppendedSystemPrompt() {
         let record: JSONValue = ["role": "user", "content": ["type": "text", "text": "old"], "meta": ["displayText": "old", "appendSystemPrompt": "x", "sentFrom": "ios"]]
         let edited = PendingMessage.editedRecord(record, text: "new")
