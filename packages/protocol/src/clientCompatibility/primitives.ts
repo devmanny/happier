@@ -3,7 +3,13 @@ import { z } from 'zod';
 export const SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY = 2 as const;
 export const PENDING_INPUT_PROTOCOL_VERSION_V1 = 1 as const;
 export const PENDING_INPUT_PROTOCOL_VERSION_V2 = 2 as const;
-export const CURRENT_PENDING_INPUT_PROTOCOL_VERSION = PENDING_INPUT_PROTOCOL_VERSION_V2;
+/**
+ * The current runner may return a row whose provider effect was possible, once its provider
+ * proves the prompt never arrived, to its place in line (`pending-delivery-not-received-v1`);
+ * such rows no longer hold later automatic deliveries.
+ */
+export const PENDING_INPUT_PROTOCOL_VERSION_V3 = 3 as const;
+export const CURRENT_PENDING_INPUT_PROTOCOL_VERSION = PENDING_INPUT_PROTOCOL_VERSION_V3;
 
 export const ClientKindSchema = z.enum([
   'ui-web',

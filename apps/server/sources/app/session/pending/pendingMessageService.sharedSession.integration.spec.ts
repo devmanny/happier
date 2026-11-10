@@ -15,6 +15,7 @@ import {
     materializeNextPendingMessageForCurrentPublisher,
     markPendingDeliveryHandled,
     reorderPendingMessages,
+    requeueNotReceivedPendingDelivery,
     resolveAcceptedPendingDelivery as resolveAcceptedPendingDeliveryOwner,
     sendPendingDeliveryAsNew,
     restorePendingMessage,
@@ -4569,5 +4570,113 @@ describe("pendingMessageService (shared sessions)", () => {
             orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
             select: { localId: true },
         })).resolves.toEqual([{ localId: localIdA }, { localId: localIdB }]);
+    });
+
+    describe("deliveries a replaced runner left uncertain", () => {
+        /** A claim in flight when its runner was replaced: the new publisher's registration blocks it. */
+        const inheritUncertainHead = async (kind: string) => {
+            const owner = await createAccount(`inherited-${kind}`);
+            const session = await createSession(owner.id);
+            const uncertainLocalId = `inherited-uncertain-${randomUUID()}`;
+            const laterLocalId = `inherited-later-${randomUUID()}`;
+            for (const localId of [uncertainLocalId, laterLocalId]) {
+                await expect(enqueuePendingMessage({
+                    actorUserId: owner.id, sessionId: session.id, localId, ciphertext: `cipher-${localId}`,
+                })).resolves.toMatchObject({ ok: true });
+            }
+            const predecessor = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+            await markPendingProviderDeliveryClaimed({ sessionId: session.id, localId: uncertainLocalId, providerAction: "send" });
+            const replacement = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+            await expect(db.sessionPendingMessage.findUniqueOrThrow({
+                where: { sessionId_localId: { sessionId: session.id, localId: uncertainLocalId } },
+                select: { deliveryState: true, deliveryBlockedReason: true },
+            })).resolves.toEqual({ deliveryState: "blocked", deliveryBlockedReason: "delivery_outcome_uncertain" });
+            return {
+                owner, session, uncertainLocalId, laterLocalId,
+                predecessorFence: { ...predecessor.binding, committedFence: predecessor.committedFence },
+                replacementFence: { ...replacement.binding, committedFence: replacement.committedFence },
+            };
+        };
+
+        it("no longer holds later messages behind a row the agent may already have", async () => {
+            const { owner, session, uncertainLocalId, laterLocalId, replacementFence } = await inheritUncertainHead("fifo");
+
+            await expect(materializeNextPendingMessage({
+                actorUserId: owner.id, sessionId: session.id, trustedPublisherFence: replacementFence,
+            })).resolves.toMatchObject({ ok: true, didMaterialize: true, message: { localId: laterLocalId } });
+            // Its acceptance settles even though the uncertain row is still queued ahead of it.
+            await expect(resolveAcceptedPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId: laterLocalId, trustedPublisherFence: replacementFence,
+            })).resolves.toMatchObject({ ok: true, didResolve: true });
+            await expect(db.sessionPendingMessage.findMany({
+                where: { sessionId: session.id }, select: { localId: true, deliveryBlockedReason: true },
+            })).resolves.toEqual([{ localId: uncertainLocalId, deliveryBlockedReason: "delivery_outcome_uncertain" }]);
+        });
+
+        it("still holds later messages behind a row blocked before any provider effect", async () => {
+            const owner = await createAccount("inherited-pre-effect");
+            const session = await createSession(owner.id);
+            const heldLocalId = `pre-effect-held-${randomUUID()}`;
+            const laterLocalId = `pre-effect-later-${randomUUID()}`;
+            for (const localId of [heldLocalId, laterLocalId]) {
+                await expect(enqueuePendingMessage({
+                    actorUserId: owner.id, sessionId: session.id, localId, ciphertext: `cipher-${localId}`,
+                })).resolves.toMatchObject({ ok: true });
+            }
+            await expect(blockPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId: heldLocalId, reason: "runtime_disposed_before_delivery",
+            })).resolves.toMatchObject({ ok: true });
+
+            await expect(materializeNextPendingMessage({ actorUserId: owner.id, sessionId: session.id }))
+                .resolves.toMatchObject({ ok: true, didMaterialize: false, deferredReason: "waiting_for_predecessor" });
+        });
+
+        it("returns a row the provider proved it never received to its place in line, only for the current runner", async () => {
+            const { owner, session, uncertainLocalId, laterLocalId, predecessorFence, replacementFence } = await inheritUncertainHead("requeue");
+            const before = await db.sessionPendingMessage.findUniqueOrThrow({
+                where: { sessionId_localId: { sessionId: session.id, localId: uncertainLocalId } },
+                select: { position: true },
+            });
+
+            // The replaced runner has no authority left over the row.
+            await expect(requeueNotReceivedPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId: uncertainLocalId, trustedPublisherFence: predecessorFence,
+            })).resolves.toEqual({ ok: false, error: "forbidden" });
+
+            await expect(requeueNotReceivedPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId: uncertainLocalId, trustedPublisherFence: replacementFence,
+            })).resolves.toMatchObject({ ok: true, didRequeue: true, pendingCount: 2, pendingBlockedCount: 0 });
+            await expect(db.sessionPendingMessage.findUniqueOrThrow({
+                where: { sessionId_localId: { sessionId: session.id, localId: uncertainLocalId } },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, providerAction: true, position: true },
+            })).resolves.toEqual({ status: "queued", deliveryState: null, deliveryBlockedReason: null, providerAction: null, position: before.position });
+            // Repeating it changes nothing.
+            await expect(requeueNotReceivedPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId: uncertainLocalId, trustedPublisherFence: replacementFence,
+            })).resolves.toMatchObject({ ok: true, didRequeue: false });
+
+            // It is delivered again ahead of the message sent after it.
+            await expect(materializeNextPendingMessage({
+                actorUserId: owner.id, sessionId: session.id, trustedPublisherFence: replacementFence,
+            })).resolves.toMatchObject({ ok: true, didMaterialize: true, message: { localId: uncertainLocalId } });
+        });
+
+        it("refuses to requeue a row whose provider effect was never possible", async () => {
+            const owner = await createAccount("requeue-pre-effect");
+            const session = await createSession(owner.id);
+            const localId = `requeue-pre-effect-${randomUUID()}`;
+            await expect(enqueuePendingMessage({
+                actorUserId: owner.id, sessionId: session.id, localId, ciphertext: "cipher-requeue-pre-effect",
+            })).resolves.toMatchObject({ ok: true });
+            await expect(blockPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId, reason: "steering_unavailable",
+            })).resolves.toMatchObject({ ok: true });
+            const publisher = await createCurrentPendingEvidencePublisher({ accountId: owner.id, sessionId: session.id });
+
+            await expect(requeueNotReceivedPendingDelivery({
+                actorUserId: owner.id, sessionId: session.id, localId,
+                trustedPublisherFence: { ...publisher.binding, committedFence: publisher.committedFence },
+            })).resolves.toEqual({ ok: false, error: "delivery-settlement-conflict" });
+        });
     });
 });

@@ -42,6 +42,14 @@ export {
 } from './sessionMessages/pendingLocalId.js';
 
 export {
+  NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+  NotReceivedPendingDeliveryRequestV1Schema,
+  NotReceivedPendingDeliveryResponseV1Schema,
+  type NotReceivedPendingDeliveryRequestV1,
+  type NotReceivedPendingDeliveryResponseV1,
+} from './sessionMessages/notReceivedPendingDeliveryV1.js';
+
+export {
   ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
   AcceptedPendingSettlementRequestV1Schema,
   AcceptedPendingSettlementResponseV1Schema,
@@ -962,6 +970,7 @@ export {
   type PendingDeliveryBlockedReason,
 } from './sessionMessages/pendingDeliveryBlockedReason.js';
 export {
+  doesPendingDeliveryHoldLaterRowsV1,
   isPendingDeliveryProviderEffectPossibleV1,
   isPendingDeliveryStatusTransitionAllowedV1,
   PENDING_DELIVERY_HIDDEN_DISCARDED_REASONS_V1,

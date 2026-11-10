@@ -16,6 +16,7 @@ import { isPrismaErrorCode } from "@/storage/prisma";
 import { readEncryptionFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
 import {
     isStoredContentKindAllowedForSessionByStoragePolicy,
+    doesPendingDeliveryHoldLaterRowsV1,
     isPendingDeliveryProviderEffectPossibleV1,
     isConditionalPendingSteerClaim,
     isPendingDeliveryStatusTransitionAllowedV1,
@@ -1389,15 +1390,16 @@ export async function resolveAcceptedPendingDelivery(params: {
 
             const requestedAction = PendingRequestedActionV1Schema.safeParse(existing.requestedAction);
             const isExactAction = requestedAction.success && requestedAction.data.kind !== "enqueue";
-            const earlierUnresolved = isUncertainTombstone || isExactAction ? null : await tx.sessionPendingMessage.findFirst({
+            // The same FIFO the materializer applies: a row the agent may already have holds nothing.
+            const earlierUnresolved = isUncertainTombstone || isExactAction ? null : (await tx.sessionPendingMessage.findMany({
                 where: {
                     sessionId,
                     status: "queued",
                     position: { lt: existing.position },
                 },
-                select: { localId: true },
+                select: { localId: true, status: true, deliveryState: true, deliveryBlockedReason: true },
                 orderBy: [{ position: "asc" }, { createdAt: "asc" }, { localId: "asc" }],
-            });
+            })).find((row) => doesPendingDeliveryHoldLaterRowsV1(normalizePendingDeliveryStatusV1(row)));
             if (earlierUnresolved) {
                 return { ok: false, error: "blocked-by-earlier-pending" } as const;
             }
@@ -2048,3 +2050,74 @@ export {
     materializeNextPendingMessageForCurrentPublisher,
     materializeNextPendingMessageForCurrentPublisherInTx,
 } from "@/app/session/pending/materializeNextPendingMessage";
+
+export type RequeueNotReceivedPendingDeliveryResult =
+    | { ok: true; didRequeue: boolean; pendingVersion: number; pendingCount: number; pendingBlockedCount: number; participantCursors: ParticipantCursor[]; badgeAttentionChanged: boolean }
+    | { ok: false; error: "session-not-found" | "forbidden" | "invalid-params" | "not-found" | "delivery-settlement-conflict" | "internal" }
+    | { ok: false; error: "transaction-unavailable"; retryAfterMs: number };
+
+/**
+ * The current runner's provider proved it never received a row whose provider effect was possible
+ * (typically a claim a replaced runner left `delivery_outcome_uncertain`). That exact row goes back
+ * in line where it was: same localId and position, no provider action, unblocked, for one ordinary
+ * delivery. Only the current publisher holds that authority; a replaced runner's fence is refused.
+ * A row already back in line is an idempotent no-op; any other state is a settlement conflict.
+ */
+export async function requeueNotReceivedPendingDelivery(params: {
+    actorUserId: string;
+    sessionId: string;
+    localId: string;
+    trustedPublisherFence: TrustedPendingPublisherFence;
+}): Promise<RequeueNotReceivedPendingDeliveryResult> {
+    const actorUserId = typeof params.actorUserId === "string" ? params.actorUserId : "";
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
+    const localId = readPendingLocalId(params.localId) ?? "";
+    if (!actorUserId || !sessionId || !localId) return { ok: false, error: "invalid-params" };
+
+    const access = await resolveSessionPendingOwnerAccess(actorUserId, sessionId);
+    if (!access.ok) return { ok: false, error: access.error };
+
+    try {
+        return await retryPendingDeliveryResolutionRace(() => inTx(async (tx): Promise<RequeueNotReceivedPendingDeliveryResult> => {
+            if (!await acquireTrustedPendingPublisherAuthority({ tx, actorUserId, sessionId, fence: params.trustedPublisherFence })) {
+                return { ok: false, error: "forbidden" };
+            }
+            const existing = await tx.sessionPendingMessage.findUnique({
+                where: { sessionId_localId: { sessionId, localId } },
+                select: { status: true, deliveryState: true, deliveryBlockedReason: true, discardedReason: true, updatedAt: true },
+            });
+            if (!existing) return { ok: false, error: "not-found" };
+            const deliveryStatus = normalizePendingDeliveryStatusV1(existing);
+            if (deliveryStatus.status === "queued") {
+                return { ok: true, didRequeue: false, ...(await readCurrentPendingMutationState(tx, sessionId)) };
+            }
+            if (deliveryStatus.status !== "blocked" || !isPendingDeliveryProviderEffectPossibleV1(deliveryStatus)) {
+                return { ok: false, error: "delivery-settlement-conflict" };
+            }
+            const updated = await tx.sessionPendingMessage.updateMany({
+                where: {
+                    sessionId,
+                    localId,
+                    status: "queued",
+                    deliveryState: "blocked",
+                    deliveryBlockedReason: existing.deliveryBlockedReason,
+                    updatedAt: existing.updatedAt,
+                },
+                data: {
+                    deliveryState: null,
+                    deliveryBlockedReason: null,
+                    providerAction: null,
+                    updatedAt: new Date(Math.max(Date.now(), existing.updatedAt.getTime() + 1)),
+                },
+            });
+            if (updated.count !== 1) return { ok: false, error: "delivery-settlement-conflict" };
+            const state = await applyPendingSessionStateChange({ tx, sessionId, pendingBlockedCountDelta: -1 });
+            return { ok: true, didRequeue: true, ...state };
+        }));
+    } catch (error) {
+        if (isTransactionAcquisitionUnavailableError(error)) {
+            return { ok: false, error: "transaction-unavailable", retryAfterMs: 1_000 };
+        }
+        return { ok: false, error: "internal" };
+    }
+}

@@ -9,6 +9,8 @@ import {
 import { readEncryptionFeatureEnv } from "@/app/features/catalog/readFeatureEnv";
 import {
     decideRuntimeIdleAdmission,
+    doesPendingDeliveryHoldLaterRowsV1,
+    normalizePendingDeliveryStatusV1,
     isStoredContentKindAllowedForSessionByStoragePolicy,
     pendingDeliveryStatusV1ToPersistedFields,
     PendingRequestedActionV1Schema,
@@ -441,12 +443,14 @@ async function materializeNextPendingMessageInTx(
                     providerAction: true,
                     status: true,
                     deliveryState: true,
+                    deliveryBlockedReason: true,
                     createdAt: true,
                     updatedAt: true,
                 },
             });
 
-            const queueHead = queuedPending[0];
+            // FIFO head: a blocked row the agent may already have no longer holds the rows behind it.
+            const queueHead = queuedPending.find((row) => doesPendingDeliveryHoldLaterRowsV1(normalizePendingDeliveryStatusV1(row)));
             const exactActionCandidate = queuedPending.find((row) => {
                 if (row.deliveryState !== null) return false;
                 const action = PendingRequestedActionV1Schema.safeParse(row.requestedAction);

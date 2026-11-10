@@ -8,7 +8,8 @@ describe('session protocol capability payload', () => {
             capabilities: {
                 session: {
                     runtimeActivity: { protocolVersion: 2 },
-                    pendingInput: { protocolVersion: 2 },
+                    // v3: a provider-proven undelivered row can return to its place in line.
+                    pendingInput: { protocolVersion: 3 },
                 },
             },
         });
