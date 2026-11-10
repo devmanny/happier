@@ -30,6 +30,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case agent(id: String, name: String?, emoji: String?)
         /// One session: starting the task sends it a message there. `title` is a display hint.
         case session(id: String, title: String?)
+        /// Nobody, as read: the stored assignee is missing, null or of a kind this build doesn't know.
+        /// The task is still shown so it can be assigned; nothing starts it.
+        case unassigned
 
         public static func agent(_ profile: AgentProfile) -> Assignee {
             .agent(id: profile.id, name: profile.name, emoji: profile.emoji)
@@ -52,15 +55,17 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             // The name only: the emoji is kept in the task for the agent's identity, not shown.
             case .agent(_, let name, _): name ?? ""
             case .session(let id, let title): title?.isEmpty == false ? title! : id
+            case .unassigned: String(localized: "Unassigned")
             }
         }
 
-        /// Groups: you, then agents, then sessions.
+        /// Groups: you, then agents, then sessions, then the tasks nobody has.
         var groupKey: String {
             switch self {
             case .user: ""
             case .agent(let id, _, _): "agent:\(id)"
             case .session(let id, _): "session:\(id)"
+            case .unassigned: "unassigned"
             }
         }
 
@@ -69,6 +74,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             case .user: 0
             case .agent: 1
             case .session: 2
+            case .unassigned: 3
             }
         }
 
@@ -85,8 +91,10 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             }
         }
 
-        var json: JSONValue {
+        /// Nil for `.unassigned`: there is nobody to write.
+        var json: JSONValue? {
             switch self {
+            case .unassigned: return nil
             case .user: return ["kind": "user"]
             case .agent(let id, let name, let emoji):
                 var object: [String: JSONValue] = ["kind": "agent", "agentId": .string(id)]
@@ -265,12 +273,11 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
     init?(json: JSONValue) {
         guard json["v"]?.intValue == 1, let id = json["id"]?.stringValue, !id.isEmpty,
               let title = json["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
-              let status = json["status"]?.stringValue.flatMap(Status.init(rawValue:)),
-              let assignee = Assignee(json: json["assignee"]) else { return nil }
+              let status = json["status"]?.stringValue.flatMap(Status.init(rawValue:)) else { return nil }
         self.id = id
         self.title = title
         self.description = json["description"]?.stringValue
-        self.assignee = assignee
+        self.assignee = Assignee(json: json["assignee"]) ?? .unassigned
         self.status = status
         self.startAt = json["startAt"]?.doubleValue
         self.dueAt = json["dueAt"]?.doubleValue
@@ -294,18 +301,28 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         object["id"] = .string(id)
         object["title"] = .string(title)
         object["description"] = description.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
-        object["assignee"] = storedAssignee.flatMap { Assignee(json: $0) == assignee ? $0 : nil } ?? assignee.json
+        object["assignee"] = Self.written(assignee, stored: storedAssignee)
         object["status"] = .string(status.rawValue)
         object["startAt"] = startAt.map(JSONValue.number)
         object["dueAt"] = dueAt.map(JSONValue.number)
         object["machineId"] = machineId.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
         object["directory"] = directory.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
-        object["source"] = source.flatMap { source in storedSource.flatMap { Source(json: $0) == source ? $0 : nil } ?? source.json }
+        if let source {
+            if let stored = storedSource, Source(json: stored) == source { object["source"] = stored } else { object["source"] = source.json }
+        }
         object["threads"] = .array(threads.map(JSONValue.string))
         object["log"] = .array(log.map(\.json))
         object["createdAt"] = .number(createdAt)
         object["updatedAt"] = .number(updatedAt)
         return .object(object)
+    }
+
+    /// The assignee as written: the stored copy while it reads the same (a newer build's fields kept),
+    /// else the new one. Still unassigned, an object of a kind this build doesn't know is kept, and
+    /// a missing or null one is left out rather than written as null.
+    private static func written(_ assignee: Assignee, stored: JSONValue?) -> JSONValue? {
+        if let stored, assignee == .unassigned ? stored.objectValue != nil : Assignee(json: stored) == assignee { return stored }
+        return assignee.json
     }
 
     // MARK: Storage

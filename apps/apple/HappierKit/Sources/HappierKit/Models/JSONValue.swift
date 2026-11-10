@@ -95,8 +95,10 @@ public enum JSONValue: Sendable, Hashable, Codable {
     }
 }
 
+/// No `nil` literal: with one, `cond ? value : nil` and `x.flatMap { … ? $0 : nil }` quietly became
+/// JSON `null` instead of "no value", and tasks were written with `"assignee": null`. Write `.null`.
 extension JSONValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, ExpressibleByBooleanLiteral,
-    ExpressibleByDictionaryLiteral, ExpressibleByArrayLiteral, ExpressibleByNilLiteral, ExpressibleByFloatLiteral
+    ExpressibleByDictionaryLiteral, ExpressibleByArrayLiteral, ExpressibleByFloatLiteral
 {
     public init(stringLiteral value: String) { self = .string(value) }
     public init(integerLiteral value: Int) { self = .number(Double(value)) }
@@ -106,5 +108,4 @@ extension JSONValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, Ex
         self = .object(Dictionary(elements, uniquingKeysWith: { $1 }))
     }
     public init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
-    public init(nilLiteral: ()) { self = .null }
 }

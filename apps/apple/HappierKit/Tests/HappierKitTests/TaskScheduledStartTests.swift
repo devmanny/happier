@@ -92,7 +92,8 @@ import Testing
         let bare = Self.task(["assignee": ["kind": "session", "sessionId": "s2"]])
         #expect(bare.assignee == .session(id: "s2", title: nil))
         #expect(bare.json["assignee"] == ["kind": "session", "sessionId": "s2"])
-        #expect(AgentTask(json: Self.task().json.merging(["assignee": ["kind": "session"]])) == nil)
+        // A session without its id is nobody's: the task is kept, unassigned.
+        #expect(AgentTask(json: Self.task().json.merging(["assignee": ["kind": "session"]]))?.assignee == .unassigned)
         // Linked to the session it's for, so "This Session" shows it.
         #expect(titled.linkedSessions.first == AgentTask.LinkedSession(sessionId: "s1", reasons: [.assigned]))
     }

@@ -1090,6 +1090,8 @@ private struct TaskAssigneePicker: View {
 
     var body: some View {
         Picker("For", selection: $assignee) {
+            // A task nobody has reads so until it is given to someone.
+            if assignee == .unassigned { Text(assignee.label).tag(assignee) }
             Text(name(.user, String(localized: "Me"))).tag(AgentTask.Assignee.user)
             ForEach(agents) { profile in
                 let tag = assignee.agentId == profile.id ? assignee : AgentTask.Assignee.agent(profile)

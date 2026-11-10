@@ -46,7 +46,7 @@ import Testing
 @Suite struct JSONValueParseTests {
     @Test func preservesBooleansNumbersAndNesting() throws {
         let value = try JSONValue.parse(#"{"a":true,"b":0,"c":1,"d":1.5,"e":null,"f":["x",false],"g":{"h":"ñ🚀"}}"#)
-        #expect(value == ["a": true, "b": 0, "c": 1, "d": 1.5, "e": nil, "f": ["x", false], "g": ["h": "ñ🚀"]])
+        #expect(value == ["a": true, "b": 0, "c": 1, "d": 1.5, "e": .null, "f": ["x", false], "g": ["h": "ñ🚀"]])
     }
 
     @Test func parsesTopLevelScalars() throws {

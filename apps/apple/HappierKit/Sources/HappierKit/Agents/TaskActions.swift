@@ -56,7 +56,8 @@ extension AgentTask {
         let worksHere = here.map { id in
             assignee.sessionId == id || threads.contains(id) || occurrences.contains { $0.status == .running && $0.sessionId == id }
         } ?? false
-        let canStart = assignee != .user && isOpen && running == nil
+        // Only an agent or a session works it: not you, and not a task nobody has yet.
+        let canStart = (assignee.agentId != nil || assignee.sessionId != nil) && isOpen && running == nil
         return Actions(
             offersThisSession: here.map { !isLinked(to: $0) } ?? false,
             worksHere: worksHere,

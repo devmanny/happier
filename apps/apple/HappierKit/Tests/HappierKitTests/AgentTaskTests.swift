@@ -44,6 +44,55 @@ import Testing
         #expect(AgentTask.kvKey(id: "ABC") == "task/abc")
     }
 
+    @Test func reassigningOrChangingTheSourceOfAStoredTaskWritesTheNewValue() throws {
+        // Read from storage, as the app does: what was stored is kept only while it is unchanged.
+        let sealed = try Self.task(["assignee": ["kind": "user"], "source": ["kind": "chat", "label": "WhatsApp"]]).sealed(machineKey: Self.machineKey)
+        let stored = try #require(AgentTask.open(sealed, machineKey: Self.machineKey))
+        let tomas = AgentTask.Assignee.agent(id: "a-tomas", name: "Tomas", emoji: "🧭")
+        let edited = stored.applying(.assigning(tomas), now: 5)
+            .applying(AgentTask.Update(source: .some(AgentTask.Source(kind: "email", label: "Correo"))), now: 6)
+        #expect(edited.json["assignee"] == ["kind": "agent", "agentId": "a-tomas", "name": "Tomas", "emoji": "🧭"])
+        #expect(edited.json["source"] == ["kind": "email", "label": "Correo"])
+        let reopened = try #require(AgentTask.open(try edited.sealed(machineKey: Self.machineKey), machineKey: Self.machineKey))
+        #expect(reopened.assignee == tomas)
+        #expect(reopened.source?.label == "Correo")
+    }
+
+    @Test func aClearedTextFieldIsLeftOutNotWrittenAsNull() {
+        // The CLI's schema drops a task with a null optional field: an empty field is no field.
+        let cleared = Self.task(["description": "Antes", "directory": "/repo", "machineId": "m1"])
+            .applying(AgentTask.Update(description: .some(""), machineId: .some(""), directory: .some("")), now: 5)
+        #expect(cleared.json["description"] == nil)
+        #expect(cleared.json["machineId"] == nil)
+        #expect(cleared.json["directory"] == nil)
+    }
+
+    @Test func aTaskNobodyHasIsShownUnassignedAndAssignedFromThereWithoutWritingNull() throws {
+        // Missing, null (written by the 7 Nov builds on every reassignment) or a kind this build doesn't know.
+        let unknownKind: JSONValue = ["kind": "team", "teamId": "x"]
+        for (stored, keptAs) in [(JSONValue.null, nil), (nil, nil), (unknownKind, unknownKind)] as [(JSONValue?, JSONValue?)] {
+            var json = Self.task().json.objectValue!
+            json["assignee"] = stored
+            let response: JSONValue = ["items": [["key": "task/t1", "value": .string(try AccountScopedBlob.seal(.object(json), kind: .agentTask, machineKey: Self.machineKey)), "version": 4]]]
+            let task = try #require(AgentTask.records(fromList: response, machineKey: Self.machineKey).first)
+            #expect(task.assignee == .unassigned)
+            #expect(task.assignee.label == "Unassigned")
+            #expect(!task.availableActions(from: .list).offersStartNow)
+            #expect(task.availableActions(from: .list).offers(.user))
+            // Edited but still nobody's: never written as null; a newer build's assignee is kept.
+            #expect(task.applying(AgentTask.Update(comment: "¿De quién es?"), now: 5).json["assignee"] == keptAs)
+            let tomas = AgentTask.Assignee.agent(id: "a-tomas", name: "Tomas", emoji: "🧭")
+            let assigned = task.applying(.assigning(tomas), now: 6)
+            #expect(assigned.json["assignee"] == ["kind": "agent", "agentId": "a-tomas", "name": "Tomas", "emoji": "🧭"])
+            #expect(assigned.status == .todo)
+        }
+        // Grouped last, after you, the agents and the sessions.
+        var nobodys = Self.task(["id": "t2"])
+        nobodys.assignee = .unassigned
+        let sections = AgentTask.sections([nobodys, Self.task()], scope: .all, openSessionId: nil, status: .open)
+        #expect(sections.map(\.kind) == [.assignee(Self.task().assignee), .assignee(.unassigned)])
+    }
+
     @Test func rejectsATaskWithoutTitleOrWithAnUnknownStatus() {
         #expect(AgentTask(json: Self.task().json.merging(["title": " "])) == nil)
         #expect(AgentTask(json: Self.task().json.merging(["status": "later"])) == nil)

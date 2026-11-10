@@ -98,7 +98,7 @@ import Testing
         #expect(controls.effort == "high")
         #expect(controls.permissionMode == .yolo)
         #expect(SessionControls(metadata: ["permissionMode": "acceptEdits"], agentId: "claude").permissionMode == .safeYolo)
-        #expect(SessionControls(metadata: ["modelOverrideV1": ["v": 1, "updatedAt": 3, "modelId": nil]], agentId: "claude").selectedModelId == "default")
+        #expect(SessionControls(metadata: ["modelOverrideV1": ["v": 1, "updatedAt": 3, "modelId": .null]], agentId: "claude").selectedModelId == "default")
     }
 
     @Test func modelWriteForcesNewerTimestamp() {

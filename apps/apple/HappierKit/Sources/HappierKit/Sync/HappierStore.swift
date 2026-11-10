@@ -713,7 +713,7 @@ public final class HappierStore {
         case .agent(let id, _, _):
             guard let agent = agentProfile(id: id), let machineId = task.machineId, let directory = task.directory else { return nil }
             return (machineId, directory, agent.providerId)
-        case .user:
+        case .user, .unassigned:
             return nil
         }
     }

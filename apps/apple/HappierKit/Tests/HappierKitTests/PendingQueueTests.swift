@@ -41,7 +41,7 @@ import Testing
         let record: JSONValue = ["role": "user", "content": ["type": "text", "text": "raw"], "meta": ["displayText": "shown"]]
         let rows: [JSONValue] = [
             ["localId": "b", "content": ["t": "plain", "v": record], "status": "queued", "position": 2, "createdAt": 10, "updatedAt": 10,
-             "deliveryStatus": ["status": "queued"], "discardedAt": nil],
+             "deliveryStatus": ["status": "queued"], "discardedAt": .null],
             ["localId": "a", "content": ["t": "plain", "v": record], "status": "queued", "position": 1, "createdAt": 20, "updatedAt": 20,
              "deliveryStatus": ["status": "blocked", "reason": "steering_unavailable"], "deliveryBlockedReason": "steering_unavailable"],
             ["localId": "d", "content": ["t": "plain", "v": record], "status": "discarded", "position": 0, "createdAt": 5, "updatedAt": 30,
