@@ -38,6 +38,7 @@ describe('actionToolExposure', () => {
       'agent.threads.read': 'mis_hilos',
       'task.create': 'tarea_crear',
       'task.update': 'tarea_actualizar',
+      'room.read': 'sala_leer',
     } as const;
     for (const [id, tool] of Object.entries(names)) {
       const spec = getActionSpec(id as keyof typeof names);

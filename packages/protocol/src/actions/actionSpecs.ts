@@ -288,6 +288,13 @@ const TaskUpdateInputSchema = z.object({
   directory: z.string().optional(),
 }).passthrough();
 
+const RoomReadInputSchema = z.object({
+  sessionId: z.string().min(1),
+  roomId: z.string().min(1),
+  fromSeq: z.number().int().positive().optional(),
+  toSeq: z.number().int().positive().optional(),
+}).passthrough();
+
 const AgentMemoryReadInputSchema = z.object({
   sessionId: z.string().min(1),
   kind: z.enum(['now', 'journal', 'notes', 'note']),
@@ -2720,6 +2727,39 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: TaskUpdateInputSchema,
+  },
+  {
+    id: 'room.read',
+    title: 'Read a room',
+    description: 'Read the messages of a room (sala) you are a member of, with who said each one, oldest first. Without fromSeq/toSeq it returns the latest page; pass toSeq (and fromSeq) to read older messages, e.g. the part of the backlog you only got summarized.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'sala_leer' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","roomId":"...","fromSeq":1,"toSeq":40}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Read a room',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'roomId', title: 'Room id', widget: 'text', required: true },
+        { path: 'fromSeq', title: 'From message #', widget: 'text' },
+        { path: 'toSeq', title: 'To message #', widget: 'text' },
+      ],
+    },
+    inputSchema: RoomReadInputSchema,
   },
   {
     id: 'agent.memory.read',

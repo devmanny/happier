@@ -9,6 +9,9 @@ import { resolveServerHttpBaseUrl } from '@/api/client/serverHttpBaseUrl';
  */
 export const ACCOUNT_KV_LIST_MAX_ROWS = 1000;
 
+/** Most keys one `POST /v1/kv/bulk` reads (the route's `keys` maximum). */
+export const ACCOUNT_KV_BULK_GET_MAX_KEYS = 100;
+
 /** Same budget as the other account-scoped document calls (`/v2/account/settings`). */
 const KV_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -18,6 +21,11 @@ type KvRow = Readonly<{ key: string; value: string | null; version: number }>;
 export type AccountKvTransport = Readonly<{
   /** Live rows under `prefix` (deleted rows, whose value is null, are left out). */
   list: (prefix: string) => Promise<ReadonlyArray<Readonly<{ key: string; value: string; version: number }>>>;
+  /**
+   * The live rows among `keys` (1 to `ACCOUNT_KV_BULK_GET_MAX_KEYS` exact keys), in no particular
+   * order; missing and deleted keys are left out.
+   */
+  bulkGet: (keys: readonly string[]) => Promise<ReadonlyArray<Readonly<{ key: string; value: string; version: number }>>>;
   mutate: (mutations: ReadonlyArray<Readonly<{ key: string; value: string | null; version: number }>>) => Promise<
     | Readonly<{ ok: true; results: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
     | Readonly<{ ok: false; current: ReadonlyArray<Readonly<{ key: string; version: number }>> }>
@@ -40,6 +48,21 @@ export function createAccountKvHttpTransport(params: Readonly<{ token: string; b
         throw new Error(`Failed to list /v1/kv (${response.status})`);
       }
       return (response.data.items as KvRow[])
+        .filter((item): item is Readonly<{ key: string; value: string; version: number }> => typeof item.value === 'string' && item.value.length > 0);
+    },
+    async bulkGet(keys) {
+      if (keys.length < 1 || keys.length > ACCOUNT_KV_BULK_GET_MAX_KEYS) {
+        throw new RangeError(`/v1/kv/bulk reads 1 to ${ACCOUNT_KV_BULK_GET_MAX_KEYS} keys, not ${keys.length}`);
+      }
+      const response = await axios.post(`${baseUrl}/v1/kv/bulk`, { keys }, {
+        headers,
+        timeout: KV_REQUEST_TIMEOUT_MS,
+        validateStatus: () => true,
+      });
+      if (response.status !== 200 || !Array.isArray(response.data?.values)) {
+        throw new Error(`Failed to read /v1/kv/bulk (${response.status})`);
+      }
+      return (response.data.values as KvRow[])
         .filter((item): item is Readonly<{ key: string; value: string; version: number }> => typeof item.value === 'string' && item.value.length > 0);
     },
     async mutate(mutations) {

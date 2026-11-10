@@ -21,7 +21,8 @@ export type AccountScopedBlobKind =
   | 'agent_presence'
   | 'agent_memory'
   | 'agent_task'
-  | 'device_diagnostics';
+  | 'device_diagnostics'
+  | 'agent_room';
 
 export type AccountScopedCryptoMaterial =
   | Readonly<{ type: 'legacy'; secret: Uint8Array }>
@@ -59,6 +60,7 @@ const ACCOUNT_SCOPED_KIND_BYTE: Record<AccountScopedBlobKind, number> = {
   agent_memory: 13,
   agent_task: 14,
   device_diagnostics: 15,
+  agent_room: 16,
 };
 
 const LEGACY_READ_ONLY_ACCOUNT_SCOPED_BLOB_KINDS = new Set<AccountScopedBlobKind>([

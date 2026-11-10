@@ -527,6 +527,16 @@ describe('createActionExecutor (session control)', () => {
     ]);
   });
 
+  it('routes the room tool to the session runner with its input', async () => {
+    const agentRooms = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentRooms });
+    const result = await executor.execute('room.read' as any, { sessionId: 's1', roomId: 'r1', fromSeq: 3 }, { surface: 'session_agent' as any });
+    expect(result).toEqual({ ok: true, result: { ok: true } });
+    expect(agentRooms.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'read', input: { roomId: 'r1', fromSeq: 3 } },
+    ]);
+  });
+
   it('asks the current session who else is here, passing declared resources', async () => {
     const sessionPresenceWho = vi.fn(async () => ({ others: [] }));
     const executor = createExecutor({ sessionPresenceWho });

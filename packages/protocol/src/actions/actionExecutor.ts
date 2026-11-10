@@ -306,6 +306,12 @@ export type ActionExecutorDeps = Readonly<{
     operation: 'create' | 'update';
     input: Record<string, unknown>;
   }>) => Promise<unknown>;
+  /** The room tools, run in the calling session's runner (it knows which agent is asking). */
+  agentRooms?: (args: Readonly<{
+    sessionId: string;
+    operation: 'read';
+    input: Record<string, unknown>;
+  }>) => Promise<unknown>;
   /** The agent memory tools; like presence, they run in the session's own runner. */
   agentMemory?: (args: Readonly<{
     sessionId: string;
@@ -2418,6 +2424,16 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             return { ok: false, errorCode: 'unsupported_action', error: `unsupported_action:${actionId}` };
           }
           return { ok: true, result: await deps.agentTasks({ sessionId, operation: taskOperation, input }) };
+        }
+
+        if (actionId === 'room.read') {
+          const { sessionId: rawSessionId, ...input } = parsed.data as Record<string, unknown>;
+          const sessionId = normalizeId(rawSessionId);
+          if (!sessionId) return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+          if (!deps.agentRooms) {
+            return { ok: false, errorCode: 'unsupported_action', error: `unsupported_action:${actionId}` };
+          }
+          return { ok: true, result: await deps.agentRooms({ sessionId, operation: 'read', input }) };
         }
 
         const agentMemoryOperation = ({

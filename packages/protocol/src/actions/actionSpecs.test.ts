@@ -33,6 +33,7 @@ const RESULT_REQUIRED_BLOCKING_ACTION_IDS = [
   'agent.threads.read',
   'task.create',
   'task.update',
+  'room.read',
   'session.goal.clear',
   'session.terminalComposer.clear',
   'session.pendingInput.interruptAndRun',

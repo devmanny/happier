@@ -13,6 +13,7 @@ public enum AccountScopedBlob {
         case agentMemory = 13
         case agentTask = 14
         case deviceDiagnostics = 15
+        case agentRoom = 16
 
         var name: String {
             switch self {
@@ -24,6 +25,7 @@ public enum AccountScopedBlob {
             case .agentMemory: "agent_memory"
             case .agentTask: "agent_task"
             case .deviceDiagnostics: "device_diagnostics"
+            case .agentRoom: "agent_room"
             }
         }
     }

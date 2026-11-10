@@ -46,6 +46,7 @@ export const ACTION_IDS = [
   'agent.threads.read',
   'task.create',
   'task.update',
+  'room.read',
   'session.terminalComposer.clear',
   'session.pendingInput.interruptAndRun',
   'session.usageLimit.waitResume.enable',

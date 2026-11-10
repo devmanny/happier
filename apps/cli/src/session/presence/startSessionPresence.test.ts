@@ -16,6 +16,7 @@ function createTransport() {
   const writes: Array<{ key: string; value: string | null; version: number }> = [];
   const transport: AccountKvTransport = {
     list: async () => [],
+    bulkGet: async () => [],
     mutate: async (mutations) => {
       writes.push(...mutations);
       return { ok: true, results: mutations.map((m) => ({ key: m.key, version: m.version + 1 })) };
