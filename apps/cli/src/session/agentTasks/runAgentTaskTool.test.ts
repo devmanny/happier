@@ -33,9 +33,35 @@ describe('runAgentTaskTool', () => {
     expect(read('t1')).toMatchObject({
       title: 'Comprar el cable USB-C', assignee: { kind: 'user' }, status: 'todo',
       dueAt: Date.parse('2026-11-10T18:00:00-06:00'),
-      source: { kind: 'chat', label: 'WhatsApp · Wendoline', url: 'https://wa.me/msg/1' },
-      createdBy: { kind: 'agent', agentId: 'a-mateo', sessionId: 's1' }, threads: ['s1'],
+      source: { kind: 'chat', label: 'WhatsApp · Wendoline', url: 'https://wa.me/msg/1', sessionId: 's1' },
+      createdBy: { kind: 'agent', agentId: 'a-mateo', sessionId: 's1' }, threads: [],
     });
+  });
+
+  it('links the creating session as a thread only when it works the task itself', async () => {
+    const { store, read } = setup();
+    const agenda = { agent: null, sessionId: 's9' };
+    await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Login' } });
+    await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Revisar', assignee: 'a-mateo' } });
+    await runAgentTaskTool({ store, caller: mateo, operation: 'create', input: { title: 'Pruebas', assignee: 'a-leo' } });
+    await runAgentTaskTool({ store, caller: agenda, operation: 'create', input: { title: 'Dentista', assignee: 'user' } });
+    await runAgentTaskTool({ store, caller: agenda, operation: 'create', input: { title: 'Resumen', assignee: 'me' } });
+    expect(['t1', 't2', 't3', 't4', 't5'].map((id) => read(id)?.threads)).toEqual([['s1'], ['s1'], [], [], ['s9']]);
+    // The session it came from stays linked as its origin, not as a session that worked it.
+    expect(read('t3')?.source).toEqual({ kind: 'session', sessionId: 's1' });
+    expect(read('t4')?.source).toEqual({ kind: 'session', sessionId: 's9' });
+  });
+
+  it('links an updating session only when it works the task', async () => {
+    const { store, read } = setup();
+    const agenda = { agent: null, sessionId: 's9' };
+    await runAgentTaskTool({ store, caller: agenda, operation: 'create', input: { title: 'Dentista', assignee: 'user' } });
+    await runAgentTaskTool({ store, caller: agenda, operation: 'update', input: { taskId: 't1', status: 'blocked', comment: 'Falta la dirección' } });
+    await runAgentTaskTool({ store, caller: mateo, operation: 'update', input: { taskId: 't1', comment: 'Le escribí al consultorio' } });
+    expect(read('t1')).toMatchObject({ status: 'blocked', threads: [] });
+    // Taking it over ("me") is working it.
+    await runAgentTaskTool({ store, caller: mateo, operation: 'update', input: { taskId: 't1', assignee: 'me', status: 'in_progress' } });
+    expect(read('t1')?.threads).toEqual(['s1']);
   });
 
   it('assigns "me" to the calling agent and refuses it for a session without one', async () => {

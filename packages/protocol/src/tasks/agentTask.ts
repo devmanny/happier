@@ -65,7 +65,10 @@ export const AgentTaskV1Schema = z.object({
   machineId: z.string().optional(),
   directory: z.string().optional(),
   source: SourceSchema.optional(),
-  /** Sessions that worked on it, on any machine. */
+  /**
+   * Sessions that worked on it, on any machine: never just the session that created or updated it
+   * for someone else (that one is `createdBy`, the log and `source.sessionId`).
+   */
   threads: z.array(z.string()),
   /** Progress comments and status changes, oldest first. */
   log: z.array(z.object({
@@ -127,7 +130,7 @@ export type AgentTaskUpdate = Readonly<{
   source?: AgentTaskSource | null;
   comment?: string;
   by?: AgentTaskActor;
-  /** The session doing the update, linked to the task once. */
+  /** The session doing the update, linked to the task once: only when it works the task. */
   threadSessionId?: string;
   permissionMode?: AgentTaskPermissionIntent;
   /** Archives (true) or restores (false) the task. */
@@ -179,16 +182,18 @@ export function agentTaskStatusLabel(status: AgentTaskStatus): string {
   return STATUS_LABELS[status];
 }
 
-/**
- * A thread's open tasks in a few lines, overdue and soonest first: its board at each turn start.
- * A thread works the tasks assigned to its agent and those assigned to the session itself.
- */
-export function buildAgentTaskBoard(params: Readonly<{ agentId?: string | null; sessionId?: string | null; tasks: readonly AgentTaskV1[]; now: number }>): string {
-  const isMine = (task: AgentTaskV1) =>
-    (task.assignee.kind === 'agent' && !!params.agentId && task.assignee.agentId === params.agentId)
-    || (task.assignee.kind === 'session' && !!params.sessionId && task.assignee.sessionId === params.sessionId);
+export type AgentTaskWorker = Readonly<{ agentId?: string | null; sessionId?: string | null }>;
+
+/** A thread works the tasks assigned to its agent and those assigned to the session itself. */
+export function isAgentTaskWorkedBy(assignee: AgentTaskAssignee, worker: AgentTaskWorker): boolean {
+  return (assignee.kind === 'agent' && !!worker.agentId && assignee.agentId === worker.agentId)
+    || (assignee.kind === 'session' && !!worker.sessionId && assignee.sessionId === worker.sessionId);
+}
+
+/** A thread's open tasks in a few lines, overdue and soonest first: its board at each turn start. */
+export function buildAgentTaskBoard(params: AgentTaskWorker & Readonly<{ tasks: readonly AgentTaskV1[]; now: number }>): string {
   return params.tasks
-    .filter((task) => isMine(task) && isAgentTaskOpen(task))
+    .filter((task) => isAgentTaskWorkedBy(task.assignee, params) && isAgentTaskOpen(task))
     .sort((a, b) => (a.dueAt ?? Number.POSITIVE_INFINITY) - (b.dueAt ?? Number.POSITIVE_INFINITY) || a.createdAt - b.createdAt)
     .map((task) => [task.id, task.title, STATUS_LABELS[task.status], describeTaskDue(task, params.now), task.directory]
       .filter(Boolean).join(' · '))

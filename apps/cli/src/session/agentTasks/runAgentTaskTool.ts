@@ -1,6 +1,7 @@
 import {
   AGENT_TASK_STATUSES,
   applyAgentTaskUpdate,
+  isAgentTaskWorkedBy,
   type AgentIdentityV1,
   type AgentTaskActor,
   type AgentTaskAssignee,
@@ -64,6 +65,11 @@ function readSource(input: Record<string, unknown>): AgentTaskSource | undefined
   return { kind: sourceKind, ...(label ? { label } : {}), ...(url ? { url } : {}) };
 }
 
+/** The caller works the task (and is linked to it as a thread) when it is for its agent or for the session itself. */
+function works(caller: AgentTaskCaller, assignee: AgentTaskAssignee): boolean {
+  return isAgentTaskWorkedBy(assignee, { agentId: caller.agent?.id, sessionId: caller.sessionId });
+}
+
 function actor(caller: AgentTaskCaller): AgentTaskActor {
   return caller.agent
     ? { kind: 'agent', agentId: caller.agent.id, sessionId: caller.sessionId }
@@ -89,19 +95,20 @@ export async function runAgentTaskTool(params: Readonly<{
       const description = readString(input, 'description');
       const directory = readString(input, 'directory');
       const machineId = readString(input, 'machineId');
-      const source = readSource(input);
+      // It came from this session, whatever else it came from (a chat, an email).
+      const source: AgentTaskSource = { ...(readSource(input) ?? { kind: 'session' }), sessionId: caller.sessionId };
       const task = await store.create({
         title,
         assignee,
         status: readStatus(input) ?? 'todo',
-        threads: [caller.sessionId],
+        threads: works(caller, assignee) ? [caller.sessionId] : [],
         createdBy: actor(caller),
+        source,
         ...(description ? { description } : {}),
         ...(typeof startAt === 'number' ? { startAt } : {}),
         ...(typeof dueAt === 'number' ? { dueAt } : {}),
         ...(directory ? { directory } : {}),
         ...(machineId ? { machineId } : {}),
-        ...(source ? { source } : {}),
       });
       return { ok: true, taskId: task.id, assignee: task.assignee, status: task.status };
     }
@@ -114,6 +121,8 @@ export async function runAgentTaskTool(params: Readonly<{
     const status = readStatus(input);
     const title = readString(input, 'title');
     const comment = readString(input, 'comment');
+    const current = await store.get(taskId);
+    if (!current) return { ok: false, error: `task ${taskId} not found` };
     const update: AgentTaskUpdate = {
       ...(status ? { status } : {}),
       ...(title ? { title } : {}),
@@ -124,10 +133,8 @@ export async function runAgentTaskTool(params: Readonly<{
       ...(typeof input.description === 'string' ? { description: input.description.trim() || null } : {}),
       ...(typeof input.directory === 'string' ? { directory: input.directory.trim() || null } : {}),
       by: actor(caller),
-      threadSessionId: caller.sessionId,
+      ...(works(caller, assignee ?? current.task.assignee) ? { threadSessionId: caller.sessionId } : {}),
     };
-    const current = await store.get(taskId);
-    if (!current) return { ok: false, error: `task ${taskId} not found` };
 
     // A repeating task stays open for its next occurrence: only the user closes or pauses it.
     // An agent's "done" is the result of the occurrence its thread is working.

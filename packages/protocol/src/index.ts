@@ -3793,6 +3793,7 @@ export {
   buildAgentTaskBoard,
   describeTaskDue,
   isAgentTaskOpen,
+  isAgentTaskWorkedBy,
   parseAgentTaskV1,
   taskDueNotices,
   taskPermissionIntent,
@@ -3805,6 +3806,7 @@ export {
   type AgentTaskStatus,
   type AgentTaskUpdate,
   type AgentTaskV1,
+  type AgentTaskWorker,
 } from './tasks/agentTask.js';
 export {
   TASK_OCCURRENCE_STATUSES,

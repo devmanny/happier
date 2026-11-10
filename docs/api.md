@@ -111,8 +111,12 @@ prefixes:
 - `task/<uuid>` — a task for the user or one of their agents, kind `agent_task`
   (`packages/protocol/src/tasks/agentTask.ts`): title, description, assignee, status (todo,
   in_progress, blocked, in_review, done), start/due dates, optional machine and folder, source with
-  link, linked threads and a comment/status log. Any thread (`tarea_crear`, `tarea_actualizar`) or
-  the native app edits it with CAS, re-applying the change on a version conflict. An agent thread's
+  link, the threads that worked it and a comment/status log. Any thread (`tarea_crear`,
+  `tarea_actualizar`) or the native app edits it with CAS, re-applying the change on a version
+  conflict. A thread joins `threads` only when it works the task (assigned to its agent or to the
+  session itself). A session that creates a task for the user or another agent stays in
+  `createdBy` and `source.sessionId`, one that updates it in the log, because the native app counts every session in
+  `threads` as a task session and leaves it out of the usual list. An agent thread's
   provider prompt ends with its open tasks (its board). Each daemon checks every 5 minutes for the
   user's open tasks due within a day or overdue; it records `notifiedV1` with a versioned write
   before pushing, so only one machine notifies.
