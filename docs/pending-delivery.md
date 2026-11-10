@@ -260,9 +260,21 @@ megabytes). Only rows between the row's creation and this runtime's start count:
   without its consumption, an unreadable transcript, or a predecessor host that may
   still be alive leave the row blocked for its owner.
 
-An ordinary row settles only after every queued row ahead of it; exact actions
-settle out of order, as the server allows. Other providers and runtimes leave
-inherited rows to the owner. RN and the native app present them as possibly
+Sending a row again uses Pending Input v3 when the server advertises it
+(`capabilities.session.pendingInput.protocolVersion >= 3`): the current runner emits
+`pending-delivery-not-received-v1`, and the server, by that runner's publisher
+authority only, returns the exact row to its place in line (same `localId` and
+position, unblocked, no provider action) for one ordinary delivery. Older servers
+only offer `delivery/send-as-new`, which queues a copy at the end.
+
+Automatic delivery stays FIFO, except that a blocked row the agent may already
+have (`doesPendingDeliveryHoldLaterRowsV1`) no longer holds the rows behind it on a
+v3 server, neither for materialization nor for accepted settlement; pre-effect
+blocks still hold. Older servers hold later rows behind it until it is resolved.
+
+An ordinary row settles only after every queued row ahead of it that still holds;
+exact actions settle out of order, as the server allows. Other providers and
+runtimes leave inherited rows to the owner. RN and the native app present them as possibly
 delivered and resolve them through the same server actions: send again as a new
 message (`delivery/send-as-new`) or remove (`delivery/dismiss`). The server refuses
 ordinary retry, edit, and delete for them.

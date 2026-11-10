@@ -12,6 +12,7 @@ import {
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
     listPendingQueueV2RowsFromServer,
     markPendingQueueV2DeliveryHandled,
+    requeueNotReceivedPendingQueueV2Delivery,
     sendPendingQueueV2DeliveryAsNew,
     materializeNextPendingQueueV2Message,
     materializeNextPendingQueueV2MessageOnReleasedServer,
@@ -1807,5 +1808,25 @@ describe('pendingQueueV2Transport', () => {
                 headers: expect.objectContaining({ Authorization: 'Bearer token' }),
             }),
         );
+    });
+
+    it('returns a provider-proven undelivered row to its place through the current runner socket', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn()
+                .mockResolvedValueOnce({ ok: true, didRequeue: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 })
+                .mockResolvedValueOnce({ ok: false, error: 'forbidden' }),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(requeueNotReceivedPendingQueueV2Delivery({ socket: socket as any, sessionId: 'session-1', localId: 'inherited-1' }))
+            .resolves.toEqual({
+                didRequeue: true,
+                pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 },
+            });
+        expect(socket.emitWithAck).toHaveBeenCalledWith('pending-delivery-not-received-v1', { v: 1, sessionId: 'session-1', localId: 'inherited-1' });
+        // A runner that lost publisher authority learns it rather than assuming the row moved.
+        await expect(requeueNotReceivedPendingQueueV2Delivery({ socket: socket as any, sessionId: 'session-1', localId: 'inherited-1' }))
+            .rejects.toThrow('forbidden');
     });
 });

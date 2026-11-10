@@ -16,7 +16,7 @@ import { normalizeClaudeUnifiedPromptIdentityText } from './promptIdentity';
  * The server marks every `delivering` row uncertain when a new runner registers, because only the
  * provider can know whether it received the prompt. For Claude that evidence is the transcript the
  * predecessor wrote: exactly one consumption of the exact prompt settles the row as accepted; no
- * consumption at all, once the predecessor's terminal host is confirmed dead, sends it again once.
+ * consumption at all, once the predecessor's terminal host is gone, delivers it once more.
  * Anything that could be another prompt, or a predecessor that may still act, stays with the owner.
  */
 
@@ -30,7 +30,7 @@ export type ClaudeInheritedPendingDeliveryDecision = Readonly<{
 
 type InheritedDeliveryRecoveryClient = Pick<
   SessionClientPort,
-  'listInheritedUncertainPendingDeliveries' | 'settleInheritedPendingDeliveryAccepted' | 'resendInheritedPendingDeliveryAsNew'
+  'listInheritedUncertainPendingDeliveries' | 'settleInheritedPendingDeliveryAccepted' | 'redeliverInheritedPendingDelivery'
 >;
 
 export function classifyClaudeInheritedPendingDelivery(params: Readonly<{
@@ -180,7 +180,7 @@ export async function recoverClaudeUnifiedInheritedPendingDeliveries(params: Rea
           outcome = await params.client.settleInheritedPendingDeliveryAccepted?.(row.localId) === true ? 'settled' : 'failed';
         }
       } else if (verdict === 'not_received') {
-        outcome = await params.client.resendInheritedPendingDeliveryAsNew?.(row.localId) === true ? 'resent' : 'failed';
+        outcome = await params.client.redeliverInheritedPendingDelivery?.(row.localId) === true ? 'resent' : 'failed';
       }
     } catch (error) {
       outcome = 'failed';

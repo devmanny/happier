@@ -104,7 +104,9 @@ const {
   resolveAcceptedPendingQueueV2DeliveryMock,
   listPendingQueueV2RowsFromServerMock,
   sendPendingQueueV2DeliveryAsNewMock,
+  requeueNotReceivedPendingQueueV2DeliveryMock,
 } = vi.hoisted(() => ({
+  requeueNotReceivedPendingQueueV2DeliveryMock: vi.fn(),
   listPendingQueueV2RowsFromServerMock: vi.fn(),
   sendPendingQueueV2DeliveryAsNewMock: vi.fn(),
   enqueuePendingQueueV2MessageViaHttpMock: vi.fn(),
@@ -137,6 +139,7 @@ vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
     resolveAcceptedPendingQueueV2Delivery: (...args: unknown[]) => resolveAcceptedPendingQueueV2DeliveryMock(...args),
     listPendingQueueV2RowsFromServer: (...args: unknown[]) => listPendingQueueV2RowsFromServerMock(...args),
     sendPendingQueueV2DeliveryAsNew: (...args: unknown[]) => sendPendingQueueV2DeliveryAsNewMock(...args),
+    requeueNotReceivedPendingQueueV2Delivery: (...args: unknown[]) => requeueNotReceivedPendingQueueV2DeliveryMock(...args),
   };
 });
 
@@ -1992,6 +1995,7 @@ describe('ApiSessionClient deliveries a replaced runner left uncertain', () => {
     vi.useRealTimers();
     listPendingQueueV2RowsFromServerMock.mockReset();
     sendPendingQueueV2DeliveryAsNewMock.mockReset();
+    requeueNotReceivedPendingQueueV2DeliveryMock.mockReset();
     resolveAcceptedPendingQueueV2DeliveryMock.mockReset();
   });
 
@@ -2044,7 +2048,7 @@ describe('ApiSessionClient deliveries a replaced runner left uncertain', () => {
     expect(client.hasPendingProviderInputAcceptance('noop-local')).toBe(false);
   });
 
-  it('sends a never-received inherited row again so its copy is delivered without waiting', async () => {
+  it('on a server before Pending Input v3, sends a never-received inherited row again as a new message', async () => {
     const client = createClient();
     (client as any).applyPendingQueueState({ known: true, pendingCount: 1, pendingBlockedCount: 1, pendingVersion: 4 }, { emit: false });
     expect(client.shouldAttemptPendingMaterialization()).toBe(false);
@@ -2052,9 +2056,29 @@ describe('ApiSessionClient deliveries a replaced runner left uncertain', () => {
       pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 5 },
     });
 
-    await expect(client.resendInheritedPendingDeliveryAsNew('lost-local')).resolves.toBe(true);
+    await expect(client.redeliverInheritedPendingDelivery('lost-local')).resolves.toBe(true);
 
     expect(sendPendingQueueV2DeliveryAsNewMock).toHaveBeenCalledWith({ token: 'tok', sessionId: 's1', localId: 'lost-local' });
+    expect(requeueNotReceivedPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+    expect(client.shouldAttemptPendingMaterialization()).toBe(true);
+  });
+
+  it('on a Pending Input v3 server, returns a never-received inherited row to its own place in line', async () => {
+    const client = createClient();
+    (client as any).sessionSyncPendingInputServerContract = {
+      mode: 'session_sync_v2_pending_input_v1', runtimeActivity: 'v2', pendingInput: 'v1', pendingInputRequeuesNotReceived: true,
+      sessionConnectionEpoch: (client as any).sessionConnectionEpoch, socket: (client as any).socket,
+    };
+    (client as any).applyPendingQueueState({ known: true, pendingCount: 1, pendingBlockedCount: 1, pendingVersion: 4 }, { emit: false });
+    requeueNotReceivedPendingQueueV2DeliveryMock.mockResolvedValue({
+      didRequeue: true,
+      pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 5 },
+    });
+
+    await expect(client.redeliverInheritedPendingDelivery('lost-local')).resolves.toBe(true);
+
+    expect(requeueNotReceivedPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's1', localId: 'lost-local' }));
+    expect(sendPendingQueueV2DeliveryAsNewMock).not.toHaveBeenCalled();
     expect(client.shouldAttemptPendingMaterialization()).toBe(true);
   });
 });

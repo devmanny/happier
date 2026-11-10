@@ -181,8 +181,8 @@ export interface SessionClientPort {
   listInheritedUncertainPendingDeliveries?(): Promise<InheritedUncertainPendingDelivery[]>;
   /** Settles an inherited row the provider proved it accepted; true once the server committed it. */
   settleInheritedPendingDeliveryAccepted?(localId: string): Promise<boolean>;
-  /** Queues an inherited row the provider proved it never received again as a new message. */
-  resendInheritedPendingDeliveryAsNew?(localId: string): Promise<boolean>;
+  /** Delivers once more an inherited row the provider proved it never received. */
+  redeliverInheritedPendingDelivery?(localId: string): Promise<boolean>;
   blockPendingMessageDelivery?(params: Readonly<{
     localIds: readonly string[] | null | undefined;
     reason: PendingQueueDeliveryBlockedReason;

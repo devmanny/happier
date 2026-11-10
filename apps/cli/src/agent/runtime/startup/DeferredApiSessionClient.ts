@@ -45,7 +45,7 @@ export type DeferredApiSessionTarget = Readonly<{
   blockPendingMessageDelivery?: SessionClientPort['blockPendingMessageDelivery'];
   listInheritedUncertainPendingDeliveries?: SessionClientPort['listInheritedUncertainPendingDeliveries'];
   settleInheritedPendingDeliveryAccepted?: SessionClientPort['settleInheritedPendingDeliveryAccepted'];
-  resendInheritedPendingDeliveryAsNew?: SessionClientPort['resendInheritedPendingDeliveryAsNew'];
+  redeliverInheritedPendingDelivery?: SessionClientPort['redeliverInheritedPendingDelivery'];
   hasOnlyBlockedPendingWork?: SessionClientPort['hasOnlyBlockedPendingWork'];
   hasActiveCanonicalTurn?: () => boolean;
   fetchRecentTranscriptTextItemsForAcpImport?: (opts?: { take?: number }) => Promise<Array<{ role: 'user' | 'agent'; text: string }>>;
@@ -289,8 +289,8 @@ export class DeferredApiSessionClient {
     return await this.withAttachedTarget((target) => target.settleInheritedPendingDeliveryAccepted?.(localId) ?? false, false);
   }
 
-  async resendInheritedPendingDeliveryAsNew(localId: string): Promise<boolean> {
-    return await this.withAttachedTarget((target) => target.resendInheritedPendingDeliveryAsNew?.(localId) ?? false, false);
+  async redeliverInheritedPendingDelivery(localId: string): Promise<boolean> {
+    return await this.withAttachedTarget((target) => target.redeliverInheritedPendingDelivery?.(localId) ?? false, false);
   }
 
   hasActiveCanonicalTurn(): boolean {

@@ -211,6 +211,7 @@ import {
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
     listPendingQueueV2RowsFromServer,
     sendPendingQueueV2DeliveryAsNew,
+    requeueNotReceivedPendingQueueV2Delivery,
     materializeNextPendingQueueV2Message,
     blockPendingQueueV2Delivery,
     PendingQueueAcceptedSettlementError,
@@ -5717,21 +5718,33 @@ export class ApiSessionClient extends EventEmitter {
     }
 
     /**
-     * Queues an inherited row the provider proved it never received again, through the server's
-     * delivery resolution for effect-possible rows (a new `enqueue` copy; the original is hidden).
+     * Delivers an inherited row the provider proved it never received once more. A Pending Input v3
+     * server returns that exact row to its place in line, by this runner's publisher authority;
+     * an older one only offers the effect-possible resolution that queues a copy as a new message.
      */
-    async resendInheritedPendingDeliveryAsNew(localId: string): Promise<boolean> {
+    async redeliverInheritedPendingDelivery(localId: string): Promise<boolean> {
         const exactLocalId = readPendingLocalId(localId);
         if (!exactLocalId || this.closed || this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return false;
-        const request = () => sendPendingQueueV2DeliveryAsNew({
-            token: this.token,
-            sessionId: this.sessionId,
-            localId: exactLocalId,
-        });
-        const supervisor = this.sessionConnectionSupervisor;
-        const result = supervisor
-            ? await runSupervisedRequest({ supervisor, purpose: 'durable_write', requireAuth: true, requireOnline: false, request })
-            : await request();
+        let result: { pendingQueueState?: KnownPendingQueueState };
+        if (this.sessionSyncPendingInputServerContract?.pendingInputRequeuesNotReceived === true) {
+            const authority = this.captureAcceptedCanonicalPendingDeliveryOperationAuthority();
+            if (!authority) return false;
+            result = await requeueNotReceivedPendingQueueV2Delivery({
+                socket: authority.socket,
+                sessionId: this.sessionId,
+                localId: exactLocalId,
+            });
+        } else {
+            const request = () => sendPendingQueueV2DeliveryAsNew({
+                token: this.token,
+                sessionId: this.sessionId,
+                localId: exactLocalId,
+            });
+            const supervisor = this.sessionConnectionSupervisor;
+            result = supervisor
+                ? await runSupervisedRequest({ supervisor, purpose: 'durable_write', requireAuth: true, requireOnline: false, request })
+                : await request();
+        }
         if (result.pendingQueueState) {
             this.applyPendingQueueState(result.pendingQueueState, { emit: true });
         } else if (!this.closed) {

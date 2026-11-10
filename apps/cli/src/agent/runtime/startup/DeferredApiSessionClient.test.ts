@@ -35,12 +35,12 @@ describe('DeferredApiSessionClient', () => {
       rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn(async () => ({})) },
       listInheritedUncertainPendingDeliveries: vi.fn(async () => inherited),
       settleInheritedPendingDeliveryAccepted: settle,
-      resendInheritedPendingDeliveryAsNew: resend,
+      redeliverInheritedPendingDelivery: resend,
     } as unknown as DeferredApiSessionTarget);
 
     await expect(deferred.listInheritedUncertainPendingDeliveries()).resolves.toEqual(inherited);
     await expect(deferred.settleInheritedPendingDeliveryAccepted('inherited-1')).resolves.toBe(true);
-    await expect(deferred.resendInheritedPendingDeliveryAsNew('inherited-2')).resolves.toBe(true);
+    await expect(deferred.redeliverInheritedPendingDelivery('inherited-2')).resolves.toBe(true);
     expect(settle).toHaveBeenCalledWith('inherited-1');
     expect(resend).toHaveBeenCalledWith('inherited-2');
   });

@@ -127,7 +127,7 @@ describe('recoverClaudeUnifiedInheritedPendingDeliveries', () => {
     return {
       listInheritedUncertainPendingDeliveries: vi.fn(async () => rows),
       settleInheritedPendingDeliveryAccepted: vi.fn(async () => settled),
-      resendInheritedPendingDeliveryAsNew: vi.fn(async () => true),
+      redeliverInheritedPendingDelivery: vi.fn(async () => true),
     };
   }
 
@@ -158,8 +158,8 @@ describe('recoverClaudeUnifiedInheritedPendingDeliveries', () => {
     ]);
     expect(port.settleInheritedPendingDeliveryAccepted).toHaveBeenCalledTimes(1);
     expect(port.settleInheritedPendingDeliveryAccepted).toHaveBeenCalledWith('consumed');
-    expect(port.resendInheritedPendingDeliveryAsNew).toHaveBeenCalledTimes(1);
-    expect(port.resendInheritedPendingDeliveryAsNew).toHaveBeenCalledWith('lost');
+    expect(port.redeliverInheritedPendingDelivery).toHaveBeenCalledTimes(1);
+    expect(port.redeliverInheritedPendingDelivery).toHaveBeenCalledWith('lost');
   });
 
   it('does not settle an ordinary row behind one still unresolved, which the server would refuse', async () => {

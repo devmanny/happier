@@ -7,6 +7,9 @@ import type { ClientToServerEvents, ServerToClientEvents } from '../types';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
 import {
+    NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+    NotReceivedPendingDeliveryRequestV1Schema,
+    NotReceivedPendingDeliveryResponseV1Schema,
     ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
     AcceptedPendingSettlementRequestV1Schema,
     AcceptedPendingSettlementResponseV1Schema,
@@ -936,6 +939,52 @@ export async function resolveAcceptedPendingQueueV2Delivery(params: {
         didResolve,
         ...(pendingQueueState ? { pendingQueueState } : {}),
         ...('message' in ack ? { message } : { message: null }),
+    };
+}
+
+function createNotReceivedPendingDeliveryAckSocket(
+    socket: Socket<ServerToClientEvents, ClientToServerEvents>,
+): PendingMaterializeAckSocket {
+    const build = (target: Socket<ServerToClientEvents, ClientToServerEvents>): PendingMaterializeAckSocket => ({
+        connected: target.connected,
+        emitWithAck: async (event, payload) => {
+            if (event !== NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1) {
+                throw new Error(`Unexpected not-received pending delivery socket ACK event: ${event}`);
+            }
+            return await target.emitWithAck(
+                NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+                NotReceivedPendingDeliveryRequestV1Schema.parse(payload),
+            );
+        },
+        timeout: (ms) => build(target.timeout(ms)),
+    });
+    return build(socket);
+}
+
+/**
+ * Pending Input v3: as the session's current runner, report that the provider never received this
+ * possibly-delivered row, so the server returns it to its place in line. Failures throw with the
+ * server's typed error; only the current publisher is authorized.
+ */
+export async function requeueNotReceivedPendingQueueV2Delivery(params: {
+    socket: Socket<ServerToClientEvents, ClientToServerEvents>;
+    sessionId: string;
+    localId: string;
+}): Promise<{ didRequeue: boolean; pendingQueueState?: KnownPendingQueueState }> {
+    const localId = requirePendingLocalId(params.localId);
+    const raw = await emitSocketWithAck<Record<string, unknown>>({
+        socket: createNotReceivedPendingDeliveryAckSocket(params.socket),
+        event: NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+        payload: { v: 1, sessionId: params.sessionId, localId },
+    });
+    const parsed = NotReceivedPendingDeliveryResponseV1Schema.safeParse(raw);
+    if (!parsed.success) throw new Error('Invalid not-received pending delivery acknowledgement');
+    const ack = parsed.data;
+    if (!ack.ok) throw new Error(`Not-received pending delivery failed: ${ack.error}`);
+    const pendingQueueState = readKnownPendingQueueState(ack);
+    return {
+        didRequeue: ack.didRequeue,
+        ...(pendingQueueState ? { pendingQueueState } : {}),
     };
 }
 
