@@ -536,6 +536,8 @@ struct TasksView: View {
     @State private var taskSearch = TaskSearch()
     /// The task whose detail is open, when one is, with where it was opened from.
     @State private var path: [TaskRoute] = []
+    /// A row is being dragged: the iPhone's Tasks show the agents to drop it on.
+    @State private var draggingTask = false
 
     /// `assignee` starts the list filtered to who the tasks are for (an agent's card opens its own).
     init(presentation: TasksPresentation = .sheet, openSessionId: String? = nil, onlyThisSession: Bool = false,
@@ -569,6 +571,16 @@ struct TasksView: View {
 
     private var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
+    /// Rows drag onto agents in the panel (iPad and Mac: the sidebar's agents and the open profile)
+    /// and in the iPhone's Tasks (the strip of agents); not while selecting.
+    private var dragsTasks: Bool {
+        #if os(iOS)
+        !selecting
+        #else
+        presentation == .panel && !selecting
+        #endif
+    }
+
     var body: some View {
         let sections = isSearching ? [] : sections
         let results = isSearching ? searchResults : []
@@ -580,7 +592,7 @@ struct TasksView: View {
                             TaskRow(task: result.task, openSessionId: openSessionId, match: result) { open($0) }
                         }
                         .tag(result.id)
-                        .modifier(PanelTaskDrag(task: result.task, enabled: presentation == .panel && !selecting))
+                        .modifier(TaskRowDrag(task: result.task, enabled: dragsTasks, dragging: $draggingTask))
                         .contextMenu { rowMenu(result.task) }
                     }
                 }
@@ -609,7 +621,7 @@ struct TasksView: View {
                                         toggleDone: selecting ? nil : { toggleDone(task) }) { open($0) }
                             }
                             .tag(task.id)
-                            .modifier(PanelTaskDrag(task: task, enabled: presentation == .panel && !selecting))
+                            .modifier(TaskRowDrag(task: task, enabled: dragsTasks, dragging: $draggingTask))
                             .swipeActions(edge: .leading, allowsFullSwipe: true) {
                                 if task.completesFromList {
                                     Button("Complete", systemImage: "checkmark") { toggleDone(task) }
@@ -636,6 +648,16 @@ struct TasksView: View {
             .safeAreaInset(edge: .bottom) {
                 if selecting { selectionBar }
             }
+            #if os(iOS)
+            // Over the list, not in its insets: the rows under the finger don't move when it shows.
+            .overlay(alignment: .top) {
+                if draggingTask, presentation == .sheet {
+                    TaskDropStrip(agents: AgentRoster.ordered(store.agentProfiles, by: store.accountSettings?.agentOrder ?? []))
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.smooth(duration: 0.2), value: draggingTask)
+            #endif
             .confirmationDialog("Assign to…", isPresented: Binding(get: { !assigning.isEmpty }, set: { if !$0 { assigning = [] } }),
                                 titleVisibility: .visible) {
                 let ids = assigning
@@ -927,15 +949,82 @@ private struct TasksTitle: ViewModifier {
     }
 }
 
-/// The Tasks panel beside the conversation (iPad and Mac): its rows drag onto an agent.
-private struct PanelTaskDrag: ViewModifier {
+/// A Tasks row that drags onto an agent; `dragging` follows its drag (iOS 27, where the drag
+/// session is observable), so the iPhone's Tasks can show the agents to drop it on.
+private struct TaskRowDrag: ViewModifier {
     let task: AgentTask
     let enabled: Bool
+    @Binding var dragging: Bool
 
     func body(content: Content) -> some View {
-        if enabled { content.taskDrag(task) } else { content }
+        if enabled {
+            #if os(iOS)
+            if #available(iOS 27.0, *) {
+                content.taskDrag(task).onDragSessionUpdated { session in
+                    switch session.phase {
+                    case .initial, .active: dragging = true
+                    case .ending, .ended, .dataTransferCompleted: dragging = false
+                    @unknown default: dragging = false
+                    }
+                }
+            } else {
+                content.taskDrag(task)
+            }
+            #else
+            content.taskDrag(task)
+            #endif
+        } else {
+            content
+        }
     }
 }
+
+#if os(iOS)
+/// Atop the iPhone's Tasks while a row is dragged: the agents, in the sidebar's order, to drop it on
+/// (`taskDrop`: it is only assigned).
+private struct TaskDropStrip: View {
+    let agents: [AgentProfile]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(agents) { AgentDropTarget(agent: $0) }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Drop on an agent to assign the task"))
+    }
+}
+
+private struct AgentDropTarget: View {
+    let agent: AgentProfile
+    @State private var targeted = false
+
+    var body: some View {
+        VStack(spacing: 4) {
+            AgentAvatar(agentId: agent.providerId, size: 44, emoji: agent.emoji)
+                .overlay {
+                    Circle().strokeBorder(Color.userBubble, lineWidth: targeted ? 3 : 0)
+                }
+                .scaleEffect(targeted ? 1.12 : 1)
+            Text(agent.name)
+                .font(.caption2.weight(targeted ? .semibold : .regular))
+                .lineLimit(1)
+        }
+        .frame(width: 62)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .taskDrop(onto: agent, targeted: $targeted)
+        .animation(.smooth(duration: 0.15), value: targeted)
+        .accessibilityIdentifier("task-drop-agent-\(agent.id)")
+    }
+}
+#endif
 
 struct TaskRow: View {
     let task: AgentTask
