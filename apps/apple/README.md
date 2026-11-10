@@ -270,6 +270,14 @@ On Mac and iPad the browser keeps its own window, with tabs above the navigation
 and the original blue Happier icon beside the native window controls. Agent activity is a subtle
 blue tab outline and pulsing sparkles; the desktop address field stays quiet.
 
+**Settings → Dictation** downloads the Whisper Large v3 Turbo model (WhisperKit, Core ML, ~627 MB)
+once, with progress, then compiles it for the device; it is kept in Application Support and is
+deletable. While it is installed and the device can run it (WhisperKit's device table),
+dictation transcribes on the device in the dictation language, never auto-detected, with text
+appearing about once a second and the rest when you stop; silence is not transcribed. Without a
+model it uses Apple's SpeechAnalyzer when the language is installed, else SFSpeechRecognizer.
+`Dictation` owns the microphone and the take; `DictationEngine.choose` picks the engine.
+
 **Settings → Read Aloud → Languages** limits automatic language detection to the languages
 enabled there. The initial selection follows the device's preferred languages; the default
 language is used when text has no detectable language. This applies to both single-message

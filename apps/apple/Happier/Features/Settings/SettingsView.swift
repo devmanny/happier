@@ -51,6 +51,15 @@ struct SettingsView: View {
                 Text("How much each agent may do without asking, when a new session starts.")
             }
             appearanceSection
+            Section {
+                NavigationLink {
+                    DictationSettingsView()
+                } label: {
+                    Label("Dictation", systemImage: "mic")
+                }
+            } footer: {
+                Text("Whisper on this device, or Apple's speech recognition.")
+            }
             ReadAloudVoices()
             BrowserSettingsSection()
             #if os(iOS)

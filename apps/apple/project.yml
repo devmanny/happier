@@ -19,6 +19,10 @@ settings:
 packages:
   HappierKit:
     path: HappierKit
+  # Whisper on the device (Core ML / Neural Engine) for dictation. MIT; models download separately.
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift
+    exactVersion: 1.1.1
 schemes:
   Happier:
     build:
@@ -48,6 +52,8 @@ targets:
       - path: Shared
     dependencies:
       - package: HappierKit
+      - package: ArgmaxOSS
+        product: WhisperKit
       - target: HappierWidgets
       - target: HappierShare
       - target: HappierSafari

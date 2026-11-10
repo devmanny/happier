@@ -4,7 +4,9 @@ import os
 import Speech
 import SwiftUI
 
-/// Live speech-to-text into the composer (the Claude/ChatGPT mic button).
+/// Live speech-to-text into the composer (the Claude/ChatGPT mic button). The one owner of
+/// dictation: the microphone, the take and the composer's text. The engine that turns the audio
+/// into text (Whisper on the device, or Apple's) is chosen per take by `DictationRecognizers`.
 @MainActor
 @Observable
 final class Dictation {
@@ -17,8 +19,9 @@ final class Dictation {
     private(set) var heard = ""
 
     @ObservationIgnored private var engine: AVAudioEngine?
-    @ObservationIgnored private var task: SFSpeechRecognitionTask?
-    @ObservationIgnored private var request: SFSpeechAudioBufferRecognitionRequest?
+    @ObservationIgnored private var recognizer: (any DictationRecognizer)?
+    /// Writes the take's text into the composer.
+    @ObservationIgnored private var deliver: (@MainActor (String) -> Void)?
     /// Bumped on every stop. The recognizer still delivers a final transcript after `finish()`;
     /// a result from an earlier take must not write into a composer the user has already sent or edited.
     @ObservationIgnored private var take = 0
@@ -51,9 +54,8 @@ final class Dictation {
         // push to talk after launch listens at once.
         Task.detached(priority: .utility) { _ = Dictation.language }
     }
-    @ObservationIgnored private var transcript = DictationTranscript()
-    /// Waiting for the recognizer's last words after `finish()`.
-    @ObservationIgnored private var finishing: CheckedContinuation<Void, Never>?
+    /// Waiting for the engine's last words after `finish()`.
+    @ObservationIgnored private var finishing = false
 
     /// Starts or stops dictation. `onText` receives `prefix + transcript` as it updates.
     func toggle(prefix: String, onText: @escaping @MainActor (String) -> Void) {
@@ -74,44 +76,41 @@ final class Dictation {
         await start(prefix: prefix, onText: onText)
     }
 
-    /// Stops listening but lets the recognizer deliver what it was still working on (the last
-    /// words), up to a second and a half, then stops: push to talk sends right after this.
+    /// Stops listening but lets the engine deliver what it was still working on (the last words),
+    /// then stops: push to talk sends right after this.
     func finish() async {
-        guard isRecording, let request else {
+        guard isRecording, let recognizer, !finishing else {
             // Let go while the microphone was still coming up: it must not start after all
             // (it used to, without the push-to-talk panel, and the next hold did nothing).
             // Let go before it even began: give back the audio claimed on touch-down.
-            if starting { stop() } else { releaseAudio() }
+            if starting { stop() } else if !finishing { releaseAudio() }
             return
         }
+        let current = take
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
-        request.endAudio()
-        await withCheckedContinuation { continuation in
-            finishing = continuation
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(1500))
-                self?.finishing?.resume()
-                self?.finishing = nil
-            }
+        finishing = true
+        let text = await recognizer.finish()
+        finishing = false
+        // Written here, before stopping: an update still on its way would arrive after the take ended.
+        if take == current {
+            heard = text
+            deliver?(text)
         }
         stop()
     }
 
     func stop() {
         let usedMicrophone = isRecording || starting || engine != nil
-        finishing?.resume()
-        finishing = nil
         // An in-flight microphone startup releases ownership when it has actually unwound.
         defer { if !starting { releaseAudio() } }
         take += 1
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        task?.finish()
+        recognizer?.cancel()
         engine = nil
-        request = nil
-        task = nil
+        recognizer = nil
+        deliver = nil
         isRecording = false
         #if os(iOS)
         if usedMicrophone {
@@ -129,23 +128,44 @@ final class Dictation {
             starting = false
             if !isRecording { releaseAudio() }
         }
-        guard await Self.authorize() else {
-            error = String(localized: "Allow microphone and speech recognition in Settings to dictate.")
-            return
-        }
         // The user's own language: the app's text is English only, so `Locale.current` is English
         // even on a Spanish phone.
         let language = await Self.dictationLanguage()
+        let choice = await DictationRecognizers.engine(language: language)
         guard take == current else { return }
-        guard let recognizer = language.flatMap({ SFSpeechRecognizer(locale: Locale(identifier: $0)) }) ?? SFSpeechRecognizer(),
-              recognizer.isAvailable else {
-            error = String(localized: "Speech recognition isn't available right now.")
+        // Whisper needs only the microphone; Apple's engines also need speech recognition.
+        let speechRecognition = if case .whisper = choice { false } else { true }
+        guard await Self.authorize(speechRecognition: speechRecognition) else {
+            error = String(localized: "Allow microphone and speech recognition in Settings to dictate.")
             return
         }
+        guard take == current else { return }
         do {
             levels = []
             heard = ""
-            let (engine, request) = try await Self.openMicrophone(onDevice: recognizer.supportsOnDeviceRecognition) { [weak self] level in
+            let separator = prefix.isEmpty || prefix.hasSuffix(" ") ? "" : " "
+            let deliver: @MainActor (String) -> Void = { text in onText(prefix + separator + text) }
+            let recognizer = try await DictationRecognizers.start(choice, language: language) { [weak self] text, ended, failure in
+                Task { @MainActor in
+                    guard let self, self.take == current, !self.finishing || failure != nil else { return }
+                    if let failure {
+                        Self.log.error("dictation failed: \(String(describing: failure), privacy: .public)")
+                        self.error = failure.localizedDescription
+                    }
+                    if text != self.heard {
+                        self.heard = text
+                        deliver(text)
+                    }
+                    if ended, !self.finishing { self.stop() }
+                }
+            }
+            guard take == current else {
+                recognizer.cancel()
+                return
+            }
+            self.recognizer = recognizer
+            self.deliver = deliver
+            let engine = try await Self.openMicrophone(feeding: recognizer) { [weak self] level in
                 Task { @MainActor in
                     guard let self, self.isRecording else { return }
                     self.levels.append(level)
@@ -153,33 +173,10 @@ final class Dictation {
                 }
             }
             self.engine = engine
-            self.request = request
             // Let go (or tapped again) while it was coming up.
             guard take == current else {
                 stop()
                 return
-            }
-            let separator = prefix.isEmpty || prefix.hasSuffix(" ") ? "" : " "
-            // After a pause the recognizer reports only the new words; this keeps the earlier ones.
-            transcript = DictationTranscript()
-            task = Self.recognize(with: recognizer, request: request) { [weak self] text, endsUtterance, done in
-                Task { @MainActor in
-                    guard let self, self.take == current else { return }
-                    if let text {
-                        self.transcript.update(text, endsUtterance: endsUtterance)
-                        self.heard = self.transcript.text
-                        onText(prefix + separator + self.transcript.text)
-                    }
-                    if done {
-                        // `finish()` is waiting for exactly this: the final words are in.
-                        if let finishing = self.finishing {
-                            self.finishing = nil
-                            finishing.resume()
-                        } else {
-                            self.stop()
-                        }
-                    }
-                }
             }
             isRecording = true
             // One ready cue for tap and hold alike, after permission, audio startup and the
@@ -202,12 +199,12 @@ final class Dictation {
         supported: SFSpeechRecognizer.supportedLocales().map(\.identifier))
 
     /// Off the main thread: the first time it lists every supported language.
-    private nonisolated static func dictationLanguage() async -> String? { language }
+    nonisolated static func dictationLanguage() async -> String? { language }
 
     /// The audio session and the microphone. They block for a noticeable moment (longer while
     /// something was playing), so they come up off the main thread: push to talk shows at once.
-    private nonisolated static func openMicrophone(onDevice: Bool, level: @escaping @Sendable (Float) -> Void) async throws
-        -> sending (AVAudioEngine, SFSpeechAudioBufferRecognitionRequest) {
+    private nonisolated static func openMicrophone(feeding recognizer: any DictationRecognizer, level: @escaping @Sendable (Float) -> Void)
+        async throws -> sending AVAudioEngine {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         // Play-and-record rather than record-only: switching to record-only left the speech
@@ -217,9 +214,6 @@ final class Dictation {
         try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         #endif
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if onDevice { request.requiresOnDeviceRecognition = true }
         var engine = AVAudioEngine()
         // An input with no valid format (the audio route was still changing) would raise an
         // Objective-C exception in `installTap`, which Swift can't catch: check it, give the route
@@ -229,17 +223,19 @@ final class Dictation {
             engine = AVAudioEngine()
             guard Self.hasUsableInput(engine.inputNode) else { throw DictationError.microphoneUnavailable }
         }
-        installTap(on: engine.inputNode, feeding: request, level: level)
+        installTap(on: engine.inputNode, feeding: recognizer, level: level)
         engine.prepare()
         try engine.start()
-        return (engine, request)
+        return engine
     }
 
-    private nonisolated static func authorize() async -> Bool {
-        let speech = await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+    private nonisolated static func authorize(speechRecognition: Bool) async -> Bool {
+        if speechRecognition {
+            let speech = await withCheckedContinuation { continuation in
+                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+            }
+            guard speech else { return false }
         }
-        guard speech else { return false }
         return await AVAudioApplication.requestRecordPermission()
     }
 
@@ -248,10 +244,10 @@ final class Dictation {
         return format.sampleRate > 0 && format.channelCount > 0
     }
 
-    private nonisolated static func installTap(on input: AVAudioInputNode, feeding request: SFSpeechAudioBufferRecognitionRequest,
+    private nonisolated static func installTap(on input: AVAudioInputNode, feeding recognizer: any DictationRecognizer,
                                                level: @escaping @Sendable (Float) -> Void) {
         input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
-            request.append(buffer)
+            recognizer.append(buffer)
             // Loudness of this slice (RMS, as 0…1 over a −50…0 dB range) for the moving bars.
             guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
             var sum: Float = 0
@@ -261,24 +257,19 @@ final class Dictation {
             level(min(max((db + 50) / 50, 0), 1))
         }
     }
-
-    private nonisolated static func recognize(with recognizer: SFSpeechRecognizer, request: SFSpeechAudioBufferRecognitionRequest,
-                                              update: @escaping @Sendable (String?, Bool, Bool) -> Void) -> SFSpeechRecognitionTask {
-        recognizer.recognitionTask(with: request) { result, error in
-            // Metadata arrives with the last result of an utterance, when the speaker pauses.
-            update(result?.bestTranscription.formattedString, result?.speechRecognitionMetadata != nil,
-                   error != nil || (result?.isFinal ?? false))
-        }
-    }
 }
 
 /// A dictation that couldn't start, shown like any other dictation error.
 enum DictationError: LocalizedError {
     case microphoneUnavailable
+    case recognizerUnavailable
+    case modelMissing
 
     var errorDescription: String? {
         switch self {
         case .microphoneUnavailable: String(localized: "The microphone isn't available right now. Try again.")
+        case .recognizerUnavailable: String(localized: "Speech recognition isn't available right now.")
+        case .modelMissing: String(localized: "The Whisper model is missing. Download it again in Settings › Dictation.")
         }
     }
 }
