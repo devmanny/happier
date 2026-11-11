@@ -32,4 +32,35 @@ struct DictationEngineTests {
         #expect(!WhisperModel.largeV3Turbo.runs(onDeviceSupporting: iPhone12))
         #expect(!WhisperModel.largeV3Turbo.runs(onDeviceSupporting: []))
     }
+
+    // MARK: Each take
+
+    @Test func appleDictatesWhileWhisperLoads() async {
+        let take = await DictationEngine.forTake(.whisper(.largeV3Turbo), whisperLoaded: false, appleAllowed: true) { true }
+        #expect(take == DictationTake(engine: .speechTranscriber, fallback: .whisperNotLoaded))
+        let classic = await DictationEngine.forTake(.whisper(.largeV3Turbo), whisperLoaded: false, appleAllowed: true) { false }
+        #expect(classic == DictationTake(engine: .speechRecognizer, fallback: .whisperNotLoaded))
+    }
+
+    @Test func whisperDictatesOnceLoaded() async {
+        var askedApple = false
+        let take = await DictationEngine.forTake(.whisper(.largeV3Turbo), whisperLoaded: true, appleAllowed: true) {
+            askedApple = true
+            return true
+        }
+        #expect(take == DictationTake(engine: .whisper(.largeV3Turbo), fallback: nil))
+        #expect(!askedApple)
+    }
+
+    @Test func whisperWaitsForItsModelWhenAppleSpeechIsNotAllowed() async {
+        // Whisper asks only for the microphone: without speech recognition allowed, there is no
+        // Apple engine to hand the take to, so it waits for Whisper.
+        let take = await DictationEngine.forTake(.whisper(.largeV3Turbo), whisperLoaded: false, appleAllowed: false) { true }
+        #expect(take == DictationTake(engine: .whisper(.largeV3Turbo), fallback: nil))
+    }
+
+    @Test func appleEnginesAreUsedAsChosen() async {
+        #expect(await DictationEngine.forTake(.speechTranscriber, whisperLoaded: false, appleAllowed: true) { false }
+            == DictationTake(engine: .speechTranscriber, fallback: nil))
+    }
 }

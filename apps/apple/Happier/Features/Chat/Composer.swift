@@ -301,7 +301,8 @@ struct Composer: View {
                     PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
                                      trashOffset: trashX.flatMap { trash in micX.map { trash - $0 } }) {
                         if dictation.isRecording {
-                            dictation.stop()
+                            // The last words still come in (see `Dictation.toggle`).
+                            Task { await dictation.finish() }
                             AppHaptics.light()
                         } else {
                             AppHaptics.light()

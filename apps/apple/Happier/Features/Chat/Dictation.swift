@@ -27,6 +27,8 @@ final class Dictation {
     @ObservationIgnored private var take = 0
     /// Between being asked to listen and the microphone being up.
     @ObservationIgnored private var starting = false
+    /// This take's report for Settings › Dictation, saved when it ends (only takes that listened).
+    @ObservationIgnored private var takeLog: DictationTakeLog?
     /// This take's hold on audio (reading aloud stays quiet while it's held). One per take, so an
     /// earlier take unwinding can't release a newer one's.
     @ObservationIgnored private var audioClaim: AudioClaim?
@@ -57,9 +59,13 @@ final class Dictation {
     /// Waiting for the engine's last words after `finish()`.
     @ObservationIgnored private var finishing = false
 
-    /// Starts or stops dictation. `onText` receives `prefix + transcript` as it updates.
+    /// Starts or stops dictation. `onText` receives `prefix + transcript` as it updates. Stopping
+    /// lets the engine deliver what it was still working on: Whisper transcribes the last second or
+    /// so only then, and a short take only then at all.
     func toggle(prefix: String, onText: @escaping @MainActor (String) -> Void) {
-        if isRecording || starting {
+        if isRecording {
+            Task { await finish() }
+        } else if starting {
             stop()
         } else {
             let current = take
@@ -96,6 +102,7 @@ final class Dictation {
         if take == current {
             heard = text
             deliver?(text)
+            takeLog?.shown(text)
         }
         stop()
     }
@@ -105,6 +112,10 @@ final class Dictation {
         // An in-flight microphone startup releases ownership when it has actually unwound.
         defer { if !starting { releaseAudio() } }
         take += 1
+        if let takeLog {
+            DictationDiagnostics.shared.save(takeLog.current)
+            self.takeLog = nil
+        }
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         recognizer?.cancel()
@@ -131,10 +142,11 @@ final class Dictation {
         // The user's own language: the app's text is English only, so `Locale.current` is English
         // even on a Spanish phone.
         let language = await Self.dictationLanguage()
-        let choice = await DictationRecognizers.engine(language: language)
+        // Whisper once its model is in memory, else Apple's engine while Whisper loads.
+        let choice = await DictationRecognizers.take(language: language)
         guard take == current else { return }
         // Whisper needs only the microphone; Apple's engines also need speech recognition.
-        let speechRecognition = if case .whisper = choice { false } else { true }
+        let speechRecognition = if case .whisper = choice.engine { false } else { true }
         guard await Self.authorize(speechRecognition: speechRecognition) else {
             error = String(localized: "Allow microphone and speech recognition in Settings to dictate.")
             return
@@ -145,7 +157,8 @@ final class Dictation {
             heard = ""
             let separator = prefix.isEmpty || prefix.hasSuffix(" ") ? "" : " "
             let deliver: @MainActor (String) -> Void = { text in onText(prefix + separator + text) }
-            let recognizer = try await DictationRecognizers.start(choice, language: language) { [weak self] text, ended, failure in
+            let takeLog = DictationTakeLog(engine: choice.engine, fallback: choice.fallback)
+            let recognizer = try await DictationRecognizers.start(choice.engine, language: language, takeLog: takeLog) { [weak self] text, ended, failure in
                 Task { @MainActor in
                     guard let self, self.take == current, !self.finishing || failure != nil else { return }
                     if let failure {
@@ -155,6 +168,7 @@ final class Dictation {
                     if text != self.heard {
                         self.heard = text
                         deliver(text)
+                        takeLog.shown(text)
                     }
                     if ended, !self.finishing { self.stop() }
                 }
@@ -179,6 +193,8 @@ final class Dictation {
                 return
             }
             isRecording = true
+            takeLog.listening()
+            self.takeLog = takeLog
             // One ready cue for tap and hold alike, after permission, audio startup and the
             // recognizer are ready. Do not pause capture for it: the first words must be kept.
             AppHaptics.listening(true)

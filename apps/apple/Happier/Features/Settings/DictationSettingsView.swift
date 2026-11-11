@@ -29,6 +29,7 @@ struct DictationSettingsView: View {
             } footer: {
                 Text("Downloaded once and kept on this device. Keep Happier open until it finishes.")
             }
+            DictationDiagnosticsSection(whisperInstalled: library.installed != nil)
         }
         .formStyle(.grouped)
         .navigationTitle("Dictation")
@@ -41,7 +42,7 @@ struct DictationSettingsView: View {
             Button("Delete \(model.title)", role: .destructive) {
                 AppHaptics.warning()
                 library.delete(model)
-                Task { await WhisperRuntime.shared.unload() }
+                Task { await WhisperRuntime.shared.unload(.deleted) }
             }
         } message: { _ in
             Text("Dictation uses Apple's speech recognition until you download a model again.")
@@ -59,6 +60,90 @@ struct DictationSettingsView: View {
         case .speechTranscriber: String(localized: "Apple Speech")
         case .speechRecognizer: String(localized: "Apple Speech (Classic)")
         }
+    }
+}
+
+/// The last dictation and the Whisper model in memory: where to look when dictation was slow or
+/// wrote nothing.
+private struct DictationDiagnosticsSection: View {
+    let whisperInstalled: Bool
+    private let diagnostics = DictationDiagnostics.shared
+
+    var body: some View {
+        let take = diagnostics.lastTake
+        if take != nil || whisperInstalled {
+            Section {
+                if let take {
+                    LabeledContent("Last Dictation", value: take.date.formatted(.relative(presentation: .named)))
+                    LabeledContent("Engine Used", value: Self.engine(take))
+                    LabeledContent("First Words", value: take.firstText.map(Self.seconds) ?? String(localized: "None"))
+                    if take.whisperPasses > 0, let slowest = take.slowestPass {
+                        LabeledContent("Whisper Passes", value: String(localized: "\(take.whisperPasses) · slowest \(Self.seconds(slowest))"))
+                    }
+                    if let loudest = take.loudestLevel, let background = take.backgroundLevel {
+                        // Whisper reads only speech 12 dB above the room: with less it heard none.
+                        LabeledContent("Voice · Room", value: "\(Self.decibels(loudest)) · \(Self.decibels(background))")
+                    }
+                    LabeledContent("Device", value: Self.device(take))
+                }
+                if whisperInstalled {
+                    LabeledContent("Whisper Model", value: Self.model(diagnostics.whisperStatus))
+                    if let load = diagnostics.whisperStatus.lastLoadSeconds {
+                        LabeledContent("Last Load", value: Self.seconds(load))
+                    }
+                }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("The last dictation on this device: which engine wrote it, and how long the first words took.")
+            }
+        }
+    }
+
+    private static func engine(_ take: DictationReport) -> String {
+        let name = DictationSettingsView.name(take.engine)
+        switch take.fallback {
+        case nil: return name
+        case .whisperNotLoaded: return String(localized: "\(name) · Whisper wasn't loaded")
+        case .whisperTooSlow: return String(localized: "\(name) · Whisper was too slow")
+        case .whisperFailed: return String(localized: "\(name) · Whisper failed")
+        }
+    }
+
+    private static func device(_ take: DictationReport) -> String {
+        var parts: [String] = []
+        switch ProcessInfo.ThermalState(rawValue: take.thermalState) {
+        case .fair: parts.append(String(localized: "Warm"))
+        case .serious: parts.append(String(localized: "Hot"))
+        case .critical: parts.append(String(localized: "Very Hot"))
+        default: break
+        }
+        if take.lowPowerMode { parts.append(String(localized: "Low Power Mode")) }
+        return parts.isEmpty ? String(localized: "Normal") : parts.joined(separator: " · ")
+    }
+
+    private static func model(_ status: WhisperModelStatus) -> String {
+        let since = status.since.map { " · " + $0.formatted(.relative(presentation: .named)) } ?? ""
+        switch status.phase {
+        case .loaded: return String(localized: "Loaded") + since
+        case .loading: return String(localized: "Loading…") + since
+        case .failed: return String(localized: "Failed: \(status.failure ?? "")")
+        case .notLoaded:
+            switch status.unloaded {
+            case .background: return String(localized: "Not loaded · app left the screen") + since
+            case .lowMemory: return String(localized: "Not loaded · low memory") + since
+            case .deleted, nil: return String(localized: "Not loaded")
+            }
+        }
+    }
+
+    private static func decibels(_ value: Float) -> String {
+        String(localized: "\(Int(value.rounded())) dB")
+    }
+
+    private static func seconds(_ value: TimeInterval) -> String {
+        guard value >= 60 else { return String(localized: "\(value.formatted(.number.precision(.fractionLength(1)))) s") }
+        return Duration.seconds(value).formatted(.units(allowed: [.minutes, .seconds], width: .abbreviated))
     }
 }
 

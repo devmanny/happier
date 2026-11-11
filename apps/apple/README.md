@@ -274,9 +274,16 @@ blue tab outline and pulsing sparkles; the desktop address field stays quiet.
 once, with progress, then compiles it for the device; it is kept in Application Support and is
 deletable. While it is installed and the device can run it (WhisperKit's device table),
 dictation transcribes on the device in the dictation language, never auto-detected, with text
-appearing about once a second and the rest when you stop; silence is not transcribed. Without a
-model it uses Apple's SpeechAnalyzer when the language is installed, else SFSpeechRecognizer.
-`Dictation` owns the microphone and the take; `DictationEngine.choose` picks the engine.
+appearing about once a second and the rest when you stop (tap or release); silence is not
+transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
+SFSpeechRecognizer. `Dictation` owns the microphone and the take; `DictationEngine.choose` picks
+the device's engine and `DictationEngine.forTake` the take's. A take never waits for Whisper to
+load: while the model isn't in memory (it is let go when the app leaves the screen and loads again
+when it's back, and on low memory until the next dictation), Apple's engine dictates that take.
+When speech recognition is allowed, Apple's engine also takes a take over, with all its audio,
+when Whisper fails, is let go mid-take or has no words 3 s into its first pass. Settings →
+Dictation → Diagnostics shows the last take (engine and why, time to the first words, Whisper's
+passes, voice and room levels, Low Power Mode/heat) and the model's state and last load time.
 
 **Settings → Read Aloud → Languages** limits automatic language detection to the languages
 enabled there. The initial selection follows the device's preferred languages; the default

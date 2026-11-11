@@ -22,7 +22,7 @@ protocol DictationRecognizer: AnyObject, Sendable {
 enum DictationRecognizers {
     private static let log = Logger(subsystem: "dev.happier.apple", category: "dictation")
 
-    /// The engine dictation uses on this device right now (the one Settings › Dictation shows).
+    /// The engine dictation uses on this device (the one Settings › Dictation shows).
     @MainActor
     static func engine(language: String?) async -> DictationEngine {
         await DictationEngine.choose(installed: WhisperModels.library.installed, deviceSupports: WhisperModels.deviceSupports) { @Sendable in
@@ -30,17 +30,48 @@ enum DictationRecognizers {
         }
     }
 
+    /// Speech recognition is allowed already: Apple's engine can take a take without asking.
+    nonisolated static var appleAllowed: Bool { SFSpeechRecognizer.authorizationStatus() == .authorized }
+
+    /// The engine this take starts with: Whisper once its model is in memory; until then Apple's,
+    /// while Whisper loads for the next take.
+    @MainActor
+    static func take(language: String?) async -> DictationTake {
+        let configured = await engine(language: language)
+        var loaded = true
+        if case .whisper(let model) = configured, let folder = WhisperModels.library.folder(of: model) {
+            loaded = await WhisperRuntime.shared.isLoaded(folder)
+            if !loaded { await WhisperRuntime.shared.warmUp(folder) }
+        }
+        return await DictationEngine.forTake(configured, whisperLoaded: loaded, appleAllowed: appleAllowed) { @Sendable in
+            await SpeechTranscriberRecognizer.isReady(for: language)
+        }
+    }
+
     /// Starts recognizing a take with `engine`, in `language` (`SpeechLanguage.dictationLocale`).
     @MainActor
-    static func start(_ engine: DictationEngine, language: String?, update: @escaping DictationUpdate) async throws -> any DictationRecognizer {
+    static func start(_ engine: DictationEngine, language: String?, takeLog: DictationTakeLog,
+                      update: @escaping DictationUpdate) async throws -> any DictationRecognizer {
+        guard case .whisper(let model) = engine else { return try await startApple(engine, language: language, update: update) }
+        guard let folder = WhisperModels.library.folder(of: model) else { throw DictationError.modelMissing }
+        // Whisper gets the language fixed, never detected: the dictation language, else the user's first.
+        let code = SpeechLanguage.languageCode(language ?? Locale.preferredLanguages.first ?? "en")
+        Self.log.notice("dictation engine: whisper \(model.id, privacy: .public) language \(code, privacy: .public)")
+        // Apple's engine takes the take over when Whisper can't keep it (speech recognition allowed).
+        var handover: WhisperRecognizer.Handover?
+        if appleAllowed {
+            handover = { @Sendable update in
+                let apple = await DictationEngine.apple { @Sendable in await SpeechTranscriberRecognizer.isReady(for: language) }
+                let recognizer = try await startApple(apple, language: language, update: update)
+                return (apple, recognizer)
+            }
+        }
+        return WhisperRecognizer(folder: folder, language: code, handover: handover, log: takeLog, update: update)
+    }
+
+    nonisolated private static func startApple(_ engine: DictationEngine, language: String?, update: @escaping DictationUpdate) async throws -> any DictationRecognizer {
         switch engine {
-        case .whisper(let model):
-            guard let folder = WhisperModels.library.folder(of: model) else { throw DictationError.modelMissing }
-            // Whisper gets the language fixed, never detected: the dictation language, else the user's first.
-            let code = SpeechLanguage.languageCode(language ?? Locale.preferredLanguages.first ?? "en")
-            log.notice("dictation engine: whisper \(model.id, privacy: .public) language \(code, privacy: .public)")
-            return WhisperRecognizer(folder: folder, language: code, update: update)
-        case .speechTranscriber:
+        case .whisper, .speechTranscriber:
             log.notice("dictation engine: SpeechTranscriber \(language ?? "-", privacy: .public)")
             return try await SpeechTranscriberRecognizer.start(language: language ?? "en", update: update)
         case .speechRecognizer:
