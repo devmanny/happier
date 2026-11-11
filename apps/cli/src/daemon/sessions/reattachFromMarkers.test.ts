@@ -1818,6 +1818,88 @@ describe('reattachTrackedSessionsFromMarkers', () => {
     });
   });
 
+  it('does not supervise a replaced runner\'s preserved terminal marker as a disconnected host while the same session runs live', async () => {
+    // "Older CLI · Update" preserves the stopped runner's marker; its successor adopts the same tmux
+    // host. On the next daemon start that dead marker is not a disconnected host: treating it as one
+    // made every later respawn/resume of the session wait for a full host-supervision pass (65 such
+    // markers on Manny's Mac, ~110 s per pass, longer than the 60 s restart request).
+    vi.mocked(listSessionMarkers).mockResolvedValue([
+      {
+        pid: 11111,
+        happySessionId: 'session-123',
+        happyHomeDir: '/tmp/happy',
+        createdAt: 1,
+        updatedAt: 1,
+        startedBy: 'daemon',
+        cwd: '/tmp/project',
+        respawn: {
+          version: 1,
+          directory: '/tmp/project',
+          backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+          resume: 'claude-thread-1',
+        },
+      } as any,
+    ]);
+    mockTerminalAttachmentState({ status: 'present', info: {
+      version: 2,
+      attachmentId: 'attachment-shared-host' as NonNullable<TerminalHostHandle['attachmentId']>,
+      sessionId: 'session-123',
+      handle: {
+        kind: 'tmux',
+        sessionName: 'happier-claude-unified-1',
+        paneId: '%1',
+        attachmentId: 'attachment-shared-host' as NonNullable<TerminalHostHandle['attachmentId']>,
+        attachMetadata: {
+          attachStrategy: 'terminal_host',
+          topology: 'shared',
+          locality: 'same_machine',
+          liveProbe: 'required',
+        },
+      },
+      terminal: { mode: 'tmux', tmux: { target: 'happier-claude-unified-1:%1' } },
+      updatedAt: 1,
+    } });
+    mockHappyProcessesForDiscovery([
+      {
+        pid: 22222,
+        daemonOwnershipEnvironmentVariables: currentOwnershipEnvironment(),
+        type: 'daemon-spawned-session',
+        cwd: '/tmp/project',
+        command:
+          '/Users/x/.happier/cli-dev/current/happier claude --happy-starting-mode remote --started-by daemon --resume claude-thread-1 --existing-session session-123',
+      } as any,
+    ]);
+    vi.spyOn(process, 'kill').mockImplementation((pid: number) => {
+      if (pid === 11111) {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      }
+      return true;
+    });
+
+    const pidToTrackedSession = new Map<number, TrackedSession>();
+    const result = await reattachTrackedSessionsFromMarkers({
+      pidToTrackedSession,
+      resolveTerminalAttachmentControlDescriptorStatus: async () => 'available',
+    });
+
+    expect(pidToTrackedSession.get(22222)).toEqual(expect.objectContaining({ happySessionId: 'session-123' }));
+    expect(result).toEqual({
+      orphanedDeadDaemonSessions: [],
+      recoveredLiveSessionIds: ['session-123'],
+      connectedServiceRestartIntents: [],
+    });
+
+    // The same dead marker with unreadable topology must not mark the live session for a
+    // stop-before-resume repair either.
+    mockTerminalAttachmentState({ status: 'unreadable', reason: 'invalid' });
+    const unreadable = await reattachTrackedSessionsFromMarkers({ pidToTrackedSession: new Map() });
+    expect(unreadable).toEqual({
+      orphanedDeadDaemonSessions: [],
+      recoveredLiveSessionIds: ['session-123'],
+      connectedServiceRestartIntents: [],
+    });
+  });
+
   it('does not report an orphaned dead daemon session when the same happy session has any recovered live owner', async () => {
     vi.mocked(listSessionMarkers).mockResolvedValue([
       {
