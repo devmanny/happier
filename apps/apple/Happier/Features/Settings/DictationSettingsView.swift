@@ -4,8 +4,8 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Settings › Dictation: which engine dictates on this device, and the Whisper model it downloads
-/// (once, over the network) to dictate on the device itself.
+/// Settings › Dictation: which engine dictates on this device, and the Whisper models it downloads
+/// (once, over the network) to dictate on the device itself: several can be kept, one is in use.
 struct DictationSettingsView: View {
     @State private var engine: DictationEngine?
     @State private var language: String?
@@ -25,27 +25,32 @@ struct DictationSettingsView: View {
                     WhisperModelRow(model: model, library: library, deleting: $deleting)
                 }
             } header: {
-                Text("Whisper Model")
+                Text("Whisper Models")
             } footer: {
-                Text("Downloaded once and kept on this device. Keep Happier open until it finishes.")
+                Text("Download one or more and tap the one to dictate with. Lighter models answer sooner but make more mistakes. Keep Happier open until a download finishes.")
             }
-            DictationDiagnosticsSection(whisperInstalled: library.installed != nil)
+            DictationDiagnosticsSection(whisperInstalled: library.inUse != nil)
         }
         .formStyle(.grouped)
         .navigationTitle("Dictation")
-        .task(id: library.installed) {
+        .task(id: library.inUse) {
             language = await Dictation.dictationLanguage()
             engine = await DictationRecognizers.engine(language: language)
         }
-        .confirmationDialog("Delete the Whisper model?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+        .confirmationDialog("Delete this Whisper model?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible, presenting: deleting) { model in
             Button("Delete \(model.title)", role: .destructive) {
                 AppHaptics.warning()
+                let folder = library.folder(of: model)
                 library.delete(model)
-                Task { await WhisperRuntime.shared.unload(.deleted) }
+                Task { await WhisperRuntime.shared.unload(.deleted, only: folder) }
             }
-        } message: { _ in
-            Text("Dictation uses Apple's speech recognition until you download a model again.")
+        } message: { model in
+            if library.inUse == model, library.installedModels.count == 1 {
+                Text("Dictation uses Apple's speech recognition until you download a model again.")
+            } else {
+                Text("You can download it again later.")
+            }
         }
     }
 
@@ -124,9 +129,10 @@ private struct DictationDiagnosticsSection: View {
 
     private static func model(_ status: WhisperModelStatus) -> String {
         let since = status.since.map { " · " + $0.formatted(.relative(presentation: .named)) } ?? ""
+        let name = status.model.map { " · " + $0.title } ?? ""
         switch status.phase {
-        case .loaded: return String(localized: "Loaded") + since
-        case .loading: return String(localized: "Loading…") + since
+        case .loaded: return String(localized: "Loaded") + name + since
+        case .loading: return String(localized: "Loading…") + name + since
         case .failed: return String(localized: "Failed: \(status.failure ?? "")")
         case .notLoaded:
             switch status.unloaded {
@@ -147,24 +153,45 @@ private struct DictationDiagnosticsSection: View {
     }
 }
 
+/// One model: download it, tap it to dictate with it, delete it.
 private struct WhisperModelRow: View {
     let model: WhisperModel
     let library: WhisperModelLibrary
     @Binding var deleting: WhisperModel?
 
     private var runsHere: Bool { model.runs(onDeviceSupporting: WhisperModels.deviceSupports) }
+    private var inUse: Bool { library.inUse == model }
 
     var body: some View {
         let state = library.state(of: model)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.title)
-                    Text(detail(state))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                Button {
+                    guard case .installed = state, !inUse else { return }
+                    AppHaptics.light()
+                    library.use(model)
+                    // Loaded now, so the next dictation doesn't wait for it.
+                    if let folder = library.folder(of: model) { Task { await WhisperRuntime.shared.warmUp(folder) } }
+                } label: {
+                    HStack(spacing: 12) {
+                        selection(state)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.title)
+                            if Self.recommendsHere, model == .recommended {
+                                Text("Recommended for iPhone")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                            }
+                            Text(detail(state))
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                    }
+                    .contentShape(Rectangle())
                 }
-                Spacer(minLength: 8)
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(inUse ? .isSelected : [])
                 action(state)
             }
             switch state {
@@ -184,6 +211,28 @@ private struct WhisperModelRow: View {
         .padding(.vertical, 2)
     }
 
+    /// The recommendation is for an iPhone.
+    private static var recommendsHere: Bool {
+        #if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .phone
+        #else
+        false
+        #endif
+    }
+
+    /// A downloaded model is a choice: filled when it dictates, empty to choose it.
+    @ViewBuilder private func selection(_ state: WhisperModelLibrary.State) -> some View {
+        Group {
+            if case .installed = state {
+                Image(systemName: inUse ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(inUse ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            } else {
+                Image(systemName: "circle").hidden()
+            }
+        }
+        .font(.title3)
+    }
+
     private func detail(_ state: WhisperModelLibrary.State) -> String {
         let size = Self.megabytes(model.downloadBytes)
         switch state {
@@ -192,7 +241,8 @@ private struct WhisperModelRow: View {
         case .preparing:
             return String(localized: "Preparing for this device. The first time takes a few minutes.")
         case .installed(let bytes):
-            return String(localized: "In use · \(Self.megabytes(bytes)) on this device")
+            let place = inUse ? String(localized: "In use") : String(localized: "Downloaded")
+            return "\(place) · \(model.summary) · \(Self.megabytes(bytes))"
         case .absent, .failed:
             return runsHere ? "\(model.summary) · \(size)" : String(localized: "Not available on this device")
         }
@@ -230,7 +280,7 @@ private struct WhisperModelRow: View {
         defer { UIApplication.shared.isIdleTimerDisabled = false }
         #endif
         await library.download(model)
-        if library.installed == model { AppHaptics.success() }
+        if library.inUse == model { AppHaptics.success() }
     }
 
     private static func megabytes(_ bytes: Int64) -> String {
@@ -242,12 +292,19 @@ extension WhisperModel {
     var title: String {
         switch self {
         case .largeV3Turbo: String(localized: "Large v3 Turbo")
+        case .small: String(localized: "Small")
+        case .base: String(localized: "Base")
+        case .tiny: String(localized: "Tiny")
         }
     }
 
+    /// Speed and accuracy in Spanish, as measured (see `WhisperModel`).
     var summary: String {
         switch self {
-        case .largeV3Turbo: String(localized: "Most accurate")
+        case .largeV3Turbo: String(localized: "Most accurate, slower")
+        case .small: String(localized: "Accurate, fast")
+        case .base: String(localized: "Some mistakes, faster")
+        case .tiny: String(localized: "Many mistakes, fastest")
         }
     }
 }

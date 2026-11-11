@@ -25,7 +25,7 @@ enum DictationRecognizers {
     /// The engine dictation uses on this device (the one Settings › Dictation shows).
     @MainActor
     static func engine(language: String?) async -> DictationEngine {
-        await DictationEngine.choose(installed: WhisperModels.library.installed, deviceSupports: WhisperModels.deviceSupports) { @Sendable in
+        await DictationEngine.choose(inUse: WhisperModels.library.inUse, deviceSupports: WhisperModels.deviceSupports) { @Sendable in
             await SpeechTranscriberRecognizer.isReady(for: language)
         }
     }

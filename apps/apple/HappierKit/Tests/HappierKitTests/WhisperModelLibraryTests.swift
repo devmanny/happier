@@ -51,9 +51,9 @@ struct WhisperModelLibraryTests {
 
         #expect(seen == [.downloading(0.5)])
         #expect(library.state(of: .largeV3Turbo) == .installed(bytes: 1_000))
-        #expect(library.installed == .largeV3Turbo)
+        #expect(library.inUse == .largeV3Turbo)
         let relaunched = WhisperModelLibrary(directory: directory, downloader: downloader)
-        #expect(relaunched.installed == .largeV3Turbo)
+        #expect(relaunched.inUse == .largeV3Turbo)
         #expect(relaunched.folder(of: .largeV3Turbo)?.lastPathComponent == WhisperModel.largeV3Turbo.id)
     }
 
@@ -65,7 +65,7 @@ struct WhisperModelLibraryTests {
         await library.download(.largeV3Turbo)
 
         #expect(library.state(of: .largeV3Turbo) == .failed("The Internet connection appears to be offline."))
-        #expect(library.installed == nil)
+        #expect(library.inUse == nil)
         #expect(!files(of: .largeV3Turbo))
     }
 
@@ -77,7 +77,7 @@ struct WhisperModelLibraryTests {
         await library.download(.largeV3Turbo)
 
         #expect(library.state(of: .largeV3Turbo) == .failed("The Internet connection appears to be offline."))
-        #expect(library.installed == nil)
+        #expect(library.inUse == nil)
         #expect(!files(of: .largeV3Turbo))
     }
 
@@ -90,7 +90,7 @@ struct WhisperModelLibraryTests {
         let library = WhisperModelLibrary(directory: directory, downloader: FakeDownloader())
 
         #expect(library.state(of: .largeV3Turbo) == .absent)
-        #expect(library.installed == nil)
+        #expect(library.inUse == nil)
         #expect(!files(of: .largeV3Turbo))
     }
 
@@ -114,12 +114,12 @@ struct WhisperModelLibraryTests {
     @Test func deletingRemovesTheModel() async {
         let library = WhisperModelLibrary(directory: directory, downloader: FakeDownloader())
         await library.download(.largeV3Turbo)
-        #expect(library.installed == .largeV3Turbo)
+        #expect(library.inUse == .largeV3Turbo)
 
         library.delete(.largeV3Turbo)
 
         #expect(library.state(of: .largeV3Turbo) == .absent)
-        #expect(library.installed == nil)
+        #expect(library.inUse == nil)
         #expect(!files(of: .largeV3Turbo))
     }
 
@@ -134,6 +134,71 @@ struct WhisperModelLibraryTests {
 
         await library.download(.largeV3Turbo)
 
-        #expect(library.installed == .largeV3Turbo)
+        #expect(library.inUse == .largeV3Turbo)
+    }
+
+    // MARK: Several models, one in use
+
+    @Test func theLatestDownloadIsTheOneInUse() async {
+        let library = WhisperModelLibrary(directory: directory, downloader: FakeDownloader())
+        await library.download(.largeV3Turbo)
+        #expect(library.inUse == .largeV3Turbo)
+
+        // A lighter one downloaded as an alternative: it is what you downloaded it for.
+        await library.download(.tiny)
+
+        #expect(library.inUse == .tiny)
+        // Both stay on the device, most accurate first.
+        #expect(library.installedModels == [.largeV3Turbo, .tiny])
+    }
+
+    @Test func choosingADownloadedModelPutsItInUseAcrossLaunches() async {
+        let downloader = FakeDownloader()
+        let library = WhisperModelLibrary(directory: directory, downloader: downloader)
+        await library.download(.tiny)
+        await library.download(.largeV3Turbo)
+
+        library.use(.tiny)
+
+        #expect(library.inUse == .tiny)
+        #expect(WhisperModelLibrary(directory: directory, downloader: downloader).inUse == .tiny)
+    }
+
+    @Test func onlyADownloadedModelCanBeChosen() async {
+        let library = WhisperModelLibrary(directory: directory, downloader: FakeDownloader())
+        await library.download(.base)
+
+        library.use(.small)
+
+        #expect(library.inUse == .base)
+    }
+
+    @Test func deletingTheModelInUseFallsBackToAnotherDownloadedOne() async {
+        let library = WhisperModelLibrary(directory: directory, downloader: FakeDownloader())
+        await library.download(.tiny)
+        await library.download(.small)
+        await library.download(.largeV3Turbo)
+        library.use(.tiny)
+
+        // Another model goes: the one in use stays.
+        library.delete(.small)
+        #expect(library.inUse == .tiny)
+
+        // The one in use goes: the most accurate one left takes over; none left, Apple's engine.
+        library.delete(.tiny)
+        #expect(library.inUse == .largeV3Turbo)
+        library.delete(.largeV3Turbo)
+        #expect(library.inUse == nil)
+    }
+
+    @Test func aChosenModelThatIsGoneFallsBackOnTheNextLaunch() async throws {
+        let downloader = FakeDownloader()
+        let library = WhisperModelLibrary(directory: directory, downloader: downloader)
+        await library.download(.base)
+        await library.download(.tiny)
+        // Its files went away while the app wasn't running (an interrupted delete).
+        try FileManager.default.removeItem(at: directory.appending(path: WhisperModel.tiny.id))
+
+        #expect(WhisperModelLibrary(directory: directory, downloader: downloader).inUse == .base)
     }
 }

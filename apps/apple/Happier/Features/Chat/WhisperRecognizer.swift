@@ -101,11 +101,13 @@ actor WhisperRuntime {
         return results.flatMap(\.segments).map { .init(text: $0.text, start: $0.start, end: $0.end) }
     }
 
-    func unload(_ reason: WhisperModelStatus.Unload) async {
+    /// Lets the model go (`only` that folder's, when given).
+    func unload(_ reason: WhisperModelStatus.Unload, only: URL? = nil) async {
+        if let only, only != folder, only != reloadOnReturn { return }
         if reason != .background { reloadOnReturn = nil }
         await acquire()
         defer { release() }
-        guard let kit else { return }
+        guard let kit, only == nil || only == folder else { return }
         await kit.unloadModels()
         self.kit = nil
         folder = nil
@@ -136,9 +138,19 @@ actor WhisperRuntime {
         if let loading, loading.folder == folder { return loading.task }
         let task = Task<Void, any Error> {
             defer { loading = nil }
+            // Another model is let go first: two in memory at once is a model too many.
+            if let kit, self.folder != folder {
+                await acquire()
+                await kit.unloadModels()
+                self.kit = nil
+                self.folder = nil
+                release()
+            }
             let started = ContinuousClock.now
+            let model = WhisperModel(rawValue: folder.lastPathComponent)
             await Self.report { status in
                 status.phase = .loading
+                status.model = model
                 status.since = .now
                 status.unloaded = nil
                 status.failure = nil
@@ -161,11 +173,6 @@ actor WhisperRuntime {
                         status.lastLoadSeconds = took.seconds
                     }
                     return
-                }
-                if let kit {
-                    await acquire()
-                    await kit.unloadModels()
-                    release()
                 }
                 kit = loaded
                 self.folder = folder

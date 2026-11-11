@@ -68,6 +68,8 @@ public struct WhisperModelStatus: Codable, Equatable, Sendable {
     }
 
     public var phase: Phase = .notLoaded
+    /// The model loaded, loading or let go last.
+    public var model: WhisperModel?
     public var since: Date?
     /// The last load that finished, in seconds (minutes when the system had to compile it again).
     public var lastLoadSeconds: TimeInterval?

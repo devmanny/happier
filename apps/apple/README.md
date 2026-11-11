@@ -270,9 +270,12 @@ On Mac and iPad the browser keeps its own window, with tabs above the navigation
 and the original blue Happier icon beside the native window controls. Agent activity is a subtle
 blue tab outline and pulsing sparkles; the desktop address field stays quiet.
 
-**Settings → Dictation** downloads the Whisper Large v3 Turbo model (WhisperKit, Core ML, ~627 MB)
-once, with progress, then compiles it for the device; it is kept in Application Support and is
-deletable. While it is installed and the device can run it (WhisperKit's device table),
+**Settings → Dictation** downloads Whisper models (WhisperKit, Core ML): Large v3 Turbo (~627 MB,
+recommended on iPhone), Small (~487 MB), Base (~147 MB) and Tiny (~77 MB), multilingual only and
+only those WhisperKit's device table lists for the device. Each downloads once, with progress,
+then compiles for the device; they are kept in Application Support and each is deletable. Several
+can be kept: the one tapped (else the latest download, else the most accurate left) is in use.
+While one is in use and the device can run it,
 dictation transcribes on the device in the dictation language, never auto-detected, with text
 appearing about once a second and the rest when you stop (tap or release); silence is not
 transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
