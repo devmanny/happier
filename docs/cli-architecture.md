@@ -664,6 +664,43 @@ launchd.plist(5) documents `SuccessfulExit` as implying `RunAtLoad`, so keeping 
 login start the mode exists to remove — at the deliberate cost of no crash relaunch while
 on-demand.
 
+### macOS privacy identity of the background service
+
+macOS attributes the privacy permissions (Accessibility, Screen Recording, Full Disk Access, …)
+requested anywhere in a launchd job's process tree — the daemon, its session runners, the agents
+and MCP servers they start, a tmux server one of them starts — to the executable launchd spawned
+for the job. Observed on macOS 26 (tccd `AUTHREQ_ATTRIBUTION` `responsible_path`): launchd records
+that file's **real path** at every spawn, a symlink in `ProgramArguments` is resolved first, and a
+later `exec` in the same process does not change the record. tccd then honours a grant only while
+the file at that path satisfies the code requirement recorded with it: replacing it with a build
+of the same signing identity keeps the grant, an ad-hoc build does not. The managed shim resolves
+into `versions/<id>/`, so before the launcher every CLI update made the service a new privacy
+client and macOS asked for every permission again.
+
+In current development source the darwin service therefore starts
+`<happierHome>/bin/happier-daemon-launcher`, which only `exec`s the command the definition would
+otherwise run (`[launcher, shim, daemon, start-sync, --takeover]`): the same process and pid become
+the daemon, so pids, parentage, `process.execPath` and runtime-root resolution are unchanged.
+`apps/cli/src/daemon/service/darwinDaemonLauncher.ts` owns it:
+
+- The launcher is first-party C (`apps/cli/tools/sources/happier-daemon-launcher`), shipped as a
+  universal tool archive in `apps/cli/tools/archives` and unpacked into darwin payloads'
+  `tools/unpacked/`, where payload signing (local builds and release notarization) signs it like
+  the other bundled Mach-O tools while preserving its identifier.
+- It is installed from the running CLI's payload **only when its path is free** and never replaced
+  (the final step is a hard link, which fails instead of overwriting): its path and signature are
+  the identity the user grants, so neither CLI updates nor a build signed differently may change
+  it. A different launcher contract must ship under a new file name.
+- The darwin drift comparator treats starting through the launcher, or not, as real drift, so the
+  next `service install` (or update-driven reinstall) rewrites an older definition and
+  re-bootstraps it. `readDaemonServiceDefinitionLauncher` strips the launcher, so every reader of
+  "which CLI does this service run" still sees the shim or node entry.
+- A CLI that ships no launcher (none installed and none in its payload) keeps the direct command
+  and warns at install time that macOS will ask again after updates.
+
+Processes that already run keep the identity they were spawned under until they exit — in
+particular a long-lived tmux server started before the switch.
+
 ### Desktop control of the background service
 
 Desktop settings carries **one** login-start switch (R16 b). **Stay reachable in the background** is the

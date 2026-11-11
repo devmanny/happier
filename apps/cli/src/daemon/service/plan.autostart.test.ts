@@ -64,7 +64,7 @@ function commandLines(plan: { commands: readonly { cmd: string; args: readonly s
 describe('daemon service install plan — autostart dimension', () => {
   describe('darwin (launchd)', () => {
     it('omits the login trigger in on-demand mode', () => {
-      const plan = planDaemonServiceInstall({ ...DARWIN_BASE, autostart: 'on-demand' });
+      const plan = planDaemonServiceInstall({ darwinLauncher: null, ...DARWIN_BASE, autostart: 'on-demand' });
       const content = plan.files[0]?.content ?? '';
 
       expect(content).toMatch(/<key>RunAtLoad<\/key>\s*<false\/>/);
@@ -85,7 +85,7 @@ describe('daemon service install plan — autostart dimension', () => {
     });
 
     it('retains the login trigger by default', () => {
-      const plan = planDaemonServiceInstall({ ...DARWIN_BASE });
+      const plan = planDaemonServiceInstall({ darwinLauncher: null, ...DARWIN_BASE });
       const content = plan.files[0]?.content ?? '';
 
       expect(content).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/);
@@ -98,7 +98,7 @@ describe('daemon service install plan — autostart dimension', () => {
 
   describe('linux (systemd)', () => {
     it('does not enable the unit in on-demand mode, and clears a previously enabled login trigger', () => {
-      const plan = planDaemonServiceInstall({ ...LINUX_BASE, autostart: 'on-demand' });
+      const plan = planDaemonServiceInstall({ darwinLauncher: null, ...LINUX_BASE, autostart: 'on-demand' });
       const lines = commandLines(plan);
 
       expect(lines).not.toContain('systemctl --user enable happier-daemon.cloud.service');
@@ -110,7 +110,7 @@ describe('daemon service install plan — autostart dimension', () => {
     });
 
     it('enables the unit by default', () => {
-      const lines = commandLines(planDaemonServiceInstall({ ...LINUX_BASE }));
+      const lines = commandLines(planDaemonServiceInstall({ darwinLauncher: null, ...LINUX_BASE }));
 
       expect(lines).toContain('systemctl --user enable happier-daemon.cloud.service');
       expect(lines).not.toContain('systemctl --user disable happier-daemon.cloud.service');
@@ -118,6 +118,7 @@ describe('daemon service install plan — autostart dimension', () => {
 
     it('does not enable a system-mode unit in on-demand mode', () => {
       const lines = commandLines(planDaemonServiceInstall({
+        darwinLauncher: null,
         ...LINUX_BASE,
         mode: 'system',
         systemUser: 'happier',
@@ -131,19 +132,19 @@ describe('daemon service install plan — autostart dimension', () => {
 
   describe('win32 (scheduled task)', () => {
     it('registers an interactive user task without triggers in on-demand mode', () => {
-      const install = planDaemonServiceInstall({ ...WIN32_BASE, autostart: 'on-demand' })
+      const install = planDaemonServiceInstall({ darwinLauncher: null, ...WIN32_BASE, autostart: 'on-demand' })
         .commands.find((command) => command.cmd === 'powershell.exe' && String(command.args.at(-1)).includes('RegisterTask'));
       const registration = String(install?.args.at(-1) ?? '');
       expect(registration).toContain('<Triggers/>');
       expect(registration).toContain('<LogonType>InteractiveToken</LogonType>');
       expect(registration).not.toContain('LogonTrigger');
       // Installed and started right now, just never by the scheduler.
-      expect(commandLines(planDaemonServiceInstall({ ...WIN32_BASE, autostart: 'on-demand' })))
+      expect(commandLines(planDaemonServiceInstall({ darwinLauncher: null, ...WIN32_BASE, autostart: 'on-demand' })))
         .toContain('schtasks /Run /TN Happier\\happier-daemon.cloud');
     });
 
     it('registers a current-user logon trigger by default', () => {
-      const install = planDaemonServiceInstall({ ...WIN32_BASE })
+      const install = planDaemonServiceInstall({ darwinLauncher: null, ...WIN32_BASE })
         .commands.find((command) => command.cmd === 'powershell.exe' && String(command.args.at(-1)).includes('RegisterTask'));
       const registration = String(install?.args.at(-1) ?? '');
       expect(registration).toContain('<LogonTrigger>');
@@ -158,19 +159,19 @@ describe('daemon service install plan — autostart dimension', () => {
     // matches the expected one (installer.ts), and on Linux/Windows the login
     // trigger lives outside the definition file.
     it('writes the selected mode into the service definition on every platform', () => {
-      expect(planDaemonServiceInstall({ ...DARWIN_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...DARWIN_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
         .toContain('<key>HAPPIER_DAEMON_SERVICE_AUTOSTART</key>');
-      expect(planDaemonServiceInstall({ ...DARWIN_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...DARWIN_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
         .toContain('<string>on-demand</string>');
-      expect(planDaemonServiceInstall({ ...DARWIN_BASE }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...DARWIN_BASE }).files[0]?.content ?? '')
         .toContain('<string>at-login</string>');
 
-      expect(planDaemonServiceInstall({ ...LINUX_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...LINUX_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
         .toContain('Environment=HAPPIER_DAEMON_SERVICE_AUTOSTART=on-demand');
-      expect(planDaemonServiceInstall({ ...LINUX_BASE }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...LINUX_BASE }).files[0]?.content ?? '')
         .toContain('Environment=HAPPIER_DAEMON_SERVICE_AUTOSTART=at-login');
 
-      expect(planDaemonServiceInstall({ ...WIN32_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
+      expect(planDaemonServiceInstall({ darwinLauncher: null, ...WIN32_BASE, autostart: 'on-demand' }).files[0]?.content ?? '')
         .toContain('HAPPIER_DAEMON_SERVICE_AUTOSTART');
     });
   });

@@ -18,6 +18,7 @@ const baseInstallParams = {
 describe('daemon service plan legacy cloud cleanup', () => {
   it('emits legacy cleanup for non-cloud default-following installs', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       ...baseInstallParams,
       targetMode: 'default-following',
       instanceId: 'company',
@@ -36,6 +37,7 @@ describe('daemon service plan legacy cloud cleanup', () => {
 
   it('still emits legacy cleanup for cloud default-following installs', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       ...baseInstallParams,
       targetMode: 'default-following',
       instanceId: 'cloud',

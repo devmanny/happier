@@ -73,6 +73,7 @@ async function loadWithSpawnRecorder(options: Readonly<{ onRestart?: (env: NodeJ
   const installService = (params: Readonly<{ targetMode: 'default-following' | 'pinned'; serverId?: string }>) => {
     const serverId = params.serverId ?? 'default';
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       channel: 'stable',
       targetMode: params.targetMode,

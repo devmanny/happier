@@ -4,6 +4,7 @@ import { getReleaseRingCatalogEntry, type PublicReleaseRingId } from '@happier-d
 import { isServerIdFilesystemSafe } from '@/server/serverId';
 
 import { buildLaunchAgentPlistXml, buildLaunchdPath } from './darwin';
+import type { DarwinDaemonLauncherInstall } from './darwinDaemonLauncher';
 import { buildServicePath, planServiceAction, renderSystemdServiceUnit, renderWindowsScheduledTaskWrapperPs1 } from '@happier-dev/cli-common/service';
 
 export type DaemonServicePlatform = 'darwin' | 'linux' | 'win32';
@@ -76,6 +77,8 @@ export type DaemonServiceInstallPlan = Readonly<{
   platform: DaemonServicePlatform;
   files: DaemonServicePlannedFile[];
   commands: DaemonServicePlannedCommand[];
+  /** darwin: the launcher the definition starts, still to be installed from this payload. */
+  darwinLauncherInstall?: Readonly<{ path: string; sourcePath: string }>;
 }>;
 
 export type DaemonServiceUninstallPlan = Readonly<{
@@ -320,6 +323,11 @@ export function planDaemonServiceInstall(params: Readonly<{
   publicServerUrl: string;
   nodePath: string;
   entryPath: string;
+  /**
+   * darwin: the stable launcher the definition starts the daemon through (see
+   * `darwinDaemonLauncher.ts`); `null`/absent runs the CLI directly. Ignored on other platforms.
+   */
+  darwinLauncher: DarwinDaemonLauncherInstall | null;
   uid?: number;
 }>): DaemonServiceInstallPlan {
   const instanceId = sanitizeServiceInstanceId(params.instanceId);
@@ -384,9 +392,10 @@ export function planDaemonServiceInstall(params: Readonly<{
       ...pinnedTargetEnv,
     };
 
+    const launcher = params.darwinLauncher ?? null;
     const xml = buildLaunchAgentPlistXml({
       label,
-      programArgs,
+      programArgs: launcher ? [launcher.path, ...programArgs] : programArgs,
       env,
       stdoutPath,
       stderrPath,
@@ -429,6 +438,7 @@ export function planDaemonServiceInstall(params: Readonly<{
       platform: 'darwin',
       files: [{ path: plistPath, content: xml, mode: 0o644 }],
       commands,
+      ...(launcher?.sourcePath ? { darwinLauncherInstall: { path: launcher.path, sourcePath: launcher.sourcePath } } : {}),
     };
   }
 

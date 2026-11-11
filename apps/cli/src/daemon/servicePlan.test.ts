@@ -13,6 +13,7 @@ describe('daemon service install plan', () => {
   it('plans a LaunchAgent install (darwin)', () => {
     envScope.patch({ PATH: '/custom/bin' });
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'darwin',
       channel: 'stable',
       instanceId: 'cloud',
@@ -57,6 +58,7 @@ describe('daemon service install plan', () => {
 
   it('enables the darwin LaunchAgent label before bootstrapping it', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'darwin',
       channel: 'stable',
       instanceId: 'cloud',
@@ -86,6 +88,7 @@ describe('daemon service install plan', () => {
   it('plans channel-scoped LaunchAgent labels for preview (darwin)', () => {
     envScope.patch({ PATH: '/custom/bin' });
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'darwin',
       channel: 'preview',
       instanceId: 'cloud',
@@ -108,6 +111,7 @@ describe('daemon service install plan', () => {
 
   it('preserves the raw pinned server id in service env while sanitizing launchd labels', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'darwin',
       channel: 'preview',
       instanceId: 'stack_macos-v0210__id_default',
@@ -135,6 +139,7 @@ describe('daemon service install plan', () => {
   it('plans a systemd --user unit install (linux)', () => {
     envScope.patch({ PATH: '/home/test/.local/bin:/usr/bin' });
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'stable',
@@ -178,6 +183,7 @@ describe('daemon service install plan', () => {
 
   it('plans a default-following systemd user unit without pinning server env', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'preview',
@@ -208,6 +214,7 @@ describe('daemon service install plan', () => {
 
   it('plans channel-scoped unit names for dev (linux)', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'publicdev',
@@ -271,6 +278,7 @@ describe('daemon service install plan', () => {
   it('plans a systemd system unit install (linux)', () => {
     envScope.patch({ PATH: '/root/.cargo/bin:/usr/local/sbin' });
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'system',
       channel: 'stable',
@@ -309,6 +317,7 @@ describe('daemon service install plan', () => {
   it('requires systemUser when mode=system (linux)', () => {
     expect(() =>
       planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'system',
         instanceId: 'cloud',
@@ -326,6 +335,7 @@ describe('daemon service install plan', () => {
 
   it('quotes ExecStart paths that contain spaces (linux)', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       instanceId: 'cloud',
@@ -345,6 +355,7 @@ describe('daemon service install plan', () => {
 
   it('plans instance-specific unit names (linux)', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'stable',
@@ -365,6 +376,7 @@ describe('daemon service install plan', () => {
 
   it('plans a Scheduled Task install (win32)', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'win32',
       channel: 'stable',
       instanceId: 'cloud',
@@ -388,6 +400,7 @@ describe('daemon service install plan', () => {
 
   it('plans channel-scoped task names for dev (win32)', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'win32',
       channel: 'publicdev',
       instanceId: 'cloud',

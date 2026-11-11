@@ -36,6 +36,7 @@ describe('service definition home attribution', () => {
         HAPPIER_DAEMON_SERVICE_INSTANCE_ID: 'cloud',
       });
       const foreignPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform, mode: 'user', channel: 'stable', targetMode: 'default-following',
         instanceId: 'cloud', activeServerId: 'cloud', userHomeDir, happierHomeDir: foreignHomeDir,
         nodePath: process.execPath, entryPath: '/opt/happier/index.mjs', uid: 501,
@@ -76,6 +77,7 @@ describe('service definition home attribution', () => {
       const { planServiceDaemonsRestartAfterUpdate } = await import('../../cli/runtime/update/restartServiceDaemonAfterUpdate');
       expect(await planServiceDaemonsRestartAfterUpdate({ channel: 'stable' })).toMatchObject({ labels: [], restart: null });
       const ownPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform, mode: 'user', channel: 'stable', targetMode: 'default-following',
         instanceId: runtime.instanceId, activeServerId: runtime.activeServerId,
         userHomeDir, happierHomeDir, nodePath: process.execPath, entryPath: '/opt/happier/index.mjs',

@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 
+import { splitDarwinDaemonLauncher } from './darwinDaemonLauncher';
+
 /**
  * Semantic equivalence check for darwin launchd plist service definitions.
  *
@@ -103,6 +105,9 @@ function shallowEqualStringMap(a: Readonly<Record<string, string>>, b: Readonly<
  * launcher path still ends up running the same daemon under the same config.
  */
 function compareProgramArgumentsSemantically(a: readonly string[], b: readonly string[]): boolean {
+  // The stable launcher is the identity macOS grants privacy permissions to, so starting through it
+  // (or not) is real drift: an installed definition without it is rewritten onto it.
+  if (splitDarwinDaemonLauncher(a).launcher !== splitDarwinDaemonLauncher(b).launcher) return false;
   const aTrailing = trailingCommandArgs(a);
   const bTrailing = trailingCommandArgs(b);
   if (aTrailing.length !== bTrailing.length) return false;

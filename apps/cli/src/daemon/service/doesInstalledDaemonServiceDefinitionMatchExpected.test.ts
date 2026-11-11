@@ -129,6 +129,31 @@ describe('doesInstalledDaemonServiceDefinitionMatchExpected', () => {
     });
   });
 
+  it('treats starting through the macOS launcher as a real change, so installed services move onto it', async () => {
+    const launched = (programArgs: string) => programArgs.replace(
+      '\n      <string>',
+      '\n      <string>/Users/me/.happier/bin/happier-daemon-launcher</string>\n      <string>',
+    );
+    await withTempDir('plist-signature-', async (dir) => {
+      const installedPath = writePlistFile(dir, plist(PROGRAM_ARGS_SHIM, PATH_A));
+      expect(doesInstalledDaemonServiceDefinitionMatchExpected({
+        installedPath,
+        expectedContents: plist(launched(PROGRAM_ARGS_SHIM), PATH_A),
+      })).toBe(false);
+
+      const launchedPath = writePlistFile(dir, plist(launched(PROGRAM_ARGS_NODE_ENTRY), PATH_A));
+      expect(doesInstalledDaemonServiceDefinitionMatchExpected({
+        installedPath: launchedPath,
+        expectedContents: plist(PROGRAM_ARGS_SHIM, PATH_A),
+      })).toBe(false);
+      // Behind the same launcher, the CLI form drifts as before.
+      expect(doesInstalledDaemonServiceDefinitionMatchExpected({
+        installedPath: launchedPath,
+        expectedContents: plist(launched(PROGRAM_ARGS_SHIM), PATH_B),
+      })).toBe(true);
+    });
+  });
+
   it('returns false when the release channel env var differs', async () => {
     await withTempDir('plist-signature-', async (dir) => {
       const installedPath = writePlistFile(dir, plist(PROGRAM_ARGS_SHIM, PATH_A));

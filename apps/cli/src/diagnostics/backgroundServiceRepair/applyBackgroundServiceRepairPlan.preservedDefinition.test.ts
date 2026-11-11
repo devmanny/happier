@@ -46,6 +46,7 @@ function definition(params: Readonly<{
   bundleId?: string;
 }>) {
   return planDaemonServiceInstall({
+    darwinLauncher: null,
     platform: params.platform,
     channel: 'preview',
     targetMode: params.targetMode ?? 'default-following',

@@ -18,6 +18,7 @@ const baseInstallParams = {
 describe('daemon service plan active server identity', () => {
   it('requires an explicit active server id for pinned installs instead of falling back to the service instance id', () => {
     expect(() => planDaemonServiceInstall({
+      darwinLauncher: null,
       ...baseInstallParams,
       targetMode: 'pinned',
       instanceId: 'service-instance',
@@ -32,7 +33,7 @@ describe('daemon service plan active server identity', () => {
       activeServerId: 'company-profile',
     } as const;
 
-    const plan = planDaemonServiceInstall(params);
+    const plan = planDaemonServiceInstall({ ...params, darwinLauncher: null });
     const file = plan.files[0];
 
     expect(file?.path).toContain('happier-daemon.service-instance.service');
@@ -42,6 +43,7 @@ describe('daemon service plan active server identity', () => {
 
   it('allows default-following installs to omit active server id and pinned server env', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       ...baseInstallParams,
       targetMode: 'default-following',
       instanceId: 'service-instance',

@@ -66,6 +66,7 @@ describe('resolveDaemonServiceListEntries', () => {
       };
 
       const expectedPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'user',
         channel: runtime.channel,
@@ -127,6 +128,7 @@ describe('resolveDaemonServiceListEntries', () => {
       };
 
       const expectedPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'user',
         channel: runtime.channel,
@@ -217,6 +219,7 @@ describe('resolveDaemonServiceListEntries', () => {
       };
 
       const expectedPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'win32',
         mode: 'user',
         channel: runtime.channel,

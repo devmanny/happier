@@ -5,6 +5,7 @@ import { planDaemonServiceInstall } from './plan';
 describe('daemon service plan release ring env', () => {
   it('writes HAPPIER_PUBLIC_RELEASE_CHANNEL=dev into systemd unit env for the public dev lane', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'publicdev',

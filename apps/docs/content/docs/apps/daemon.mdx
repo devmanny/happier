@@ -175,7 +175,11 @@ happier daemon service restart
 
 Platform notes:
 
-- **macOS**: LaunchAgent
+- **macOS**: LaunchAgent. In current development builds it starts the daemon through
+  `~/.happier/bin/happier-daemon-launcher`, a small launcher that stays at that path across CLI
+  updates. macOS attributes the privacy permissions your agents need (Accessibility, Screen
+  Recording, Full Disk Access) to it, so grant them to that file once in System Settings › Privacy &
+  Security; CLI updates no longer reset them.
 - **Linux**: `systemd --user`, with `systemctl` available and a working systemd user session. Linux systems without systemd cannot use this automatic startup path.
 - **Windows**: Scheduled Task (user-level)
 

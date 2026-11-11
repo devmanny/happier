@@ -5,6 +5,7 @@ import { planDaemonServiceInstall, planDaemonServiceUninstall } from './plan';
 describe('daemon service legacy cleanup planning', () => {
   it('marks legacy Linux cleanup commands as optional during default-following installs', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'linux',
       mode: 'user',
       channel: 'stable',
@@ -96,6 +97,7 @@ describe('daemon service legacy cleanup planning', () => {
 
   it('marks legacy Windows scheduled-task cleanup as optional during default-following installs', () => {
     const plan = planDaemonServiceInstall({
+      darwinLauncher: null,
       platform: 'win32',
       mode: 'user',
       channel: 'stable',

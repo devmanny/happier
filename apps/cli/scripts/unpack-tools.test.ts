@@ -81,6 +81,23 @@ describe('unpack-tools script', () => {
     await expect(unpacker.unpackTools(options)).resolves.toEqual({ success: true, alreadyUnpacked: true });
   });
 
+  it('unpacks the checked-in macOS daemon launcher for both darwin architectures only', async () => {
+    const unpackTools = require('./unpack-tools.cjs') as UnpackToolsModule;
+    const repoArchives = join(unpackTools.getToolsDir(), 'archives');
+    for (const platformDir of ['arm64-darwin', 'x64-darwin']) {
+      const toolsDir = await mkdtemp(join(tmpdir(), 'happier-launcher-tools-'));
+      await mkdir(join(toolsDir, 'archives'), { recursive: true });
+      for (const name of ['checksums.sha256', 'happier-daemon-launcher-darwin-universal.tar.gz']) {
+        await copyFile(join(repoArchives, name), join(toolsDir, 'archives', name));
+      }
+      await unpackTools.unpackTools({ platformDir, toolsDir, tools: ['happier-daemon-launcher'] });
+      const launcher = await stat(join(toolsDir, 'unpacked', 'happier-daemon-launcher'));
+      expect(launcher.mode & 0o111).not.toBe(0);
+    }
+    expect(unpackTools.getToolArchiveManifest().filter((entry) => entry.tool === 'happier-daemon-launcher')
+      .map((entry) => entry.platformDir).sort()).toEqual(['arm64-darwin', 'x64-darwin']);
+  });
+
   it('manifest includes zellij only for supported POSIX targets', () => {
     const unpackTools = require('./unpack-tools.cjs') as UnpackToolsModule;
     const manifest = unpackTools.getToolArchiveManifest();
