@@ -542,8 +542,9 @@ private struct RoomMessageRow: View {
                 text[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
             }
         }
+        // No `.textSelection`: on the Mac a selectable text answers a right-click with the text
+        // system's menu, hiding Reply; Copy is in the bubble's menu, as in the session chat.
         return Text(text)
-            .textSelection(.enabled)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .foregroundStyle(Color.white)
