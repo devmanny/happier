@@ -96,11 +96,22 @@ extension HappierStore {
     }
 
     /// The user's message: the room (at its version) and the message (new) are written together, so
-    /// it takes the next seq; when an agent wrote first it goes again on the newer room. False after
+    /// it takes the next seq; when an agent wrote first it goes again on the newer room. Quoting a
+    /// message (Reply) answers it and reaches its author (`AgentRoom.replying`). False after
     /// reporting why not.
     @discardableResult
-    public func sendRoomMessage(roomId: String, text: String) async -> Bool {
-        await appendRoomMessage(roomId: roomId) { room, now in room.appendingUserMessage(text, now: now) }
+    public func sendRoomMessage(roomId: String, text: String, replyingTo quoted: AgentRoomMessage? = nil) async -> Bool {
+        await appendRoomMessage(roomId: roomId) { room, now in
+            if let quoted { return room.replying(to: quoted, with: text, now: now) }
+            return room.appendingUserMessage(text, now: now)
+        }
+    }
+
+    /// The user dismissed a member's "Let It Answer" for the mention at `mentionSeq`: stored in the
+    /// room, so no device shows it until another agent mentions that member again.
+    @discardableResult
+    public func dismissRoomWait(roomId: String, agentId: String, mentionSeq: Int) async -> AgentRoom? {
+        await updateRoom(id: roomId) { room in room.dismissWait(agentId: agentId, mentionSeq: mentionSeq) }
     }
 
     /// An `<options>` option the user picked on an agent's message: answers only that agent.

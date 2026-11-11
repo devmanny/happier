@@ -157,6 +157,34 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(stored.json["userName"] == nil)
     }
 
+    @Test func aDismissedWaitIsWrittenToTheRoomAndKeepsWhatOthersWrote() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        // Mateo's daemon posts #3 meanwhile; the dismissal is applied to that newer room.
+        try seed(server, lastSeq: 3, version: 6)
+        #expect(await store.dismissRoomWait(roomId: "r1", agentId: "a-tomas", mentionSeq: 2)?.members.last?.dismissedMentionSeq == 2)
+        let room = try #require(server.row(AgentRoom.kvKey(id: "r1")).flatMap { AgentRoom.open($0.value, machineKey: machineKey) })
+        #expect(room.lastSeq == 3)
+        #expect(room.members.map(\.dismissedMentionSeq) == [nil, 2])
+        #expect(room.members.map(\.wakeByAgents) == [true, nil])
+    }
+
+    @Test func aReplyIsWrittenAnsweringTheQuotedMessageAndReachesOnlyItsAuthor() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 3, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        await store.loadRoom(id: "r1")
+        let quoted = try #require(store.roomMessages["r1"]?.first { $0.seq == 3 })
+        #expect(await store.sendRoomMessage(roomId: "r1", text: "sí, hazlo", replyingTo: quoted))
+        let sent = try #require(server.row(AgentRoomMessage.kvKey(roomId: "r1", seq: 4)).flatMap { AgentRoomMessage.open($0.value, machineKey: machineKey) })
+        #expect(sent.text == "sí, hazlo")
+        #expect(sent.replyTo == 3)
+        #expect(sent.mentions == ["a-mateo"])
+    }
+
     @Test func pausingWritesTheRoomAtItsVersionAndKeepsTheOthersChanges() async throws {
         let server = RoomKVServer()
         try seed(server, lastSeq: 2, version: 5)

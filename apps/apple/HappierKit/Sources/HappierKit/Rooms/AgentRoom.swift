@@ -19,6 +19,9 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         public var wakeByAgents: Bool?
         /// The protocol's intent name (`read_only`, `default`, `auto`, `yolo`); nil is YOLO.
         public var permissionMode: String?
+        /// The agent mention whose "Let It Answer" the user dismissed: its notice comes back only for a
+        /// later one. Written by the app in the room, so every device hides it; daemons don't read it.
+        public var dismissedMentionSeq: Int?
         var extra: [String: JSONValue] = [:]
 
         public var id: String { agentId }
@@ -60,7 +63,8 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
                   let directory = json["directory"]?.stringValue, !directory.isEmpty else { return nil }
             self.init(agentId: agentId, name: json["name"]?.stringValue, emoji: json["emoji"]?.stringValue, machineId: machineId,
                       directory: directory, wakeByAgents: json["wakeByAgents"]?.boolValue, permissionMode: json["permissionMode"]?.stringValue)
-            let known: Set<String> = ["agentId", "name", "emoji", "machineId", "directory", "wakeByAgents", "permissionMode"]
+            dismissedMentionSeq = json["dismissedMentionSeq"]?.intValue
+            let known: Set<String> = ["agentId", "name", "emoji", "machineId", "directory", "wakeByAgents", "permissionMode", "dismissedMentionSeq"]
             extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
         }
 
@@ -73,6 +77,7 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
             object["directory"] = .string(directory)
             if let wakeByAgents { object["wakeByAgents"] = .bool(wakeByAgents) }
             if let permissionMode { object["permissionMode"] = .string(permissionMode) }
+            if let dismissedMentionSeq { object["dismissedMentionSeq"] = .number(Double(dismissedMentionSeq)) }
             return .object(object)
         }
     }
@@ -191,6 +196,20 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         return appendingUserMessage("@\(name) \(option)", now: now, replyTo: message.seq, mentions: [author])
     }
 
+    /// Who the user's reply to `quoted` reaches: its author when that is an agent of the room (never
+    /// the members it mentioned), then whoever `text` mentions, since the user named them.
+    public func replyRecipients(to quoted: AgentRoomMessage, text: String) -> [String] {
+        let author = quoted.author.agentId.flatMap { id in members.contains { $0.agentId == id } ? id : nil }
+        var recipients = author.map { [$0] } ?? []
+        for id in Self.mentions(in: text, members: members) where !recipients.contains(id) { recipients.append(id) }
+        return recipients
+    }
+
+    /// The user's `text` quoting `quoted` (Reply): it answers that message and reaches `replyRecipients`.
+    public func replying(to quoted: AgentRoomMessage, with text: String, now: Double) -> (room: AgentRoom, message: AgentRoomMessage)? {
+        appendingUserMessage(text, now: now, replyTo: quoted.seq, mentions: replyRecipients(to: quoted, text: text))
+    }
+
     /// The option the user picked on `message`, from the answer that replies to it; nil while none is.
     public static func chosenOption(on message: AgentRoomMessage, options: [String], messages: [AgentRoomMessage]) -> String? {
         guard let answer = messages.first(where: { $0.author == .user && $0.replyTo == message.seq }) else { return nil }
@@ -301,22 +320,46 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         return last.count == maxAgentTurns && last.allSatisfy { $0.author.agentId != nil }
     }
 
+    /// A member another agent mentioned that waits for the user: the mention (`mentionSeq`) and the
+    /// agent who wrote it.
+    public struct Wait: Equatable, Sendable {
+        public let agentId: String
+        public let mentionSeq: Int
+        public let mentionedBy: String?
+
+        public init(agentId: String, mentionSeq: Int, mentionedBy: String?) {
+            self.agentId = agentId
+            self.mentionSeq = mentionSeq
+            self.mentionedBy = mentionedBy
+        }
+    }
+
+    /// The user dismissed `agentId`'s "Let It Answer" for the mention at `mentionSeq` (it doesn't
+    /// answer it): the notice stays away until another agent mentions it again.
+    public mutating func dismissWait(agentId: String, mentionSeq: Int) {
+        guard let index = members.firstIndex(where: { $0.agentId == agentId }) else { return }
+        members[index].dismissedMentionSeq = max(members[index].dismissedMentionSeq ?? 0, mentionSeq)
+    }
+
     /// Members another agent mentioned that wait for the user ("Let It Answer"): agents can't wake
-    /// them (Claude, unless allowed after the warning), and they haven't spoken, nor been mentioned
-    /// by the user, since. Nothing waits in a paused or archived room.
-    public func waitingForUser(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> [String] {
+    /// them (Claude, unless allowed after the warning), they haven't spoken, nor been mentioned by
+    /// the user, since, and the user hasn't dismissed that mention. Nothing waits in a paused or
+    /// archived room.
+    public func waitingForUser(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> [Wait] {
         guard pausedAt == nil, archivedAt == nil else { return [] }
         let ordered = messages.sorted { $0.seq < $1.seq }
-        return members.filter { member in
-            guard member.wakeByAgents != true else { return false }
+        return members.compactMap { member -> Wait? in
+            guard member.wakeByAgents != true else { return nil }
             let seat = seats.first { $0.agentId == member.agentId }
-            guard seat?.inFlight == nil else { return false }
+            guard seat?.inFlight == nil else { return nil }
             let read = seat?.readThroughSeq ?? 0
             guard let mention = ordered.last(where: { $0.seq > read && $0.author.agentId != nil
-                && $0.author.agentId != member.agentId && $0.mentions.contains(member.agentId) }) else { return false }
-            return !ordered.contains { $0.seq > mention.seq
+                && $0.author.agentId != member.agentId && $0.mentions.contains(member.agentId) }),
+                  mention.seq > member.dismissedMentionSeq ?? 0 else { return nil }
+            let answered = ordered.contains { $0.seq > mention.seq
                 && ($0.author.agentId == member.agentId || ($0.author == .user && $0.mentions.contains(member.agentId))) }
-        }.map(\.agentId)
+            return answered ? nil : Wait(agentId: member.agentId, mentionSeq: mention.seq, mentionedBy: mention.author.agentId)
+        }
     }
 }
 
@@ -379,7 +422,7 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
     public let mentions: [String]
     /// An agent's message that mentions the user.
     public let mentionsUser: Bool
-    /// The message this one answers (an option the user picked on it).
+    /// The message this one answers: one the user quoted (Reply), or picked an option on.
     public let replyTo: Int?
     var extra: [String: JSONValue] = [:]
 

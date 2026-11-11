@@ -163,9 +163,55 @@ import Testing
         // Tomás wrote #3 after #2, so it already answered: nobody waits.
         #expect(room.waitingForUser(seats: seats, messages: messages).isEmpty)
         let unanswered = Array(messages.prefix(2))
-        #expect(Self.room(["lastSeq": 2]).waitingForUser(seats: seats, messages: unanswered) == ["a-tomas"])
+        #expect(Self.room(["lastSeq": 2]).waitingForUser(seats: seats, messages: unanswered)
+            == [AgentRoom.Wait(agentId: "a-tomas", mentionSeq: 2, mentionedBy: "a-mateo")])
         // The user's own mention wakes anyone, and a paused room waits for the user to resume, not answer.
         #expect(Self.room(["lastSeq": 2, "pausedAt": 9]).waitingForUser(seats: seats, messages: unanswered).isEmpty)
+    }
+
+    @Test func aDismissedWaitStaysAwayUntilAnotherAgentMentionsTheMemberAgain() throws {
+        // Mateo mentions Tomás in #2; the user dismisses Tomás's "Let It Answer" instead of letting it answer.
+        let seats = [AgentRoomSeat(roomId: "r1", agentId: "a-tomas", readThroughSeq: 1)]
+        let mentioned = [Self.message(1, by: Self.user, mentions: ["a-mateo"]), Self.message(2, by: Self.agent("a-mateo"), mentions: ["a-tomas"])]
+        var room = Self.room(["lastSeq": 2])
+        room.dismissWait(agentId: "a-tomas", mentionSeq: 2)
+        #expect(room.waitingForUser(seats: seats, messages: mentioned).isEmpty)
+        // Every device reads it from the room, and dismissing an older mention never brings a newer one back.
+        let stored = try #require(AgentRoom(json: room.json))
+        #expect(stored.members.first { $0.agentId == "a-tomas" }?.dismissedMentionSeq == 2)
+        room.dismissWait(agentId: "a-tomas", mentionSeq: 1)
+        #expect(room.members.first { $0.agentId == "a-tomas" }?.dismissedMentionSeq == 2)
+        #expect(room.members.first { $0.agentId == "a-mateo" }?.dismissedMentionSeq == nil)
+
+        // A later mention by an agent asks again.
+        let again = mentioned + [Self.message(3, by: Self.agent("a-mateo"), mentions: ["a-tomas"])]
+        #expect(room.waitingForUser(seats: seats, messages: again) == [AgentRoom.Wait(agentId: "a-tomas", mentionSeq: 3, mentionedBy: "a-mateo")])
+    }
+
+    @Test func aReplyReachesOnlyTheQuotedAgentPlusWhoeverTheUserMentions() throws {
+        let room = Self.room(["lastSeq": 4])
+        let tomas: JSONValue = ["kind": "agent", "agentId": "a-tomas", "name": "Tomás"]
+        // Tomás's message mentions Mateo: quoting it doesn't carry that mention.
+        let quoted = Self.message(4, by: tomas, mentions: ["a-mateo"], text: "Listo. @Mateo revisa")
+
+        let (next, reply) = try #require(room.replying(to: quoted, with: " sí, adelante ", now: 9))
+        #expect(next.lastSeq == 5)
+        #expect(reply.text == "sí, adelante")
+        #expect(reply.replyTo == 4)
+        #expect(reply.mentions == ["a-tomas"])
+        #expect(room.replyRecipients(to: quoted, text: "sí, adelante") == ["a-tomas"])
+
+        // The members the user names are added, the quoted author first.
+        #expect(room.replyRecipients(to: quoted, text: "y que @Mateo lo vea") == ["a-tomas", "a-mateo"])
+        #expect(room.replyRecipients(to: quoted, text: "@todos atentos") == ["a-tomas", "a-mateo"])
+        #expect(try #require(room.replying(to: quoted, with: "y que @Mateo lo vea", now: 9)).message.mentions == ["a-tomas", "a-mateo"])
+
+        // Quoting the user's own message reaches no one by itself; nor does an agent no longer in the room.
+        let mine = Self.message(3, by: Self.user, mentions: ["a-tomas"], text: "@Tomás ¿y esto?")
+        #expect(room.replyRecipients(to: mine, text: "lo repito") == [])
+        #expect(try #require(room.replying(to: mine, with: "lo repito", now: 9)).message.replyTo == 3)
+        #expect(room.replyRecipients(to: Self.message(2, by: Self.agent("a-leo")), text: "ok") == [])
+        #expect(room.replying(to: quoted, with: "  ", now: 9) == nil)
     }
 
     @Test func theBrakeHoldsAfterSixAgentTurnsInARowWithoutTheUser() {

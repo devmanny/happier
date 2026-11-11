@@ -2,11 +2,13 @@ import HappierKit
 import SwiftUI
 
 /// A room's chat: who said what, oldest first; the agents replying now; the members another agent
-/// mentioned that wait for you ("Let … Answer"); the brake after six agent turns in a row; and the
-/// pause. Your message reaches the members you mention with @ (`@todos` is everyone); with no one
-/// mentioned, @todos and the last agent who spoke are suggested. An agent's `<options>` show as the
-/// session chat's buttons; picking one answers only that agent. Delivery is the members' daemons'
-/// (`decideRoomDelivery`).
+/// mentioned that wait for you ("Let … Answer", or dismiss it until an agent mentions it again); the
+/// brake after six agent turns in a row; and the pause. Your message reaches the members you mention
+/// with @ (`@todos` is everyone); with no one mentioned, @todos and the last agent who spoke are
+/// suggested. Reply (the message's menu, a swipe to the left on iPhone and iPad, a button on hover on
+/// the Mac) quotes a message and reaches only its author, plus whoever you mention. An agent's
+/// `<options>` show as the session chat's buttons; picking one answers only that agent. Delivery is
+/// the members' daemons' (`decideRoomDelivery`).
 struct RoomView: View {
     let roomId: String
     @Environment(HappierStore.self) private var store
@@ -14,6 +16,12 @@ struct RoomView: View {
     @State private var draft = ""
     @State private var sending = false
     @State private var showMembers = false
+    /// The message being answered (Reply), by seq.
+    @State private var replyingTo: Int?
+    /// The message a tapped quote scrolled to, lit for a moment.
+    @State private var highlighted: Int?
+    /// "Let It Answer" notices dismissed here whose write is under way: hidden at once.
+    @State private var dismissing: Set<String> = []
     @FocusState private var composing: Bool
 
     private var room: AgentRoom? { store.room(id: roomId) }
@@ -32,6 +40,7 @@ struct RoomView: View {
             }
         }
         .task(id: roomId) {
+            replyingTo = nil
             if store.room(id: roomId) == nil { await store.refreshRooms() }
             await store.loadRoom(id: roomId)
         }
@@ -55,8 +64,12 @@ struct RoomView: View {
                             .padding(.top, 40)
                     }
                     ForEach(messages) { message in
-                        RoomMessageRow(message: message, room: room, messages: messages) { option in
+                        RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq) { option in
                             Task { await store.answerRoomOption(roomId: roomId, message: message, option: option) }
+                        } reply: {
+                            startReply(to: message)
+                        } showQuoted: { seq in
+                            show(seq, proxy: proxy)
                         }
                         .id(message.seq)
                     }
@@ -105,6 +118,24 @@ struct RoomView: View {
         }
     }
 
+    private func startReply(to message: AgentRoomMessage) {
+        AppHaptics.light()
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { replyingTo = message.seq }
+        composing = true
+    }
+
+    /// Scrolls to the message a quote answers and lights it for a moment.
+    private func show(_ seq: Int, proxy: ScrollViewProxy) {
+        AppHaptics.light()
+        withAnimation(reduceMotion ? nil : .smooth) { proxy.scrollTo(seq, anchor: .center) }
+        highlighted = seq
+        Task {
+            try? await Task.sleep(for: .seconds(1.2))
+            guard highlighted == seq else { return }
+            withAnimation(.easeOut(duration: 0.5)) { highlighted = nil }
+        }
+    }
+
     /// Members whose thread is working a turn for this room.
     private func replying(_ room: AgentRoom) -> [AgentRoom.Member] {
         let busy = Set(seats.filter { $0.inFlight != nil }.map(\.agentId))
@@ -125,20 +156,76 @@ struct RoomView: View {
                     EmptyView()
                 }
             }
-            ForEach(room.waitingForUser(seats: seats, messages: messages), id: \.self) { agentId in
-                let name = room.members.first { $0.agentId == agentId }?.name ?? agentId
-                notice("Another agent mentioned \(name). It answers when you let it.", systemImage: "person.wave.2", tint: Color.userBubble) {
-                    Button("Let \(name) Answer") {
-                        AppHaptics.light()
-                        Task { await store.letRoomMemberAnswer(roomId: roomId, agentId: agentId) }
-                    }
-                    .accessibilityIdentifier("room-let-answer-\(agentId)")
-                }
+            let waits = room.waitingForUser(seats: seats, messages: messages).filter { !dismissing.contains(Self.key($0)) }
+            if !waits.isEmpty {
+                waitingRow(room, waits)
             }
             composer(room)
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+    }
+
+    private static func key(_ wait: AgentRoom.Wait) -> String { "\(wait.agentId)#\(wait.mentionSeq)" }
+
+    /// The members another agent mentioned that wait for you, in one row: let each one answer, or
+    /// dismiss it (it doesn't answer that mention; it comes back when an agent mentions it again).
+    private func waitingRow(_ room: AgentRoom, _ waits: [AgentRoom.Wait]) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.wave.2")
+                .foregroundStyle(Color.userBubble)
+                .accessibilityHidden(true)
+            ScrollView(.horizontal, showsIndicators: false) {
+                GlassEffectContainer(spacing: 4) {
+                    HStack(spacing: 10) {
+                        ForEach(waits, id: \.agentId) { wait in waitChip(room, wait) }
+                    }
+                    .padding(.vertical, 2)
+                    .padding(.trailing, 4)
+                }
+            }
+            .scrollClipDisabled()
+        }
+        .padding(.leading, 6)
+        .transition(.opacity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("room-waiting")
+    }
+
+    private func waitChip(_ room: AgentRoom, _ wait: AgentRoom.Wait) -> some View {
+        let name = room.memberName(wait.agentId)
+        let why = wait.mentionedBy.map { String(localized: "\(room.memberName($0)) mentioned \(name). It answers when you let it.") }
+            ?? String(localized: "Another agent mentioned \(name). It answers when you let it.")
+        return HStack(spacing: 4) {
+            Button("Let \(name) Answer") {
+                AppHaptics.light()
+                Task { await store.letRoomMemberAnswer(roomId: roomId, agentId: wait.agentId) }
+            }
+            .accessibilityHint(Text(verbatim: why))
+            .accessibilityIdentifier("room-let-answer-\(wait.agentId)")
+            Button {
+                dismiss(wait)
+            } label: {
+                Image(systemName: "xmark").font(.caption.weight(.semibold))
+            }
+            .buttonBorderShape(.circle)
+            .accessibilityLabel(Text("Dismiss \(name)"))
+            .accessibilityHint(Text("It doesn't answer this mention. It asks again when an agent mentions it."))
+            .accessibilityIdentifier("room-dismiss-wait-\(wait.agentId)")
+        }
+        .buttonStyle(.glass)
+        .controlSize(.small)
+        .help(Text(verbatim: why))
+    }
+
+    private func dismiss(_ wait: AgentRoom.Wait) {
+        AppHaptics.light()
+        let key = Self.key(wait)
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { _ = dismissing.insert(key) }
+        Task {
+            await store.dismissRoomWait(roomId: roomId, agentId: wait.agentId, mentionSeq: wait.mentionSeq)
+            dismissing.remove(key)
+        }
     }
 
     private func notice(_ text: LocalizedStringKey, systemImage: String, tint: Color,
@@ -154,11 +241,22 @@ struct RoomView: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
+    /// The message being answered, while it is still in the room's window.
+    private var quoted: AgentRoomMessage? {
+        replyingTo.flatMap { seq in messages.first { $0.seq == seq } }
+    }
+
     @ViewBuilder
     private func composer(_ room: AgentRoom) -> some View {
-        let mentioned = AgentRoom.mentions(in: draft, members: room.members)
+        let quoted = quoted
+        // Who it reaches: a reply's author and whoever the draft mentions (`AgentRoom.replying`).
+        let mentioned = quoted.map { room.replyRecipients(to: $0, text: draft) } ?? AgentRoom.mentions(in: draft, members: room.members)
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         VStack(alignment: .leading, spacing: 6) {
+            if let quoted {
+                replyBar(room, quoted: quoted, recipients: mentioned)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if let partial = partialMention(), case let chips = AgentRoom.mentionSuggestions(for: partial, members: room.members), !chips.isEmpty {
                 // Completing the @ being typed: everyone first.
                 chipRow(chips, room: room) { complete(with: $0.label(members: room.members)) }
@@ -196,6 +294,57 @@ struct RoomView: View {
         }
     }
 
+    /// The message being answered, above the field: who wrote it, its first line, who will be
+    /// notified (its author and whoever the draft mentions), and ✕ to stop replying.
+    private func replyBar(_ room: AgentRoom, quoted: AgentRoomMessage, recipients: [String]) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Capsule()
+                .fill(Color.userBubble)
+                .frame(width: 3)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Replying to \(room.displayName(of: quoted.author))")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.userBubble)
+                Text(verbatim: quoted.quotePreview)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !recipients.isEmpty {
+                    Label(Self.notified(recipients.map(room.memberName)), systemImage: "bell")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("room-reply-recipients")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                AppHaptics.light()
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { replyingTo = nil }
+            } label: {
+                Image(systemName: "xmark").font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.small)
+            .accessibilityLabel(Text("Cancel Reply"))
+            .accessibilityIdentifier("room-reply-cancel")
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("room-reply-bar")
+    }
+
+    /// "Only Julián will be notified"; "Julián and Mateo will be notified".
+    private static func notified(_ names: [String]) -> String {
+        names.count == 1
+            ? String(localized: "Only \(names[0]) will be notified")
+            : String(localized: "\(names.formatted(.list(type: .and))) will be notified")
+    }
+
     private func chipRow(_ chips: [AgentRoom.MentionSuggestion], room: AgentRoom,
                          pick: @escaping (AgentRoom.MentionSuggestion) -> Void) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -227,35 +376,41 @@ struct RoomView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sending else { return }
         sending = true
+        let quoted = quoted
         Task {
-            let sent = await store.sendRoomMessage(roomId: roomId, text: text)
+            let sent = await store.sendRoomMessage(roomId: roomId, text: text, replyingTo: quoted)
             sending = false
             if sent {
                 AppHaptics.light()
                 if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text { draft = "" }
+                if let quoted, replyingTo == quoted.seq { replyingTo = nil }
             }
         }
     }
 }
 
-/// One message: yours on the right in your color (with the message it answers quoted above); an
-/// agent's on the left under its emoji and name, Markdown like the session chat, with its
-/// `<options>` as the chat's buttons. Mentions are in bold.
+/// One message: yours on the right in your color; an agent's on the left under its emoji and name,
+/// Markdown like the session chat, with its `<options>` as the chat's buttons. Mentions are in bold;
+/// the message it answers is quoted above it (tap it to go there). Reply is in its menu, a swipe to
+/// the left on iPhone and iPad, and a button on hover on the Mac.
 private struct RoomMessageRow: View {
     let message: AgentRoomMessage
     let room: AgentRoom
     let messages: [AgentRoomMessage]
+    /// Lit for a moment: a quote of it was tapped.
+    let highlighted: Bool
     let pick: (String) -> Void
+    let reply: () -> Void
+    let showQuoted: (Int) -> Void
     @Environment(HappierStore.self) private var store
+    #if os(iOS)
+    /// How far the message is dragged to the left to reply (≤ 0).
+    @State private var swipe: CGFloat = 0
+    #else
+    @State private var hovering = false
+    #endif
 
     private var isUser: Bool { message.author == .user }
-
-    private func name(of author: AgentRoomMessage.Author) -> String {
-        switch author {
-        case .user: room.userName ?? String(localized: "You")
-        case .agent(let id, let name, _, _): name ?? room.members.first { $0.agentId == id }?.name ?? id
-        }
-    }
 
     private var emoji: String? {
         if case .agent(let id, _, let emoji, _) = message.author { return emoji ?? room.members.first { $0.agentId == id }?.emoji }
@@ -278,40 +433,106 @@ private struct RoomMessageRow: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             if isUser { Spacer(minLength: 48) }
+            #if os(macOS)
+            if isUser { hoverReply }
+            #endif
             if !isUser {
                 AgentAvatar(agentId: providerId, size: 28, emoji: emoji)
             }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 if !isUser {
-                    Text(name(of: message.author)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(room.displayName(of: message.author)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 if let replyTo = message.replyTo, let answered = messages.first(where: { $0.seq == replyTo }) {
                     quote(answered)
                 }
-                if isUser { userBubble } else { agentBubble }
+                Group {
+                    if isUser { userBubble } else { agentBubble }
+                }
                 Text(Date(timeIntervalSince1970: message.at / 1000), format: .dateTime.hour().minute())
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+            #if os(macOS)
+            if !isUser { hoverReply }
+            #endif
             if !isUser { Spacer(minLength: 48) }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.userBubble.opacity(highlighted ? 0.14 : 0))
+                .padding(-6)
+                .allowsHitTesting(false)
+        }
+        #if os(iOS)
+        .offset(x: swipe)
+        .background(alignment: .trailing) {
+            Image(systemName: "arrowshape.turn.up.left.circle.fill")
+                .font(.title2)
+                .foregroundStyle(Color.userBubble)
+                .opacity(min(1, -swipe / RoomReplySwipe.threshold))
+                .scaleEffect(swipe <= -RoomReplySwipe.threshold ? 1 : 0.7)
+                .animation(.smooth(duration: 0.15), value: swipe <= -RoomReplySwipe.threshold)
+                .accessibilityHidden(true)
+        }
+        .gesture(RoomReplySwipe { translation in
+            // Past the threshold it gives, with a tick, like Messages.
+            let pulled = translation < -RoomReplySwipe.threshold ? -RoomReplySwipe.threshold + (translation + RoomReplySwipe.threshold) / 3 : translation
+            if (pulled <= -RoomReplySwipe.threshold) != (swipe <= -RoomReplySwipe.threshold) { AppHaptics.selection() }
+            swipe = pulled
+        } onEnd: { translation in
+            if translation <= -RoomReplySwipe.threshold { reply() }
+            withAnimation(.spring(duration: 0.3)) { swipe = 0 }
+        })
+        #else
+        .onHover { hovering = $0 }
+        #endif
         .accessibilityElement(children: .contain)
+        .accessibilityAction(named: Text("Reply"), reply)
         .accessibilityIdentifier("room-message-\(message.seq)")
     }
 
-    /// "↩︎ Julián: …": the message this one answers, in a line.
+    #if os(macOS)
+    /// Reply, beside the message while the pointer is over it.
+    private var hoverReply: some View {
+        Button(action: reply) {
+            Image(systemName: "arrowshape.turn.up.left")
+                .font(.callout)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help(Text("Reply"))
+        .opacity(hovering ? 1 : 0)
+        .allowsHitTesting(hovering)
+        .padding(.bottom, 20)
+        .accessibilityHidden(true)
+    }
+    #endif
+
+    /// Reply and Copy, on the bubble.
+    @ViewBuilder
+    private var actions: some View {
+        Button("Reply", systemImage: "arrowshape.turn.up.left", action: reply)
+        Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(message.text); AppHaptics.success() }
+    }
+
+    /// "↩︎ Julián: …": the message this one answers, in a line; tapping it goes there.
     private func quote(_ answered: AgentRoomMessage) -> some View {
-        let prose = MarkdownSegments.cached(answered.text).compactMap { segment -> String? in
-            if case .prose(let text) = segment { return text }
-            return nil
-        }.joined(separator: " ")
-        return Text("↩︎ \(name(of: answered.author)): \(prose.replacingOccurrences(of: "\n", with: " "))")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
+        Button {
+            showQuoted(answered.seq)
+        } label: {
+            Text("↩︎ \(room.displayName(of: answered.author)): \(answered.quotePreview)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("Shows the message it answers"))
     }
 
     private var userBubble: some View {
@@ -327,6 +548,10 @@ private struct RoomMessageRow: View {
             .padding(.vertical, 8)
             .foregroundStyle(Color.white)
             .background(Color.userBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            #if os(iOS)
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+            #endif
+            .contextMenu { actions }
     }
 
     @ViewBuilder
@@ -345,6 +570,10 @@ private struct RoomMessageRow: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(Color.agentBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                #if os(iOS)
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+                #endif
+                .contextMenu { actions }
         }
         if !options.isEmpty {
             ReplyOptions(options: options, chosen: AgentRoom.chosenOption(on: message, options: options, messages: messages), onSelect: pick)
@@ -431,3 +660,67 @@ private struct RoomMembersSheet: View {
         }
     }
 }
+
+private extension AgentRoom {
+    /// A member's name as the room shows it.
+    func memberName(_ agentId: String) -> String {
+        members.first { $0.agentId == agentId }?.name ?? agentId
+    }
+
+    /// Who wrote a message: your name in the room (or "You"), or the agent's as it wrote.
+    func displayName(of author: AgentRoomMessage.Author) -> String {
+        switch author {
+        case .user: userName ?? String(localized: "You")
+        case .agent(let id, let name, _, _): name ?? memberName(id)
+        }
+    }
+}
+
+private extension AgentRoomMessage {
+    /// Its prose in one line (no code or options), for a quote.
+    var quotePreview: String {
+        MarkdownSegments.cached(text).compactMap { segment -> String? in
+            if case .prose(let text) = segment { return text }
+            return nil
+        }.joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
+    }
+}
+
+#if os(iOS)
+/// Dragging a message to the left replies to it. It only claims a drag that starts out horizontal
+/// and leftward: the room still scrolls vertically, and a rightward drag stays the conversation's
+/// (on iPhone it opens the sessions, `OpenSwipe`).
+private struct RoomReplySwipe: UIGestureRecognizerRepresentable {
+    /// How far to drag for the reply.
+    static let threshold: CGFloat = 56
+    var onChange: (CGFloat) -> Void
+    var onEnd: (CGFloat) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let recognizer = UIPanGestureRecognizer()
+        recognizer.delegate = context.coordinator
+        return recognizer
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        // In window coordinates: the message moves with the finger, so its own space would not.
+        let translation = min(recognizer.translation(in: recognizer.view?.window).x, 0)
+        switch recognizer.state {
+        case .began, .changed: onChange(translation)
+        case .ended: onEnd(translation)
+        case .cancelled, .failed: onEnd(0)
+        default: break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer, let view = pan.view else { return false }
+            let velocity = pan.velocity(in: view)
+            return velocity.x < 0 && abs(velocity.x) > abs(velocity.y) * 1.2
+        }
+    }
+}
+#endif
