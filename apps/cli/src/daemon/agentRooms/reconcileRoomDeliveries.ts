@@ -6,6 +6,7 @@ import {
   buildRoomDeliveryPrompt,
   decideRoomDelivery,
   roomDeliveryLocalId,
+  roomDeliveryQuotedSeqs,
   roomMemberPermissionMode,
   type AgentProfileV1,
   type AgentRoomMember,
@@ -110,7 +111,10 @@ async function reconcileMember(room: AgentRoomV1, member: AgentRoomMember, seat:
   await send(room, member, claimed, localId, decision.toSeq, deps, messages);
 }
 
-/** Sends the delivery (in flight with `localId`) to the member's thread, opening one when it has none. */
+/**
+ * Sends the delivery (in flight with `localId`) to the member's thread, opening one when it has none.
+ * The messages it answers are read too, so the member sees what the user quoted.
+ */
 async function send(
   room: AgentRoomV1,
   member: AgentRoomMember,
@@ -121,7 +125,9 @@ async function send(
   known?: Parameters<typeof buildRoomDeliveryPrompt>[0]['messages'],
 ): Promise<void> {
   const fromSeq = seat.readThroughSeq + 1;
-  const messages = known ?? await deps.store.readMessages(room.id, { fromSeq, toSeq: throughSeq });
+  const unread = known ?? await deps.store.readMessages(room.id, { fromSeq, toSeq: throughSeq });
+  const quoted = roomDeliveryQuotedSeqs({ member, messages: unread, fromSeq, toSeq: throughSeq });
+  const messages = quoted.length > 0 ? [...unread, ...await deps.store.readMessagesAt(room.id, quoted)] : unread;
   const text = buildRoomDeliveryPrompt({ room, member, messages, fromSeq, toSeq: throughSeq });
   const permissionMode = roomMemberPermissionMode(member);
   const forThisDelivery = (change: (latest: AgentRoomSeatV1) => AgentRoomSeatV1) =>

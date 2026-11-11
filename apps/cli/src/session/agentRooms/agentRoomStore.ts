@@ -180,8 +180,14 @@ export class AgentRoomStore {
 
   /** The messages from `fromSeq` to `toSeq` (inclusive) that exist, oldest first. */
   async readMessages(roomId: string, range: Readonly<{ fromSeq: number; toSeq: number }>): Promise<AgentRoomMessageV1[]> {
-    const keys: string[] = [];
-    for (let seq = Math.max(1, range.fromSeq); seq <= range.toSeq; seq += 1) keys.push(agentRoomMessageKvKey(roomId, seq));
+    const seqs: number[] = [];
+    for (let seq = Math.max(1, range.fromSeq); seq <= range.toSeq; seq += 1) seqs.push(seq);
+    return this.readMessagesAt(roomId, seqs);
+  }
+
+  /** The messages at these seqs that exist, oldest first. */
+  async readMessagesAt(roomId: string, seqs: readonly number[]): Promise<AgentRoomMessageV1[]> {
+    const keys = seqs.map((seq) => agentRoomMessageKvKey(roomId, seq));
     const messages: AgentRoomMessageV1[] = [];
     for (const row of await this.bulkGet(keys)) {
       const message = parseAgentRoomMessageV1(this.open(row.value));

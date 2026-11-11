@@ -3877,6 +3877,7 @@ export {
   resolveRoomReply,
   roomAgentStreak,
   roomDeliveryLocalId,
+  roomDeliveryQuotedSeqs,
   roomMemberPermissionMode,
   roomReplyNotices,
   type RoomDeliveryDecision,

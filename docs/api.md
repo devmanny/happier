@@ -169,8 +169,9 @@ prefixes:
   of the user and the agents they invite, kind `agent_room`
   (`packages/protocol/src/rooms/agentRoom.ts`, delivery policy in `agentRoomDelivery.ts`). The room
   holds `{title, userName?, members [{agentId, name?, emoji?, machineId, directory, wakeByAgents?,
-  permissionMode?}], lastSeq, pausedAt?, archivedAt?}`; each message is its own row
-  `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?}`
+  permissionMode?, dismissedMentionSeq?}], lastSeq, pausedAt?, archivedAt?}`; each message is its own row
+  `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?,
+  replyTo? {seq}}`
   created with version -1 in the same atomic write that moves the room's `lastSeq` to its seq, so
   concurrent writers (the app, every member's thread) get gap-free ordered seqs and re-run on a
   conflict. Messages are read by exact key through `POST /v1/kv/bulk` (≤100 keys per call), never
@@ -178,7 +179,13 @@ prefixes:
   read marker (`readThroughSeq`) and the delivery in flight (`inFlight {localId, throughSeq, at,
   sent?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
   picker; "Que conteste" is the user's own message mentioning that member); the daemon of each
-  member's machine writes that member's seat; the member's thread posts its replies.
+  member's machine writes that member's seat; the member's thread posts its replies. A user's
+  message with `replyTo` answers that message: Reply (quoting any message) mentions its author when
+  that is a member, plus whoever the user names, never the quoted message's own mentions; picking an
+  agent's `<options>` option mentions only its author. A member's `dismissedMentionSeq` is app-only
+  state: the user dismissed its "Let It Answer" notice for the agent mention at that seq, so no device
+  shows it until a later agent mention; daemons don't read it and keep it when they rewrite the room
+  (passthrough), and it changes no delivery.
   Delivery runs in the daemon of the member's machine (`apps/cli/src/daemon/agentRooms/`), so a room
   may span machines without a coordinator and works with the app closed. The machine socket does
   not carry KV writes, so the daemon keeps a lean user-scoped socket (`updates-lean-v1`) and
@@ -190,7 +197,11 @@ prefixes:
   parameter, since readers look messages up by localId) through the canonical send path; a send
   that failed is retried with the same localId, so it lands once. Over 15 unread messages, the newest
   15 go in full, the 50 before as one line each (≤160 characters) and the rest only counted, with a
-  pointer to `sala_leer` (`room.read`, a member reads its room by seq range). A member mid-turn gets
+  pointer to `sala_leer` (`room.read`, a member reads its room by seq range). A message shown in full
+  that answers another says which, quoting it in one line (≤160 characters; "your #N" when it is the
+  member's own); the daemon reads quoted messages outside the unread range for that. The other
+  members are not woken by a reply that doesn't mention them; it stays in the room's history, so
+  their next delivery (or `sala_leer`) includes it. A member mid-turn gets
   nothing new: what arrives meanwhile is delivered together once that turn ends. The user's messages
   without `@` go to no one. When a room turn is ready (`sendReadyWithPushNotification`, after the
   transcript is flushed) the thread posts the turn's final assistant text as its reply (mentions

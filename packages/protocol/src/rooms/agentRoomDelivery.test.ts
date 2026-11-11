@@ -9,6 +9,7 @@ import {
   resolveRoomReply,
   roomAgentStreak,
   roomDeliveryLocalId,
+  roomDeliveryQuotedSeqs,
   roomMemberPermissionMode,
   roomReplyNotices,
 } from './agentRoomDelivery.js';
@@ -100,6 +101,26 @@ describe('buildRoomDeliveryPrompt', () => {
     expect(prompt).not.toContain('[#2]');
     expect(prompt).toContain('posted to the room as your reply');
     expect(prompt).toContain('sala_leer');
+  });
+
+  it('shows the member which message the user quoted, in one line, even its own or one before the backlog', () => {
+    const asked = 'Bien, ya casi termino el login.\n¿Sigo con el registro o con la recuperación de contraseña? Las dos están a medias y cualquiera me lleva una hora. Dime cuál prefieres y la termino hoy.';
+    const messages = log([agent(mateo), asked], [agent(tomas), 'Yo reviso la app'], [user, 'Sí, sigue con el registro', ['a-mateo']]);
+    const answer = (seq: number, quotes: number): AgentRoomMessageV1 => ({ ...messages[2]!, seq, replyTo: { seq: quotes } });
+
+    // Its own message: "your #1", the quote collapsed to one line and cut like a backlog line.
+    const own = buildRoomDeliveryPrompt({ room: room({ lastSeq: 3 }), member: mateo, messages: [messages[0]!, answer(3, 1)], fromSeq: 3, toSeq: 3 });
+    expect(own).toContain('[#3] Manny (answer to your #1: "Bien, ya casi termino el login. ¿Sigo con el registro');
+    const quote = own.match(/\(answer to your #1: "(.*)"\)/)![1]!;
+    expect(quote.length).toBeLessThanOrEqual(160);
+    expect(quote.endsWith('…')).toBe(true);
+    // Another member's message names its author.
+    const others = buildRoomDeliveryPrompt({ room: room({ lastSeq: 3 }), member: mateo, messages: [messages[1]!, answer(3, 2)], fromSeq: 3, toSeq: 3 });
+    expect(others).toContain('[#3] Manny (answer to #2 by Tomás: "Yo reviso la app"): Sí, sigue con el registro');
+    // A quote not at hand keeps the bare reference; the daemon reads the ones the delivery answers.
+    const bare = buildRoomDeliveryPrompt({ room: room({ lastSeq: 3 }), member: mateo, messages: [answer(3, 1)], fromSeq: 3, toSeq: 3 });
+    expect(bare).toContain('[#3] Manny (answer to #1): Sí');
+    expect(roomDeliveryQuotedSeqs({ member: mateo, messages: [answer(3, 1), answer(4, 2), messages[1]!], fromSeq: 3, toSeq: 4 })).toEqual([1]);
   });
 
   it('cuts a long backlog: the last 15 in full, one line each for the 50 before, the rest only counted', () => {

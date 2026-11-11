@@ -91,6 +91,21 @@ describe('reconcileRoomDeliveries', () => {
     expect(text).not.toContain('[#3]');
   });
 
+  it('quotes the message the user answered, even one from long before what the member had not read', async () => {
+    const { store, deps, mocks } = await setup();
+    await store.appendMessage('r1', { author: { kind: 'agent', agentId: 'a-mateo', name: 'Mateo' }, text: '¿Sigo con el registro\no con la recuperación?' });
+    for (let index = 0; index < 8; index += 1) await store.appendMessage('r1', { author: { kind: 'user' }, text: `nota ${index + 2}` });
+    await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.old', throughSeq: 9 }, null);
+    await store.updateSeat('r1', 'a-mateo', ({ inFlight: _done, ...seat }) => ({ ...seat, sessionId: 's-mateo', readThroughSeq: 9 }));
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: 'Con el registro', mentions: ['a-mateo'], replyTo: { seq: 1 } });
+
+    await reconcileRoomDeliveries('r1', deps);
+
+    const [, text] = mocks.sendToThread.mock.calls[0] as unknown as [string, string];
+    expect(text).toContain('[#10] Manny (answer to your #1: "¿Sigo con el registro o con la recuperación?"): Con el registro');
+    expect(text).not.toContain('[#1] ');
+  });
+
   it('retries a delivery that could not be sent with the same localId, and opens a new thread when the old one is gone', async () => {
     const sendToThread = vi.fn()
       .mockResolvedValueOnce({ ok: false, code: 'timeout' })

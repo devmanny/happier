@@ -3,6 +3,7 @@ import {
   agentRoomUnreadRange,
   formatRoomMessages,
   resolveRoomMentions,
+  roomAnswerNote,
   roomMessageAuthorLabel,
   roomUserLabel,
   type AgentRoomMember,
@@ -80,29 +81,47 @@ export function decideRoomDelivery(params: Readonly<{
 }
 
 function oneLine(label: string, message: AgentRoomMessageV1): string {
-  const answer = message.replyTo ? ` (answer to #${message.replyTo.seq})` : '';
-  const line = `[#${message.seq}] ${label}${answer}: ${message.text.replace(/\s+/g, ' ').trim()}`;
+  const line = `[#${message.seq}] ${label}${roomAnswerNote(message)}: ${message.text.replace(/\s+/g, ' ').trim()}`;
   return line.length <= ROOM_DELIVERY_LINE_CHARS ? line : `${line.slice(0, ROOM_DELIVERY_LINE_CHARS - 1)}…`;
 }
 
-/**
- * The message a member's thread gets: who is in the room, what it hadn't read (others' messages
- * from `fromSeq` to `toSeq`, a long backlog cut down) and how its reply reaches the room.
- */
-export function buildRoomDeliveryPrompt(params: Readonly<{
-  room: AgentRoomV1;
+type DeliveryRange = Readonly<{
   member: AgentRoomMember;
   messages: readonly AgentRoomMessageV1[];
   fromSeq: number;
   toSeq: number;
-}>): string {
-  const { room, member } = params;
-  const userLabel = roomUserLabel(room);
-  const unread = [...new Map(params.messages
+}>;
+
+/** Others' messages from `fromSeq` to `toSeq`, oldest first: what the member gets. */
+function unreadByOthers(params: DeliveryRange): AgentRoomMessageV1[] {
+  return [...new Map(params.messages
     .filter((message) => message.seq >= params.fromSeq && message.seq <= params.toSeq)
-    .filter((message) => !(message.author.kind === 'agent' && message.author.agentId === member.agentId))
+    .filter((message) => !(message.author.kind === 'agent' && message.author.agentId === params.member.agentId))
     .map((message) => [message.seq, message])).values()]
     .sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * The messages that the ones a delivery shows in full answer (quote) and `messages` doesn't hold:
+ * the daemon reads them too, so the member sees what the user quoted, however old.
+ */
+export function roomDeliveryQuotedSeqs(params: DeliveryRange): number[] {
+  const have = new Set(params.messages.map((message) => message.seq));
+  const quoted = unreadByOthers(params).slice(-ROOM_DELIVERY_FULL_MESSAGES)
+    .flatMap((message) => (message.replyTo && !have.has(message.replyTo.seq) ? [message.replyTo.seq] : []));
+  return [...new Set(quoted)].sort((a, b) => a - b);
+}
+
+/**
+ * The message a member's thread gets: who is in the room, what it hadn't read (others' messages
+ * from `fromSeq` to `toSeq`, a long backlog cut down) and how its reply reaches the room. A message
+ * shown in full that answers another says which, and quotes it in one line when `messages` holds
+ * it (`roomDeliveryQuotedSeqs`).
+ */
+export function buildRoomDeliveryPrompt(params: Readonly<{ room: AgentRoomV1 }> & DeliveryRange): string {
+  const { room, member } = params;
+  const userLabel = roomUserLabel(room);
+  const unread = unreadByOthers(params);
   const full = unread.slice(-ROOM_DELIVERY_FULL_MESSAGES);
   const lines = unread.slice(0, -ROOM_DELIVERY_FULL_MESSAGES).slice(-ROOM_DELIVERY_LINE_MESSAGES);
   const counted = unread.slice(0, Math.max(0, unread.length - ROOM_DELIVERY_FULL_MESSAGES - ROOM_DELIVERY_LINE_MESSAGES));
@@ -120,7 +139,8 @@ export function buildRoomDeliveryPrompt(params: Readonly<{
     parts.push(`Earlier, one line each (full text with sala_leer):\n${lines
       .map((message) => oneLine(roomMessageAuthorLabel(message.author, userLabel), message)).join('\n')}`);
   }
-  parts.push(`${lines.length > 0 ? 'Latest, in full' : 'New messages'}:\n\n${formatRoomMessages({ messages: full, userLabel })}`);
+  const quotes = { bySeq: new Map(params.messages.map((message) => [message.seq, message])), readerAgentId: member.agentId, maxChars: ROOM_DELIVERY_LINE_CHARS };
+  parts.push(`${lines.length > 0 ? 'Latest, in full' : 'New messages'}:\n\n${formatRoomMessages({ messages: full, userLabel, quotes })}`);
   parts.push([
     'The final message of your turn is posted to the room as your reply.',
     `To hand the floor to someone, mention them (${others.length > 0 ? `@${others[0]}` : '@Name'}), or everyone with @todos; mention @${userLabel} to ask the user.`,

@@ -72,6 +72,8 @@ const AgentRoomMemberSchema = z.object({
   wakeByAgents: z.boolean().optional(),
   /** How its turns in the room run; absent means YOLO, as for tasks. */
   permissionMode: z.enum(SESSION_PERMISSION_INTENT_INPUTS).optional(),
+  // `dismissedMentionSeq` is the app's alone (the agent mention whose "Let It Answer" the user
+  // dismissed): daemons don't read it and keep it, like any unknown field, when they rewrite the room.
 }).passthrough();
 export type AgentRoomMember = z.infer<typeof AgentRoomMemberSchema>;
 
@@ -117,7 +119,10 @@ export const AgentRoomMessageV1Schema = z.object({
   mentions: z.array(z.string().min(1)),
   /** An agent's message that mentions the user (`@<userName>`). */
   mentionsUser: z.boolean().optional(),
-  /** The message this one answers: an option the user picked on it (it mentions only its author). */
+  /**
+   * The message this one answers: one the user quoted (Reply: it mentions that message's author,
+   * plus whoever the user names) or picked an option on (it mentions only its author).
+   */
   replyTo: z.object({ seq: SeqSchema }).passthrough().optional(),
 }).passthrough();
 export type AgentRoomMessageV1 = z.infer<typeof AgentRoomMessageV1Schema>;
@@ -260,11 +265,42 @@ export function roomMessageAuthorLabel(author: AgentRoomAuthor, userLabel: strin
   return author.emoji ? `${name} ${author.emoji}` : name;
 }
 
-/** The messages as one text, oldest first, each with its seq and who said it. */
-export function formatRoomMessages(params: Readonly<{ messages: readonly AgentRoomMessageV1[]; userLabel: string }>): string {
+/** The messages a room's text may quote, for one reader. */
+export type RoomQuotes = Readonly<{
+  /** Messages that may be answered, by seq. */
+  bySeq: ReadonlyMap<number, AgentRoomMessageV1>;
+  /** Who reads: an answer to its own message says "your #N". */
+  readerAgentId: string;
+  /** A quote longer than this is cut, ending in "…". */
+  maxChars: number;
+}>;
+
+/**
+ * Which message `message` answers, after its author: ` (answer to #7)`, or with the quoted message
+ * in one line when `quotes` holds it (` (answer to your #7: "…")`, ` (answer to #7 by Tomás: "…")`).
+ */
+export function roomAnswerNote(message: AgentRoomMessageV1, quotes?: RoomQuotes & Readonly<{ userLabel: string }>): string {
+  if (!message.replyTo) return '';
+  const seq = message.replyTo.seq;
+  const quoted = quotes?.bySeq.get(seq);
+  if (!quotes || !quoted) return ` (answer to #${seq})`;
+  const whose = quoted.author.kind === 'agent' && quoted.author.agentId === quotes.readerAgentId
+    ? `your #${seq}`
+    : `#${seq} by ${roomMessageAuthorLabel(quoted.author, quotes.userLabel)}`;
+  const text = quoted.text.replace(/\s+/g, ' ').trim();
+  const cut = text.length <= quotes.maxChars ? text : `${text.slice(0, quotes.maxChars - 1)}…`;
+  return ` (answer to ${whose}: "${cut}")`;
+}
+
+/**
+ * The messages as one text, oldest first, each with its seq, who said it and which message it
+ * answers (quoted in one line when `quotes` holds it).
+ */
+export function formatRoomMessages(params: Readonly<{ messages: readonly AgentRoomMessageV1[]; userLabel: string; quotes?: RoomQuotes }>): string {
   const bySeq = new Map(params.messages.map((message) => [message.seq, message]));
+  const quotes = params.quotes ? { ...params.quotes, userLabel: params.userLabel } : undefined;
   return [...bySeq.values()]
     .sort((a, b) => a.seq - b.seq)
-    .map((message) => `[#${message.seq}] ${roomMessageAuthorLabel(message.author, params.userLabel)}${message.replyTo ? ` (answer to #${message.replyTo.seq})` : ''}: ${message.text}`)
+    .map((message) => `[#${message.seq}] ${roomMessageAuthorLabel(message.author, params.userLabel)}${roomAnswerNote(message, quotes)}: ${message.text}`)
     .join('\n\n');
 }
