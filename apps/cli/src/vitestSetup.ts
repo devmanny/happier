@@ -2,6 +2,11 @@ import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { isolateTestProcessFromRealUser } from './testkit/realUserIsolation';
+
+// Never the real user's LaunchAgent/systemd unit, Happier home or service manager (see the module).
+isolateTestProcessFromRealUser();
+
 // Many CLI tests touch persistence under `HAPPIER_HOME_DIR`. Our `.env.integration-test`
 // sets a shared value, which can cause cross-process races when Vitest runs with multiple
 // workers. Provide a per-process default home directory instead; individual tests may

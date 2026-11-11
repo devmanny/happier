@@ -25,6 +25,8 @@ export default defineConfig({
     include: ['src/**/*.slow.test.ts'],
     exclude: [...configDefaults.exclude, ...resolveVitestFeatureTestExcludeGlobs({ ...process.env, ...testEnv })],
     globalSetup: ['./src/test-setup.slow.ts'],
+    // Never the real user's LaunchAgent/systemd unit, Happier home or service manager.
+    setupFiles: ['./src/testkit/realUserIsolation.setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
