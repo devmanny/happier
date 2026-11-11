@@ -121,7 +121,7 @@ extension HappierStore {
     }
 
     /// Writes the user's next message (`make` on the latest room) and the room together, again on a
-    /// newer room after a conflict.
+    /// newer room after a conflict. Done (true) once both are saved; the room is read again after.
     private func appendRoomMessage(roomId: String,
                                    _ make: (AgentRoom, Double) -> (room: AgentRoom, message: AgentRoomMessage)?) async -> Bool {
         guard let api, let machineKey = keys?.content.secretKey, var base = room(id: roomId) else { return false }
@@ -138,8 +138,9 @@ extension HappierStore {
                     storeRoom(saved)
                     if roomMessages[roomId] != nil {
                         mergeRoomMessages([message], into: roomId)
-                        // Whatever others wrote before it (the conflict's messages) is read now.
-                        await loadRoom(id: roomId)
+                        // Whatever others wrote before it (the conflict's messages) is read behind the
+                        // send: the message is saved, so the composer is done with it.
+                        Task { await self.loadRoom(id: roomId) }
                     }
                     return true
                 case .conflict(let conflicts):

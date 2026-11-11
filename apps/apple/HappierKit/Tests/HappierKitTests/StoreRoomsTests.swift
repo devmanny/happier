@@ -8,6 +8,25 @@ private final class RoomKVServer: @unchecked Sendable {
     private let lock = NSLock()
     private var rows: [String: (value: String, version: Int)] = [:]
     private(set) var mutateCalls = 0
+    /// Listings of this prefix wait (a slow network) until `release()`, or 2 s at most.
+    private var heldPrefix: String?
+    private let held = DispatchSemaphore(value: 0)
+    /// What happened, in order: the test's own marks and "held"/"released" for each held listing.
+    private var log: [String] = []
+
+    func hold(prefix: String) { lock.withLock { heldPrefix = prefix } }
+    func release() { held.signal() }
+    func mark(_ event: String) { lock.withLock { log.append(event) } }
+    var events: [String] { lock.withLock { log } }
+
+    /// Called off the lock before answering: a held listing waits here.
+    func waitIfHeld(_ request: URLRequest) {
+        let prefix = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "prefix" }?.value
+        guard request.httpMethod == "GET", let prefix, let heldPrefix = lock.withLock({ heldPrefix }), prefix.hasPrefix(heldPrefix) else { return }
+        mark("held")
+        _ = held.wait(timeout: .now() + 2)
+        mark("released")
+    }
 
     func put(_ key: String, _ value: String, version: Int) { lock.withLock { rows[key] = (value, version) } }
     func row(_ key: String) -> (value: String, version: Int)? { lock.withLock { rows[key] } }
@@ -68,6 +87,7 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
                 body.append(contentsOf: bytes.prefix(count))
             }
         }
+        Self.server?.waitIfHeld(request)
         let (status, json) = Self.server?.respond(request, body) ?? (500, [:])
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -121,11 +141,36 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(sent.author == .user)
         #expect(sent.mentions == ["a-tomas"])
         #expect(sent.text == "@Tomás sigue tú")
-        // Mateo's #3 is kept, and this app shows it too.
+        // Mateo's #3 is kept, and this app shows it too once it reads the room again, behind the send.
         #expect(server.row(AgentRoomMessage.kvKey(roomId: "r1", seq: 3)) != nil)
         #expect(server.mutateCalls == 2)
         #expect(store.rooms.first { $0.id == "r1" }?.lastSeq == 4)
+        for _ in 0..<100 where store.roomMessages["r1"]?.count != 4 { try await Task.sleep(for: .milliseconds(20)) }
         #expect(store.roomMessages["r1"]?.map(\.seq) == [1, 2, 3, 4])
+    }
+
+    @Test func sendingIsDoneOnceTheMessageIsSavedNotOnceTheRoomIsReadAgain() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 3, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        await store.loadRoom(id: "r1")
+        // Reading the room again after a send (its members' seats) is slow; the composer must not wait for it.
+        server.hold(prefix: AgentRoomSeat.kvPrefix(roomId: "r1"))
+        #expect(await store.sendRoomMessage(roomId: "r1", text: "@Tomás sigue tú"))
+        server.mark("sent")
+        #expect(store.roomMessages["r1"]?.last?.text == "@Tomás sigue tú")
+        let quoted = try #require(store.roomMessages["r1"]?.first { $0.seq == 3 })
+        #expect(await store.answerRoomOption(roomId: "r1", message: quoted, option: "Sí"))
+        server.mark("answered")
+        #expect(store.roomMessages["r1"]?.last?.text == "@Mateo Sí")
+        for _ in 0..<2 { server.release() }
+        // The room is still read again, behind the send.
+        for _ in 0..<100 where server.events.filter({ $0 == "released" }).count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+        let events = server.events
+        #expect(events.firstIndex(of: "sent")! < events.firstIndex(of: "released")!)
+        #expect(events.firstIndex(of: "answered")! < events.lastIndex(of: "released")!)
+        #expect(server.mutateCalls == 2)
     }
 
     @Test func aMembersAnswersOtherAgentsChangesInARoomAlreadyMade() async throws {
