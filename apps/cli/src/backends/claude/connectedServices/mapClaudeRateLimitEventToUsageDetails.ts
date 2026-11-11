@@ -584,6 +584,28 @@ export function readClaudeRateLimitEventWindows(event: unknown): readonly Normal
   })];
 }
 
+const CLAUDE_STATUSLINE_USAGE_WINDOW_IDS = ['five_hour', 'seven_day'] as const;
+
+/**
+ * The subscription windows Claude's statusline payload reports under `rate_limits` — the only
+ * usage signal a terminal (TUI) session gets, since its transcript carries no `rate_limit_event`.
+ * Same window ids as `unifiedWindows`; `used_percentage` is already 0-100.
+ */
+export function readClaudeStatuslineRateLimitWindows(rateLimits: unknown): readonly NormalizedProviderUsageLimitDetailsV1[] {
+  if (!isRecord(rateLimits)) return [];
+  return CLAUDE_STATUSLINE_USAGE_WINDOW_IDS.flatMap((windowId) => {
+    const window = rateLimits[windowId];
+    if (!isRecord(window)) return [];
+    const utilization = readUtilization(window.used_percentage);
+    if (utilization === null) return [];
+    return [buildPassiveQuotaEvidence({
+      providerLimitId: windowId,
+      utilization,
+      resetAtMs: readTimestampMs(window.resets_at),
+    })];
+  });
+}
+
 /** Availability is quota evidence even when an optional allowance is rejected. */
 export function mapClaudeRateLimitEventToQuotaEvidence(event: unknown): readonly NormalizedProviderUsageLimitDetailsV1[] {
   const record = isRecord(event) ? event : null;

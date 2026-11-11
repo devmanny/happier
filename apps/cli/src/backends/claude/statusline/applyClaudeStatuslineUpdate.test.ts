@@ -1,12 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Metadata } from '@/api/types';
+import { HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY } from '@/daemon/connectedServices/connectedServiceChildEnvironment';
+import { buildNativeProviderAccountUsageSourceProfileId } from '@/daemon/connectedServices/accountUsage/nativeSourceIdentity';
 import { createTestMetadata } from '@/testkit/backends/sessionMetadata';
 
 import type { Session } from '../session';
 import { createClaudeSessionModelsReconciler } from '../sessionModels/reconcileClaudeSessionModelsState';
 import { createClaudeStatuslineApplier } from './applyClaudeStatuslineUpdate';
 import type { ClaudeStatuslinePayload } from './statuslinePayload';
+
+// Boundary mock: the daemon's local control server receives the session's quota snapshots.
+const mockNotifyDaemonConnectedServiceQuotaSnapshot = vi.hoisted(() => vi.fn(async (_input: unknown) => ({ ok: true })));
+vi.mock('@/daemon/controlClient', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/daemon/controlClient')>(),
+  notifyDaemonConnectedServiceQuotaSnapshot: mockNotifyDaemonConnectedServiceQuotaSnapshot,
+}));
 
 // Boundary mock: ApiSessionClient is the server transport. updateMetadata applies the updater to
 // an in-memory metadata object so assertions target resulting state, not call wiring.
@@ -275,5 +284,77 @@ describe('createClaudeStatuslineApplier — runtime reconcile feed (lane Y)', ()
     expect(metadata.acpSessionModeOverrideV1).toBeUndefined();
     // Only the effective/display surfaces are written.
     expect(Object.keys(metadata).sort()).toEqual(['acpSessionModelsV1', 'sessionModelsV1']);
+  });
+});
+
+describe('createClaudeStatuslineApplier — account usage feed', () => {
+  // The runner's materialized Claude folder names the account this session runs on.
+  const agentConfigDir = '/Users/dev/.claude-agent';
+  const usageWindows = {
+    five_hour: { used_percentage: 12.5, resets_at: 1_790_000_000 },
+    seven_day: { used_percentage: 34, resets_at: 1_790_500_000 },
+  };
+  let previousConfigDir: string | undefined;
+  let previousSelections: string | undefined;
+
+  beforeEach(() => {
+    previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    previousSelections = process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+    process.env.CLAUDE_CONFIG_DIR = agentConfigDir;
+    delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+    mockNotifyDaemonConnectedServiceQuotaSnapshot.mockClear();
+  });
+
+  afterEach(() => {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    if (previousSelections === undefined) delete process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY];
+    else process.env[HAPPIER_CONNECTED_SERVICE_SELECTIONS_ENV_KEY] = previousSelections;
+  });
+
+  it("records the statusline's usage windows as the usage of the session's own Claude folder", async () => {
+    const fixture = createSessionFixture({ sessionId: 'claude-session-id' });
+    const applier = createClaudeStatuslineApplier({ logPrefix: '[test]' });
+
+    applier.apply(fixture.session, buildPayload({ rate_limits: usageWindows }));
+
+    await vi.waitFor(() => expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledTimes(1));
+    expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'happy-session-id',
+      serviceId: 'claude-subscription',
+      snapshot: expect.objectContaining({
+        providerId: 'claude',
+        profileId: buildNativeProviderAccountUsageSourceProfileId({
+          kind: 'localCredential',
+          providerId: 'claude',
+          material: agentConfigDir,
+        }),
+        meters: [
+          expect.objectContaining({ meterId: 'five_hour', utilizationPct: 12.5, resetAtMs: 1_790_000_000_000 }),
+          expect.objectContaining({ meterId: 'seven_day', utilizationPct: 34, resetAtMs: 1_790_500_000_000 }),
+        ],
+      }),
+    }));
+  });
+
+  it('records usage again only when a window moves', async () => {
+    const fixture = createSessionFixture({ sessionId: 'claude-session-id' });
+    const applier = createClaudeStatuslineApplier({ logPrefix: '[test]' });
+
+    applier.apply(fixture.session, buildPayload());
+    applier.apply(fixture.session, buildPayload({ rate_limits: usageWindows }));
+    applier.apply(fixture.session, buildPayload({ rate_limits: usageWindows, cost: { total_cost_usd: 1 } }));
+    await vi.waitFor(() => expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledTimes(1));
+
+    applier.apply(fixture.session, buildPayload({
+      rate_limits: { ...usageWindows, seven_day: { used_percentage: 35, resets_at: 1_790_500_000 } },
+    }));
+
+    await vi.waitFor(() => expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenCalledTimes(2));
+    expect(mockNotifyDaemonConnectedServiceQuotaSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({
+      snapshot: expect.objectContaining({
+        meters: expect.arrayContaining([expect.objectContaining({ meterId: 'seven_day', utilizationPct: 35 })]),
+      }),
+    }));
   });
 });

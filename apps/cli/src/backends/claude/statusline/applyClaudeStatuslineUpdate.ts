@@ -1,5 +1,7 @@
 import { logger } from '@/ui/logger';
 
+import { readClaudeStatuslineRateLimitWindows } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
+import { recordClaudeRateLimitQuotaEvidence } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import type { Session } from '../session';
 import { applyClaudeEffectiveModelUpdate } from '../sessionModels/effectiveModelUpdate';
 import type { ClaudeStatuslinePayload } from './statuslinePayload';
@@ -13,6 +15,7 @@ import type { ClaudeStatuslinePayload } from './statuslinePayload';
  * context window (`context_window.context_window_size`), so it wins the UI window resolution
  * (sessionModelsV1 is preferred over catalog/default there). Everything here is additive
  * enrichment: sessions without statusline data keep the U8 catalog + evidence-bump fallbacks.
+ * Its `rate_limits` windows feed the existing Claude quota-evidence seam (account usage).
  */
 
 function readString(value: unknown): string | null {
@@ -53,6 +56,7 @@ export type ClaudeStatuslineRuntimeReconcileInput = Readonly<{
 type StatuslineSessionState = {
     lastRuntimeReconcileKey: string | null;
     lastCanaryKey: string | null;
+    lastUsageKey: string | null;
 };
 
 export function createClaudeStatuslineApplier(params: Readonly<{
@@ -65,7 +69,7 @@ export function createClaudeStatuslineApplier(params: Readonly<{
     const stateFor = (session: Session): StatuslineSessionState => {
         const existing = stateBySession.get(session);
         if (existing) return existing;
-        const created: StatuslineSessionState = { lastRuntimeReconcileKey: null, lastCanaryKey: null };
+        const created: StatuslineSessionState = { lastRuntimeReconcileKey: null, lastCanaryKey: null, lastUsageKey: null };
         stateBySession.set(session, created);
         return created;
     };
@@ -117,6 +121,26 @@ export function createClaudeStatuslineApplier(params: Readonly<{
         });
     };
 
+    /**
+     * The account's usage windows go to the same quota-evidence owner the SDK `rate_limit_event`
+     * feeds, which keys the reading by this runner's Claude folder (`CLAUDE_CONFIG_DIR`), so each
+     * agent account gets its own record. Sent only when a window moves, as Claude emits events.
+     */
+    const maybeRecordUsage = (
+        session: Session,
+        payload: ClaudeStatuslinePayload,
+        state: StatuslineSessionState,
+    ): void => {
+        const windows = readClaudeStatuslineRateLimitWindows(payload.rate_limits);
+        if (windows.length === 0) return;
+        const usageKey = JSON.stringify(windows.map((window) => [window.providerLimitId, window.utilization, window.resetAtMs]));
+        if (usageKey === state.lastUsageKey) return;
+        state.lastUsageKey = usageKey;
+        void recordClaudeRateLimitQuotaEvidence(session, windows, params.logPrefix).catch((error) => {
+            logger.debug(`${params.logPrefix}: failed to record statusline usage windows`, error);
+        });
+    };
+
     const maybeLogRuntimeCanary = (payload: ClaudeStatuslinePayload, state: StatuslineSessionState): void => {
         const canary = {
             version: payload.version ?? null,
@@ -143,6 +167,7 @@ export function createClaudeStatuslineApplier(params: Readonly<{
             }
             maybeAdoptModelAndWindow(session, payload);
             maybeReconcileRuntime(session, payload, stateFor(session));
+            maybeRecordUsage(session, payload, stateFor(session));
             maybeLogRuntimeCanary(payload, stateFor(session));
         },
     };
