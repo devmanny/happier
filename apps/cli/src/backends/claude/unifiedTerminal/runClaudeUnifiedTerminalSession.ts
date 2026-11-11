@@ -97,6 +97,7 @@ import {
 } from './dialogChoice/claudeUnifiedDialogChoiceScreenProbe';
 import type { ClaudeUnifiedDialogChoiceBroker } from './dialogChoice/claudeUnifiedDialogChoiceBroker';
 import { hasClaudeUnifiedVisibleDialog } from './tuiControls/dialogRegistry';
+import { isClaudeScreenReadyForInput, parseClaudeScreenState } from './tuiControls/screenState';
 import type {
   ClaudeUnifiedInputConsumer,
   ClaudeUnifiedInputArbiter,
@@ -2487,6 +2488,14 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                       ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
                     onStalled: async () => {
                       await dialogChoiceScreenProbe?.probe();
+                    },
+                    isTurnEndedOnScreen: async () => {
+                      const captureInputState = hostResolution.adapter.captureInputState;
+                      if (!captureInputState) return false;
+                      const inputState = await captureInputState(activeHandle);
+                      return inputState.stable && isClaudeScreenReadyForInput(
+                        parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor }),
+                      );
                     },
                     onStarvation: () => {
                       // Mid-turn stall budget exhausted with the turn still active (e.g. an API-retry

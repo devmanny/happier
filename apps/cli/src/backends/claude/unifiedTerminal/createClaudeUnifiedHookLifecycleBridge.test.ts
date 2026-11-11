@@ -648,6 +648,132 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
+  it('does not open a turn when Claude compacts while idle before this runner saw any turn', async () => {
+    // Claude Code 2.1.319 "idle compaction": with no turn running, Claude compacts before the prompt
+    // cache expires and writes an `auto` compact boundary exactly like a mid-turn auto-compact. A
+    // runner that restarted after Claude's last turn has never seen a terminal turn, so that boundary
+    // must not read as the continuation of one (live session a325234f, 10 Nov: the runner then
+    // reported a turn for 6 h and the relay held every message as waiting_for_foreground_turn).
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const observeLifecycle = vi.fn();
+    const onThinkingChange = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle,
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(false),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      hook({ hook_event_name: 'PreCompact', session_id: 'claude-session-id', trigger: 'auto' });
+      bridge.observeTranscript({
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'idle-compact-boundary',
+        parentUuid: null,
+        isSidechain: false,
+        compactMetadata: { trigger: 'auto', preTokens: 350063, durationMs: 85324 },
+        sessionId: 'claude-session-id',
+      } as any);
+      bridge.observeTranscript({
+        type: 'user',
+        uuid: 'idle-compact-summary',
+        isCompactSummary: true,
+        isVisibleInTranscriptOnly: true,
+        message: { role: 'user', content: 'This session is being continued from a previous conversation.' },
+        sessionId: 'claude-session-id',
+      } as any);
+      bridge.observeTranscript({
+        type: 'system',
+        subtype: 'informational',
+        uuid: 'idle-compact-notice',
+        content: 'Compacted while idle, before the prompt cache expired',
+        sessionId: 'claude-session-id',
+      } as any);
+      hook({ hook_event_name: 'PostCompact', session_id: 'claude-session-id', trigger: 'auto' });
+      hook({ hook_event_name: 'SessionStart', session_id: 'claude-session-id', source: 'compact' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onThinkingChange).not.toHaveBeenCalledWith(true);
+      const turnStates = observeLifecycle.mock.calls
+        .map(([observation]) => observation)
+        .filter((observation) => observation.type === 'turn_state')
+        .map((observation) => observation.state);
+      expect(turnStates).not.toContain('running');
+      expect(turnStates.at(-1)).toBe('idle');
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it.each([
+    { screen: 'idle at its prompt', turnEndedOnScreen: true },
+    { screen: 'still working', turnEndedOnScreen: false },
+  ])('reconciles a stalled turn with the screen when Claude is $screen', async ({ turnEndedOnScreen }) => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onThinkingChange = vi.fn();
+    const onReady = vi.fn();
+    const onStalled = vi.fn();
+    const isTurnEndedOnScreen = vi.fn().mockResolvedValue(turnEndedOnScreen);
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+      onReady,
+      turnStallScreenProbe: { quietMs: 5, maxAttempts: 3, onStalled, isTurnEndedOnScreen },
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      // A turn whose Stop hook never arrives.
+      hook({ hook_event_name: 'UserPromptSubmit', session_id: 'claude-session-id' });
+      expect(onThinkingChange).toHaveBeenLastCalledWith(true);
+
+      await vi.waitFor(() => {
+        expect(isTurnEndedOnScreen).toHaveBeenCalledTimes(turnEndedOnScreen ? 1 : 3);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      if (turnEndedOnScreen) {
+        expect(onReady).toHaveBeenCalledTimes(1);
+        expect(onThinkingChange).toHaveBeenLastCalledWith(false);
+        expect(onStalled).not.toHaveBeenCalled();
+      } else {
+        expect(onReady).not.toHaveBeenCalled();
+        expect(onThinkingChange).toHaveBeenLastCalledWith(true);
+        expect(onStalled).toHaveBeenCalledTimes(3);
+      }
+    } finally {
+      bridge.dispose();
+    }
+  });
+
   it('does not let sidechain compact boundary transcript rows complete the parent compaction lifecycle', () => {
     const observeLifecycle = vi.fn();
     const drainWhenSafe = vi.fn().mockResolvedValue(undefined);

@@ -66,6 +66,13 @@ export type ClaudeUnifiedTurnStallScreenProbe = Readonly<{
   maxAttempts?: number | undefined;
   onStalled: () => void | Promise<void>;
   /**
+   * Reads whether Claude's TUI shows its idle interactive prompt (no spinner, dialog, draft or
+   * queued banner). After a full quiet window with no hook or transcript progress, that screen is
+   * turn-end evidence like a Stop hook: the hook was lost or no turn was ever running, and keeping
+   * the turn open holds every queued message behind it.
+   */
+  isTurnEndedOnScreen?: (() => Promise<boolean>) | undefined;
+  /**
    * Fired ONCE per stall episode when the bounded `maxAttempts` budget exhausts while the turn is
    * still active-but-stuck (e.g. an API-retry loop that never reaches turn-terminal). Without it the
    * mid-turn window went silently blind after the last attempt, so a dialog that surfaced late in the
@@ -185,6 +192,9 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   let turnStallTimer: NodeJS.Timeout | null = null;
   let turnStallActive = false;
   let turnStallAttempts = 0;
+  // Bumped on every hook/transcript progress event so a screen read that started before progress
+  // cannot settle the turn that progress proved alive.
+  let turnStallProgressEpoch = 0;
   let turnStallProbeInFlight = false;
   let turnStallEscalated = false;
   let turnEndProbeTimer: NodeJS.Timeout | null = null;
@@ -249,7 +259,8 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (disposed || !turnStallActive || turnStallProbeInFlight) return;
       turnStallAttempts += 1;
       turnStallProbeInFlight = true;
-      Promise.resolve(probe.onStalled())
+      settleStalledTurnIfScreenIsIdle(probe)
+        .then((settled) => (settled ? undefined : probe.onStalled()))
         .catch((error) => {
           logger.debug('[unified]: Claude unified terminal turn-stall screen probe failed', error);
         })
@@ -261,8 +272,29 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     turnStallTimer.unref?.();
   };
 
+  const settleStalledTurnIfScreenIsIdle = async (probe: ClaudeUnifiedTurnStallScreenProbe): Promise<boolean> => {
+    if (!probe.isTurnEndedOnScreen) return false;
+    const progressEpoch = turnStallProgressEpoch;
+    let turnEndedOnScreen = false;
+    try {
+      turnEndedOnScreen = await probe.isTurnEndedOnScreen();
+    } catch (error) {
+      logger.debug('[unified]: Claude unified terminal turn-stall idle screen read failed', error);
+    }
+    if (!turnEndedOnScreen || disposed || !turnStallActive || progressEpoch !== turnStallProgressEpoch) {
+      return false;
+    }
+    logger.warn('[unified]: settling a stalled turn: Claude shows its idle prompt without a turn-end signal', {
+      quietMs: turnStallProbeQuietMs(),
+      attempt: turnStallAttempts,
+    });
+    lifecycle?.observe({ type: 'completion_candidate', providerTurnId: null, source: 'claude_screen_idle_prompt' });
+    return true;
+  };
+
   const noteTurnStallProgress = (): void => {
     if (!opts.turnStallScreenProbe || !turnStallActive) return;
+    turnStallProgressEpoch += 1;
     turnStallAttempts = 0;
     turnStallEscalated = false;
     scheduleTurnStallProbe();
