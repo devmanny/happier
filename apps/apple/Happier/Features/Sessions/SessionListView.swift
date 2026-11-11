@@ -642,6 +642,43 @@ extension SessionListView {
         list.offlineNotice()
     }
 
+    /// The agents and the rooms head the list (not while searching) once the account has agents.
+    private var showsAgentsAndRooms: Bool { query.isEmpty && !store.agentProfiles.isEmpty }
+
+    /// What the list shows when it has no sessions to show.
+    private enum EmptyState { case noMatchingSessions, loading, noSearchResults, noSessions }
+
+    /// Loading, no sessions, or none matching the filter or search; nil while there are sessions.
+    private var emptyState: EmptyState? {
+        if !filter.isDefault, query.isEmpty, filteredSessions.isEmpty, archivedSearch?.isLoading != true { return .noMatchingSessions }
+        guard sessions.isEmpty, query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true) else { return nil }
+        if store.isLoadingSessions { return .loading }
+        return query.isEmpty ? .noSessions : .noSearchResults
+    }
+
+    /// The empty state: over the list when it is otherwise empty, under the agents and rooms when it
+    /// shows them (`showsAgentsAndRooms`).
+    @ViewBuilder
+    private func emptyStateView(_ state: EmptyState) -> some View {
+        switch state {
+        case .noMatchingSessions:
+            ContentUnavailableView {
+                Label("No Matching Sessions", systemImage: "line.3.horizontal.decrease.circle")
+            } description: {
+                Text("Nothing in your sessions matches this filter.")
+            } actions: {
+                Button("Clear Filter") { changeFilter { $0.clear() } }
+            }
+        case .loading:
+            HappierSpinner(size: HappierSpinner.hero)
+        case .noSearchResults:
+            ContentUnavailableView.search(text: query)
+        case .noSessions:
+            ContentUnavailableView("No Sessions", systemImage: "bubble.left.and.text.bubble.right",
+                                   description: Text("Start an agent with the Happier CLI on your computer and it will show up here."))
+        }
+    }
+
     private var list: some View {
         List(selection: isDrawer ? .constant(nil) : Binding(get: { selection }, set: { next in
             if next != selection { AppHaptics.selection() }
@@ -652,7 +689,7 @@ extension SessionListView {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            if query.isEmpty {
+            if showsAgentsAndRooms {
                 AgentsSection(sessions: listed.sessions ?? store.sessionList, drawer: isDrawer, selection: selection, open: open,
                               newSession: { newSessionAgent = $0 }, editing: $editingAgents)
                 RoomsSection(drawer: isDrawer, selection: selection, open: open, newRoom: { creatingRoom = true })
@@ -663,6 +700,13 @@ extension SessionListView {
                 groupedList()
             } else {
                 filteredList()
+            }
+            if showsAgentsAndRooms, let emptyState {
+                // Under the agents and rooms, not over them.
+                emptyStateView(emptyState)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
         }
         #if os(macOS)
@@ -710,24 +754,7 @@ extension SessionListView {
             .padding(.vertical, 8)
         }
         .overlay {
-            if !filter.isDefault, query.isEmpty, filteredSessions.isEmpty, archivedSearch?.isLoading != true {
-                ContentUnavailableView {
-                    Label("No Matching Sessions", systemImage: "line.3.horizontal.decrease.circle")
-                } description: {
-                    Text("Nothing in your sessions matches this filter.")
-                } actions: {
-                    Button("Clear Filter") { changeFilter { $0.clear() } }
-                }
-            } else if sessions.isEmpty, query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true) {
-                if store.isLoadingSessions {
-                    HappierSpinner(size: HappierSpinner.hero)
-                } else if !query.isEmpty {
-                    ContentUnavailableView.search(text: query)
-                } else {
-                    ContentUnavailableView("No Sessions", systemImage: "bubble.left.and.text.bubble.right",
-                                           description: Text("Start an agent with the Happier CLI on your computer and it will show up here."))
-                }
-            }
+            if !showsAgentsAndRooms, let emptyState { emptyStateView(emptyState) }
         }
         .navigationTitle(isDrawer ? "Happier" : "Sessions")
         #if os(iOS)

@@ -3,7 +3,7 @@ import SwiftUI
 
 /// "Rooms" in the session list, under the agents: group chats of the user and the agents they
 /// invite (`AgentRoom`). A room opens like a session (selected in the sidebar, the chat in the
-/// detail; full screen on the iPhone); "+" starts a new one. Shown once there are agents.
+/// detail; full screen on the iPhone); "+" starts a new one. The list shows it once there are agents.
 struct RoomsSection: View {
     let drawer: Bool
     /// What the list has selected: a session, an agent, or a room (`AgentRoom.selection(id:)`).
@@ -15,29 +15,27 @@ struct RoomsSection: View {
     @Environment(HappierStore.self) private var store
 
     var body: some View {
-        if !store.agentProfiles.isEmpty {
-            Section {
-                ForEach(store.activeRooms) { room in
-                    RoomRow(room: room, drawer: drawer, selected: selection == AgentRoom.selection(id: room.id), open: open)
-                }
-            } header: {
-                HStack {
-                    Text("Rooms")
-                    Spacer()
-                    Button {
-                        AppHaptics.light()
-                        newRoom()
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .textCase(nil)
-                    .accessibilityLabel(Text("New Room"))
-                    .accessibilityIdentifier("rooms-new")
-                }
+        Section {
+            ForEach(store.activeRooms) { room in
+                RoomRow(room: room, drawer: drawer, selected: selection == AgentRoom.selection(id: room.id), open: open)
             }
-            .task { await store.refreshRooms() }
+        } header: {
+            HStack {
+                Text("Rooms")
+                Spacer()
+                Button {
+                    AppHaptics.light()
+                    newRoom()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .textCase(nil)
+                .accessibilityLabel(Text("New Room"))
+                .accessibilityIdentifier("rooms-new")
+            }
         }
+        .task { await store.refreshRooms() }
     }
 }
 

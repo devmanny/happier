@@ -5,7 +5,7 @@ import SwiftUI
 /// usage of its account and how many need you. Tapping one opens its whole profile the way a
 /// session opens (selected in the sidebar, the profile in the detail; full screen on the iPhone).
 /// The order is the account's (`AccountSettings.agentOrder`): Edit, or touching and holding a row,
-/// drags it into place. Nothing shows without agents.
+/// drags it into place. The list shows it once there are agents.
 struct AgentsSection: View {
     /// The list's sessions (throttled by the list), every state but archived.
     let sessions: [Session]
@@ -27,25 +27,23 @@ struct AgentsSection: View {
 
     var body: some View {
         let profiles = profiles
-        if !profiles.isEmpty {
-            Section {
-                // Plain rows, exactly like the session rows below: no card or background of their own.
-                ForEach(profiles) { profile in
-                    AgentRow(profile: profile, sessions: sessions, drawer: drawer,
-                             selected: selection == AgentProfile.selection(id: profile.id), open: open, newSession: newSession)
-                }
-                .onMove { offsets, destination in
-                    let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
-                    AppHaptics.selection()
-                    Task { await store.updateAccountSettings { $0.delta(agentOrder: next) } }
-                }
-            } header: {
-                header
+        Section {
+            // Plain rows, exactly like the session rows below: no card or background of their own.
+            ForEach(profiles) { profile in
+                AgentRow(profile: profile, sessions: sessions, drawer: drawer,
+                         selected: selection == AgentProfile.selection(id: profile.id), open: open, newSession: newSession)
             }
-            // Readings for agents with none shown yet: one read of one session each, when the section
-            // appears or an agent gets a session to read from.
-            .task(id: usageSources(profiles).map(\.id)) { await readMissingUsage(profiles) }
+            .onMove { offsets, destination in
+                let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
+                AppHaptics.selection()
+                Task { await store.updateAccountSettings { $0.delta(agentOrder: next) } }
+            }
+        } header: {
+            header
         }
+        // Readings for agents with none shown yet: one read of one session each, when the section
+        // appears or an agent gets a session to read from.
+        .task(id: usageSources(profiles).map(\.id)) { await readMissingUsage(profiles) }
     }
 
     private var header: some View {
