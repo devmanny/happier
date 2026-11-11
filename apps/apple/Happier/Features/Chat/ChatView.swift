@@ -158,6 +158,8 @@ private struct ChatConversationContent: View, Equatable {
     @Binding var finding: Bool
     @State private var findQuery = ""
     @State private var findCurrentId: String?
+    /// The row a message-search result opened, lit for a moment.
+    @State private var jumpHighlightId: String?
     /// Selected transcript item ids; nil when not in selection mode.
     @State private var selected: Set<String>?
     @State private var choosingDestination = false
@@ -386,6 +388,7 @@ private struct ChatConversationContent: View, Equatable {
                 withAnimation(.smooth) { scrollPosition.scrollTo(id: id, anchor: .center) }
             }
         }
+        .task(id: pendingMessageJump) { await jumpToRequestedMessage() }
         .task(id: finding && !findQuery.isEmpty) {
             // The transcript is end-to-end encrypted: searching it means having it here, all of it.
             guard finding, !findQuery.isEmpty else { return }
@@ -512,7 +515,7 @@ private struct ChatConversationContent: View, Equatable {
                 .allowsHitTesting(selected == nil)
         }
         .background {
-            if finding, row.id == findCurrentId {
+            if (finding && row.id == findCurrentId) || row.id == jumpHighlightId {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(Color.yellow.opacity(0.28))
                     .padding(-4)
@@ -606,6 +609,37 @@ private struct ChatConversationContent: View, Equatable {
         } else {
             draft += (draft.hasSuffix(" ") || draft.hasSuffix("\n") ? "" : " ") + text
         }
+    }
+
+    /// A message-search result to show in this conversation, once its transcript is here.
+    private var pendingMessageJump: MessageRequest? {
+        guard let request = store.messageRequest, request.sessionId == sessionId, store.transcripts[sessionId] != nil else { return nil }
+        return request
+    }
+
+    /// Opens the conversation at the message a search found: older pages load until it is in the
+    /// transcript (it grows back from the newest page), then it scrolls into view, lit for a moment.
+    private func jumpToRequestedMessage() async {
+        guard let request = pendingMessageJump else { return }
+        func rowId() -> String? { ChatRow.rowId(showingSeq: request.seq, in: ChatRow.rows(from: items, working: facts.working)) }
+        while rowId() == nil, store.hasOlderMessages[sessionId] == true, !Task.isCancelled {
+            let before = store.transcripts[sessionId]?.minSeq
+            if let before, before <= request.seq { break }
+            await store.loadOlder(sessionId)
+            if store.transcripts[sessionId]?.minSeq == before { break }
+        }
+        guard !Task.isCancelled else { return }
+        if store.messageRequest == request { store.messageRequest = nil }
+        guard let target = rowId() else { return }
+        // After the opening scroll to the newest message has run.
+        try? await Task.sleep(for: .milliseconds(150))
+        pinnedToEnd = false
+        windowLimit = ChatWindow.limit(including: target, in: ChatRow.rows(from: items, working: facts.working), current: windowLimit)
+        await Task.yield()
+        withAnimation(.smooth) { scrollPosition.scrollTo(id: target, anchor: .center) }
+        jumpHighlightId = target
+        try? await Task.sleep(for: .seconds(2.5))
+        if jumpHighlightId == target { withAnimation(.easeOut(duration: 0.6)) { jumpHighlightId = nil } }
     }
 
     private func keepWindowStart() {

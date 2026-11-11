@@ -185,6 +185,8 @@ private struct MachineDetailView: View {
                 Text("Daemon")
             }
 
+            ConversationSearchSection(machineId: machine.id, machineName: machine.name, online: online)
+
             Section {
                 toolsContent(online: online)
             } header: {
@@ -277,6 +279,118 @@ private struct MachineDetailView: View {
             tools = try await store.detectTools(on: machineId, refresh: refresh).map(ToolsState.loaded) ?? .unsupported
         } catch {
             tools = .failed(UserFacingError.message(for: error, hasNetworkPath: store.hasNetworkPath))
+        }
+    }
+}
+
+/// Conversation search on this machine: whether its daemon keeps the full-text index of the
+/// account's conversations and answers searches, how far it has read, and the index's size.
+/// Turning it off offers to delete the index too.
+private struct ConversationSearchSection: View {
+    let machineId: String
+    let machineName: String
+    let online: Bool
+    @Environment(HappierStore.self) private var store
+    @State private var state: LoadState = .loading
+    @State private var switching = false
+    @State private var confirmingOff = false
+
+    enum LoadState: Equatable {
+        case loading
+        case loaded(MessageSearch.Status)
+        case unsupported
+        case failed(String)
+    }
+
+    var body: some View {
+        Section {
+            switch state {
+            case .loading:
+                HStack {
+                    Text("Conversation Search")
+                    Spacer()
+                    HappierSpinner(size: HappierSpinner.mini)
+                }
+            case .unsupported:
+                Text("Update Happier on this machine to search inside conversations.").foregroundStyle(.secondary)
+            case .failed(let message):
+                Text(message).foregroundStyle(.secondary)
+            case .loaded(let status):
+                Toggle(isOn: Binding(get: { status.enabled }, set: { on in
+                    AppHaptics.selection()
+                    if on { Task { await apply(enabled: true, deleteIndex: false) } } else { confirmingOff = true }
+                })) {
+                    Text("Conversation Search")
+                }
+                .disabled(switching || !online)
+                .accessibilityIdentifier("machine-conversation-search")
+                LabeledContent("Status") { statusText(status) }
+                if let coverage = status.coverage, status.state == .indexing {
+                    ProgressView(value: coverage.progress)
+                        .accessibilityLabel(Text("Indexing progress"))
+                }
+                if let bytes = status.indexBytes {
+                    LabeledContent("Index Size", value: bytes.formatted(.byteCount(style: .file)))
+                }
+            }
+        } header: {
+            Text("Conversation Search")
+        } footer: {
+            Text("\(machineName) reads every conversation of your account once and keeps the index on its own disk, so you can search inside messages from any device. The relay never sees the text.")
+        }
+        .task(id: online) { await refreshWhileIndexing() }
+        .confirmationDialog("Turn off conversation search?", isPresented: $confirmingOff, titleVisibility: .visible) {
+            Button("Turn Off and Delete Index", role: .destructive) {
+                AppHaptics.warning()
+                Task { await apply(enabled: false, deleteIndex: true) }
+            }
+            Button("Turn Off, Keep Index") {
+                AppHaptics.light()
+                Task { await apply(enabled: false, deleteIndex: false) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(machineName) stops indexing and answering searches. Keeping the index lets it resume where it stopped; deleting it frees the disk space.")
+        }
+    }
+
+    private func statusText(_ status: MessageSearch.Status) -> Text {
+        switch status.state {
+        case .off: Text("Off")
+        case .ready: Text("Ready · \(status.coverage?.messageCount ?? 0) messages")
+        case .indexing: Text("Indexing \(Int((status.coverage?.progress ?? 0) * 100)) %")
+        }
+    }
+
+    private func apply(enabled: Bool, deleteIndex: Bool) async {
+        switching = true
+        defer { switching = false }
+        if let status = await store.setMessageSearch(machineId: machineId, enabled: enabled, deleteIndex: deleteIndex) {
+            state = .loaded(status)
+        }
+    }
+
+    /// Reads the status, again every few seconds while the machine is still indexing and this
+    /// screen is open (the task ends with it).
+    private func refreshWhileIndexing() async {
+        guard online else {
+            state = .failed(String(localized: "The machine is offline."))
+            return
+        }
+        while !Task.isCancelled {
+            do {
+                if let status = try await store.messageSearchStatus(machineId: machineId) {
+                    state = .loaded(status)
+                    guard status.state == .indexing else { return }
+                } else {
+                    state = .unsupported
+                    return
+                }
+            } catch {
+                state = .failed(UserFacingError.message(for: error, hasNetworkPath: store.hasNetworkPath))
+                return
+            }
+            try? await Task.sleep(for: .seconds(5))
         }
     }
 }

@@ -45,6 +45,8 @@ struct SessionListView: View {
     @State private var olderSessions: OlderSessionsSection?
     /// The archive, loaded only while a search runs or the filter shows archived sessions.
     @State private var archivedSearch: ArchivedSessions?
+    /// What the search finds inside messages, from the Mac that keeps the index.
+    @State private var messageSearch = MessageSearchResults()
     /// The filter button's chosen filter and whether it's on, kept on this device.
     @AppStorage("happier.sessionListFilter") private var storedFilter = ""
     @State private var showFilter = false
@@ -144,6 +146,14 @@ struct SessionListView: View {
             openArchived(session)
         } else {
             open(session.id)
+        }
+    }
+
+    /// Opens the conversation at the message a search found (archived or not yet listed ones load).
+    private func openMessage(_ hit: MessageSearch.Hit) {
+        Task {
+            await store.openMessage(sessionId: hit.sessionId, seq: hit.seq)
+            if store.sessions[hit.sessionId] != nil { open(hit.sessionId) }
         }
     }
 
@@ -392,6 +402,7 @@ struct SessionListView: View {
                 }
             }
         }
+        MessageSearchSection(results: messageSearch, open: openMessage)
     }
 
     private func archivedRow(_ session: Session) -> some View {
@@ -651,7 +662,8 @@ extension SessionListView {
     /// Loading, no sessions, or none matching the filter or search; nil while there are sessions.
     private var emptyState: EmptyState? {
         if !filter.isDefault, query.isEmpty, filteredSessions.isEmpty, archivedSearch?.isLoading != true { return .noMatchingSessions }
-        guard sessions.isEmpty, query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true) else { return nil }
+        guard sessions.isEmpty,
+              query.isEmpty || (archivedMatches.isEmpty && archivedSearch?.isLoading != true && !messageSearch.hasContent) else { return nil }
         if store.isLoadingSessions { return .loading }
         return query.isEmpty ? .noSessions : .noSearchResults
     }
@@ -766,6 +778,7 @@ extension SessionListView {
         .searchable(text: $query, placement: .sidebar, prompt: "Search Sessions")
         #endif
         .refreshable { await store.refreshSessions(userInitiated: true) }
+        .task(id: query) { await messageSearch.update(query: query, store: store) }
         .task(id: needsArchive) {
             // Searching (or a filter showing archived sessions) looks in the archive too; it is
             // fetched for that and let go after.

@@ -34,6 +34,61 @@ import Testing
         #expect(callerOpens.log.values == ["spawn", "sessions", "send", "task", "title"])
     }
 
+    // MARK: Message search
+
+    @Test func messageSearchMergesEveryOnlineMachineWithSearchOn() async throws {
+        let relay = Relay()
+        relay.servesMachineList = true
+        relay.machinesWithSearchOn = ["m1", "m2"]
+        let store = relay.store()
+        await store.refreshMachines()
+
+        guard case .results(let hits, let cursors, let backfilling) = await store.searchMessages(query: "relay") else {
+            Issue.record("expected results"); return
+        }
+        // The message both machines found appears once; the better-ranked one leads.
+        #expect(hits.map(\.id) == ["s9:7", "s1:2"])
+        #expect(cursors == ["m2": "o:20"])
+        #expect(backfilling.map(\.machineName) == ["Mac mini"])
+        #expect(Set(relay.log.values) == ["search m1", "search m2"])
+
+        _ = await store.searchMessages(query: "relay", cursors: cursors)
+        #expect(relay.log.values.filter { $0 == "search m2" }.count == 2)
+        #expect(relay.log.values.filter { $0 == "search m1" }.count == 1)
+    }
+
+    @Test func messageSearchOffersToTurnItOnAndOpensTheResultAtItsMessage() async throws {
+        let relay = Relay()
+        relay.servesMachineList = true
+        let store = relay.store()
+        await store.refreshMachines()
+
+        #expect(await store.searchMessages(query: "relay") == .off(machines: [.init(id: "m1", name: "Alpha"), .init(id: "m2", name: "Mac mini")]))
+        let on = await store.setMessageSearch(machineId: "m1", enabled: true)
+        #expect(on?.enabled == true && on?.state == .indexing)
+        #expect(relay.switchRequests == [["v": 1, "enabled": true, "deleteIndex": false]])
+        #expect(try await store.messageSearchStatus(machineId: "m1")?.enabled == true)
+        guard case .results = await store.searchMessages(query: "relay") else { Issue.record("expected results once on"); return }
+
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        await store.refreshSessions()
+        await store.openMessage(sessionId: "s1", seq: 2)
+        #expect(store.messageRequest == MessageRequest(sessionId: "s1", seq: 2))
+        #expect(store.openRequest == "s1")
+
+        let off = await store.setMessageSearch(machineId: "m1", enabled: false, deleteIndex: true)
+        #expect(off == MessageSearch.Status(enabled: false, state: .off, coverage: nil, indexBytes: nil))
+        #expect(relay.switchRequests.last == ["v": 1, "enabled": false, "deleteIndex": true])
+    }
+
+    @Test func messageSearchIsUnavailableWithNoMachineOnline() async throws {
+        let relay = Relay()
+        relay.servesMachineList = true
+        relay.machinesOnline = false
+        let store = relay.store()
+        #expect(await store.searchMessages(query: "relay") == .unavailable)
+    }
+
     // MARK: Light message updates
 
     @Test func anEditToAClosedSessionKeepsItsTranscriptAndIsReadWhenOpened() async throws {
@@ -405,7 +460,9 @@ private final class Relay: @unchecked Sendable {
     private let lock = NSLock()
     private var state = (sessionRows: [JSONValue](), messageTexts: ["m1": "hola", "m2": "adios"],
                          writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
-                         writtenMetadata: JSONValue?.none, supportsAgentIdentity: false, pendingRows: [JSONValue]())
+                         writtenMetadata: JSONValue?.none, supportsAgentIdentity: false, pendingRows: [JSONValue](),
+                         machinesWithSearchOn: Set<String>(), machinesOnline: true, switchRequests: [JSONValue](),
+                         servesMachineList: false)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -420,6 +477,21 @@ private final class Relay: @unchecked Sendable {
         get { lock.withLock { state.pendingRows } }
         set { lock.withLock { state.pendingRows = newValue } }
     }
+    /// Machines whose daemon has message search on (the others answer that it's off).
+    var machinesWithSearchOn: Set<String> {
+        get { lock.withLock { state.machinesWithSearchOn } }
+        set { lock.withLock { state.machinesWithSearchOn = newValue } }
+    }
+    /// Whether `/v1/machines` answers (otherwise the listing fails, as some tests need).
+    var servesMachineList: Bool {
+        get { lock.withLock { state.servesMachineList } }
+        set { lock.withLock { state.servesMachineList = newValue } }
+    }
+    var machinesOnline: Bool {
+        get { lock.withLock { state.machinesOnline } }
+        set { lock.withLock { state.machinesOnline = newValue } }
+    }
+    var switchRequests: [JSONValue] { lock.withLock { state.switchRequests } }
     var writtenTask: AgentTask? { lock.withLock { state.writtenTask } }
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
     var agentTransitionCall: JSONValue? { lock.withLock { state.agentTransitionCall } }
@@ -471,6 +543,40 @@ private final class Relay: @unchecked Sendable {
     // MARK: Socket
 
     private func socketAck(_ event: String, _ payload: JSONValue) throws -> [JSONValue] {
+        if event == "rpc-call", let method = payload["method"]?.stringValue, let separator = method.firstIndex(of: ":") {
+            let machine = String(method[..<separator])
+            switch method[method.index(after: separator)...] {
+            case "daemon.memory.search":
+                log.add("search \(machine)")
+                guard lock.withLock({ state.machinesWithSearchOn.contains(machine) }) else {
+                    return [["ok": true, "result": ["v": 2, "ok": false, "errorCode": "memory_disabled", "error": "memory_disabled"]]]
+                }
+                let shared: JSONValue = ["sessionId": "s1", "seq": 2, "createdAtMs": 2000, "role": "user", "score": 1,
+                                         "snippet": [["text": "the relay", "match": true]], "session": ["title": "Radar", "agent": "codex"]]
+                let only: JSONValue = ["sessionId": "s9", "seq": 7, "createdAtMs": 9000, "role": "assistant", "score": 2,
+                                       "snippet": [["text": "relay notes", "match": true]], "session": ["title": .null, "agent": .null]]
+                let mini = machine == "m2"
+                return [["ok": true, "result": [
+                    "v": 2, "ok": true, "nextCursor": mini ? "o:20" : .null,
+                    "coverage": ["messageCount": 2, "sessionCount": 1, "knownSessionCount": 4, "pendingSessionCount": mini ? 1 : 0,
+                                 "backfillComplete": .bool(!mini)],
+                    "hits": mini ? [shared, only] : [shared],
+                ]]]
+            case "daemon.memory.messageSearch.status":
+                let on = lock.withLock { state.machinesWithSearchOn.contains(machine) }
+                return [["ok": true, "result": ["v": 1, "enabled": .bool(on), "state": on ? "indexing" : "off", "coverage": .null, "indexBytes": on ? 4096 : .null]]]
+            case "daemon.memory.messageSearch.set":
+                let params = payload["params"] ?? .null
+                let on = params["enabled"]?.boolValue == true
+                lock.withLock {
+                    state.switchRequests.append(params)
+                    if on { state.machinesWithSearchOn.insert(machine) } else { state.machinesWithSearchOn.remove(machine) }
+                }
+                return [["ok": true, "result": ["v": 1, "enabled": .bool(on), "state": on ? "indexing" : "off", "coverage": .null,
+                                                 "indexBytes": on ? 4096 : .null]]]
+            default: break
+            }
+        }
         switch event {
         case "rpc-call" where payload["method"]?.stringValue?.hasPrefix("m1:spawn-happy-session") == true:
             log.add("spawn")
@@ -525,6 +631,15 @@ private final class Relay: @unchecked Sendable {
                 lock.withLock { state.writtenTask = AgentTask.open(value, machineKey: machineKey) }
             }
             return (200, ["success": true, "results": [["key": mutation?["key"] ?? .null, "version": 2]]])
+        case ("GET", "/v1/machines") where servesMachineList:
+            let plain = Data(#"{"t":"plain"}"#.utf8).base64EncodedString()
+            let now = Date().timeIntervalSince1970 * 1000
+            let row = { (id: String, name: String) -> JSONValue in
+                ["id": .string(id), "active": .bool(self.machinesOnline), "activeAt": .number(self.machinesOnline ? now : 1),
+                 "dataEncryptionKey": .string(plain),
+                 "metadata": .string(Data(#"{"t":"plain","v":{"displayName":"\#(name)"}}"#.utf8).base64EncodedString())]
+            }
+            return (200, [row("m1", "Alpha"), row("m2", "Mac mini")])
         case ("GET", "/v1/machines/m1"):
             let plain = Data(#"{"t":"plain"}"#.utf8).base64EncodedString()
             return (200, ["machine": ["id": "m1", "active": true, "dataEncryptionKey": .string(plain)]])

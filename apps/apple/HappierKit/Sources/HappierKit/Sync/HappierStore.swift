@@ -78,6 +78,8 @@ public final class HappierStore {
     public var draftSeeds: [String: String] = [:]
     /// A session the UI should navigate to (e.g. a freshly created fork).
     public var openRequest: String?
+    /// A conversation to show at one message (a message-search result); its chat consumes it.
+    public var messageRequest: MessageRequest?
     /// The Tasks list (or one task's detail) to show, e.g. from the My Tasks widget; the Tasks view
     /// consumes it once it is on screen.
     public enum TasksRequest: Equatable, Sendable { case list, task(String) }
@@ -1122,6 +1124,7 @@ public final class HappierStore {
         pendingQueues = [:]
         draftSeeds = [:]
         openRequest = nil
+        messageRequest = nil
         pinnedSessionIds = []
         deleteRequest = nil
         deletedSessionIds = []
@@ -3618,7 +3621,7 @@ public final class HappierStore {
 
     /// Failure of automatic sync work: logged only; the sync loop retries and the connection
     /// indicator shows the state.
-    private func logBackground(_ error: Error, _ context: StaticString) {
+    func logBackground(_ error: Error, _ context: StaticString) {
         if UserFacingError.isSilent(error) { return }
         log.error("\(context, privacy: .public) failed: \(String(describing: error), privacy: .public)")
     }
