@@ -2,16 +2,18 @@ import { z } from 'zod';
 
 import {
   MemorySearchQueryV1Schema,
+  MemorySearchQueryV2Schema,
+  MessageSearchSetRequestV1Schema,
   type MemorySearchResultV1,
+  type MemorySearchResultV2,
   MemoryStatusV1Schema,
   MemoryWindowV1Schema,
   type MemoryWindowV1,
 } from '@happier-dev/protocol';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 
-import { searchTier1Memory, searchTier2Memory } from '@/daemon/memory/searchMemory';
+import { searchDeepIndexMessages, searchTier1Memory, searchTier2Memory } from '@/daemon/memory/searchMemory';
 import { getMemoryWindow } from '@/daemon/memory/getMemoryWindow';
-import { openDeepIndexDb } from '@/daemon/memory/deepIndex/deepIndexDb';
 import { openSummaryShardIndexDb } from '@/daemon/memory/summaryShardIndexDb';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -48,6 +50,18 @@ function disabledResult(): MemorySearchResultV1 {
   return { v: 1, ok: false, errorCode: 'memory_disabled', error: 'memory_disabled' };
 }
 
+function searchMessagesV2(memoryWorker: MemoryWorkerHandle, raw: unknown): MemorySearchResultV2 {
+  const failure = (errorCode: 'memory_disabled' | 'memory_index_missing' | 'memory_invalid_query', error: string = errorCode): MemorySearchResultV2 =>
+    ({ v: 2, ok: false, errorCode, error });
+  const parsed = MemorySearchQueryV2Schema.safeParse(raw);
+  if (!parsed.success) return failure('memory_invalid_query');
+  const settings = memoryWorker.getSettings();
+  if (!settings.enabled) return failure('memory_disabled', 'Conversation search is turned off on this machine.');
+  const deep = settings.indexMode === 'deep' ? memoryWorker.getDeepIndex() : null;
+  if (!deep) return failure('memory_index_missing');
+  return searchDeepIndexMessages({ deep, query: parsed.data, coverage: memoryWorker.getDeepIndexCoverage() });
+}
+
 export function registerMachineMemoryRpcHandlers(params: Readonly<{
   rpcHandlerManager: RpcHandlerManager;
   memoryWorker: MemoryWorkerHandle;
@@ -78,14 +92,8 @@ export function registerMachineMemoryRpcHandlers(params: Readonly<{
       }
     })();
     const deepStats = (() => {
-      if (!deepDbPath) return null;
       try {
-        const db = openDeepIndexDb({ dbPath: deepDbPath });
-        try {
-          return db.getDeepIndexStats();
-        } finally {
-          db.close();
-        }
+        return memoryWorker.getDeepIndex()?.getDeepIndexStats() ?? null;
       } catch {
         return null;
       }
@@ -188,6 +196,18 @@ export function registerMachineMemoryRpcHandlers(params: Readonly<{
     return next;
   });
 
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_MEMORY_MESSAGE_SEARCH_STATUS, async () => {
+    return await memoryWorker.getMessageSearchStatus();
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_MEMORY_MESSAGE_SEARCH_SET, async (raw: unknown) => {
+    const parsed = MessageSearchSetRequestV1Schema.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' };
+    }
+    return await memoryWorker.setMessageSearch(parsed.data);
+  });
+
   rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_MEMORY_ENSURE_UP_TO_DATE, async (raw: unknown) => {
     const parsed = EnsureUpToDateParamsSchema.safeParse(raw ?? {});
     if (!parsed.success) {
@@ -197,7 +217,10 @@ export function registerMachineMemoryRpcHandlers(params: Readonly<{
     return { ok: true };
   });
 
-  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_MEMORY_SEARCH, async (raw: unknown): Promise<MemorySearchResultV1> => {
+  rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_MEMORY_SEARCH, async (raw: unknown): Promise<MemorySearchResultV1 | MemorySearchResultV2> => {
+    if (raw && typeof raw === 'object' && (raw as { v?: unknown }).v === 2) {
+      return searchMessagesV2(memoryWorker, raw);
+    }
     const parsed = MemorySearchQueryV1Schema.safeParse(raw);
     if (!parsed.success) {
       return { v: 1, ok: false, errorCode: 'memory_invalid_query', error: 'memory_invalid_query' };
@@ -210,8 +233,8 @@ export function registerMachineMemoryRpcHandlers(params: Readonly<{
     const preferDeep = mode === 'deep' || (mode === 'auto' && settings.indexMode === 'deep');
 
     if (preferDeep) {
-      const deepPath = memoryWorker.getDeepDbPath();
-      if (!deepPath) return { v: 1, ok: false, errorCode: 'memory_index_missing', error: 'memory_index_missing' };
+      const deep = memoryWorker.getDeepIndex();
+      if (!deep) return { v: 1, ok: false, errorCode: 'memory_index_missing', error: 'memory_index_missing' };
       const embeddings = resolveOperationalMemoryEmbeddingsSettings(settings.embeddings);
       const embeddingsProviderSettings = resolveOperationalMemoryEmbeddingsSettings(settings.embeddings);
       const embedQuery = await (async () => {
@@ -234,7 +257,7 @@ export function registerMachineMemoryRpcHandlers(params: Readonly<{
         return provider.provider?.embedQuery;
       })();
       return await searchTier2Memory({
-        dbPath: deepPath,
+        deep,
         query: parsed.data,
         previewChars: settings.deep.previewChars,
         candidateLimit: settings.deep.candidateLimit,

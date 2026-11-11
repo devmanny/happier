@@ -6861,6 +6861,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
+      // `happier search`: the memory worker starts after the control server, so it is read late.
+      messageSearch: {
+        status: async () => await memoryWorker?.getMessageSearchStatus() ?? null,
+        set: async (request) => await memoryWorker?.setMessageSearch(request) ?? null,
+      },
       getChildren: getCurrentChildren,
       machineId,
       runtimeId,

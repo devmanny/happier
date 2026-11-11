@@ -264,7 +264,7 @@ describe('optional runtime installation through capabilities', () => {
     const worker = await startMemoryWorker({
       credentials: { token: 't', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) } },
       machineId: 'fixture-machine',
-      deps: { fetchDecryptedTranscriptPageAfterSeq: async () => [] },
+      deps: { fetchDecryptedTranscriptPageAfterSeq: async () => ({ rows: [], hasMore: false, lastSeq: null }) },
     });
     try {
       await vi.waitFor(() => expect(worker.getEmbeddingsDiagnostics()).toMatchObject({ runtimeState: 'error' }));

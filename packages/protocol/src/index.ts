@@ -3002,6 +3002,13 @@ export {
   MemorySearchQueryV1Schema,
   MemorySearchResultV1Schema,
   MemorySearchScopeSchema,
+  MEMORY_SEARCH_V2_DEFAULT_LIMIT,
+  MEMORY_SEARCH_V2_MAX_LIMIT,
+  MemorySearchCoverageV2Schema,
+  MemorySearchHitV2Schema,
+  MemorySearchQueryV2Schema,
+  MemorySearchResultV2Schema,
+  MemorySearchSnippetSegmentV2Schema,
   type MemoryCitationV1,
   type MemorySearchErrorCode,
   type MemorySearchHitV1,
@@ -3009,7 +3016,22 @@ export {
   type MemorySearchQueryV1,
   type MemorySearchResultV1,
   type MemorySearchScope,
+  type MemorySearchCoverageV2,
+  type MemorySearchHitV2,
+  type MemorySearchQueryV2,
+  type MemorySearchResultV2,
+  type MemorySearchSnippetSegmentV2,
 } from './memory/memorySearch.js';
+
+export {
+  applyMessageSearchSwitch,
+  isMessageSearchEnabled,
+  MessageSearchSetRequestV1Schema,
+  MessageSearchStatusV1Schema,
+  messageSearchProgress,
+  type MessageSearchSetRequestV1,
+  type MessageSearchStatusV1,
+} from './memory/messageSearchSwitch.js';
 
 export {
   MemorySnippetV1Schema,

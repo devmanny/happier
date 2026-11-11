@@ -7510,6 +7510,10 @@ describe('registerMachineRpcHandlers', () => {
 	        }),
 	        getTier1DbPath: () => null,
 	        getDeepDbPath: () => null,
+	        getDeepIndex: () => null,
+	        getDeepIndexCoverage: () => ({ messageCount: 0, sessionCount: 0, knownSessionCount: 0, pendingSessionCount: 0, backfillComplete: false }),
+        getMessageSearchStatus: async () => ({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null }),
+        setMessageSearch: async () => ({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null }),
 	      },
 	    });
 

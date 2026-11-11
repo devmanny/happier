@@ -148,6 +148,13 @@ const COMMAND_SURFACE_MANIFEST: readonly CliCommandSurfaceEntry[] = [
     rootHelpDescription: 'Resume an inactive session',
   },
   {
+    command: 'search',
+    rootHelpLabel: 'happier search',
+    rootHelpDescription: 'Turn conversation search on this machine on or off',
+    rootHelpDetail: 'enable | disable [--delete-index] | status',
+    allowTmux: false,
+  },
+  {
     // Compatibility alias: intentionally accepted but omitted from root help.
     command: 'sessions',
     allowTmux: false,

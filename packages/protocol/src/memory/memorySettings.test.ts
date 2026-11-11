@@ -95,7 +95,7 @@ describe('memorySettings', () => {
     expect(parsed.hints.targetShardMessages).toBe(12);
   });
 
-  it('parses light and deep semantic budget settings', () => {
+  it('parses light semantic budget settings', () => {
     const parsed = normalizeMemorySettings({
       v: 1,
       hints: {
@@ -104,21 +104,11 @@ describe('memorySettings', () => {
         targetShardChars: 8_000,
         maxShardChars: 12_000,
       },
-      deep: {
-        targetChunkMessages: 12,
-        minChunkMessages: 1,
-        maxChunkMessages: 25,
-        maxChunkChars: 8_000,
-      },
     });
 
     expect(parsed.hints.targetShardMessages).toBe(16);
     expect(parsed.hints.minShardMessages).toBe(1);
     expect(parsed.hints.targetShardChars).toBe(8_000);
-    expect(parsed.deep.targetChunkMessages).toBe(12);
-    expect(parsed.deep.minChunkMessages).toBe(1);
-    expect(parsed.deep.maxChunkMessages).toBe(25);
-    expect(parsed.deep.maxChunkChars).toBe(8_000);
   });
 
   it('migrates legacy balanced embeddings settings into preset mode', () => {

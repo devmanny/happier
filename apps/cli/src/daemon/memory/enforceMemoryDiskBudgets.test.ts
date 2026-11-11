@@ -15,8 +15,7 @@ describe('enforceMemoryDiskBudgets', () => {
       const deepPath = join(dir, 'deep.sqlite');
       const tier1 = openSummaryShardIndexDb({ dbPath: tier1Path });
       tier1.init();
-      const deep = openDeepIndexDb({ dbPath: deepPath });
-      deep.init();
+      const deep = openDeepIndexDb({ dbPath: deepPath, accountId: 'acct-1' });
 
       tier1.insertSummaryShard({
         sessionId: 's1',
@@ -29,17 +28,13 @@ describe('enforceMemoryDiskBudgets', () => {
         entities: [],
         decisions: [],
       });
-      deep.insertChunk({
+      deep.upsertMessages({
         sessionId: 's1',
-        seqFrom: 1,
-        seqTo: 2,
-        createdAtFromMs: 1,
-        createdAtToMs: 2,
-        text: 'termtwo',
+        messages: [{ seq: 1, createdAtMs: 1, role: 'user', kind: 'user_message', text: 'termtwo' }],
       });
 
       expect(tier1.search({ query: 'termone', scope: { type: 'global' }, maxResults: 10 }).length).toBe(1);
-      expect(deep.search({ query: 'termtwo', scope: { type: 'global' }, maxResults: 10 }).length).toBe(1);
+      expect(deep.searchMessages({ query: 'termtwo', scope: { type: 'global' }, limit: 10, offset: 0 }).hits.length).toBe(1);
 
       await enforceMemoryDiskBudgets({
         tier1,
@@ -50,7 +45,7 @@ describe('enforceMemoryDiskBudgets', () => {
       });
 
       expect(tier1.search({ query: 'termone', scope: { type: 'global' }, maxResults: 10 })).toEqual([]);
-      expect(deep.search({ query: 'termtwo', scope: { type: 'global' }, maxResults: 10 })).toEqual([]);
+      expect(deep.searchMessages({ query: 'termtwo', scope: { type: 'global' }, limit: 10, offset: 0 }).hits).toEqual([]);
 
       deep.close();
       tier1.close();

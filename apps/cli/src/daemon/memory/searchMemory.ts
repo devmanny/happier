@@ -1,8 +1,14 @@
-import type { MemorySearchQueryV1, MemorySearchResultV1 } from '@happier-dev/protocol';
+import type {
+  MemorySearchCoverageV2,
+  MemorySearchQueryV1,
+  MemorySearchQueryV2,
+  MemorySearchResultV1,
+  MemorySearchResultV2,
+} from '@happier-dev/protocol';
 
 import type { OperationalMemoryEmbeddingsSettings } from './resolveOperationalMemoryEmbeddingsSettings';
 import { openSummaryShardIndexDb } from './summaryShardIndexDb';
-import { openDeepIndexDb } from './deepIndex/deepIndexDb';
+import { deepIndexMessageKey, type DeepIndexDbHandle } from './deepIndex/deepIndexDb';
 import { rerankHitsWithEmbeddings } from './deepIndex/embeddings/rerankHitsWithEmbeddings';
 
 function trimToMaxChars(text: string, maxChars: number): string {
@@ -11,10 +17,6 @@ function trimToMaxChars(text: string, maxChars: number): string {
   if (max <= 0) return '';
   if (value.length <= max) return value;
   return value.slice(0, max);
-}
-
-function deepHitKey(hit: Readonly<{ sessionId: string; seqFrom: number; seqTo: number }>): string {
-  return `${hit.sessionId}:${hit.seqFrom}-${hit.seqTo}`;
 }
 
 export function searchTier1Memory(params: Readonly<{
@@ -59,7 +61,7 @@ export function searchTier1Memory(params: Readonly<{
 }
 
 export async function searchTier2Memory(params: Readonly<{
-  dbPath: string;
+  deep: DeepIndexDbHandle;
   query: MemorySearchQueryV1;
   previewChars: number;
   candidateLimit?: number;
@@ -68,28 +70,24 @@ export async function searchTier2Memory(params: Readonly<{
 }>): Promise<MemorySearchResultV1> {
   const maxResults = params.query.maxResults ?? 20;
   const minScore = params.query.minScore ?? 0;
-  const previewChars = params.previewChars;
   const embeddings = params.embeddings;
   const candidateLimitRaw = params.candidateLimit ?? maxResults;
   const candidateLimit = Math.max(maxResults, Math.max(1, Math.min(1000, Math.floor(candidateLimitRaw))));
 
-  const db = openDeepIndexDb({ dbPath: params.dbPath });
   try {
-    const candidates = db.search({
+    const candidates = params.deep.searchMessages({
       query: params.query.query,
       scope: params.query.scope,
-      maxResults: candidateLimit,
-    });
+      limit: candidateLimit,
+      offset: 0,
+    }).hits;
+    // v1 scores are 0..1: BM25 relevance relative to the best candidate.
+    const bestScore = candidates.reduce((max, hit) => Math.max(max, hit.score), 0);
 
     let ranked = candidates.map((hit) => ({
-      key: deepHitKey(hit),
-      sessionId: hit.sessionId,
-      seqFrom: hit.seqFrom,
-      seqTo: hit.seqTo,
-      createdAtFromMs: hit.createdAtFromMs,
-      createdAtToMs: hit.createdAtToMs,
-      text: hit.text,
-      baseScore: hit.score,
+      key: deepIndexMessageKey(hit),
+      hit,
+      baseScore: bestScore > 0 ? hit.score / bestScore : 0,
       finalScore: undefined as number | undefined,
     }));
 
@@ -99,21 +97,17 @@ export async function searchTier2Memory(params: Readonly<{
       if (provider && modelId) {
         try {
           const queryEmbedding = await params.embedQuery(params.query.query);
-          const embeddingMap = db.loadEmbeddings({
+          const embeddingMap = params.deep.loadEmbeddings({
             provider,
             modelId,
-            keys: ranked.map((hit) => ({
-              sessionId: hit.sessionId,
-              seqFrom: hit.seqFrom,
-              seqTo: hit.seqTo,
-            })),
+            keys: ranked.map(({ hit }) => ({ sessionId: hit.sessionId, seq: hit.seq })),
           });
 
           const reranked = rerankHitsWithEmbeddings({
-            hits: ranked.map((hit) => ({
-              id: hit.key,
-              baseScore: hit.baseScore,
-              embedding: embeddingMap.get(hit.key) ?? null,
+            hits: ranked.map((entry) => ({
+              id: entry.key,
+              baseScore: entry.baseScore,
+              embedding: embeddingMap.get(entry.key) ?? null,
             })),
             queryEmbedding,
             weights: {
@@ -125,7 +119,7 @@ export async function searchTier2Memory(params: Readonly<{
           const scoreByKey = new Map<string, number>();
           for (const row of reranked) scoreByKey.set(row.id, row.finalScore);
           ranked = ranked
-            .map((hit) => ({ ...hit, finalScore: scoreByKey.get(hit.key) ?? hit.baseScore }))
+            .map((entry) => ({ ...entry, finalScore: scoreByKey.get(entry.key) ?? entry.baseScore }))
             .sort((a, b) => (b.finalScore ?? 0) - (a.finalScore ?? 0));
         } catch {
           // Best-effort: fall back to base rank ordering.
@@ -137,25 +131,66 @@ export async function searchTier2Memory(params: Readonly<{
       v: 1,
       ok: true,
       hits: ranked
-        .map((hit) => ({
+        .slice(0, maxResults)
+        .map(({ hit, baseScore, finalScore }) => ({
           sessionId: hit.sessionId,
-          seqFrom: hit.seqFrom,
-          seqTo: hit.seqTo,
-          createdAtFromMs: hit.createdAtFromMs,
-          createdAtToMs: hit.createdAtToMs,
-          summary: trimToMaxChars(hit.text, previewChars) || hit.text,
-          score: hit.finalScore ?? hit.baseScore,
+          seqFrom: hit.seq,
+          seqTo: hit.seq,
+          createdAtFromMs: hit.createdAtMs,
+          createdAtToMs: hit.createdAtMs,
+          summary: trimToMaxChars(hit.text, params.previewChars) || hit.text,
+          score: Math.max(0, Math.min(1, finalScore ?? baseScore)),
         }))
         .filter((hit) => hit.score >= minScore),
     };
-  } catch (e: any) {
+  } catch (e: unknown) {
     return {
       v: 1,
       ok: false,
       errorCode: 'memory_failed',
       error: e instanceof Error ? e.message : 'Memory search failed',
     };
-  } finally {
-    db.close();
+  }
+}
+
+const MESSAGE_SEARCH_CURSOR = /^o:(\d{1,9})$/;
+
+/** Full-text message search (`v: 2`): one BM25-ranked page of messages, with an offset cursor. */
+export function searchDeepIndexMessages(params: Readonly<{
+  deep: DeepIndexDbHandle;
+  query: MemorySearchQueryV2;
+  coverage: MemorySearchCoverageV2;
+}>): MemorySearchResultV2 {
+  const cursor = params.query.cursor ?? null;
+  const cursorMatch = cursor === null ? null : MESSAGE_SEARCH_CURSOR.exec(cursor);
+  if (cursor !== null && !cursorMatch) {
+    return { v: 2, ok: false, errorCode: 'memory_invalid_query', error: 'memory_invalid_query' };
+  }
+  const offset = cursorMatch ? Number(cursorMatch[1]) : 0;
+
+  try {
+    const page = params.deep.searchMessages({
+      query: params.query.query,
+      scope: params.query.scope,
+      limit: params.query.limit,
+      offset,
+    });
+    return {
+      v: 2,
+      ok: true,
+      hits: page.hits.map((hit) => ({
+        sessionId: hit.sessionId,
+        seq: hit.seq,
+        createdAtMs: hit.createdAtMs,
+        role: hit.role,
+        snippet: hit.snippet,
+        score: hit.score,
+        session: hit.session,
+      })),
+      nextCursor: page.hasMore ? `o:${offset + page.hits.length}` : null,
+      coverage: params.coverage,
+    };
+  } catch (e: unknown) {
+    return { v: 2, ok: false, errorCode: 'memory_failed', error: e instanceof Error ? e.message : 'memory_failed' };
   }
 }

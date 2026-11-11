@@ -160,7 +160,7 @@ describe('memoryWorker', () => {
       credentials,
       machineId: 'machine_1',
       deps: {
-        fetchDecryptedTranscriptPageAfterSeq: async () => [],
+        fetchDecryptedTranscriptPageAfterSeq: async () => ({ rows: [], hasMore: false, lastSeq: null }),
       },
     });
 
@@ -241,7 +241,7 @@ describe('memoryWorker', () => {
       const worker = await startMemoryWorker({
         credentials: { token: 't', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) } },
         machineId: 'machine_1',
-        deps: { fetchDecryptedTranscriptPageAfterSeq: async () => [] },
+        deps: { fetchDecryptedTranscriptPageAfterSeq: async () => ({ rows: [], hasMore: false, lastSeq: null }) },
       });
       try {
         await vi.waitFor(() => expect(pipeline).toHaveBeenCalledTimes(1));
@@ -308,6 +308,38 @@ describe('memoryWorker', () => {
     worker.stop();
   });
 
+  it('switches conversation search on and off for this machine, deleting the local index only when asked', async () => {
+    const { configuration } = await import('@/configuration');
+    const { readMemorySettingsFromDisk } = await import('@/settings/memorySettings');
+    const { startMemoryWorker } = await import('./memoryWorker');
+    const worker = await startMemoryWorker({
+      credentials: { token: 't', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) } },
+      machineId: 'machine_1',
+      deps: { fetchDecryptedTranscriptPageAfterSeq: async () => ({ rows: [], hasMore: false, lastSeq: null }) },
+    });
+    try {
+      expect(await worker.getMessageSearchStatus()).toEqual({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null });
+
+      const on = await worker.setMessageSearch({ v: 1, enabled: true, deleteIndex: false });
+      expect(on).toMatchObject({ enabled: true, state: 'indexing' });
+      expect(on.indexBytes).toBeGreaterThan(0);
+      expect(await readMemorySettingsFromDisk()).toMatchObject({ enabled: true, indexMode: 'deep', backfillPolicy: 'all_history' });
+      expect(worker.getDeepIndex()).not.toBeNull();
+
+      const off = await worker.setMessageSearch({ v: 1, enabled: false, deleteIndex: false });
+      expect(off).toMatchObject({ enabled: false, state: 'off', coverage: null });
+      expect(off.indexBytes).toBeGreaterThan(0);
+      expect(worker.getDeepIndex()).toBeNull();
+
+      const deleted = await worker.setMessageSearch({ v: 1, enabled: false, deleteIndex: true });
+      expect(deleted).toEqual({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null });
+      await expect(stat(join(configuration.activeServerDir, 'memory'))).rejects.toBeTruthy();
+      expect((await readMemorySettingsFromDisk()).deleteOnDisable).toBe(false);
+    } finally {
+      worker.stop();
+    }
+  });
+
   it('hydrates summary_shard.v1 system records into the tier-1 index', async () => {
     const { writeMemorySettingsToDisk } = await import('@/settings/memorySettings');
     await writeMemorySettingsToDisk({ v: 1, enabled: true, indexMode: 'hints' });
@@ -320,7 +352,7 @@ describe('memoryWorker', () => {
       credentials,
       machineId: 'machine_1',
       deps: {
-        fetchDecryptedTranscriptPageAfterSeq: async () => [],
+        fetchDecryptedTranscriptPageAfterSeq: async () => ({ rows: [], hasMore: false, lastSeq: null }),
         fetchCommittedSummaryShards: async () => [{
           v: 1,
           seqFrom: 10,
@@ -366,10 +398,14 @@ describe('memoryWorker', () => {
       credentials,
       machineId: 'machine_1',
       deps: {
-        fetchDecryptedTranscriptPageAfterSeq: async () => [
-          { seq: 1, createdAtMs: 1000, role: 'user' as const, content: { type: 'text', text: 'hello openclaw' } },
-          { seq: 2, createdAtMs: 2000, role: 'agent' as const, content: { type: 'text', text: 'we discussed memory search' } },
-        ],
+        fetchDecryptedTranscriptPageAfterSeq: async () => ({
+          rows: [
+            { seq: 1, createdAtMs: 1000, role: 'user' as const, content: { type: 'text', text: 'hello openclaw' } },
+            { seq: 2, createdAtMs: 2000, role: 'agent' as const, content: { type: 'text', text: 'we discussed memory search' } },
+          ],
+          hasMore: false,
+          lastSeq: 2,
+        }),
       },
     });
 
@@ -386,11 +422,11 @@ describe('memoryWorker', () => {
       tier1.close();
     }
 
-    const deepPath = worker.getDeepDbPath();
-    expect(deepPath).toBeTruthy();
+    const deep = worker.getDeepIndex();
+    expect(deep).toBeTruthy();
 
     const result = await searchTier2Memory({
-      dbPath: deepPath!,
+      deep: deep!,
       query: { v: 1, query: 'openclaw', scope: { type: 'global' }, mode: 'deep' },
       previewChars: 240,
     });
@@ -439,10 +475,13 @@ describe('memoryWorker', () => {
       credentials,
       machineId: 'machine_1',
       deps: {
-        fetchDecryptedTranscriptPageAfterSeq: async ({ sessionId }) =>
-          sessionId === 'sess-1'
+        fetchDecryptedTranscriptPageAfterSeq: async ({ sessionId }) => ({
+          rows: sessionId === 'sess-1'
             ? [{ seq: 1, createdAtMs: 1000, role: 'user' as const, content: { type: 'text', text: 'candidate openclaw memory row' } }]
             : [],
+          hasMore: false,
+          lastSeq: sessionId === 'sess-1' ? 1 : null,
+        }),
       },
     });
 
@@ -747,8 +786,10 @@ describe('memoryWorker', () => {
         credentials,
         machineId: 'machine_1',
         deps: {
-          fetchDecryptedTranscriptPageAfterSeq: async ({ afterSeq }) =>
-            rows.filter((row) => row.seq > afterSeq),
+          fetchDecryptedTranscriptPageAfterSeq: async ({ afterSeq }) => {
+            const page = rows.filter((row) => row.seq > afterSeq);
+            return { rows: page, hasMore: false, lastSeq: page.at(-1)?.seq ?? null };
+          },
         },
       });
 
@@ -776,6 +817,126 @@ describe('memoryWorker', () => {
 
       expect(fetchSessionsPage).toHaveBeenCalledWith(expect.objectContaining({ activeOnly: false }));
       worker.stop();
+    } finally {
+      process.argv = argvBackup;
+      vi.useRealTimers();
+    }
+  });
+  it('backfills every session, archived ones too, one page per request, then reads only sessions whose head moves', async () => {
+    vi.useFakeTimers();
+    const argvBackup = process.argv.slice();
+    try {
+      type FakeSession = {
+        id: string;
+        seq: number;
+        archived: boolean;
+        metadata: Record<string, unknown>;
+        rows: Array<{ seq: number; role: 'user' | 'agent'; text: string }>;
+      };
+      const sessions: FakeSession[] = [
+        { id: 'sess-a', seq: 3, archived: false, metadata: { summary: { text: 'Alpha plan' }, flavor: 'claude' }, rows: [
+          { seq: 1, role: 'user', text: 'alpha question about relays' },
+          { seq: 2, role: 'agent', text: 'alpha answer about relays' },
+        ] },
+        { id: 'sess-b', seq: 1, archived: false, metadata: { name: 'Beta', flavor: 'codex' }, rows: [{ seq: 1, role: 'user', text: 'beta words' }] },
+        { id: 'sess-c', seq: 2, archived: false, metadata: { path: '/work/gamma' }, rows: [
+          { seq: 1, role: 'user', text: 'gamma first' },
+          { seq: 2, role: 'agent', text: 'gamma second' },
+        ] },
+        { id: 'sess-d', seq: 1, archived: true, metadata: { name: 'Delta' }, rows: [{ seq: 1, role: 'user', text: 'archived zanahoria notes' }] },
+      ];
+      const record = (session: FakeSession) => ({
+        id: session.id,
+        seq: session.seq,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        activeAt: 0,
+        encryptionMode: 'plain',
+        metadata: JSON.stringify(session.metadata),
+        dataEncryptionKey: null,
+      });
+      const fetchSessionsPage = vi.fn(async ({ cursor, limit, archivedOnly }: { cursor?: string; limit?: number; archivedOnly?: boolean }) => {
+        const listed = sessions.filter((session) => session.archived === Boolean(archivedOnly));
+        const start = cursor ? Number(cursor) : 0;
+        const end = start + (limit ?? 50);
+        return {
+          sessions: listed.slice(start, end).map(record),
+          nextCursor: end < listed.length ? String(end) : null,
+          hasNext: end < listed.length,
+        };
+      });
+      const fetchSessionById = vi.fn(async ({ sessionId }: { sessionId: string }) => {
+        const session = sessions.find((candidate) => candidate.id === sessionId);
+        return session ? record(session) : null;
+      });
+      const fetchEncryptedTranscriptMessagesPage = vi.fn(async ({ sessionId, afterSeq, limit }: { sessionId: string; afterSeq?: number; limit: number; roles?: readonly string[] }) => {
+        const after = (sessions.find((session) => session.id === sessionId)?.rows ?? []).filter((row) => row.seq > (afterSeq ?? 0));
+        const page = after.slice(0, limit);
+        return {
+          messages: page.map((row) => ({
+            id: `${sessionId}-${row.seq}`,
+            seq: row.seq,
+            createdAt: 1_000 + row.seq,
+            messageRole: row.role,
+            content: { t: 'plain', v: { role: row.role, content: { type: 'text', text: row.text } } },
+          })),
+          hasMore: after.length > page.length,
+          nextBeforeSeq: null,
+          nextAfterSeq: after.length > page.length ? page[page.length - 1]!.seq : null,
+        };
+      });
+
+      // HTTP is the system boundary; the worker, cursors and index stay real.
+      vi.doMock('@/session/transport/http/sessionsHttp', async (importOriginal) => ({
+        ...(await importOriginal<typeof import('@/session/transport/http/sessionsHttp')>()),
+        fetchSessionsPage,
+        fetchSessionById,
+      }));
+      vi.doMock('@/session/replay/fetchEncryptedTranscriptMessages', () => ({ fetchEncryptedTranscriptMessagesPage }));
+      process.argv = ['node', 'happier', 'daemon', 'start-sync'];
+      vi.doMock('@/configuration', async () => {
+        const actual = await vi.importActual<typeof import('@/configuration')>('@/configuration');
+        return { ...actual, configuration: { ...actual.configuration, isDaemonProcess: true, memoryMaxTranscriptWindowMessages: 50 } };
+      });
+
+      const { writeMemorySettingsToDisk } = await import('@/settings/memorySettings');
+      await writeMemorySettingsToDisk({
+        v: 1,
+        enabled: true,
+        indexMode: 'deep',
+        backfillPolicy: 'all_history',
+        worker: { tickIntervalMs: 500, inventoryRefreshIntervalMs: 5_000, maxSessionsPerTick: 1, sessionListPageLimit: 2 },
+      });
+      const { startMemoryWorker } = await import('./memoryWorker');
+      const worker = await startMemoryWorker({
+        credentials: { token: 't', encryption: { type: 'legacy', secret: new Uint8Array(32).fill(1) } },
+        machineId: 'machine_1',
+      });
+      const search = (query: string) =>
+        worker.getDeepIndex()?.searchMessages({ query, scope: { type: 'global' }, limit: 20, offset: 0 }).hits ?? [];
+
+      try {
+        await vi.advanceTimersByTimeAsync(16_000);
+
+        expect(search('zanahoria').map((hit) => hit.sessionId)).toEqual(['sess-d']);
+        expect(search('gamma')).toHaveLength(2);
+        expect(search('alpha')[0]?.session).toEqual({ title: 'Alpha plan', agent: 'claude' });
+        expect(fetchEncryptedTranscriptMessagesPage.mock.calls.every(([args]) => args.roles?.join(',') === 'user,agent')).toBe(true);
+        expect(worker.getDeepIndexCoverage()).toEqual({ messageCount: 6, sessionCount: 4, knownSessionCount: 4, pendingSessionCount: 0, backfillComplete: true });
+
+        const transcriptCallsWhenCaughtUp = fetchEncryptedTranscriptMessagesPage.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(fetchEncryptedTranscriptMessagesPage.mock.calls.length).toBe(transcriptCallsWhenCaughtUp);
+
+        sessions[0]!.rows.push({ seq: 4, role: 'agent', text: 'alpha follow-up about rollback' });
+        sessions[0]!.seq = 4;
+        await vi.advanceTimersByTimeAsync(6_000);
+
+        expect(search('rollback').map((hit) => [hit.sessionId, hit.seq])).toEqual([['sess-a', 4]]);
+        expect(fetchEncryptedTranscriptMessagesPage.mock.calls.length).toBe(transcriptCallsWhenCaughtUp + 1);
+      } finally {
+        worker.stop();
+      }
     } finally {
       process.argv = argvBackup;
       vi.useRealTimers();

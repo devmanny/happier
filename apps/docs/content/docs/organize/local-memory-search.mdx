@@ -56,6 +56,23 @@ This design is deliberate:
 - the derived memory index stays on the machine that built it
 - users can choose different storage and embeddings settings per machine
 
+## Conversation search on a machine
+
+Conversation search is the deep index switched on for a machine: its daemon reads every conversation of your account (archived ones too) and answers searches inside messages. It is **off** until you turn it on, and each machine has its own switch.
+
+Turn it on, check its progress, or turn it off from the machine's terminal:
+
+```bash
+happier search status        # off, indexing (with %), or ready; and the index size
+happier search enable        # starts reading your conversations in the background
+happier search disable       # stops indexing and answering; keeps the index
+happier search disable --delete-index   # also deletes the local index (asks first; --yes skips)
+```
+
+Apps that support it show the same switch in the machine's settings. While it is off, the daemon refuses searches with a typed error (`memory_disabled`, "Conversation search is turned off on this machine."). A search from an app goes to every online machine with conversation search on, and their results are merged, each message listed once.
+
+The switch lives in the machine's memory settings: on means memory search enabled, deep mode, and **All history**.
+
 ## Light vs deep indexing
 
 Happier supports two indexing modes.
@@ -74,15 +91,19 @@ This is the recommended starting point if you mainly want broad recall and do no
 
 ### Deep
 
-Deep mode stores **message chunks** locally.
+Deep mode keeps a local **full-text index of every message**: what you wrote and what the agent answered (tool output and thinking stay out by default). It is a SQLite FTS5 database in the daemon's data folder, readable only by your user account.
+
+- Matches ignore case and accents (`migracion` finds `migración`), and each word also matches as a prefix.
+- Results are ranked by relevance (BM25) and come back one message at a time, with the matching words highlighted, so opening a result lands on that exact message.
+- Clients that support it can search the full text of all your conversations through the daemon. The request and the answer travel through the relay end-to-end encrypted: the relay never sees the query or the text.
 
 Use it when you want:
 
 - stronger recall over real conversation content
-- better search quality for specific topics, decisions, or snippets
+- to find a message by the words in it, not only by session title
 - optional embeddings-based reranking
 
-Deep mode uses more disk and can take longer to backfill.
+Deep mode uses more disk and can take longer to backfill. As a reference, about 64,000 messages (roughly 100 MB of text) make an index of about 180 MB.
 
 ## Backfill behavior
 
@@ -95,6 +116,8 @@ When you turn local memory search on, you can choose how much history Happier sh
 If you want the fastest, lowest-risk rollout, start with **New only**.
 
 If you want older conversations to be searchable immediately, use **Last 30 days** or **All history**.
+
+In deep mode, **All history** also reads archived sessions. The backfill runs in the background at a gentle pace (a page of messages from a couple of sessions every few seconds), remembers where it stopped in each session, and picks up there after a restart. New messages are indexed within about a minute of arriving, and sessions with recent activity go ahead of the backfill.
 
 ## Memory hint generation
 
@@ -137,7 +160,7 @@ Happier currently exposes these modes:
 - lower cold-start cost
 - good overall retrieval quality
 
-`Long context` works well and is often a better fit for larger transcript chunks, but it still has a heavier first-use cost than the default.
+`Long context` works well and is often a better fit for long messages, but it still has a heavier first-use cost than the default.
 
 `Quality` is the heaviest preset and is best treated as an evaluation / advanced option.
 
@@ -238,7 +261,7 @@ For most users:
 3. Use **New only** first
 4. Turn on **Delete on disable** if you want easy cleanup
 
-Switch to **Long context** if your conversations are long and you want stronger recall over larger transcript chunks.
+Switch to **Long context** if your messages are long and you want stronger recall over them.
 
 Use **Custom remote** only if you intentionally want to bring your own embeddings endpoint.
 
