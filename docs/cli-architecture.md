@@ -1400,6 +1400,10 @@ waits for that exact prompt before sending Enter once, and re-observes its consu
 without resubmitting. Individual transport commands retain their own timeouts.
 The arbiter's existing accepted/retired delivery state also ends verification, so a
 manual submission or cancelled Pending row cannot leave the injection waiting forever.
+The Claude prompt injector also bounds each write's verification by the session stall
+budget (the mid-turn stall probe's quiet window times its attempts). Past it, the
+verifier's ambiguous failure hands the row to Pending recovery without a resend; see
+`docs/pending-delivery.md`.
 The Herdr client stages large text in sequential Unicode-safe requests within
 Herdr's 1 MiB serialized JSON-line limit, including escape expansion and envelope
 bytes. Submission still belongs to the existing verifier: it sends Enter only

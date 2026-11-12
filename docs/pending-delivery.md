@@ -227,6 +227,32 @@ must not replace the daemon's Happier session identity. Otherwise a subsequent
 wake can miss the live runner and attach a second one; replacing the publisher
 turns unresolved delivery claims into `delivery_outcome_uncertain`.
 
+## Claude unified terminal deliveries that never reach Claude (development)
+
+A materialized Pending row must not wait silently in `delivering` when Claude never
+shows, consumes, or records the prompt (incidents `cmwcg4h31` and `cmw9m36zc`,
+11 Nov 2026, Claude Code 2.1.322):
+
+- The screen parser reads a scrolled composer whose first visible row is a blank
+  paragraph row (a long expanded paste in an 80x24 tmux pane) as composer content,
+  not as an empty composer. Before this, staging verification never saw the prompt,
+  never pressed Enter, and waited for the whole session lifetime.
+- One prompt write's staging and consumption verification is bounded by the
+  session's existing stall budget (the mid-turn stall probe's quiet window times its
+  attempts, 45 s × 3). When it expires the attempt ends as the verifier's ambiguous
+  failure: the arbiter keeps terminal custody (no automatic replay), the row becomes
+  `blocked / delivery_outcome_uncertain` (or `ambiguous_terminal_delivery` after
+  Enter), later rows keep flowing, and late provider evidence still resolves the row
+  as `provider_accepted`. The runner logs `prompt delivery was not observed within the
+  session stall budget`.
+- Bare commands that Claude runs only as an interactive panel (`/mcp`, `/config`,
+  `/hooks`, `/permissions`, `/help`, `/status`, `/cost`, `/usage`, owned by
+  `controlCommandRows.ts`) are refused before any write, also mid-turn and also with
+  Happier's provider-only context appended. They open a panel even mid-turn and write
+  no transcript row on open, on Esc, or with the next prompt, so their delivery could
+  never be accepted. The row becomes `blocked / unsupported_action` with no provider
+  effect; like other pre-effect blocks it holds later rows until it is dismissed.
+
 ## Inherited uncertain deliveries (development)
 
 When a runner registers as the session publisher, the server marks every

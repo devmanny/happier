@@ -449,7 +449,15 @@ function readComposerState(
     };
   }
   const cursorRelation = readCursorComposerRelation({ text, match, content, context });
-  if (content.length === 0) return { content, shellContent: null, cursorRelation };
+  if (content.length === 0) {
+    // A scrolled long composer can start its visible window on a blank paragraph row (2.1.322,
+    // 80x24 tmux): the indented rows below it are still composer content, not an empty composer.
+    return {
+      content: continuation.length === 0 ? content : ['', ...continuation].join('\n'),
+      shellContent: null,
+      cursorRelation,
+    };
+  }
   if (continuation.length === 0 && composerContentIsDimPlaceholder(rawText, content, cursorRelation)) {
     return { content: '', shellContent: null, cursorRelation };
   }

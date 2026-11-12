@@ -43,6 +43,30 @@ export function resolveClaudeControlCommandCompletionOwner(
     : 'external_lifecycle';
 }
 
+/**
+ * Bare Claude commands that run only as an interactive terminal panel. Claude Code 2.1.322 (tmux
+ * probe, 11 nov 2026, incident cmw9m36zc): each opened a panel that replaced the composer, even
+ * mid-turn, and wrote no transcript row on open, on Esc, or with the next prompt. A remote delivery
+ * of one can therefore never be accepted, and nobody remote can operate the panel it leaves open.
+ * Commands that record rows (`/agents`, `/context`, `/plugin`) or start a model turn (`/doctor`)
+ * are deliberately absent; unprobed commands keep the normal delivery path. `/status` is also a
+ * local-stdout command above: that classifies its transcript rows when Claude does write them.
+ */
+const INTERACTIVE_PANEL_ONLY_COMMANDS = new Set([
+  '/mcp',
+  '/config',
+  '/hooks',
+  '/permissions',
+  '/help',
+  '/status',
+  '/cost',
+  '/usage',
+]);
+
+export function isClaudeInteractivePanelOnlyCommand(promptText: string): boolean {
+  return INTERACTIVE_PANEL_ONLY_COMMANDS.has(promptText.trim().toLowerCase());
+}
+
 // Claude writes the command tags in either order (`<command-name>` first for built-ins,
 // `<command-message>` first for skill commands), and a local command's output as stdout or stderr.
 const COMMAND_ROW_PREFIXES = ['<command-name>', '<command-message>', '<command-args>'] as const;

@@ -2,6 +2,8 @@ import { resolveTerminalInjectionReadiness } from '@/agent/runtime/terminal/inje
 import type { TerminalInputInjectionResult, TerminalLifecycleObservation, TerminalTurnState } from '@/agent/runtime/terminal/_types';
 import { isNonSteerablePromptPayload, parseSpecialCommand } from '@/cli/parsers/specialCommands';
 import { logger } from '@/ui/logger';
+import { isHappierProviderOnlyPromptSuffix } from '@/agent/runtime/prompt/resolveProviderPromptForDispatch';
+import { isClaudeInteractivePanelOnlyCommand } from '@/backends/claude/utils/controlCommandRows';
 
 import { isConditionalPendingSteerClaim } from '@happier-dev/protocol';
 import type {
@@ -61,6 +63,25 @@ function isCompactPrompt(batch: Readonly<{ message: string }>): boolean {
 function isNonSteerablePrompt(batch: Readonly<{ message: string }>): boolean {
   return isNonSteerablePromptPayload(normalizePromptText(batch.message));
 }
+
+function isInteractivePanelOnlyPrompt(batch: Readonly<{ message: string }>): boolean {
+  const text = normalizePromptText(batch.message);
+  // Dispatch appends provider-only context (thread summary, task board) after a blank line; the
+  // user's command is the text before it.
+  const separator = text.indexOf('\n\n');
+  const userText = separator >= 0 && isHappierProviderOnlyPromptSuffix(text.slice(separator + 2))
+    ? text.slice(0, separator)
+    : text;
+  return isClaudeInteractivePanelOnlyCommand(userText);
+}
+
+const UNSUPPORTED_COMMAND_RESULT = {
+  status: 'failed',
+  reason: 'unsupported_command',
+  phase: 'before_write',
+  duplicateRisk: 'none',
+  recoverable: true,
+} as const satisfies Extract<TerminalInputInjectionResult, { status: 'failed' }>;
 
 function isDeterministicPreProviderInputRejection(
   failure: Extract<TerminalInputInjectionResult, { status: 'failed' }>,
@@ -518,8 +539,10 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
     };
   }
 
-  async function failExactDelivery(batch: ClaudeUnifiedPromptBatch<Mode>): Promise<'dropped' | 'parked'> {
-    const result = buildExactDeliveryUnavailableResult();
+  async function failExactDelivery(
+    batch: ClaudeUnifiedPromptBatch<Mode>,
+    result: Extract<TerminalInputInjectionResult, { status: 'failed' }> = buildExactDeliveryUnavailableResult(),
+  ): Promise<'dropped' | 'parked'> {
     lastFailureReason = result.reason;
     headInputState = 'failed_terminal';
     const handling = await notifyInjectionFailure({ batch, result, failureState: 'failed_terminal' });
@@ -870,6 +893,12 @@ export function createClaudeUnifiedInputArbiter<Mode = unknown>(opts: Readonly<{
         return;
       }
       const next = queue[0];
+      if (next.origin.kind === 'ui_pending' && isPendingQueueBatch(next) && isInteractivePanelOnlyPrompt(next)) {
+        // Typing it would open a panel nobody remote can operate and a delivery Claude never
+        // records (incident cmw9m36zc): refuse it before any write so Pending shows why.
+        if (await failExactDelivery(next, UNSUPPORTED_COMMAND_RESULT) === 'dropped') continue;
+        return;
+      }
       const isSteerDelivery = next.pendingProviderAction === 'steer'
         || next.pendingRequestedAction?.kind === 'steer_now';
       const isConditionalSteer = isConditionalPendingSteerClaim({

@@ -1358,6 +1358,23 @@ describe('parseClaudeScreenState — soft-wrapped composer draft (C11)', () => {
     ].join('\n'));
   });
 
+  it('reads a scrolled composer whose first visible row is a blank paragraph row as a draft', () => {
+    // Claude Code 2.1.322 in an 80x24 tmux pane scrolls a long expanded paste so the row next to
+    // `❯` is the blank line between paragraphs (incident cmwcg4h31). The text below it is still
+    // composer content: treating it as an empty composer hides a real draft.
+    const state = parseClaudeScreenState([
+      '────────────────────────────────────────────────',
+      '❯ ',
+      '  last paragraph of a long pasted prompt that',
+      '  wraps onto a second row',
+      '────────────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('\nlast paragraph of a long pasted prompt that\nwraps onto a second row');
+    expect(state.userDraftPresent).toBe(true);
+  });
+
   it('keeps blank paragraph rows inside a box-bordered composer', () => {
     const state = parseClaudeScreenState([
       '╭──────────────────────────────╮',

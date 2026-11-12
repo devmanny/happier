@@ -155,6 +155,42 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
     })).toThrow();
   });
 
+  it('submits a long prompt whose small viewport window starts on a blank paragraph row', async () => {
+    // Claude Code 2.1.322, tmux 80x24 (incident cmwcg4h31, 11 nov 2026): an expanded multi-paragraph
+    // paste scrolls the composer to its last rows, and the first visible row next to `❯` is the
+    // blank line between paragraphs. Reading that row as an empty composer never staged the prompt,
+    // so Enter was never sent and the delivery waited forever.
+    const lastParagraph = 'Before the release, check that the data volume has at least fifteen gigabytes free. '
+      + 'If it does not, stop and report back; do not delete anything outside your own artifacts.';
+    const promptText = `${'Status note for the delivery investigation. '.repeat(12)}\n\n${lastParagraph}`;
+    const screenText = [
+      '⏺ Compacted while idle, before the prompt cache expired',
+      '',
+      '─'.repeat(80),
+      '❯ ',
+      '  Before the release, check that the data volume has at least fifteen gigabytes',
+      '  free. If it does not, stop and report back; do not delete anything outside',
+      '  your own artifacts.',
+      '─'.repeat(80),
+      '  Opus 5.5',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const policy = createClaudePromptSubmitVerificationPolicy();
+    const submitEnter = vi.fn(async () => 'success' as const);
+
+    expect(await runTerminalPromptSubmission({
+      promptText,
+      verifyStagedBeforeSubmit: async () => policy.isPromptStagedBeforeSubmit({ promptText, screenText }),
+      submitEnter,
+      verifyAfterSubmit: async () => false,
+      remainingTimeoutMs: () => 0,
+      wait: async () => {},
+      postSubmitSettleMs: 0,
+    })).toEqual({ success: true });
+    expect(submitEnter).toHaveBeenCalledOnce();
+    expect(policy.isPromptStillPendingAfterSubmit({ promptText, screenText })).toBe(true);
+  });
+
   it('accepts a sufficiently long canonical visible composer window before and after submit', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
     const words = Array.from({ length: 90 }, (_, index) => `incident-word-${index}`);

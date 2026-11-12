@@ -567,6 +567,20 @@ const DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS = 250;
 const DEFAULT_DIALOG_OWNERSHIP_GRACE_MS = 300;
 const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS = 45_000;
 const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS = 3;
+
+/**
+ * The session's single stall budget: how long Claude may show no progress before the runner stops
+ * waiting silently and makes the state observable. The mid-turn stall probe escalates after this
+ * window, and one prompt write's delivery verification is bounded by the same window.
+ */
+function resolveTurnStallScreenProbeBudget(opts: Readonly<{
+  dialogTurnStallScreenProbeQuietMs?: number | undefined;
+  dialogTurnStallScreenProbeMaxAttempts?: number | undefined;
+}>): Readonly<{ quietMs: number; maxAttempts: number; windowMs: number }> {
+  const quietMs = opts.dialogTurnStallScreenProbeQuietMs ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS;
+  const maxAttempts = opts.dialogTurnStallScreenProbeMaxAttempts ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS;
+  return { quietMs, maxAttempts, windowMs: Math.max(0, quietMs) * Math.max(0, maxAttempts) };
+}
 // After a turn settles, evaluate the dialog registry on a bounded idle re-arm schedule (offsets in ms
 // from settle): the first two shots catch a queued-command dialog that renders a beat after Stop, and
 // the backoff tail keeps re-evaluating for ~a minute so a dialog rendering several seconds late is
@@ -1940,7 +1954,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           : undefined;
         let result: TerminalInputInjectionResult;
         try {
-          const sessionInput = { ...input, signal: terminalSubmissionSignal };
+          // The session lifetime always ends verification; an attempt-scoped signal (the injector's
+          // stall budget) may end it earlier, never later.
+          const sessionInput = {
+            ...input,
+            signal: input.signal ? AbortSignal.any([terminalSubmissionSignal, input.signal]) : terminalSubmissionSignal,
+          };
           result = adapterWriteBoundary
             ? await hostResolution.adapter.injectUserPrompt(activeHandle, sessionInput, adapterWriteBoundary)
             : await hostResolution.adapter.injectUserPrompt(activeHandle, sessionInput);
@@ -2049,6 +2068,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       const captureInputStateForGuard = hostResolution.adapter.captureInputState;
       const promptInjector = createClaudeUnifiedPromptInjector<Mode>({
         inputInjection: hostInputInjection,
+        deliveryVerificationBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
         beforeComposerDraftGuard: runBeforePromptInjectionGates,
         // A terminal-local slash command can replace the composer with a chooser without emitting
         // a Claude turn or hook. Observe that exact successful injection boundary so the single
@@ -2482,10 +2502,8 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             ...(dialogChoiceScreenProbe
               ? {
                   turnStallScreenProbe: {
-                    quietMs: opts.dialogTurnStallScreenProbeQuietMs
-                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS,
-                    maxAttempts: opts.dialogTurnStallScreenProbeMaxAttempts
-                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
+                    quietMs: resolveTurnStallScreenProbeBudget(opts).quietMs,
+                    maxAttempts: resolveTurnStallScreenProbeBudget(opts).maxAttempts,
                     onStalled: async () => {
                       await dialogChoiceScreenProbe?.probe();
                     },
@@ -2506,13 +2524,11 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                       // a silent "computing…". This is the mid-turn analog of the turn-end tail's
                       // one-shot starvation — ONE escalation discipline, never silent.
                       void dialogChoiceScreenProbe?.probe().catch(() => undefined);
-                      const quietMs = opts.dialogTurnStallScreenProbeQuietMs
-                        ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS;
-                      const attempts = opts.dialogTurnStallScreenProbeMaxAttempts
-                        ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS;
+                      const stallBudget = resolveTurnStallScreenProbeBudget(opts);
+                      const attempts = stallBudget.maxAttempts;
                       emitClaudeUnifiedDialogTurnStallStarvation(telemetry, {
                         attempts,
-                        windowMs: Math.max(0, quietMs) * Math.max(0, attempts),
+                        windowMs: stallBudget.windowMs,
                       });
                       logger.warn('[unified]: mid-turn stall dialog probe budget exhausted with the turn still active', {
                         attempts,

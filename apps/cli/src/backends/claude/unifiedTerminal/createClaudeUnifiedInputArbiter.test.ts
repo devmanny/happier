@@ -4,6 +4,7 @@ import { createClaudeUnifiedInputArbiter } from './createClaudeUnifiedInputArbit
 import { createClaudeUnifiedInFlightSteerEvaluator } from './createClaudeUnifiedInFlightSteerEvaluator';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 import { runTerminalPromptSubmission, resolveTerminalPromptSubmissionFailureReason } from '@/integrations/terminalHost/promptSubmitVerification';
+import { AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER } from '@/session/agentMemory/agentMemory';
 
 describe('createClaudeUnifiedInputArbiter', () => {
   it.each(['accepted', 'retired'] as const)('releases a waiting terminal submission when its canonical delivery is %s', async settledState => {
@@ -374,6 +375,50 @@ describe('createClaudeUnifiedInputArbiter', () => {
       expect.objectContaining({ inFlightSteer: true }),
     );
     expect(onInjectionFailure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['mid-turn steer', 'running', 'steer', '/mcp'],
+    ['idle new turn', 'idle', 'send', '/mcp'],
+    // The dispatch owner appends provider-only thread context; it is not part of the command.
+    ['with provider-only thread context', 'idle', 'send', `/mcp\n\n${AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER}\n- other-session: working`],
+  ] as const)('refuses a panel-only slash command before writing it (%s) and keeps delivering later input', async (_label, turnState, pendingProviderAction, panelMessage) => {
+    // Claude Code 2.1.322 opens `/mcp` as an interactive panel, even mid-turn, and writes no
+    // transcript row on open, Esc or the next prompt (incident cmw9m36zc, 11 nov 2026), so its
+    // delivery could never be accepted and every later row waited behind it.
+    const injectedTexts: string[] = [];
+    const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => 10_000,
+      quietPeriodMs: 0,
+      injectPrompt: vi.fn(async (batch) => {
+        injectedTexts.push(batch.message);
+        return { status: 'injected' as const, at: 10_000, bytesWritten: batch.message.length };
+      }),
+      evaluateInFlightSteer: async () => ({ steer: true, turnLikelyEnded: false }),
+      resolvePromptDeliveryState: (batch) => (injectedTexts.includes(batch.message) ? 'accepted' : 'pending'),
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'turn_state', state: turnState, observedAtMs: 10_000 });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: 10_000 });
+    await arbiter.enqueueUiMessage({
+      message: panelMessage, origin: { kind: 'ui_pending' }, userMessageLocalIds: ['panel-row'], pendingProviderAction,
+    });
+    await arbiter.enqueueUiMessage({
+      message: 'later prompt', origin: { kind: 'ui_pending' }, userMessageLocalIds: ['later-row'], pendingProviderAction,
+    });
+    await arbiter.drainWhenSafe();
+
+    expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_terminal',
+      batch: expect.objectContaining({ userMessageLocalIds: ['panel-row'] }),
+      result: expect.objectContaining({ reason: 'unsupported_command', phase: 'before_write', duplicateRisk: 'none' }),
+    }));
+    expect(injectedTexts).toEqual(['later prompt']);
+
+    await arbiter.dispose();
   });
 
   it('keeps an ambiguous after-enter attempt available for later exact provider acceptance', async () => {
