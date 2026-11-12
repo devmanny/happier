@@ -50,6 +50,7 @@ import {
 } from '../sessionMessages/pendingRequestedActionV1.js';
 import { normalizeConnectedServiceSelectionInput } from '../connect/normalizeConnectedServiceSelectionInput.js';
 import type { SessionMcpSelectionV1 } from '../mcpServers/sessionSelectionV1.js';
+import type { SessionRestReason } from '../sessionMetadata/sessionRestV1.js';
 import {
   mergeSpawnConfigOptionAliases,
   type SpawnConfigOptionValue,
@@ -279,7 +280,12 @@ export type ActionExecutorDeps = Readonly<{
     callerPermissionMode?: string | null;
   }>) => Promise<unknown>;
   sessionTitleSet?: (args: Readonly<{ sessionId: string; title: string; serverId?: string | null }>) => Promise<unknown>;
-  sessionStop?: (args: Readonly<{ sessionId: string; serverId?: string | null }>) => Promise<SessionStopActionDependencyResult>;
+  sessionStop?: (args: Readonly<{
+    sessionId: string;
+    serverId?: string | null;
+    /** Marks an automatic stop; validated against `SessionRestReasonSchema` by the action input. */
+    reason?: SessionRestReason;
+  }>) => Promise<SessionStopActionDependencyResult>;
   sessionPermissionModeSet?: (args: Readonly<{
     sessionId: string;
     permissionMode: string;
@@ -2321,7 +2327,8 @@ export function createActionExecutor(deps: ActionExecutorDeps): Readonly<{
             return { ok: false, errorCode: 'unsupported_action', error: 'unsupported_action:session.stop' };
           }
           const serverId = resolveServerIdForSession(deps, ctx, sessionId);
-          const res = await deps.sessionStop({ sessionId, ...(serverId ? { serverId } : {}) });
+          const reason: SessionRestReason | undefined = (parsed.data as { reason?: SessionRestReason }).reason;
+          const res = await deps.sessionStop({ sessionId, ...(serverId ? { serverId } : {}), ...(reason ? { reason } : {}) });
           const stopFailed = 'success' in res ? res.success === false : res.ok === false;
           if (stopFailed) {
             const errorCode = res.code?.trim()

@@ -211,6 +211,18 @@ Stop a session:
 happier session stop <session-id-or-prefix>
 ```
 
+An automatic stop, such as one from an idle cleaner, can say why:
+
+```bash
+happier session stop <session-id-or-prefix> --reason idle
+```
+
+Once the stop is confirmed (or the session was already stopped), Happier records the reason in
+the session's metadata (`sessionRestV1`). The native Apple app then shows the session as
+**Resting** rather than stopped, until it next starts. `idle` is the only accepted reason. A
+stop without `--reason` records nothing. With `--json`, the result includes `sessionRest`, or
+`sessionRestError` if the stop succeeded but the reason could not be recorded.
+
 Archive / unarchive:
 
 ```bash

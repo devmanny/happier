@@ -35,6 +35,7 @@ import {
   SessionPermissionModeInputSchema,
 } from '../sessionMetadata/sessionPermissionModes.js';
 import { AgentRuntimeDescriptorV1Schema } from '../sessionMetadata/agentRuntimeDescriptorV1.js';
+import { SessionRestReasonSchema } from '../sessionMetadata/sessionRestV1.js';
 import { SessionMcpSelectionV1Schema } from '../mcpServers/sessionSelectionV1.js';
 import { ConnectedServiceBindingsV1Schema } from '../connect/connectedServiceBindings.js';
 import {
@@ -256,6 +257,12 @@ const OptionalSessionIdInputSchema = z.object({
 
 const SessionIdRequiredInputSchema = z.object({
   sessionId: z.string().min(1),
+}).passthrough();
+
+/** `reason` marks an automatic stop (`sessionRestV1`); a stop the user asks for has none. */
+const SessionStopInputSchema = z.object({
+  sessionId: z.string().min(1),
+  reason: SessionRestReasonSchema.optional(),
 }).passthrough();
 
 const TaskStatusInputSchema = z.enum(['todo', 'in_progress', 'blocked', 'in_review', 'done']);
@@ -2401,9 +2408,12 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
     },
     inputHints: {
       title: 'Stop a session',
-      fields: [{ path: 'sessionId', title: 'Session id', widget: 'text', required: true }],
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'reason', title: 'Automatic stop reason (optional: idle)', widget: 'text' },
+      ],
     },
-    inputSchema: SessionIdRequiredInputSchema,
+    inputSchema: SessionStopInputSchema,
   },
   {
     id: 'session.title.set',

@@ -49,12 +49,14 @@ describe('happier session stop (integration)', () => {
   let sessionActive = true;
   let sessionStatusFetchCount = 0;
   let sessionStatusShouldFail = false;
+  let sessionMetadata = 'metadata_ciphertext';
 
   beforeEach(async () => {
     happyHomeDir = await createTempDir('happier-cli-session-stop-');
     sessionActive = true;
     sessionStatusFetchCount = 0;
     sessionStatusShouldFail = false;
+    sessionMetadata = 'metadata_ciphertext';
 
     server = createServer((req, res) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
@@ -78,7 +80,7 @@ describe('happier session stop (integration)', () => {
               updatedAt: 2,
               active: sessionActive,
               activeAt: sessionActive ? 10 : 0,
-              metadata: 'metadata_ciphertext',
+              metadata: sessionMetadata,
               metadataVersion: 0,
               agentState: null,
               agentStateVersion: 0,
@@ -363,5 +365,140 @@ describe('happier session stop (integration)', () => {
       delete process.env.HAPPIER_SESSION_STOP_POLL_INTERVAL_MS;
       output.restore();
     }
+  });
+
+  describe('--reason idle', () => {
+    const secret = new Uint8Array(32).fill(7);
+    const readLegacyCredentials = async () => ({
+      token: 'token_test',
+      encryption: { type: 'legacy' as const, secret },
+    });
+
+    async function serveLegacyMetadata(metadata: Record<string, unknown>): Promise<void> {
+      const { encodeBase64, encryptLegacy } = await import('@/api/encryption');
+      sessionMetadata = encodeBase64(encryptLegacy(metadata, secret), 'base64');
+    }
+
+    /** Accepts every metadata write, as the relay does, and keeps what was written. */
+    function recordMetadataWrites(): Record<string, unknown>[] {
+      const writes: Record<string, unknown>[] = [];
+      const socket = createApiSessionSocketStub({
+        emit: async (event: string, args: unknown[]) => {
+          if (event !== 'update-metadata') return;
+          const [data, callback] = args as [{ metadata?: string }, ((value: unknown) => void) | undefined];
+          const { decodeBase64, decryptLegacy } = await import('@/api/encryption');
+          writes.push(decryptLegacy(decodeBase64(String(data?.metadata ?? ''), 'base64'), secret));
+          callback?.({ result: 'success', version: 1, metadata: data?.metadata });
+        },
+      });
+      bindApiSessionSocketMock(mockIo, socket);
+      return writes;
+    }
+
+    async function runStop(argv: string[]): Promise<any> {
+      process.env.HAPPIER_SESSION_STOP_TIMEOUT_MS = '50';
+      process.env.HAPPIER_SESSION_STOP_POLL_INTERVAL_MS = '1';
+      const { handleSessionCommand } = await import('./index');
+      const output = captureConsoleJsonOutput();
+      try {
+        await handleSessionCommand(argv, { readCredentialsFn: readLegacyCredentials });
+        return output.json();
+      } finally {
+        delete process.env.HAPPIER_SESSION_STOP_TIMEOUT_MS;
+        delete process.env.HAPPIER_SESSION_STOP_POLL_INTERVAL_MS;
+        output.restore();
+      }
+    }
+
+    it('records the idle rest on the session after a confirmed stop', async () => {
+      const sessionId = 'sess_integration_stop_rest_idle';
+      await serveLegacyMetadata({ path: '/tmp/project', host: 'host1', lifecycleState: 'running', lifecycleStateSince: 1_000 });
+      stopDaemonSessionMock.mockImplementation(async () => {
+        sessionActive = false;
+        return { status: 'stopped' } as const;
+      });
+      const writes = recordMetadataWrites();
+      const startedAt = Date.now();
+
+      const parsed = await runStop(['stop', sessionId, '--reason', 'idle', '--json']);
+
+      expect(stopDaemonSessionMock).toHaveBeenCalledWith(sessionId);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatchObject({ path: '/tmp/project', host: 'host1', lifecycleState: 'running', lifecycleStateSince: 1_000 });
+      const rest = writes[0]?.sessionRestV1 as { v: number; reason: string; at: number };
+      expect(rest).toEqual({ v: 1, reason: 'idle', at: expect.any(Number) });
+      expect(rest.at).toBeGreaterThanOrEqual(startedAt);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.data).toEqual({ sessionId, stopped: true, sessionRest: rest });
+    });
+
+    it('records the idle rest on a session that was already stopped', async () => {
+      const sessionId = 'sess_integration_stop_rest_already';
+      sessionActive = false;
+      await serveLegacyMetadata({ path: '/tmp/project', lifecycleState: 'running', lifecycleStateSince: 1_000 });
+      stopDaemonSessionMock.mockResolvedValue({ status: 'not_found' });
+      const writes = recordMetadataWrites();
+
+      const parsed = await runStop(['stop', sessionId, '--reason', 'idle', '--json']);
+
+      expect(writes).toHaveLength(1);
+      expect(writes[0]?.sessionRestV1).toEqual({ v: 1, reason: 'idle', at: expect.any(Number) });
+      expect(parsed.data).toEqual({
+        sessionId,
+        stopped: false,
+        stopOutcome: { status: 'already_stopped', reason: 'no_runtime_session_inactive' },
+        sessionRest: writes[0]?.sessionRestV1,
+      });
+    });
+
+    it('does not record a rest when the stop is not confirmed', async () => {
+      const sessionId = 'sess_integration_stop_rest_unconfirmed';
+      await serveLegacyMetadata({ path: '/tmp/project' });
+      stopDaemonSessionMock.mockResolvedValue({ status: 'not_found' });
+      const writes = recordMetadataWrites();
+
+      const parsed = await runStop(['stop', sessionId, '--reason', 'idle', '--json']);
+
+      expect(writes).toHaveLength(0);
+      expect(parsed.data).toEqual({
+        sessionId,
+        stopped: false,
+        stopOutcome: { status: 'physical_stop_unconfirmed', reason: 'local_session_not_found' },
+      });
+    });
+
+    it('reports a failed rest write without undoing the confirmed stop', async () => {
+      const sessionId = 'sess_integration_stop_rest_write_failed';
+      await serveLegacyMetadata({ path: '/tmp/project' });
+      stopDaemonSessionMock.mockImplementation(async () => {
+        sessionActive = false;
+        return { status: 'stopped' } as const;
+      });
+      const socket = createApiSessionSocketStub({
+        emit: (event: string, args: unknown[]) => {
+          if (event !== 'update-metadata') return;
+          const callback = args[1] as ((value: unknown) => void) | undefined;
+          callback?.({ result: 'error' });
+        },
+      });
+      bindApiSessionSocketMock(mockIo, socket);
+
+      const parsed = await runStop(['stop', sessionId, '--reason', 'idle', '--json']);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.data).toEqual({ sessionId, stopped: true, sessionRestError: 'unknown_error' });
+    });
+
+    it('refuses a reason outside the closed set before stopping anything', async () => {
+      const sessionId = 'sess_integration_stop_rest_bad_reason';
+      const writes = recordMetadataWrites();
+
+      const parsed = await runStop(['stop', sessionId, '--reason', 'manual', '--json']);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error?.code).toBe('invalid_parameters');
+      expect(stopDaemonSessionMock).not.toHaveBeenCalled();
+      expect(writes).toHaveLength(0);
+    });
   });
 });

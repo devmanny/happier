@@ -17,7 +17,7 @@ describe('handleSessionCommand help output', () => {
       expect(output.text()).toContain(SESSION_CREATE_USAGE);
       expect(output.text()).toContain('happier session send <session-id-or-prefix-or-tag> <message> [--local-id <id>] [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]');
       expect(output.text()).toContain('happier session wait <session-id-or-prefix-or-tag> [--timeout <seconds>] [--json]');
-      expect(output.text()).toContain('happier session stop <session-id-or-prefix-or-tag> [--json]');
+      expect(output.text()).toContain('happier session stop <session-id-or-prefix-or-tag> [--reason idle] [--json]');
       expect(output.text()).toContain('happier session set-title <session-id-or-prefix-or-tag> <title> [--json]');
       expect(output.text()).toContain('happier session set-permission-mode <session-id-or-prefix-or-tag> <mode> [--json]');
       expect(output.text()).toContain('happier session set-model <session-id-or-prefix-or-tag> <model-id> [--json]');
@@ -48,7 +48,7 @@ describe('handleSessionCommand help output', () => {
     [['create', '--help'], 'happier session create [options]\n\nOptions:\n  [--path <path>]'],
     [['send', '--help'], 'happier session send <session-id-or-prefix-or-tag> <message>'],
     [['wait', '--help'], 'happier session wait <session-id-or-prefix-or-tag>'],
-    [['stop', '--help'], 'happier session stop <session-id-or-prefix-or-tag>'],
+    [['stop', '--help'], 'happier session stop <session-id-or-prefix-or-tag> [--reason idle] [--json]'],
     [['history', '--help'], 'happier session history <session-id-or-prefix-or-tag>'],
     [['set-title', '--help'], 'happier session set-title <session-id-or-prefix-or-tag> <title>'],
     [['set-permission-mode', '--help'], 'happier session set-permission-mode <session-id-or-prefix-or-tag> <mode>'],

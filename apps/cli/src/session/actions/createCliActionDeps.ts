@@ -63,6 +63,7 @@ import { getSessionStatus } from '@/session/services/getSessionStatus';
 import { getSessionTranscript } from '@/session/services/getSessionTranscript';
 import { listSessions } from '@/session/services/listSessions';
 import { requestSessionStop } from '@/session/services/requestSessionStop';
+import { recordSessionRestAfterStop } from '@/session/services/recordSessionRestAfterStop';
 import {
   requestInactiveSessionResume,
 } from '@/session/services/requestInactiveSessionResume';
@@ -1726,11 +1727,14 @@ export function createCliActionDeps(params: Readonly<{
       return res;
     },
 
-    sessionStop: async ({ sessionId }) => {
+    sessionStop: async ({ sessionId, reason }) => {
       if (!params.credentials) {
         return { ok: false, errorCode: 'not_authenticated', error: 'not_authenticated' };
       }
-      return await requestSessionStop({ credentials: params.credentials, idOrPrefix: sessionId });
+      const stop = await requestSessionStop({ credentials: params.credentials, idOrPrefix: sessionId });
+      return reason
+        ? await recordSessionRestAfterStop({ credentials: params.credentials, stop, reason })
+        : stop;
     },
 
     sessionTitleSet: async ({ sessionId, title }) => {

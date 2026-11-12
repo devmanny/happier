@@ -3794,6 +3794,13 @@ export {
   isSessionNotificationsMuted,
 } from './sessionMetadata/sessionNotificationsMutedV1.js';
 export {
+  SESSION_REST_METADATA_KEY,
+  SessionRestReasonSchema,
+  SessionRestV1Schema,
+  type SessionRestReason,
+  type SessionRestV1,
+} from './sessionMetadata/sessionRestV1.js';
+export {
   AgentJournalEntryV1Schema,
   AgentNoteV1Schema,
   AgentNowV1Schema,

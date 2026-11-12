@@ -155,6 +155,34 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionStop).toHaveBeenCalledWith({ sessionId: 's1', serverId: 'server-a' });
   });
 
+  it('forwards a known session.stop reason to deps.sessionStop', async () => {
+    const sessionStop = vi.fn(async () => ({ success: true }));
+    const executor = createExecutor({ sessionStop });
+
+    const res = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1', reason: 'idle' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: true, result: { success: true } });
+    expect(sessionStop).toHaveBeenCalledWith({ sessionId: 's1', reason: 'idle' });
+  });
+
+  it('rejects a session.stop reason outside the closed set without stopping', async () => {
+    const sessionStop = vi.fn(async () => ({ success: true }));
+    const executor = createExecutor({ sessionStop });
+
+    const res = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1', reason: 'user' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(sessionStop).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       label: 'control unavailable',
