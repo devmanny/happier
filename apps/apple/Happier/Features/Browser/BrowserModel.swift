@@ -222,7 +222,7 @@ final class BrowserModel: NSObject {
     }
 
     func sessionColor(_ sessionId: String) -> Color? {
-        store?.folderColor(of: store?.sessions[sessionId])?.deep
+        store?.folderColor(of: store?.sessions[sessionId])?.color
     }
 
     // MARK: - Ended sessions

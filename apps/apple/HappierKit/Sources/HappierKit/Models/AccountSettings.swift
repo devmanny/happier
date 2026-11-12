@@ -135,6 +135,42 @@ public struct AccountSettings: Sendable, Equatable {
     /// other apps keep the key as it is).
     public enum FolderColor: String, CaseIterable, Sendable {
         case red, orange, yellow, green, teal, blue, indigo, purple, pink, gray
+
+        /// The color as a fill under white text (your bubbles, the avatar's disc): saturated,
+        /// and no lighter than white text can be read on.
+        public var vivid: RGB {
+            switch self {
+            case .red: RGB(0xF0293E)
+            case .orange: RGB(0xE65C00)
+            case .yellow: RGB(0xC28500)
+            case .green: RGB(0x16A04A)
+            case .teal: RGB(0x008C99)
+            case .blue: RGB(0x1A6DFF)
+            case .indigo: RGB(0x5E4FF0)
+            case .purple: RGB(0xA63DF0)
+            case .pink: RGB(0xF02D7D)
+            case .gray: RGB(0x6E7480)
+            }
+        }
+    }
+
+    /// A color as sRGB components, 0...1.
+    public struct RGB: Equatable, Sendable {
+        public let red: Double, green: Double, blue: Double
+
+        init(_ hex: UInt32) {
+            red = Double((hex >> 16) & 0xFF) / 255
+            green = Double((hex >> 8) & 0xFF) / 255
+            blue = Double(hex & 0xFF) / 255
+        }
+
+        /// WCAG contrast ratio of white text on this color.
+        public var contrastWithWhite: Double {
+            func linear(_ value: Double) -> Double {
+                value <= 0.03928 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 1.05 / (0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue) + 0.05)
+        }
     }
 
     static let folderColorsKey = "nativeFolderColorsV1"

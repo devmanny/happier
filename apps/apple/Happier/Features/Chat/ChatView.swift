@@ -463,7 +463,8 @@ private struct ChatConversationContent: View, Equatable {
         }
         .environment(\.chatRowActions, rowActions)
         // Your bubbles in the project folder's color, when it has one.
-        .environment(\.userBubbleColor, facts.folderColor?.deep ?? .userBubble)
+        .environment(\.userBubbleColor, facts.folderColor?.color ?? .userBubble)
+        .background { FolderWash(color: facts.folderColor?.color) }
         .environment(\.textSelectingId, textSelectingId)
         .modifier(SessionFilePreview(sessionId: sessionId))
         .onAppear {

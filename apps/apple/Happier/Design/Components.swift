@@ -119,7 +119,7 @@ struct SessionAvatar: View {
     @Environment(HappierStore.self) private var store: HappierStore?
 
     var body: some View {
-        AgentAvatar(agentId: session.agentId, size: size, folderTint: store?.folderColor(of: session)?.deep)
+        AgentAvatar(agentId: session.agentId, size: size, folderTint: store?.folderColor(of: session)?.color)
     }
 }
 
@@ -320,20 +320,11 @@ extension View {
 }
 
 extension AccountSettings.FolderColor {
-    /// The system color it stands for; used faintly (a tint, a dot), never as a fill.
+    /// The folder's color: vivid, and readable under white text (your bubbles, the avatar's
+    /// disc, the picker's dots).
     var color: Color {
-        switch self {
-        case .red: .red
-        case .orange: .orange
-        case .yellow: .yellow
-        case .green: .green
-        case .teal: .teal
-        case .blue: .blue
-        case .indigo: .indigo
-        case .purple: .purple
-        case .pink: .pink
-        case .gray: .gray
-        }
+        let rgb = vivid
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
     }
 
     var name: LocalizedStringKey {
@@ -388,18 +379,25 @@ struct FolderColorMenu: View {
 
 extension EnvironmentValues {
     /// The color of your own message bubbles: the app's blue, or the conversation's project
-    /// folder color (darkened, for the white text), set once by the conversation.
+    /// folder color, set once by the conversation.
     @Entry var userBubbleColor: Color = .userBubble
 }
 
-extension AccountSettings.FolderColor {
-    /// The folder's color deepened so white text and logos read on it in light and dark mode
-    /// (your bubbles, the avatar's disc); the light hues need more.
-    var deep: Color {
-        switch self {
-        case .yellow: color.mix(with: .black, by: 0.55)
-        case .orange, .green, .teal: color.mix(with: .black, by: 0.42)
-        default: color.mix(with: .black, by: 0.3)
+/// The project folder's color washed faintly over the conversation, strongest along the top and
+/// bottom edges, so a window tells its project at a glance. A plain gradient: nothing to animate.
+struct FolderWash: View {
+    let color: Color?
+
+    var body: some View {
+        if let color {
+            LinearGradient(stops: [
+                .init(color: color.opacity(0.22), location: 0),
+                .init(color: color.opacity(0.07), location: 0.3),
+                .init(color: color.opacity(0.07), location: 0.75),
+                .init(color: color.opacity(0.18), location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
         }
     }
 }
