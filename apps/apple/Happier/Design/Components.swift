@@ -384,12 +384,14 @@ extension EnvironmentValues {
 }
 
 /// The project folder's color as a soft glow along the inside of the window's edges, over a
-/// barely tinted ground, so a window tells its project at a glance. Static: nothing to animate.
+/// barely tinted ground, so a conversation in a window of its own tells its project at a glance.
+/// Not in the main window, where the glow would frame only one pane. Static: nothing to animate.
 struct FolderWash: View {
     let color: Color?
+    @Environment(\.inSessionWindow) private var inSessionWindow
 
     var body: some View {
-        if let color {
+        if let color, inSessionWindow {
             ZStack {
                 color.opacity(0.06)
                 Rectangle()
