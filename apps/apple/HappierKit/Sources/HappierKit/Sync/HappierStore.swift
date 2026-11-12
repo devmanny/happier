@@ -1613,8 +1613,16 @@ public final class HappierStore {
                 if let seq = row["seq"]?.intValue { updated.seq = max(session.seq, seq) }
                 if let at = Session.date(row["createdAt"]), body["t"]?.stringValue == "new-message" { updated.meaningfulActivityAt = at }
                 if updated != session { sessions[sid] = updated }
-                if body["t"]?.stringValue == "message-updated", !openSessionIds.contains(sid), transcripts[sid] != nil {
+                if body["t"]?.stringValue == "message-updated", transcripts[sid] != nil {
                     staleTranscripts.insert(sid)
+                }
+                // A bare notice for a conversation on screen: the relay doesn't have it as open
+                // here (a declaration that never reached it). Say so again and read the message,
+                // or the window sits still until it's closed and reopened.
+                if openSessionIds.contains(sid) {
+                    log.notice("bare message notice for an open session: declaring open sessions again")
+                    Task { await declareOpenSessions() }
+                    startLoading(sid)
                 }
                 return
             }

@@ -115,6 +115,23 @@ import Testing
         #expect(relay.log.values.filter { $0.hasPrefix("messages") } == ["messages after=2", "messages latest"])
     }
 
+    /// The relay sends full messages only for the sessions it believes are open here. If it lost
+    /// that list (a declaration that never arrived), a conversation on screen gets the bare notice:
+    /// it must read the message itself rather than sit still until it's closed and reopened.
+    @Test func aBareNoticeForAConversationOnScreenReadsTheNewMessage() async throws {
+        let (relay, store) = try await openSession()
+        relay.log.clear()
+        await store.handleUpdate(["t": "new-message", "sid": "s1", "message": ["id": "m3", "seq": 3, "createdAt": 3000, "contentOmitted": true]])
+        try await until { relay.log.values.contains("messages after=2") }
+
+        // Not for a conversation that isn't on screen: it reads when opened.
+        store.close("s1")
+        relay.log.clear()
+        await store.handleUpdate(["t": "new-message", "sid": "s1", "message": ["id": "m4", "seq": 4, "createdAt": 4000, "contentOmitted": true]])
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!relay.log.values.contains { $0.hasPrefix("messages") })
+    }
+
     /// An open conversation redraws only for changes it shows: an update bringing the same agent
     /// state must not rewrite its transcript.
     @Test func theSameAgentStateDoesNotRewriteTheTranscript() async throws {
