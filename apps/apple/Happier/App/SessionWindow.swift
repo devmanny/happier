@@ -40,10 +40,22 @@ extension EnvironmentValues {
 /// rather than in every open window at the same time.
 struct StoreAlerts: ViewModifier {
     @Environment(HappierStore.self) private var store
-    @Environment(\.appearsActive) private var appearsActive
+    @Environment(\.appearsActive) private var windowActive
+    #if os(iOS)
+    /// iPad keeps every visible window active; only the key one (last touched) shows a prompt.
+    @State private var keyWindow = KeyWindowState()
+    private var appearsActive: Bool {
+        FrontWindow.showsPrompts(active: windowActive, isKey: keyWindow.isKey, anyWindowIsKey: keyWindow.anyWindowIsKey)
+    }
+    #else
+    private var appearsActive: Bool { windowActive }
+    #endif
 
     func body(content: Content) -> some View {
         content
+            #if os(iOS)
+            .background(KeyWindowReader(state: keyWindow))
+            #endif
             .confirmationDialog(
                 store.stopRequest?.thenArchive == true ? "Stop and archive this session?" : "Stop this session?",
                 isPresented: Binding(get: { appearsActive && store.stopRequest != nil }, set: { if !$0 { store.stopRequest = nil } }),
@@ -125,3 +137,52 @@ private struct OfflineBanner: View {
         .accessibilityElement(children: .combine)
     }
 }
+
+#if os(iOS)
+/// Whether the window holding a view is the key window, kept current as windows gain and lose it.
+@MainActor @Observable
+final class KeyWindowState {
+    var isKey = false
+    var anyWindowIsKey = false
+}
+
+private struct KeyWindowReader: UIViewRepresentable {
+    let state: KeyWindowState
+
+    func makeUIView(context: Context) -> Probe { Probe(state: state) }
+    func updateUIView(_ view: Probe, context: Context) {}
+
+    final class Probe: UIView {
+        private let state: KeyWindowState
+
+        init(state: KeyWindowState) {
+            self.state = state
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+            // Selector observers need no removal: the center drops them with the view.
+            for name in [UIWindow.didBecomeKeyNotification, UIWindow.didResignKeyNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(keyWindowChanged), name: name, object: nil)
+            }
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        @objc private func keyWindowChanged() { refresh() }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            refresh()
+        }
+
+        private func refresh() {
+            let isKey = window?.isKeyWindow ?? false
+            let anyKey = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .contains { $0.windows.contains(where: \.isKeyWindow) }
+            if state.isKey != isKey { state.isKey = isKey }
+            if state.anyWindowIsKey != anyKey { state.anyWindowIsKey = anyKey }
+        }
+    }
+}
+#endif
