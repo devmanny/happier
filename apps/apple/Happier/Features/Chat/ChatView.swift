@@ -341,7 +341,7 @@ private struct ChatConversationContent: View, Equatable {
                 }
             } else {
             VStack(spacing: 0) {
-            if MessageSpeaker.shared.speakingText != nil {
+            if MessageSpeaker.shared.showsPlayer(in: sessionId) {
                 SpeechControls()
                     .padding(.top, 6)
                     .transition(.move(edge: .bottom).combined(with: .opacity))

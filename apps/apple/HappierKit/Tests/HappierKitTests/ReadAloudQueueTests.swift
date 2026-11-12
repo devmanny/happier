@@ -138,4 +138,19 @@ struct AutoReadCursorTests {
         #expect(last == [.new(.init(id: "m2", text: "Done."))])
         #expect(cursor.take([agent("m2", "Done.")], turnActive: false).isEmpty)
     }
+    @Test func thePlayerShowsOnlyInTheWindowOfTheSessionBeingRead() {
+        var queue = ReadAloudQueue()
+        // Nothing is read: no window shows it.
+        #expect(!queue.showsPlayer(in: "a", picked: nil, autoRead: "a"))
+        // Auto read of session a: only a's window, even when b's window is open too.
+        _ = queue.enqueue(.init(id: "m1", text: "Hello."))
+        #expect(queue.showsPlayer(in: "a", picked: nil, autoRead: "a"))
+        #expect(!queue.showsPlayer(in: "b", picked: nil, autoRead: "a"))
+        // A message picked by hand in b replaces the queue: the player moves to b.
+        queue.play(.init(id: ReadAloudQueue.pickedId("Hi."), text: "Hi."))
+        #expect(queue.showsPlayer(in: "b", picked: "b", autoRead: "a"))
+        #expect(!queue.showsPlayer(in: "a", picked: "b", autoRead: "a"))
+        // Picked outside any known conversation: every window shows it, as nothing says whose it is.
+        #expect(queue.showsPlayer(in: "a", picked: nil, autoRead: "a"))
+    }
 }

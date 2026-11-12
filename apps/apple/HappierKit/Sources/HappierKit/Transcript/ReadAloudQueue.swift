@@ -154,3 +154,18 @@ public struct AutoReadCursor: Equatable, Sendable {
         return changes
     }
 }
+
+extension ReadAloudQueue {
+    /// The id of a block the user picked by hand, as opposed to one auto read queued.
+    public static func pickedId(_ text: String) -> String { "picked:\(text.hashValue)" }
+
+    /// Whether the conversation window of `sessionId` shows the player: only the conversation being
+    /// read, so several windows open side by side don't all carry it. A message picked by hand
+    /// belongs to the conversation it was picked in (`picked`); anything else was queued by auto
+    /// read (`autoRead`). With no known conversation (a pick outside one), every window shows it.
+    public func showsPlayer(in sessionId: String, picked: String?, autoRead: String?) -> Bool {
+        guard let current else { return false }
+        let owner = current.id.hasPrefix("picked:") ? picked : autoRead
+        return owner == nil || owner == sessionId
+    }
+}

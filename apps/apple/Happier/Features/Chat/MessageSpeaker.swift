@@ -27,6 +27,8 @@ final class MessageSpeaker: NSObject {
     private(set) var queue = ReadAloudQueue()
     /// The conversation whose new agent messages are read as they arrive.
     private(set) var autoReadSessionId: String?
+    /// The conversation a message was picked in by hand, when known.
+    private(set) var pickedSessionId: String?
     @ObservationIgnored private var autoReadCursor: AutoReadCursor?
     /// Follows the auto-read conversation in the store, not on screen, so it keeps going with
     /// the app in the background.
@@ -72,12 +74,18 @@ final class MessageSpeaker: NSObject {
 
     func isSpeaking(_ markdown: String) -> Bool { speakingText == markdown }
 
-    func toggle(_ markdown: String) {
+    /// Whether the window of `sessionId` shows the player (`ReadAloudQueue.showsPlayer`).
+    func showsPlayer(in sessionId: String) -> Bool {
+        speakingText != nil && queue.showsPlayer(in: sessionId, picked: pickedSessionId, autoRead: autoReadSessionId)
+    }
+
+    func toggle(_ markdown: String, sessionId: String? = nil) {
         guard recordingOwners.isEmpty else { return }
         if speakingText == markdown {
             stop()
         } else {
-            queue.play(.init(id: "picked:\(markdown.hashValue)", text: markdown))
+            pickedSessionId = sessionId
+            queue.play(.init(id: ReadAloudQueue.pickedId(markdown), text: markdown))
             if autoReadSessionId == nil { readingTitle = String(localized: "Reading aloud") }
             start(markdown)
         }

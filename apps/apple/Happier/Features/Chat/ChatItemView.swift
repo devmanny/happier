@@ -348,7 +348,7 @@ private struct MessageActionsModifier: ViewModifier {
                     let speaking = MessageSpeaker.shared.isSpeaking(text)
                     Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
                         AppHaptics.light()
-                        MessageSpeaker.shared.toggle(text)
+                        MessageSpeaker.shared.toggle(text, sessionId: target?.sessionId)
                     }
                     if let selectionId, let rowActions {
                         Button("Select Text", systemImage: "text.cursor") { rowActions.beginTextSelection(selectionId) }
