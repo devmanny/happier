@@ -383,19 +383,20 @@ extension EnvironmentValues {
     @Entry var userBubbleColor: Color = .userBubble
 }
 
-/// The project folder's color washed faintly over the conversation, strongest along the top and
-/// bottom edges, so a window tells its project at a glance. A plain gradient: nothing to animate.
+/// The project folder's color as a soft glow along the inside of the window's edges, over a
+/// barely tinted ground, so a window tells its project at a glance. Static: nothing to animate.
 struct FolderWash: View {
     let color: Color?
 
     var body: some View {
         if let color {
-            LinearGradient(stops: [
-                .init(color: color.opacity(0.22), location: 0),
-                .init(color: color.opacity(0.07), location: 0.3),
-                .init(color: color.opacity(0.07), location: 0.75),
-                .init(color: color.opacity(0.18), location: 1),
-            ], startPoint: .top, endPoint: .bottom)
+            ZStack {
+                color.opacity(0.05)
+                Rectangle()
+                    .strokeBorder(color.opacity(0.6), lineWidth: 16)
+                    .blur(radius: 22)
+            }
+            .clipped()
             .ignoresSafeArea()
             .allowsHitTesting(false)
         }

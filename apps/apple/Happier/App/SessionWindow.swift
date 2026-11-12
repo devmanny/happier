@@ -1,5 +1,8 @@
 import HappierKit
 import SwiftUI
+#if os(iOS)
+import UIKit.UIGestureRecognizerSubclass
+#endif
 
 /// One conversation in a window of its own ("Open in New Window", Mac and iPad). It reads the same
 /// store as the main window, so both show every change; the main window keeps the session.
@@ -42,10 +45,11 @@ struct StoreAlerts: ViewModifier {
     @Environment(HappierStore.self) private var store
     @Environment(\.appearsActive) private var windowActive
     #if os(iOS)
-    /// iPad keeps every visible window active; only the key one (last touched) shows a prompt.
+    /// iPad keeps every visible window active; only the one touched last shows a prompt.
     @State private var keyWindow = KeyWindowState()
     private var appearsActive: Bool {
-        FrontWindow.showsPrompts(active: windowActive, isKey: keyWindow.isKey, anyWindowIsKey: keyWindow.anyWindowIsKey)
+        let touched = TouchedWindow.shared.id
+        return FrontWindow.showsPrompts(active: windowActive, isKey: touched != nil && touched == keyWindow.id, anyWindowIsKey: touched != nil)
     }
     #else
     private var appearsActive: Bool { windowActive }
@@ -139,11 +143,18 @@ private struct OfflineBanner: View {
 }
 
 #if os(iOS)
-/// Whether the window holding a view is the key window, kept current as windows gain and lose it.
+/// The window the user touched last. `UIWindow.isKeyWindow` can't tell: on iPad each scene's
+/// window is key within its own scene, so every visible window reports it.
+@MainActor @Observable
+final class TouchedWindow {
+    static let shared = TouchedWindow()
+    var id: ObjectIdentifier?
+}
+
+/// The window holding a view, as the id `TouchedWindow` compares against.
 @MainActor @Observable
 final class KeyWindowState {
-    var isKey = false
-    var anyWindowIsKey = false
+    var id: ObjectIdentifier?
 }
 
 private struct KeyWindowReader: UIViewRepresentable {
@@ -154,35 +165,60 @@ private struct KeyWindowReader: UIViewRepresentable {
 
     final class Probe: UIView {
         private let state: KeyWindowState
+        private var watcher: TouchWatcher?
 
         init(state: KeyWindowState) {
             self.state = state
             super.init(frame: .zero)
             isUserInteractionEnabled = false
-            // Selector observers need no removal: the center drops them with the view.
-            for name in [UIWindow.didBecomeKeyNotification, UIWindow.didResignKeyNotification] {
-                NotificationCenter.default.addObserver(self, selector: #selector(keyWindowChanged), name: name, object: nil)
-            }
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError() }
 
-        @objc private func keyWindowChanged() { refresh() }
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            guard let old = window, old !== newWindow else { return }
+            if let watcher { old.removeGestureRecognizer(watcher) }
+            watcher = nil
+            // A closed window can't be the one in front: any active window shows the prompt.
+            if TouchedWindow.shared.id == ObjectIdentifier(old) { TouchedWindow.shared.id = nil }
+        }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            refresh()
-        }
-
-        private func refresh() {
-            let isKey = window?.isKeyWindow ?? false
-            let anyKey = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .contains { $0.windows.contains(where: \.isKeyWindow) }
-            if state.isKey != isKey { state.isKey = isKey }
-            if state.anyWindowIsKey != anyKey { state.anyWindowIsKey = anyKey }
+            state.id = window.map(ObjectIdentifier.init)
+            guard let window, watcher == nil else { return }
+            let watcher = TouchWatcher { [weak window] in
+                guard let window else { return }
+                let id = ObjectIdentifier(window)
+                if TouchedWindow.shared.id != id { TouchedWindow.shared.id = id }
+            }
+            window.addGestureRecognizer(watcher)
+            self.watcher = watcher
         }
     }
+}
+
+/// Sees every touch that lands in a window and takes none of them.
+private final class TouchWatcher: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    private let touched: () -> Void
+
+    init(touched: @escaping () -> Void) {
+        self.touched = touched
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        touched()
+        state = .failed
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 #endif
