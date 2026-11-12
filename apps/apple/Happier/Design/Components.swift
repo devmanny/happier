@@ -397,7 +397,8 @@ struct FolderWash: View {
                     .blur(radius: 26)
             }
             .clipped()
-            .ignoresSafeArea()
+            // Not sideways: on the Mac that would run the glow's edges under the sidebar.
+            .ignoresSafeArea(edges: .vertical)
             .allowsHitTesting(false)
         }
     }
