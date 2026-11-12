@@ -534,7 +534,7 @@ export async function runPermissionModePromptLoop(opts: {
       const seedResolution = await resolveProviderPromptForDispatch({
         session: opts.session,
         userText: message.message.text,
-        allowSeed: special.type === null && !providerNativeCommand,
+        allowTurnContext: special.type === null && !providerNativeCommand,
         localId,
         nowMs,
         refreshMetadataBeforeRead: false,

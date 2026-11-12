@@ -281,7 +281,7 @@ export function registerPermissionModeMessageQueueBinding(opts: {
                   : {}),
               },
               userText: text,
-              allowSeed: !providerNativeCommand,
+              allowTurnContext: !providerNativeCommand,
               localId: deliveryIdentity.localId,
               nowMs: Date.now(),
               refreshMetadataBeforeRead: !didReplaySeedBootstrapForSteer,

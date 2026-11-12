@@ -103,9 +103,11 @@ prefixes:
   (`packages/protocol/src/agentProfiles/agentMemory.ts`). `now` is written only by that thread (its
   title at each turn start, then what the agent says with `ahora_actualizar`); journal entries are
   append-only, one key each (version -1), so threads never collide; notes are Markdown with
-  `[[links]]`, edited with CAS by any thread or the app. Every provider prompt of an agent thread
-  ends with a short summary of its other threads' `now` (`resolveProviderPromptForDispatch`,
-  provider-only text). Tools: `memoria_leer`, `memoria_buscar` (searched in the CLI after
+  `[[links]]`, edited with CAS by any thread or the app. Every provider prompt that opens a
+  conversation turn in an agent thread ends with a short summary of its other threads' `now`
+  (`resolveProviderPromptForDispatch`, provider-only text). A command the provider must receive
+  verbatim (a Claude slash command, `/compact`, an ACP-native command) and a prompt an earlier
+  dispatch already resolved carry no such summary and no replay seed. Tools: `memoria_leer`, `memoria_buscar` (searched in the CLI after
   decrypting), `memoria_anotar`, `ahora_actualizar`, `mis_hilos`. One listing returns at most
   1000 rows, so reads go per kind and the journal per day.
 - `task/<uuid>` — a task for the user or one of their agents, kind `agent_task`

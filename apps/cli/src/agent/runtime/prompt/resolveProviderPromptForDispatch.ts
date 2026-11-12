@@ -137,7 +137,13 @@ async function readAgentTurnContext(sessionId: string | undefined): Promise<stri
 export async function resolveProviderPromptForDispatch(params: Readonly<{
     session: ProviderPromptDispatchSession;
     userText: string;
-    allowSeed: boolean;
+    /**
+     * Whether this prompt opens a conversation turn that may carry Happier's turn context: the
+     * replay seed before it and the agent thread context after it. False for a command the
+     * provider must receive verbatim (appended text becomes its arguments, or turns it into plain
+     * text) and for a prompt an earlier dispatch already resolved.
+     */
+    allowTurnContext: boolean;
     localId: string | null;
     nowMs: number;
     refreshMetadataBeforeRead: boolean;
@@ -182,7 +188,7 @@ export async function resolveProviderPromptForDispatch(params: Readonly<{
     const seedResolution = await resolveProviderPromptWithReplaySeed({
         session: params.session,
         userText: params.userText,
-        allowSeed: params.allowSeed,
+        allowSeed: params.allowTurnContext,
         localId: params.localId,
         nowMs: params.nowMs,
         refreshMetadataBeforeRead: params.refreshMetadataBeforeRead,
@@ -222,7 +228,7 @@ export async function resolveProviderPromptForDispatch(params: Readonly<{
 
     // An agent thread hears, every turn, what its other threads are doing. Provider-only text,
     // like the reference block: the stored message stays the user's own.
-    const agentTurnContext = await readAgentTurnContext(params.session.sessionId);
+    const agentTurnContext = params.allowTurnContext ? await readAgentTurnContext(params.session.sessionId) : null;
     const providerPrompt = [promptBody, sessionReferenceBlock, agentTurnContext].filter(Boolean).join('\n\n');
 
     return {

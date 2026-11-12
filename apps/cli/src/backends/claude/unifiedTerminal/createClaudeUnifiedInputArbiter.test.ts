@@ -4,7 +4,6 @@ import { createClaudeUnifiedInputArbiter } from './createClaudeUnifiedInputArbit
 import { createClaudeUnifiedInFlightSteerEvaluator } from './createClaudeUnifiedInFlightSteerEvaluator';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 import { runTerminalPromptSubmission, resolveTerminalPromptSubmissionFailureReason } from '@/integrations/terminalHost/promptSubmitVerification';
-import { AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER } from '@/session/agentMemory/agentMemory';
 
 describe('createClaudeUnifiedInputArbiter', () => {
   it.each(['accepted', 'retired'] as const)('releases a waiting terminal submission when its canonical delivery is %s', async settledState => {
@@ -380,8 +379,6 @@ describe('createClaudeUnifiedInputArbiter', () => {
   it.each([
     ['mid-turn steer', 'running', 'steer', '/mcp'],
     ['idle new turn', 'idle', 'send', '/mcp'],
-    // The dispatch owner appends provider-only thread context; it is not part of the command.
-    ['with provider-only thread context', 'idle', 'send', `/mcp\n\n${AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER}\n- other-session: working`],
   ] as const)('refuses a panel-only slash command before writing it (%s) and keeps delivering later input', async (_label, turnState, pendingProviderAction, panelMessage) => {
     // Claude Code 2.1.322 opens `/mcp` as an interactive panel, even mid-turn, and writes no
     // transcript row on open, Esc or the next prompt (incident cmw9m36zc, 11 nov 2026), so its

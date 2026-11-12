@@ -98,7 +98,7 @@ async function dispatch(params: Readonly<{ meta: unknown; description?: string }
     const resolution = await resolveProviderPromptForDispatch({
         session,
         userText: 'do the thing',
-        allowSeed: false,
+        allowTurnContext: false,
         localId: 'local-1',
         nowMs: 1_000,
         refreshMetadataBeforeRead: false,
@@ -145,7 +145,7 @@ describe('resolveProviderPromptForDispatch catalog diagnostics', () => {
             const resolution = await resolveDispatch({
                 session,
                 userText: 'private user prompt',
-                allowSeed: false,
+                allowTurnContext: false,
                 localId: 'local-1',
                 nowMs: 1_000,
                 refreshMetadataBeforeRead: false,
@@ -217,7 +217,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         const admittedResolution = await resolveProviderPromptForDispatch({
             session: admitted.session,
             userText: 'do the thing',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1_000,
             refreshMetadataBeforeRead: false,
@@ -233,7 +233,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         await expect(resolveProviderPromptForDispatch({
             session,
             userText: 'do the thing',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1_000,
             refreshMetadataBeforeRead: false,
@@ -288,7 +288,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         const resolution = await resolveProviderPromptForDispatch({
             session,
             userText: 'do the thing',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1_000,
             refreshMetadataBeforeRead: false,
@@ -327,7 +327,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         const resolution = await resolveProviderPromptForDispatch({
             session,
             userText: 'do the thing',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1_000,
             refreshMetadataBeforeRead: false,
@@ -368,7 +368,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
             const resolution = await resolveProviderPromptForDispatch({
                 session,
                 userText: 'do the thing',
-                allowSeed: true,
+                allowTurnContext: true,
                 localId: 'local-1',
                 nowMs: 1_000,
                 refreshMetadataBeforeRead: false,
@@ -397,7 +397,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         const resolution = await resolveProviderPromptForDispatch({
             session,
             userText: 'do the thing',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1_000,
             refreshMetadataBeforeRead: false,
@@ -428,7 +428,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         await tasks.store.create({ title: 'Revisar login', assignee: { kind: 'agent', agentId: 'a1' }, status: 'in_progress', threads: [] });
         try {
             const resolution = await resolveProviderPromptForDispatch({
-                session: agentSession, userText: 'do the thing', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
+                session: agentSession, userText: 'do the thing', allowTurnContext: true, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
             });
             expect(resolution.providerPrompt.startsWith('do the thing\n\n[Happier · your other threads')).toBe(true);
             expect(resolution.providerPrompt).toContain('sess-other: Revisando TestFlight (3 min ago)');
@@ -436,9 +436,16 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
             expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Revisar login · In progress/);
 
             const plain = await resolveProviderPromptForDispatch({
-                session, userText: 'do the thing', allowSeed: false, localId: 'l2', nowMs: 1, refreshMetadataBeforeRead: false,
+                session, userText: 'do the thing', allowTurnContext: true, localId: 'l2', nowMs: 1, refreshMetadataBeforeRead: false,
             });
             expect(plain.providerPrompt).toBe('do the thing');
+
+            // A command reaches the provider verbatim: appended context would become its arguments,
+            // or turn it into plain text (incident cmw9m36zc, `/mcp` redelivered at 16:37).
+            const command = await resolveProviderPromptForDispatch({
+                session: agentSession, userText: '/effort high', allowTurnContext: false, localId: 'l3', nowMs: 1, refreshMetadataBeforeRead: false,
+            });
+            expect(command.providerPrompt).toBe('/effort high');
         } finally {
             resetAgentMemoryForTests();
             resetAgentTasksForTests();
@@ -454,7 +461,7 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         await tasks.store.create({ title: 'Probar en Mac', assignee: { kind: 'session', sessionId: 'sess-plain' }, status: 'todo', threads: [] });
         try {
             const resolution = await resolveProviderPromptForDispatch({
-                session: plainSession, userText: 'hola', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
+                session: plainSession, userText: 'hola', allowTurnContext: true, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
             });
             expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Probar en Mac · To do/);
         } finally {

@@ -31,7 +31,7 @@ export async function resolveCodexQueuedPromptForDispatch(params: Readonly<{
   const resolution = await resolveProviderPromptForDispatch({
     session: params.sessionClient,
     userText: params.text,
-    allowSeed: params.replaySeedAllowed,
+    allowTurnContext: params.replaySeedAllowed,
     localId: params.localId,
     nowMs: Date.now(),
     refreshMetadataBeforeRead: !params.didBootstrap,

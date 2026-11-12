@@ -247,11 +247,19 @@ shows, consumes, or records the prompt (incidents `cmwcg4h31` and `cmw9m36zc`,
   session stall budget`.
 - Bare commands that Claude runs only as an interactive panel (`/mcp`, `/config`,
   `/hooks`, `/permissions`, `/help`, `/status`, `/cost`, `/usage`, owned by
-  `controlCommandRows.ts`) are refused before any write, also mid-turn and also with
-  Happier's provider-only context appended. They open a panel even mid-turn and write
-  no transcript row on open, on Esc, or with the next prompt, so their delivery could
-  never be accepted. The row becomes `blocked / unsupported_action` with no provider
-  effect; like other pre-effect blocks it holds later rows until it is dismissed.
+  `controlCommandRows.ts`) are refused before any write, also mid-turn. They open a
+  panel even mid-turn and write no transcript row on open, on Esc, or with the next
+  prompt, so their delivery could never be accepted. The row becomes
+  `blocked / unsupported_action` with no provider effect; like other pre-effect blocks
+  it holds later rows until it is dismissed.
+- Provider acceptance correlates by prompt text (`promptIdentity.ts`). Inside a pasted
+  block Claude escapes quoted paste markers (`<pasted_content` → `<\pasted_content`,
+  `</pasted_content` → `<\/pasted_content`); identity undoes that before comparing.
+  Before this, a prompt that quoted the marker (a child-session notice, incident
+  `cmvepv5n2`, 11 Nov 2026) was recorded and answered but never accepted, and held the
+  queue until its row was dismissed. Confusable spellings of the marker, which Claude
+  also escapes, are not undone. A row whose text evidence never correlates is released
+  once its canonical Pending row is dismissed (`delivery/dismiss`).
 
 ## Inherited uncertain deliveries (development)
 

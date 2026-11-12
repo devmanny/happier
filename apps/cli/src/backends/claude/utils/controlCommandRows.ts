@@ -67,6 +67,15 @@ export function isClaudeInteractivePanelOnlyCommand(promptText: string): boolean
   return INTERACTIVE_PANEL_ONLY_COMMANDS.has(promptText.trim().toLowerCase());
 }
 
+/**
+ * Whether Claude runs this prompt as a slash command. Claude Code 2.1.322 (tmux probe, 11 nov
+ * 2026): `/name args` runs as a command even when the name is unknown ("Unknown command"), while a
+ * leading path such as `/tmp/notes.txt summarize` is an ordinary prompt.
+ */
+export function isClaudeSlashCommandPrompt(promptText: string): boolean {
+  return /^\/[^\s/]+(?:\s|$)/u.test(promptText.trimStart());
+}
+
 // Claude writes the command tags in either order (`<command-name>` first for built-ins,
 // `<command-message>` first for skill commands), and a local command's output as stdout or stderr.
 const COMMAND_ROW_PREFIXES = ['<command-name>', '<command-message>', '<command-args>'] as const;
