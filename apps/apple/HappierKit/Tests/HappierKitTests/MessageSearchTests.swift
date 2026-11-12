@@ -80,12 +80,16 @@ private func user(_ id: String, _ text: String, seq: Int, at createdAt: Date) ->
             .agentText(AgentText(id: "m4:0", seq: 4, text: "thinking", isThinking: true, createdAt: created)),
             .agentText(AgentText(id: "m5:0", seq: 5, text: "answer", isThinking: false, createdAt: created)),
             .agentText(AgentText(id: "m5:1", seq: 5, text: "more", isThinking: false, createdAt: created)),
+            user("u7", "next question", seq: 7, at: created),
         ]
         let rows = ChatRow.rows(from: items, working: false)
         #expect(ChatRow.rowId(showingSeq: 3, in: rows) == "u1")
         #expect(ChatRow.rowId(showingSeq: 5, in: rows) == "m5:0")
         #expect(ChatRow.rowId(showingSeq: 4, in: rows) == "work:m4:0")
-        #expect(ChatRow.rowId(showingSeq: 9, in: rows) == nil)
+        // Seq 6 is indexed text this app doesn't draw: the closest drawn message before it.
+        #expect(ChatRow.rowId(showingSeq: 6, in: rows) == "m5:0")
+        // Older than every loaded row: that page isn't loaded yet.
+        #expect(ChatRow.rowId(showingSeq: 2, in: rows) == nil)
     }
 
     @Test func searchesWhatIsAlreadyOnTheDeviceWhenTheMacIsAway() {

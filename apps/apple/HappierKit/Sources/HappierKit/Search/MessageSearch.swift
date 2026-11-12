@@ -206,22 +206,27 @@ public enum MessageSearch {
 
 extension ChatRow {
     /// The row that shows transcript message `seq`: the message's first block, or the folded
-    /// steps that hold it; nil while that page of the transcript isn't loaded.
+    /// steps that hold it. A message this app doesn't draw (the daemon indexes its text anyway)
+    /// lands on the closest drawn message before it. Nil while that page of the transcript isn't
+    /// loaded (every loaded message is newer).
     public static func rowId(showingSeq seq: Int, in rows: [ChatRow]) -> String? {
-        func shows(_ item: ChatItem) -> Bool {
+        func messageSeq(_ item: ChatItem) -> Int? {
             switch item {
-            case .userText(let user): user.seq == seq
-            case .agentText(let agent): agent.seq == seq
-            case .toolCall, .event: false
+            case .userText(let user): user.seq
+            case .agentText(let agent): agent.seq
+            case .toolCall, .event: nil
             }
         }
+        var closest: (id: String, seq: Int)?
         for row in rows {
-            switch row {
-            case .item(let item): if shows(item) { return row.id }
-            case .work(let steps, _, _): if steps.contains(where: shows) { return row.id }
-            case .tools: continue
+            let seqs: [Int] = switch row {
+            case .item(let item): messageSeq(item).map { [$0] } ?? []
+            case .work(let steps, _, _): steps.compactMap(messageSeq)
+            case .tools: []
             }
+            if seqs.contains(seq) { return row.id }
+            if let before = seqs.filter({ $0 < seq }).max(), before > (closest?.seq ?? Int.min) { closest = (row.id, before) }
         }
-        return nil
+        return closest?.id
     }
 }

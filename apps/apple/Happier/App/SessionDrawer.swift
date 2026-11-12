@@ -135,9 +135,10 @@ struct SessionDrawer: View {
 
     private func setOpen(_ open: Bool, feedback: Bool = true) {
         if feedback, isOpen != open { AppHaptics.light() }
-        // Opening the sidebar puts the keyboard away, like any other navigation: before the slide,
-        // so the conversation isn't relaid out under the keyboard halfway through it.
-        if open { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        // Going to or from the sidebar puts the keyboard away, like any other navigation: before
+        // the slide, so the conversation isn't relaid out under the keyboard halfway through it,
+        // and a conversation opened from the sidebar's search doesn't open under its keyboard.
+        if open || isOpen { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
         withAnimation(.smooth(duration: 0.3)) {
             dragX = nil
             isOpen = open

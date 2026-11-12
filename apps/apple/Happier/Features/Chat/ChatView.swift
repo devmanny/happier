@@ -234,8 +234,9 @@ private struct ChatConversationContent: View, Equatable {
         .onChange(of: items.isEmpty, initial: true) { _, isEmpty in
             // On open (including an already-loaded transcript) land on the concrete bottom
             // anchor: it renders the latest messages instead of an estimated (blank) region and
-            // settles the horizontal offset on the content margin.
-            if !isEmpty {
+            // settles the horizontal offset on the content margin. A message-search result opens
+            // at its message instead (`jumpToRequestedMessage`).
+            if !isEmpty, store.messageRequest?.sessionId != sessionId {
                 pinnedToEnd = true
                 scrollToBottom(animated: false)
             }
@@ -611,9 +612,12 @@ private struct ChatConversationContent: View, Equatable {
         }
     }
 
-    /// A message-search result to show in this conversation, once its transcript is here.
+    /// A message-search result to show in this conversation, once its first page has loaded: the
+    /// transcript appears before the store knows whether older pages exist, and a jump started in
+    /// between would stop short at the newest page.
     private var pendingMessageJump: MessageRequest? {
-        guard let request = store.messageRequest, request.sessionId == sessionId, store.transcripts[sessionId] != nil else { return nil }
+        guard let request = store.messageRequest, request.sessionId == sessionId, store.transcripts[sessionId] != nil,
+              !store.loadingTranscripts.contains(sessionId) else { return nil }
         return request
     }
 
@@ -621,6 +625,8 @@ private struct ChatConversationContent: View, Equatable {
     /// transcript (it grows back from the newest page), then it scrolls into view, lit for a moment.
     private func jumpToRequestedMessage() async {
         guard let request = pendingMessageJump else { return }
+        // Cleared last: clearing it changes this task's id, which would cancel the jump midway.
+        defer { if store.messageRequest == request { store.messageRequest = nil } }
         func rowId() -> String? { ChatRow.rowId(showingSeq: request.seq, in: ChatRow.rows(from: items, working: facts.working)) }
         while rowId() == nil, store.hasOlderMessages[sessionId] == true, !Task.isCancelled {
             let before = store.transcripts[sessionId]?.minSeq
@@ -628,11 +634,10 @@ private struct ChatConversationContent: View, Equatable {
             await store.loadOlder(sessionId)
             if store.transcripts[sessionId]?.minSeq == before { break }
         }
-        guard !Task.isCancelled else { return }
-        if store.messageRequest == request { store.messageRequest = nil }
-        guard let target = rowId() else { return }
-        // After the opening scroll to the newest message has run.
+        guard !Task.isCancelled, let target = rowId() else { return }
+        // Let the opened conversation lay out before moving it.
         try? await Task.sleep(for: .milliseconds(150))
+        guard !Task.isCancelled else { return }
         pinnedToEnd = false
         windowLimit = ChatWindow.limit(including: target, in: ChatRow.rows(from: items, working: facts.working), current: windowLimit)
         await Task.yield()

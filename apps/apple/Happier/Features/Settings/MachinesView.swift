@@ -294,6 +294,8 @@ private struct ConversationSearchSection: View {
     @State private var state: LoadState = .loading
     @State private var switching = false
     @State private var confirmingOff = false
+    /// Bumped by each switch, so the status is followed again (a machine just turned on starts indexing).
+    @State private var statusGeneration = 0
 
     enum LoadState: Equatable {
         case loading
@@ -338,7 +340,7 @@ private struct ConversationSearchSection: View {
         } footer: {
             Text("\(machineName) reads every conversation of your account once and keeps the index on its own disk, so you can search inside messages from any device. The relay never sees the text.")
         }
-        .task(id: online) { await refreshWhileIndexing() }
+        .task(id: "\(online)|\(statusGeneration)") { await refreshWhileIndexing() }
         .confirmationDialog("Turn off conversation search?", isPresented: $confirmingOff, titleVisibility: .visible) {
             Button("Turn Off and Delete Index", role: .destructive) {
                 AppHaptics.warning()
@@ -367,6 +369,7 @@ private struct ConversationSearchSection: View {
         defer { switching = false }
         if let status = await store.setMessageSearch(machineId: machineId, enabled: enabled, deleteIndex: deleteIndex) {
             state = .loaded(status)
+            statusGeneration += 1
         }
     }
 
