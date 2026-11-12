@@ -562,7 +562,7 @@ struct Composer: View {
 
 /// How the session is doing, just above the composer like the official app: a pill colored by the
 /// state (green online, blue working, orange waiting on you, red failed, brown archived, gray
-/// inactive), as wide as what it says.
+/// inactive, gray with "zzz" resting), as wide as what it says.
 struct SessionStatusRow: View {
     let session: Session
     @Environment(HappierStore.self) private var store
@@ -586,7 +586,8 @@ struct SessionStatusRow: View {
                     if look.spinning {
                         HappierSpinner(size: HappierSpinner.mini, color: look.tint)
                     } else if let icon = look.icon {
-                        Image(systemName: icon)
+                        // The state's name always follows its icon in the pill: VoiceOver reads it once.
+                        Image(systemName: icon).accessibilityHidden(true)
                     } else {
                         Circle().frame(width: 7, height: 7)
                     }
@@ -628,7 +629,10 @@ struct SessionStatusRow: View {
         case .failed: return Look(text: "Turn failed", icon: "exclamationmark.triangle.fill", tint: .red)
         case .idle: return Look(text: "Online", tint: .green)
         case .offline:
-            return Look(text: "Inactive", detail: session.activeAt.map { Text("· active \($0, format: .relative(presentation: .named))") })
+            let detail = session.activeAt.map { Text("· active \($0, format: .relative(presentation: .named))") }
+            // Put to rest by the idle cleaner: a calm mark, not a stop.
+            if session.isResting { return Look(text: "Resting", icon: "zzz", detail: detail) }
+            return Look(text: "Inactive", detail: detail)
         }
     }
 }

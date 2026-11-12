@@ -5,16 +5,18 @@ import Foundation
 /// tasks, its recent memory, and the session's controls. A session with no agent shows its state,
 /// its tasks and its controls instead.
 public enum AgentCard {
-    /// The colored dot of a row; color is only ever a state.
+    /// The colored dot of a row; color is only ever a state. A session the idle cleaner put to rest
+    /// (`Session.isResting`) is resting rather than inactive.
     public enum State: Equatable, Sendable {
-        case online, working, waiting, inactive
+        case online, working, waiting, inactive, resting
 
-        public init(_ status: Session.Status?) {
-            switch status {
+        public init(_ session: Session?, now: Date) {
+            switch session?.status(at: now) {
             case .working: self = .working
             case .permissionRequired, .actionRequired: self = .waiting
             case .idle: self = .online
-            case .failed, .offline, nil: self = .inactive
+            case .offline: self = session?.isResting == true ? .resting : .inactive
+            case .failed, nil: self = .inactive
             }
         }
     }
@@ -57,17 +59,18 @@ public enum AgentCard {
     /// This session's thread first, then the others newest first. A thread with no text is shown as
     /// working, as the memory screen does.
     public static func nowRows(_ memory: AgentMemory?, sessionId: String, now: Double,
-                               status: (String) -> Session.Status?, title: (String) -> String?) -> [NowRow] {
+                               session: (String) -> Session?) -> [NowRow] {
         let threads = (memory?.now ?? [])
             .sorted { a, b in
                 if (a.sessionId == sessionId) != (b.sessionId == sessionId) { return a.sessionId == sessionId }
                 return a.updatedAt > b.updatedAt
             }
         return threads.map { thread in
-            NowRow(sessionId: thread.sessionId, text: thread.text,
-                   place: thread.title ?? title(thread.sessionId).flatMap { $0.isEmpty ? nil : $0 },
-                   ago: Ago(ms: thread.updatedAt, now: now), isThisSession: thread.sessionId == sessionId,
-                   state: State(status(thread.sessionId)))
+            let listed = session(thread.sessionId)
+            return NowRow(sessionId: thread.sessionId, text: thread.text,
+                          place: thread.title ?? listed.map(\.title).flatMap { $0.isEmpty ? nil : $0 },
+                          ago: Ago(ms: thread.updatedAt, now: now), isThisSession: thread.sessionId == sessionId,
+                          state: State(listed, now: Date(timeIntervalSince1970: now / 1000)))
         }
     }
 

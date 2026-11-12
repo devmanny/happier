@@ -104,6 +104,33 @@ import Testing
         #expect(!row.thinking)
     }
 
+    /// The idle cleaner's stop (`sessionRestV1`, written by `happier session stop --reason idle`)
+    /// reads as resting until the session starts again (`lifecycleStateSince`); a stop of the
+    /// user's own never does.
+    @Test func restingIsAnIdleStopNoOlderThanTheLastStart() throws {
+        func session(_ metadata: JSONValue, active: Bool = false, archived: Bool = false) throws -> Session {
+            try Session(row: e2eeRow(metadata: metadata, extra: ["active": .bool(active), "archivedAt": archived ? .number(nowMs) : .null]),
+                        keys: keys)
+        }
+        let rest: JSONValue = ["v": 1, "reason": "idle", "at": 2_000]
+        #expect(try session(["path": "/a", "lifecycleStateSince": 1_000, "sessionRestV1": rest]).isResting)
+        // The same instant: the stop came after the start it ended.
+        #expect(try session(["path": "/a", "lifecycleStateSince": 2_000, "sessionRestV1": rest]).isResting)
+        // Started again since (and then stopped by the user): stopped, not resting.
+        #expect(try !session(["path": "/a", "lifecycleStateSince": 3_000, "sessionRestV1": rest]).isResting)
+        // Running, archived, or never put to rest.
+        #expect(try !session(["path": "/a", "lifecycleStateSince": 1_000, "sessionRestV1": rest], active: true).isResting)
+        #expect(try !session(["path": "/a", "lifecycleStateSince": 1_000, "sessionRestV1": rest], archived: true).isResting)
+        #expect(try !session(["path": "/a", "lifecycleStateSince": 1_000]).isResting)
+        // Only what the CLI writes counts.
+        #expect(try !session(["path": "/a", "sessionRestV1": ["v": 1, "reason": "user", "at": 2_000]]).isResting)
+        #expect(try !session(["path": "/a", "sessionRestV1": ["v": 2, "reason": "idle", "at": 2_000]]).isResting)
+        // No recorded start: the rest is the latest thing known about it.
+        #expect(try session(["path": "/a", "sessionRestV1": rest]).isResting)
+        // Resting is a way of not running: everything that acts on a stopped session still sees one.
+        #expect(try session(["path": "/a", "sessionRestV1": rest]).status(at: now) == .offline)
+    }
+
     @Test func statusFollowsUIPrecedence() throws {
         var session = try Session(row: e2eeRow(metadata: ["path": "/a"], extra: ["pendingPermissionRequestCount": 1]), keys: keys)
         #expect(session.status(at: now) == .permissionRequired)

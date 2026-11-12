@@ -17,9 +17,15 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
         /// When it started working (for a timer), else its last activity.
         public let since: Date
         public let link: URL?
+        /// A stopped session the idle cleaner put to rest (`Session.isResting`). Kept apart from
+        /// `state`, which stays `offline`: the watch decodes the whole snapshot with that enum, and a
+        /// watch app older than resting would drop every update carrying a new case.
+        private let resting: Bool?
         public var id: String { sessionId }
+        public var isResting: Bool { resting == true }
 
-        public init(sessionId: String, title: String, agentId: String?, folder: String?, state: State, since: Date, link: URL?) {
+        public init(sessionId: String, title: String, agentId: String?, folder: String?, state: State, since: Date, link: URL?,
+                    resting: Bool = false) {
             self.sessionId = sessionId
             self.title = title
             self.agentId = agentId
@@ -27,6 +33,7 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
             self.state = state
             self.since = since
             self.link = link
+            self.resting = resting ? true : nil
         }
     }
 
@@ -99,7 +106,8 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
         let since = state == .working ? (session.thinkingAt ?? session.activeAt ?? session.sortDate) : session.sortDate
         return Item(sessionId: session.id, title: session.title, agentId: session.agentId,
                     folder: session.path.flatMap { $0.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) },
-                    state: state, since: since, link: SessionLink(sessionId: session.id, server: server)?.nativeURL)
+                    state: state, since: since, link: SessionLink(sessionId: session.id, server: server)?.nativeURL,
+                    resting: state == .offline && session.isResting)
     }
 
     public static func load(from defaults: UserDefaults? = UserDefaults(suiteName: AttentionSnapshot.appGroup)) -> ActivitySnapshot? {

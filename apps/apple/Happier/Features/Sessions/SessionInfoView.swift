@@ -145,15 +145,23 @@ struct SessionInfoView: View {
             ?? session.metadata["flavor"]?.stringValue ?? String(localized: "Agent")
     }
 
-    private func status(_ session: Session, at date: Date) -> Text {
-        if session.archivedAt != nil { return Text("Archived") }
-        return switch session.status(at: date) {
-        case .permissionRequired: Text("Needs your approval")
-        case .actionRequired: Text("Waiting for your answer")
-        case .working: Text("Working")
-        case .failed: Text("Turn failed")
-        case .idle: Text("Online")
-        case .offline: Text("Inactive")
+    @ViewBuilder
+    private func status(_ session: Session, at date: Date) -> some View {
+        if session.isResting {
+            // Put to rest by the idle cleaner; the label reads "Resting" once to VoiceOver.
+            Label { Text("Resting") } icon: { Image(systemName: "zzz") }
+                .labelStyle(.titleAndIcon)
+        } else if session.archivedAt != nil {
+            Text("Archived")
+        } else {
+            switch session.status(at: date) {
+            case .permissionRequired: Text("Needs your approval")
+            case .actionRequired: Text("Waiting for your answer")
+            case .working: Text("Working")
+            case .failed: Text("Turn failed")
+            case .idle: Text("Online")
+            case .offline: Text("Inactive")
+            }
         }
     }
 

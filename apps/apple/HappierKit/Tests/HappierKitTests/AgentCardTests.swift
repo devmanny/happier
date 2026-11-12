@@ -19,22 +19,41 @@ import Testing
         return task
     }
 
+    /// A session from the list: `row` adds what decides its state, `metadata` its title and rest.
+    private func session(_ id: String, row: [String: JSONValue] = [:], metadata: JSONValue = [:]) throws -> Session {
+        var fields: [String: JSONValue] = [
+            "id": .string(id), "encryptionMode": "plain", "metadataVersion": 1, "active": true, "activeAt": .number(now),
+            "metadata": .string(String(decoding: try metadata.encoded(), as: UTF8.self)),
+        ]
+        fields.merge(row) { $1 }
+        return try Session(row: .object(fields), keys: nil)
+    }
+
     // MARK: Now
 
     @Test func thisSessionLeadsTheNowRowsAndTheOthersFollowNewestFirst() {
         let memory = AgentMemory(now: [thread("b", minutesAgo: 12), thread("here", minutesAgo: 60), thread("c", minutesAgo: 120)])
-        let rows = AgentCard.nowRows(memory, sessionId: "here", now: now, status: { _ in nil }, title: { _ in nil })
+        let rows = AgentCard.nowRows(memory, sessionId: "here", now: now, session: { _ in nil })
         #expect(rows.map(\.sessionId) == ["here", "b", "c"])
         #expect(rows.map(\.isThisSession) == [true, false, false])
     }
 
-    @Test func aNowRowTakesItsStateFromTheSessionAndItsPlaceFromTheRecordThenTheSessionList() {
+    @Test func aNowRowTakesItsStateFromTheSessionAndItsPlaceFromTheRecordThenTheSessionList() throws {
         let memory = AgentMemory(now: [thread("a", minutesAgo: 1, title: "Publish TAPAGOL"), thread("b", minutesAgo: 2),
-                                       thread("c", minutesAgo: 3), thread("d", minutesAgo: 4)])
-        let states: [String: Session.Status] = ["a": .working, "b": .permissionRequired, "c": .idle, "d": .failed]
-        let rows = AgentCard.nowRows(memory, sessionId: "x", now: now, status: { states[$0] }, title: { $0 == "b" ? "Invoice La Chata" : nil })
-        #expect(rows.map(\.state) == [.working, .waiting, .online, .inactive])
-        #expect(rows.map(\.place) == ["Publish TAPAGOL", "Invoice La Chata", nil, nil])
+                                       thread("c", minutesAgo: 3), thread("d", minutesAgo: 4), thread("e", minutesAgo: 5),
+                                       thread("f", minutesAgo: 6), thread("gone", minutesAgo: 7)])
+        let sessions = Dictionary(uniqueKeysWithValues: try [
+            session("a", row: ["latestTurnStatus": "in_progress", "latestTurnStatusObservedAt": .number(now)]),
+            session("b", row: ["pendingPermissionRequestCount": 1], metadata: ["summary": ["text": "Invoice La Chata", "updatedAt": 1]]),
+            session("c", metadata: ["path": "/w/radar"]),
+            session("d", row: ["latestTurnStatus": "failed"]),
+            session("e", row: ["active": false]),
+            session("f", row: ["active": false],
+                    metadata: ["lifecycleStateSince": 1, "sessionRestV1": ["v": 1, "reason": "idle", "at": 2]]),
+        ].map { ($0.id, $0) })
+        let rows = AgentCard.nowRows(memory, sessionId: "x", now: now, session: { sessions[$0] })
+        #expect(rows.map(\.state) == [.working, .waiting, .online, .inactive, .inactive, .resting, .inactive])
+        #expect(rows.map(\.place) == ["Publish TAPAGOL", "Invoice La Chata", "radar", "Unknown", "Unknown", "Unknown", nil])
     }
 
     @Test func howLongAgoIsBucketedLikeTheMockup() {

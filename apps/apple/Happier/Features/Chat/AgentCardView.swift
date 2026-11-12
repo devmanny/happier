@@ -209,8 +209,7 @@ struct AgentCardView: View {
     // MARK: Now
 
     private var nowSection: some View {
-        let rows = AgentCard.nowRows(memory, sessionId: sessionId, now: ServerClock.nowMs(),
-                                     status: { store.sessions[$0]?.status() }, title: { store.sessions[$0]?.title })
+        let rows = AgentCard.nowRows(memory, sessionId: sessionId, now: ServerClock.nowMs(), session: { store.sessions[$0] })
         return Section {
             if rows.isEmpty {
                 Text(memory == nil ? "Loading…" : "No thread has reported yet.").foregroundStyle(.secondary)
@@ -430,15 +429,23 @@ private struct Chip: ViewModifier {
     }
 }
 
-/// A row's state as a colored dot: green online, blue working, amber waiting on you, gray inactive.
+/// A row's state as a colored dot: green online, blue working, amber waiting on you, gray inactive;
+/// a quiet "zzz" when resting. The row reads its state aloud, so the mark itself is silent.
 private struct StateDot: View {
     let state: AgentCard.State
 
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 8, height: 8)
-            .accessibilityHidden(true)
+        Group {
+            if state == .resting {
+                RestingMark()
+                    .font(.system(size: 9, weight: .semibold))
+            } else {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+            }
+        }
+        .accessibilityHidden(true)
     }
 
     private var color: Color {
@@ -446,7 +453,7 @@ private struct StateDot: View {
         case .online: .green
         case .working: .userBubble
         case .waiting: .orange
-        case .inactive: .gray
+        case .inactive, .resting: .gray
         }
     }
 }
@@ -473,6 +480,7 @@ extension AgentCard.State {
         case .working: String(localized: "Working")
         case .waiting: String(localized: "Waiting for you")
         case .inactive: String(localized: "Inactive")
+        case .resting: String(localized: "Resting")
         }
     }
 }

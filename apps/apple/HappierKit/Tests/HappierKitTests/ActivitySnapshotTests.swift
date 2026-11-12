@@ -9,10 +9,11 @@ struct ActivitySnapshotTests {
     private let now = Date(timeIntervalSince1970: 10_000)
 
     private func session(_ id: String, updated: Double, thinking: Bool = false, unread: Bool = false,
-                         permission: Bool = false, active: Bool = true) throws -> Session {
+                         permission: Bool = false, active: Bool = true, resting: Bool = false) throws -> Session {
+        let rest = resting ? ",\"lifecycleStateSince\":1,\"sessionRestV1\":{\"v\":1,\"reason\":\"idle\",\"at\":2}" : ""
         var session = try Session(row: ["id": .string(id), "seq": 0, "createdAt": 1, "updatedAt": .number(updated * 1000),
                                         "active": .bool(active), "activeAt": .number(updated * 1000), "encryptionMode": "plain",
-                                        "metadata": .string("{\"flavor\":\"claude\",\"path\":\"/w/proj-\(id)\",\"summary\":{\"text\":\"T-\(id)\",\"updatedAt\":1}}"),
+                                        "metadata": .string("{\"flavor\":\"claude\",\"path\":\"/w/proj-\(id)\",\"summary\":{\"text\":\"T-\(id)\",\"updatedAt\":1}\(rest)}"),
                                         "metadataVersion": 1, "agentStateVersion": 0], keys: nil)
         session.thinking = thinking
         session.thinkingAt = thinking ? Date(timeIntervalSince1970: updated) : nil
@@ -38,6 +39,21 @@ struct ActivitySnapshotTests {
         #expect(snapshot.recent.map(\.state) == [.working, .waiting, .unread, .idle, .working, .offline])
         #expect(snapshot.recent[0].folder == "proj-a")
         #expect(snapshot.recent[0].link == SessionLink(sessionId: "a", server: server)?.nativeURL)
+    }
+
+    /// A session the idle cleaner put to rest is shown resting, apart from one the user stopped. Its
+    /// state stays `offline` on the wire: a watch app from before resting decodes the whole context
+    /// with this enum and would otherwise drop it.
+    @Test func marksRestingSessionsWhileTheirWireStateStaysOffline() throws {
+        let sessions = [try session("r", updated: 9_000, active: false, resting: true), try session("s", updated: 8_000, active: false)]
+        let snapshot = ActivitySnapshot(sessions: sessions, usage: [], server: server, now: now)
+        #expect(snapshot.recent.map(\.isResting) == [true, false])
+        #expect(snapshot.recent.map(\.state) == [.offline, .offline])
+
+        let data = try JSONEncoder().encode(snapshot)
+        let recent = try #require((JSONSerialization.jsonObject(with: data) as? [String: Any])?["recent"] as? [[String: Any]])
+        #expect(recent.map { $0["state"] as? String } == ["offline", "offline"])
+        #expect(try JSONDecoder().decode(ActivitySnapshot.self, from: data) == snapshot)
     }
 
     @Test func keepsTheTightestLimitOfEachProviderFromItsNewestReading() throws {

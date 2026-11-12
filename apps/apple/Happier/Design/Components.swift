@@ -123,6 +123,17 @@ struct SessionAvatar: View {
     }
 }
 
+/// The mark of a session the idle cleaner put to rest (`Session.isResting`): quiet, in the secondary
+/// color, never an alert. A session the user stopped keeps its usual look. Sized by the caller's font.
+struct RestingMark: View {
+    var body: some View {
+        Image(systemName: "zzz")
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(Text("Resting"))
+            .help(Text("Resting"))
+    }
+}
+
 /// The small chevron at the end of a transcript line that unfolds (steps, tool groups, a tool's
 /// details, the thought process): the same mark, turning down when open.
 struct DisclosureChevron: View {

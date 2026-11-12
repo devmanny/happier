@@ -606,7 +606,11 @@ struct ResumeSessionButton: View {
     var body: some View {
         if let session = store.sessions[sessionId], session.archivedAt == nil, session.status() == .offline {
             let resuming = store.resumingSessions[sessionId] == true
-            Button(resuming ? "Reactivating…" : "Reactivate Session", systemImage: "play.circle") {
+            // The same reconnect either way; a session put to rest is woken rather than reactivated.
+            let title: LocalizedStringKey = session.isResting
+                ? (resuming ? "Waking…" : "Wake Session")
+                : (resuming ? "Reactivating…" : "Reactivate Session")
+            Button(title, systemImage: "play.circle") {
                 AppHaptics.light()
                 Task { await store.resumeSession(sessionId) }
             }
@@ -1016,6 +1020,9 @@ struct SessionRow: View, Equatable {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .accessibilityLabel(Text("Archived"))
+                    }
+                    if session.isResting {
+                        RestingMark().font(.caption2)
                     }
                     if speaker.autoReadSessionId == session.id {
                         // New messages of this session are read aloud (moving while it reads).

@@ -235,6 +235,19 @@ public struct Session: Identifiable, Sendable, Equatable {
 
     public var sortDate: Date { meaningfulActivityAt ?? updatedAt }
 
+    /// Put to rest by the idle cleaner, not stopped by the user: `sessionRestV1` (written by
+    /// `happier session stop --reason idle`, `packages/protocol/src/sessionMetadata/sessionRestV1.ts`)
+    /// no older than the last start (`lifecycleStateSince`, rewritten by the runner on every start and
+    /// resume). A start supersedes the rest, so the user's own stop after it reads as stopped. With no
+    /// recorded start, the rest is the latest thing known. Only for a stopped session that isn't
+    /// archived; everything that acts on a stopped session still sees `.offline`.
+    public var isResting: Bool {
+        guard !active, archivedAt == nil, let rest = metadata["sessionRestV1"], rest["v"]?.intValue == 1,
+              rest["reason"]?.stringValue == "idle", let at = rest["at"]?.doubleValue else { return false }
+        guard let since = metadata["lifecycleStateSince"]?.doubleValue else { return true }
+        return at >= since
+    }
+
     /// Whether the user may delete the session for good (`sessionActionContext.ts` `canDelete`):
     /// only their own, once it has stopped, and not while a preserved terminal host still holds it.
     public var canDelete: Bool {

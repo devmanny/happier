@@ -63,6 +63,14 @@ private extension ActivitySnapshot.State {
     }
 }
 
+/// A stopped session the idle cleaner put to rest shows resting, quietly; one the user stopped shows
+/// stopped.
+private extension ActivitySnapshot.Item {
+    var label: LocalizedStringKey { isResting ? "Resting" : state.label }
+    var color: Color { isResting ? .secondary : state.color }
+    var symbol: String { isResting ? "moon.zzz" : state.symbol }
+}
+
 /// The small Happier mark with a title, at the top of a widget.
 private struct WidgetHeader: View {
     let title: LocalizedStringKey
@@ -228,8 +236,9 @@ private struct RecentView: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(item.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                                 HStack(spacing: 4) {
-                                    Image(systemName: item.state.symbol).font(.system(size: 8)).foregroundStyle(item.state.color)
-                                    Text(item.state.label)
+                                    Image(systemName: item.symbol).font(.system(size: 8)).foregroundStyle(item.color)
+                                        .accessibilityHidden(true)
+                                    Text(item.label)
                                     Text("·")
                                     if item.state == .working {
                                         Text(item.since, style: .timer).monospacedDigit()
