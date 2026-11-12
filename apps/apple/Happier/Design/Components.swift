@@ -391,10 +391,10 @@ struct FolderWash: View {
     var body: some View {
         if let color {
             ZStack {
-                color.opacity(0.05)
+                color.opacity(0.06)
                 Rectangle()
-                    .strokeBorder(color.opacity(0.6), lineWidth: 16)
-                    .blur(radius: 22)
+                    .strokeBorder(color.opacity(0.9), lineWidth: 22)
+                    .blur(radius: 26)
             }
             .clipped()
             .ignoresSafeArea()
