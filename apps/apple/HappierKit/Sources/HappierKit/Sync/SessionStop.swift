@@ -49,4 +49,8 @@ public enum SessionStop {
 enum RPCErrorCodes {
     /// The RPC target isn't connected or doesn't implement the method.
     static let unavailable: Set<String> = ["RPC_METHOD_NOT_AVAILABLE", "RPC_METHOD_NOT_FOUND"]
+    /// The relay has no connected socket registered for the method (`rpcHandler.ts`): for a
+    /// session method, no runner of that session is connected. `RPC_METHOD_NOT_FOUND` is
+    /// different: a connected runner answered that it doesn't implement the method.
+    static let noConnectedTarget = "RPC_METHOD_NOT_AVAILABLE"
 }

@@ -597,6 +597,13 @@ public final class HappierStore {
         return { event, payload, timeout in try await socket.emitWithAck(event, payload, timeout: timeout) }
     }
 
+    /// The connected socket's emit for events the relay doesn't acknowledge; nil offline.
+    private var unacknowledgedEmit: ((String, JSONValue) async throws -> Void)? {
+        if let testSocketAck { return { event, payload in _ = try await testSocketAck(event, payload) } }
+        guard let socket, connection == .online else { return nil }
+        return { event, payload in try await socket.emit(event, payload) }
+    }
+
     /// After a reconnect or coming back to the foreground: nothing to read when the KV store didn't
     /// change since `kvCursor`; otherwise only the prefixes shown here are read again.
     public func catchUpAccountKV() async {
@@ -2752,9 +2759,43 @@ public final class HappierStore {
             _ = try await sessionRPC(sessionId, method: "abort", params: [
                 "reason": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
             ])
-        } catch let error as RPCError where error.code == "RPC_METHOD_NOT_AVAILABLE" {
-            // Session runtime is offline: nothing to abort.
+        } catch let error as RPCError where error.code == RPCErrorCodes.noConnectedTarget {
+            // No runner is connected, so nothing can be working: a session still shown as
+            // running is one whose process is gone. Ending it is what Stop is for; it kills nothing.
+            if sessions[sessionId]?.active == true { _ = await endDeadSession(sessionId) }
         } catch { report(error) }
+    }
+
+    /// Ends a session whose process is gone (the computer restarted, the runner crashed). The
+    /// relay lets a silent session go only when its presence timeout runs out (10 min,
+    /// `presence/timeout.ts`); until then it shows as running and a stop finds no one to ask.
+    /// Called only once the relay has no runner connected for it. The user-scoped `session-end`
+    /// (`registerReleasedUiV021SessionEndSocketEvent.ts`) closes it at once, with its open turn
+    /// and activity; a runner that was only cut off registers again when it reconnects.
+    private func endDeadSession(_ sessionId: String) async -> Bool {
+        guard let emit = unacknowledgedEmit, let api, let session = sessions[sessionId] else {
+            lastError = notConnectedMessage
+            return false
+        }
+        // The relay ignores an end older than the session's last activity, and caps it at its clock.
+        let lastSeen = [session.activeAt, session.thinkingAt, session.latestTurnStatusObservedAt].compactMap { $0 }.max()
+        let endedAt = max(Date.now, lastSeen?.addingTimeInterval(0.001) ?? .distantPast)
+        do {
+            try await emit("session-end", ["sid": .string(sessionId), "time": .number((endedAt.timeIntervalSince1970 * 1000).rounded(.up))])
+            // `session-end` has no acknowledgement: read the session back to know it ended.
+            let deadline = ContinuousClock.now + .seconds(5)
+            while true {
+                if let row = try await api.session(id: sessionId), row["active"]?.boolValue == false {
+                    try sessions[sessionId]?.apply(update: row)
+                    sessions[sessionId]?.thinking = false
+                    return true
+                }
+                guard ContinuousClock.now < deadline else { break }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            lastError = String(localized: "Happier couldn't stop this session. Try again in a few minutes.")
+        } catch { report(error) }
+        return false
     }
 
     /// Sets the session's goal or moves it along (`session.goal.set`): a new objective, or a
@@ -3406,6 +3447,9 @@ public final class HappierStore {
         if outcome == .fallback {
             do {
                 outcome = SessionStop.runnerOutcome(try await sessionRPC(sessionId, method: "killSession", params: [:]))
+            } catch let error as RPCError where error.code == RPCErrorCodes.noConnectedTarget {
+                // Neither its daemon nor the relay knows a runner for it: the process is gone.
+                return await endDeadSession(sessionId)
             } catch let error as RPCError where RPCErrorCodes.unavailable.contains(error.code ?? "") {
                 outcome = .failed(String(localized: "The session's machine isn't reachable right now. Try again when it's online."))
             } catch {
@@ -3485,11 +3529,19 @@ public final class HappierStore {
         let deadline = clock.now + timeout
         // Back from the background the connection is still returning: wait for it, within this
         // call's own budget, rather than failing an upload made in that moment.
-        let socket = try await connectedSocket(until: deadline, clock: clock)
+        var socket: SocketIOClient?
+        if testSocketAck == nil { socket = try await connectedSocket(until: deadline, clock: clock) }
         guard let session = sessions[sessionId] else { throw RPCError(message: "Unknown session", code: nil) }
         let encodedParams: JSONValue = session.isPlain ? params : .string(try session.encodeDocument(params))
-        let ack = try await socket.emitWithAck(
-            "rpc-call", ["method": .string("\(sessionId):\(method)"), "params": encodedParams], timeout: deadline - clock.now)
+        let call: JSONValue = ["method": .string("\(sessionId):\(method)"), "params": encodedParams]
+        let ack: [JSONValue]
+        if let socket {
+            ack = try await socket.emitWithAck("rpc-call", call, timeout: deadline - clock.now)
+        } else if let testSocketAck {
+            ack = try await testSocketAck("rpc-call", call)
+        } else {
+            throw RPCError(message: notConnectedMessage, code: nil)
+        }
         guard let response = ack.first else { throw RPCError(message: "Empty RPC response", code: nil) }
         guard response["ok"]?.boolValue == true else {
             throw RPCError(message: response["error"]?.stringValue ?? "RPC failed", code: response["errorCode"]?.stringValue)
