@@ -70,7 +70,7 @@ struct SessionFilterView: View {
                     }
                     .disabled(filter.isDefault)
                 } footer: {
-                    Text("The default shows active and inactive sessions, without the ones tasks started.")
+                    Text("The default shows active, resting and stopped sessions, without the ones tasks started.")
                 }
             }
             .formStyle(.grouped)

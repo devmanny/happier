@@ -160,7 +160,7 @@ struct SessionInfoView: View {
             case .working: Text("Working")
             case .failed: Text("Turn failed")
             case .idle: Text("Online")
-            case .offline: Text("Inactive")
+            case .offline: Text("Stopped")
             }
         }
     }

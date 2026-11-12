@@ -42,12 +42,12 @@ final class ArchivedSessions {
 }
 
 enum OlderSessionsSection: String, Identifiable, Hashable {
-    case inactive, archived
+    case resting, stopped, archived
     var id: String { rawValue }
 }
 
-/// Stopped and archived sessions, in their own window: a search, and chips with how many there are
-/// in each (or how many match) that jump to their section.
+/// Resting, stopped and archived sessions, in their own window: a search, and chips with how many
+/// there are in each (or how many match) that jump to their section.
 struct OlderSessionsView: View {
     let initial: OlderSessionsSection
     let onOpen: (Session) -> Void
@@ -64,29 +64,15 @@ struct OlderSessionsView: View {
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
-                let inactiveTree = SessionSidebar.groups(store.sessionList, pinned: store.pinnedSessionIds) { store.listDate($0) }.inactive
+                let groups = SessionSidebar.groups(store.sessionList, pinned: store.pinnedSessionIds) { store.listDate($0) }
                 let filtering = unreadOnly || !query.isEmpty
-                let inactiveMatches = filtering ? Self.flatten(inactiveTree).filter(shows) : nil
+                let resting = rows(groups.resting, filtering: filtering)
+                let stopped = rows(groups.stopped, filtering: filtering)
                 let kept = archive.items.filter { !store.deletedSessionIds.contains($0.id) }
                 let archived = filtering ? kept.filter(shows) : kept
                 List {
-                    Section {
-                        anchor(.inactive)
-                        if let inactiveMatches {
-                            ForEach(inactiveMatches) { session in inactiveRow(session) }
-                        } else {
-                            // Sub-sessions unfolded beneath the session that started them.
-                            ForEach(Self.indented(inactiveTree), id: \.session.id) { entry in
-                                inactiveRow(entry.session)
-                                    .padding(.leading, CGFloat(entry.depth) * 20)
-                            }
-                        }
-                        if inactiveMatches?.isEmpty ?? inactiveTree.isEmpty {
-                            placeholder(filtering ? "No matches" : "No inactive sessions")
-                        }
-                    } header: {
-                        Text("Inactive")
-                    }
+                    notRunningSection(.resting, "Resting", rows: resting, empty: filtering ? "No matches" : "No resting sessions")
+                    notRunningSection(.stopped, "Stopped", rows: stopped, empty: filtering ? "No matches" : "No stopped sessions")
                     Section {
                         anchor(.archived)
                         ForEach(archived) { session in archivedRow(session) }
@@ -111,21 +97,28 @@ struct OlderSessionsView: View {
                 // The sidebar's compact rows, shorter than the standard list row.
                 .environment(\.defaultMinListRowHeight, 0)
                 .safeAreaBar(edge: .top) {
-                    HStack(spacing: 8) {
-                        chip("Inactive", count: inactiveMatches?.count ?? Self.flatten(inactiveTree).count, loading: false) {
-                            withAnimation(.smooth) { proxy.scrollTo(OlderSessionsSection.inactive, anchor: .top) }
+                    // Three chips can be wider than a phone (long counts, larger text): they scroll.
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            chip("Resting", count: resting.count, loading: false) {
+                                withAnimation(.smooth) { proxy.scrollTo(OlderSessionsSection.resting, anchor: .top) }
+                            }
+                            chip("Stopped", count: stopped.count, loading: false) {
+                                withAnimation(.smooth) { proxy.scrollTo(OlderSessionsSection.stopped, anchor: .top) }
+                            }
+                            chip("Archived", count: archived.count, loading: archive.isLoading) {
+                                withAnimation(.smooth) { proxy.scrollTo(OlderSessionsSection.archived, anchor: .top) }
+                            }
                         }
-                        chip("Archived", count: archived.count, loading: archive.isLoading) {
-                            withAnimation(.smooth) { proxy.scrollTo(OlderSessionsSection.archived, anchor: .top) }
-                        }
-                        Spacer(minLength: 0)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
+                    .scrollIndicators(.hidden)
                 }
                 .onAppear {
-                    guard initial == .archived else { return }
-                    Task { @MainActor in proxy.scrollTo(OlderSessionsSection.archived, anchor: .top) }
+                    // Resting is the first section, already in view.
+                    guard initial != .resting else { return }
+                    Task { @MainActor in proxy.scrollTo(initial, anchor: .top) }
                 }
             }
             #if os(iOS)
@@ -134,12 +127,33 @@ struct OlderSessionsView: View {
             #else
             .searchable(text: $query, prompt: "Search")
             #endif
-            .navigationTitle("Inactive & Archived")
+            .navigationTitle("Resting, Stopped & Archived")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
                 ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
             }
             .task { await archive.loadAll(from: store) }
+        }
+    }
+
+    /// A family's rows: sub-sessions indented beneath the session that started them, or, while
+    /// searching or showing only unread, just the sessions that match.
+    private func rows(_ group: [SessionTreeNode<Session>], filtering: Bool) -> [(session: Session, depth: Int)] {
+        filtering ? Self.flatten(group).filter(shows).map { ($0, 0) } : Self.indented(group)
+    }
+
+    /// The Resting or Stopped section.
+    private func notRunningSection(_ section: OlderSessionsSection, _ title: LocalizedStringKey,
+                                   rows: [(session: Session, depth: Int)], empty: LocalizedStringKey) -> some View {
+        Section {
+            anchor(section)
+            ForEach(rows, id: \.session.id) { entry in
+                notRunningRow(entry.session)
+                    .padding(.leading, CGFloat(entry.depth) * 20)
+            }
+            if rows.isEmpty { placeholder(empty) }
+        } header: {
+            Text(title)
         }
     }
 
@@ -173,7 +187,7 @@ struct OlderSessionsView: View {
         .glassHover()
     }
 
-    private func inactiveRow(_ session: Session) -> some View {
+    private func notRunningRow(_ session: Session) -> some View {
         openButton(session)
             .rowActions(session, store: store)
     }

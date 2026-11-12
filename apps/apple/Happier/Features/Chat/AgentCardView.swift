@@ -429,8 +429,8 @@ private struct Chip: ViewModifier {
     }
 }
 
-/// A row's state as a colored dot: green online, blue working, amber waiting on you, gray inactive;
-/// a quiet "zzz" when resting. The row reads its state aloud, so the mark itself is silent.
+/// A row's state as a colored dot: green online, blue working, amber waiting on you, red failed, gray
+/// stopped; a quiet "zzz" when resting. The row reads its state aloud, so the mark itself is silent.
 private struct StateDot: View {
     let state: AgentCard.State
 
@@ -453,7 +453,8 @@ private struct StateDot: View {
         case .online: .green
         case .working: .userBubble
         case .waiting: .orange
-        case .inactive, .resting: .gray
+        case .failed: .red
+        case .stopped, .resting: .gray
         }
     }
 }
@@ -479,7 +480,8 @@ extension AgentCard.State {
         case .online: String(localized: "Online")
         case .working: String(localized: "Working")
         case .waiting: String(localized: "Waiting for you")
-        case .inactive: String(localized: "Inactive")
+        case .failed: String(localized: "Turn failed")
+        case .stopped: String(localized: "Stopped")
         case .resting: String(localized: "Resting")
         }
     }

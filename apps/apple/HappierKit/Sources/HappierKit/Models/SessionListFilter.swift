@@ -1,8 +1,8 @@
 import Foundation
 
 /// Which sessions the list shows: their kind, state and agent, and optionally only those that need
-/// you. Stored on the device (JSON); the default is the usual list (running and stopped sessions,
-/// archive apart) without the sessions tasks started.
+/// you. Stored on the device (JSON); the default is the usual list (running, resting and stopped
+/// sessions, archive apart) without the sessions tasks started.
 public struct SessionListFilter: Equatable, Sendable, Codable {
     /// Every session has exactly one kind; a sub-session a task started counts as a task session.
     public enum Kind: String, CaseIterable, Sendable, Codable, Identifiable {
@@ -25,6 +25,8 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
     }
 
     public enum State: String, CaseIterable, Sendable, Codable, Identifiable {
+        /// `inactive` is every session not running and not archived, resting or stopped (the stored
+        /// raw value stays as it was).
         case active, inactive, archived
 
         public var id: String { rawValue }
@@ -32,7 +34,7 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
         public var label: String {
             switch self {
             case .active: String(localized: "Active")
-            case .inactive: String(localized: "Inactive")
+            case .inactive: String(localized: "Resting & Stopped")
             case .archived: String(localized: "Archived")
             }
         }

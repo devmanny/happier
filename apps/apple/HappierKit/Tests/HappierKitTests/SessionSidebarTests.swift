@@ -2,11 +2,15 @@ import Foundation
 import Testing
 @testable import HappierKit
 
-/// The sidebar shows pinned and running conversations; stopped ones wait in a collapsed group.
+/// The sidebar shows pinned and running conversations; the rest wait in two collapsed groups, the
+/// ones the idle cleaner put to rest and the ones that were stopped.
 @Suite struct SessionSidebarTests {
-    private func session(_ id: String, active: Bool, at: Double, parent: String? = nil, title: String = "t", path: String = "/a") throws -> Session {
+    /// `resting`: the idle cleaner put it to rest after its last start (`Session.isResting`).
+    private func session(_ id: String, active: Bool, at: Double, parent: String? = nil, title: String = "t", path: String = "/a",
+                         resting: Bool = false) throws -> Session {
         let spawned = parent.map { #","spawnedBySessionV1":{"parentSessionId":"\#($0)"}"# } ?? ""
-        let metadata = #"{"path":"\#(path)","name":"\#(title)"\#(spawned)}"#
+        let rest = resting ? #","lifecycleStateSince":1,"sessionRestV1":{"v":1,"reason":"idle","at":2}"# : ""
+        let metadata = #"{"path":"\#(path)","name":"\#(title)"\#(spawned)\#(rest)}"#
         return try Session(row: ["id": .string(id), "encryptionMode": "plain", "metadata": .string(metadata), "metadataVersion": 1,
                                  "active": .bool(active), "updatedAt": .number(at)], keys: nil)
     }
@@ -18,26 +22,42 @@ import Testing
         }
     }
 
-    @Test func splitsPinnedRunningAndStopped() throws {
+    @Test func splitsPinnedRunningRestingAndStopped() throws {
         let groups = SessionSidebar.groups([
             try session("run", active: true, at: 30),
             try session("stopped", active: false, at: 40),
-            try session("pinnedStopped", active: false, at: 10),
+            try session("dozing", active: false, at: 35, resting: true),
+            try session("pinnedResting", active: false, at: 10, resting: true),
+            try session("asleep", active: false, at: 8, resting: true),
             try session("old", active: false, at: 5),
-        ], pinned: ["pinnedStopped"])
-        #expect(ids(groups.pinned) == ["pinnedStopped"])
+        ], pinned: ["pinnedResting"])
+        #expect(ids(groups.pinned) == ["pinnedResting"])
         #expect(ids(groups.active) == ["run"])
-        #expect(ids(groups.inactive) == ["stopped", "old"])
+        #expect(ids(groups.resting) == ["dozing", "asleep"])
+        #expect(ids(groups.stopped) == ["stopped", "old"])
     }
 
     @Test func aRunningChildKeepsItsFamilyInTheMainList() throws {
         let groups = SessionSidebar.groups([
-            try session("parent", active: false, at: 10),
+            try session("parent", active: false, at: 10, resting: true),
             try session("child", active: true, at: 20, parent: "parent"),
             try session("done", active: false, at: 30),
         ], pinned: [])
         #expect(ids(groups.active) == ["parent(child)"])
-        #expect(ids(groups.inactive) == ["done"])
+        #expect(ids(groups.resting).isEmpty)
+        #expect(ids(groups.stopped) == ["done"])
+    }
+
+    @Test func aFamilyThatIsNotRunningGoesByItsTopSession() throws {
+        // Sub-sessions stay beneath the session that started them, whatever their own state.
+        let groups = SessionSidebar.groups([
+            try session("restingParent", active: false, at: 10, resting: true),
+            try session("stoppedChild", active: false, at: 20, parent: "restingParent"),
+            try session("stoppedParent", active: false, at: 5),
+            try session("restingChild", active: false, at: 6, parent: "stoppedParent", resting: true),
+        ], pinned: [])
+        #expect(ids(groups.resting) == ["restingParent(stoppedChild)"])
+        #expect(ids(groups.stopped) == ["stoppedParent(restingChild)"])
     }
 
     @Test func familiesRiseWithTheirLatestActivityPinnedOrNot() throws {
@@ -65,7 +85,8 @@ import Testing
         ], pinned: ["pinnedTask"], shows: { !hidden.contains($0.id) })
         #expect(ids(groups.pinned) == ["pinnedTask"])
         #expect(ids(groups.active) == ["run"])
-        #expect(ids(groups.inactive).isEmpty)
+        #expect(ids(groups.resting).isEmpty)
+        #expect(ids(groups.stopped).isEmpty)
     }
 
     @Test func searchMatchesTitleAndFolder() throws {

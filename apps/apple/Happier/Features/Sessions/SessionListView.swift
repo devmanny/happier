@@ -41,7 +41,7 @@ struct SessionListView: View {
         }
     }
     @State private var showRelay = false
-    /// Stopped and archived sessions open in their own window, at this section.
+    /// Resting, stopped and archived sessions open in their own window, at this section.
     @State private var olderSessions: OlderSessionsSection?
     /// The archive, loaded only while a search runs or the filter shows archived sessions.
     @State private var archivedSearch: ArchivedSessions?
@@ -359,23 +359,31 @@ struct SessionListView: View {
             }
         }
         Section {
-            if !groups.inactive.isEmpty {
-                let flat = Self.flatten(groups.inactive)
-                Button {
-                    AppHaptics.light()
-                    olderSessions = .inactive
-                } label: {
-                    folderRow("Inactive", systemImage: "moon.zzz", count: flat.count, unread: flat.contains { $0.unreadSince != nil })
-                }
-                .buttonStyle(.plain)
-                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
-                .listRowSeparatorTint(isDrawer ? Self.separatorTint : nil)
-            }
+            olderFolder("Resting", systemImage: "moon.zzz", groups.resting, section: .resting)
+            olderFolder("Stopped", systemImage: "stop.circle", groups.stopped, section: .stopped)
             Button {
                 AppHaptics.light()
                 olderSessions = .archived
             } label: {
                 folderRow("Archived", systemImage: "archivebox", count: nil, unread: false)
+            }
+            .buttonStyle(.plain)
+            .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
+            .listRowSeparatorTint(isDrawer ? Self.separatorTint : nil)
+        }
+    }
+
+    /// The Resting or Stopped row, counting every session of its families; hidden while empty.
+    @ViewBuilder
+    private func olderFolder(_ title: LocalizedStringKey, systemImage: String, _ group: [SessionTreeNode<Session>],
+                             section: OlderSessionsSection) -> some View {
+        if !group.isEmpty {
+            let flat = Self.flatten(group)
+            Button {
+                AppHaptics.light()
+                olderSessions = section
+            } label: {
+                folderRow(title, systemImage: systemImage, count: flat.count, unread: flat.contains { $0.unreadSince != nil })
             }
             .buttonStyle(.plain)
             .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
@@ -458,7 +466,7 @@ struct SessionListView: View {
         return names
     }
 
-    /// The Inactive and Archived rows: an icon, a count, and a chevron to their window.
+    /// The Resting, Stopped and Archived rows: an icon, a count, and a chevron to their window.
     private func folderRow(_ title: LocalizedStringKey, systemImage: String, count: Int?, unread: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
@@ -598,7 +606,7 @@ extension View {
     }
 }
 
-/// One action shared by the inactive status pill, conversation menu and sidebar rows.
+/// One action shared by the stopped or resting status pill, conversation menu and sidebar rows.
 struct ResumeSessionButton: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store

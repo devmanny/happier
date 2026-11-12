@@ -562,7 +562,7 @@ struct Composer: View {
 
 /// How the session is doing, just above the composer like the official app: a pill colored by the
 /// state (green online, blue working, orange waiting on you, red failed, brown archived, gray
-/// inactive, gray with "zzz" resting), as wide as what it says.
+/// stopped, gray with "zzz" resting), as wide as what it says.
 struct SessionStatusRow: View {
     let session: Session
     @Environment(HappierStore.self) private var store
@@ -632,7 +632,7 @@ struct SessionStatusRow: View {
             let detail = session.activeAt.map { Text("· active \($0, format: .relative(presentation: .named))") }
             // Put to rest by the idle cleaner: a calm mark, not a stop.
             if session.isResting { return Look(text: "Resting", icon: "zzz", detail: detail) }
-            return Look(text: "Inactive", detail: detail)
+            return Look(text: "Stopped", detail: detail)
         }
     }
 }

@@ -5,18 +5,20 @@ import Foundation
 /// tasks, its recent memory, and the session's controls. A session with no agent shows its state,
 /// its tasks and its controls instead.
 public enum AgentCard {
-    /// The colored dot of a row; color is only ever a state. A session the idle cleaner put to rest
-    /// (`Session.isResting`) is resting rather than inactive.
+    /// The colored dot of a row; color is only ever a state. A session that isn't running is resting
+    /// when the idle cleaner put it to rest (`Session.isResting`), else stopped; one the list doesn't
+    /// have (archived or gone) counts as stopped. A failed turn leaves the session running.
     public enum State: Equatable, Sendable {
-        case online, working, waiting, inactive, resting
+        case online, working, waiting, failed, stopped, resting
 
         public init(_ session: Session?, now: Date) {
             switch session?.status(at: now) {
             case .working: self = .working
             case .permissionRequired, .actionRequired: self = .waiting
             case .idle: self = .online
-            case .offline: self = session?.isResting == true ? .resting : .inactive
-            case .failed, nil: self = .inactive
+            case .failed: self = .failed
+            case .offline: self = session?.isResting == true ? .resting : .stopped
+            case nil: self = .stopped
             }
         }
     }

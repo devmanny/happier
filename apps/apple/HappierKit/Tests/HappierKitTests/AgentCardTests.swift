@@ -52,7 +52,8 @@ import Testing
                     metadata: ["lifecycleStateSince": 1, "sessionRestV1": ["v": 1, "reason": "idle", "at": 2]]),
         ].map { ($0.id, $0) })
         let rows = AgentCard.nowRows(memory, sessionId: "x", now: now, session: { sessions[$0] })
-        #expect(rows.map(\.state) == [.working, .waiting, .online, .inactive, .inactive, .resting, .inactive])
+        // A failed turn leaves the session running; one that isn't listed (archived or gone) isn't running.
+        #expect(rows.map(\.state) == [.working, .waiting, .online, .failed, .stopped, .resting, .stopped])
         #expect(rows.map(\.place) == ["Publish TAPAGOL", "Invoice La Chata", "radar", "Unknown", "Unknown", "Unknown", nil])
     }
 
