@@ -2628,10 +2628,12 @@ public final class HappierStore {
         }
     }
 
-    /// Where a downloaded attachment is kept: by content hash when known, else by session and path.
+    /// Where a downloaded attachment is kept: by content hash when known, else by session, path and
+    /// (for a file the agent sent) the send.
     static func attachmentCacheURL(for file: MessageAttachment, sessionId: String) -> URL {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Happier/Downloads")
-        let key = file.sha256 ?? Data(SHA256.hash(data: Data("\(sessionId)|\(file.path ?? file.name)".utf8))).map { String(format: "%02x", $0) }.joined()
+        let source = ([sessionId, file.path ?? file.name] + [file.revision].compactMap { $0 }).joined(separator: "|")
+        let key = file.sha256 ?? Data(SHA256.hash(data: Data(source.utf8))).map { String(format: "%02x", $0) }.joined()
         let folder = directory.appending(path: String(key.prefix(32)))
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appending(path: file.name)

@@ -104,15 +104,19 @@ public struct MessageAttachment: Identifiable, Equatable, Sendable {
     public let sizeBytes: Int?
     public let sha256: String?
     public let thumbnail: AttachmentThumbnail?
+    /// Without a content hash, which send of `path` this is (the agent's tool call): the file there
+    /// can change between sends, so each send keeps its own download.
+    public let revision: String?
 
     public init(name: String, path: String? = nil, mimeType: String? = nil, sizeBytes: Int? = nil, sha256: String? = nil,
-                thumbnail: AttachmentThumbnail? = nil) {
+                thumbnail: AttachmentThumbnail? = nil, revision: String? = nil) {
         self.name = name
         self.path = path
         self.mimeType = mimeType
         self.sizeBytes = sizeBytes
         self.sha256 = sha256
         self.thumbnail = thumbnail
+        self.revision = revision
     }
 
     public var isVideo: Bool {

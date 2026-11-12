@@ -110,10 +110,13 @@ private extension ChatItem {
         }
     }
 
-    /// Agent text that isn't thinking: always shown.
+    /// Agent text that isn't thinking, and files the agent sent the user: always shown.
     var isMessage: Bool {
-        if case .agentText(let text) = self { return !text.isThinking }
-        return false
+        switch self {
+        case .agentText(let text): !text.isThinking
+        case .toolCall(let tool): tool.sentFiles != nil
+        default: false
+        }
     }
 }
 

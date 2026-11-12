@@ -25,7 +25,11 @@ struct ChatItemView: View {
                 AgentBubble(itemId: message.id, text: message.text, date: message.createdAt, seq: message.seq, tail: tail, sessionId: sessionId)
             }
         case .toolCall(let tool):
-            ToolCallCard(tool: tool, sessionId: sessionId)
+            if let sent = tool.sentFiles {
+                SentFilesView(sent: sent, sessionId: sessionId, tail: tail)
+            } else {
+                ToolCallCard(tool: tool, sessionId: sessionId)
+            }
         case .event(let event):
             EventRow(event: event)
         }
@@ -47,20 +51,7 @@ private struct UserBubble: View {
             let files = message.files.isEmpty ? message.attachments.map { MessageAttachment(name: $0) } : message.files
             let media = files.filter { $0.isImage || $0.isVideo || AttachmentPreviews.cached($0.name) != nil }
             if !media.isEmpty {
-                // Up to three thumbnails a row, so many of them wrap instead of widening the
-                // message past the screen.
-                let size: CGFloat = media.count == 1 ? 180 : media.count == 2 ? 110 : 96
-                let lines = stride(from: 0, to: media.count, by: 3).map { Array(media[$0..<min($0 + 3, media.count)]) }
-                VStack(alignment: .trailing, spacing: 6) {
-                    ForEach(lines, id: \.first?.id) { line in
-                        HStack(spacing: 6) {
-                            Spacer(minLength: 56)
-                            ForEach(line) { file in
-                                MessageAttachmentTile(file: file, sessionId: sessionId, size: size) { openFilePreview?($0) }
-                            }
-                        }
-                    }
-                }
+                MessageAttachmentTiles(files: media, sessionId: sessionId, fromUser: true) { openFilePreview?($0) }
             }
             let unpreviewed = files.filter { file in !media.contains { $0.id == file.id } }
             if !message.text.isEmpty || !unpreviewed.isEmpty {

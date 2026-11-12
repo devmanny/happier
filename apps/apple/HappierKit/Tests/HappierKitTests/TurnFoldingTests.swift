@@ -69,6 +69,20 @@ import Testing
         #expect(shape(ChatRow.groupTools(items)) == ["tool:before", "tool:question", "tool:after", "text:done"])
     }
 
+    /// A file the agent sent reaches the user like a message: it stays out of the folded steps.
+    @Test func sentFilesShowLikeAMessage() {
+        func sendFile(_ id: String, state: ToolCall.State) -> ChatItem {
+            .toolCall(ToolCall(id: id, itemId: "i-\(id)", name: "SendUserFile", input: ["files": ["/r/report.pdf"], "status": "normal"],
+                               title: nil, state: state, result: nil, permission: nil, createdAt: .distantPast))
+        }
+        let items = [user("q"), tool("1"), sendFile("file", state: .completed), tool("2"), text("done")]
+        #expect(shape(ChatRow.rows(from: items, working: false)) == ["user:q", "work1", "tool:file", "work1", "text:done"])
+        // Mid-turn, the steps before it are done; only the ones after it are in progress.
+        #expect(shape(ChatRow.rows(from: Array(items.prefix(4)), working: true)) == ["user:q", "work1", "tool:file", "work1…"])
+        // A send that failed delivered nothing: it folds as a failed step.
+        #expect(shape(ChatRow.rows(from: [user("q"), sendFile("file", state: .error), text("done")], working: false)) == ["user:q", "work1", "text:done"])
+    }
+
     @Test func expandedStepsGroupConsecutiveTools() {
         let steps = [text("a"), tool("1"), tool("2"), text("b"), tool("3")]
         #expect(shape(ChatRow.groupTools(steps)) == ["text:a", "tools2", "text:b", "tool:3"])
