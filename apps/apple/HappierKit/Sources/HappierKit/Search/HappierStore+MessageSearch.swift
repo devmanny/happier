@@ -41,7 +41,8 @@ extension HappierStore {
     static let messageSearchTimeout: Duration = .seconds(15)
 
     /// One search across the online machines; with `cursors`, the next page of each of those machines.
-    public func searchMessages(query: String, cursors: [String: String]? = nil) async -> MessageSearchOutcome {
+    public func searchMessages(query: String, order: MessageSearch.Order = .relevance,
+                               cursors: [String: String]? = nil) async -> MessageSearchOutcome {
         var online = machines.filter { $0.isOnline(at: presenceDate()) }
         if online.isEmpty, cursors == nil {
             await refreshMachines()
@@ -52,7 +53,7 @@ extension HappierStore {
 
         // Every machine at once; answers are read back in the machine list's order.
         let asks = online.map { machine in
-            let request = MessageSearch.request(query: query, cursor: cursors?[machine.id])
+            let request = MessageSearch.request(query: query, cursor: cursors?[machine.id], order: order)
             return (machine, Task { @MainActor () -> MessageSearch.Answer? in
                 do {
                     return MessageSearch.answer(try await self.machineRPC(machine.id, method: MessageSearch.method, params: request,
@@ -86,7 +87,7 @@ extension HappierStore {
         }
         if !pages.isEmpty {
             return .results(
-                hits: MessageSearch.merge(pages.map(\.1.hits)),
+                hits: MessageSearch.merge(pages.map(\.1.hits), order: order),
                 cursors: Dictionary(uniqueKeysWithValues: pages.compactMap { machine, page in page.nextCursor.map { (machine.id, $0) } }),
                 backfilling: pages.compactMap { machine, page in
                     page.coverage.backfillComplete ? nil : MessageSearchBackfill(machineName: machine.name, coverage: page.coverage)

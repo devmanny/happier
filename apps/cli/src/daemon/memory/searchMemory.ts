@@ -155,7 +155,7 @@ export async function searchTier2Memory(params: Readonly<{
 
 const MESSAGE_SEARCH_CURSOR = /^o:(\d{1,9})$/;
 
-/** Full-text message search (`v: 2`): one BM25-ranked page of messages, with an offset cursor. */
+/** Full-text message search (`v: 2`): one page of messages, BM25-ranked or newest first, with an offset cursor. */
 export function searchDeepIndexMessages(params: Readonly<{
   deep: DeepIndexDbHandle;
   query: MemorySearchQueryV2;
@@ -174,6 +174,7 @@ export function searchDeepIndexMessages(params: Readonly<{
       scope: params.query.scope,
       limit: params.query.limit,
       offset,
+      order: params.query.order,
     });
     return {
       v: 2,

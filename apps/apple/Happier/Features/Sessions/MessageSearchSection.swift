@@ -26,7 +26,10 @@ final class MessageSearchResults {
     private(set) var cursors: [String: String] = [:]
     private(set) var isLoadingMore = false
     private(set) var turningOn: String?
+    /// The newest message first unless the best match was chosen; kept on this device.
+    private(set) var order = MessageSearch.Order(rawValue: UserDefaults.standard.string(forKey: orderKey) ?? "") ?? .recent
     private var query = ""
+    private static let orderKey = "messageSearchOrder"
 
     /// Waits for typing to pause; a newer query cancels this one (the caller's task id).
     static let debounce: Duration = .milliseconds(300)
@@ -50,7 +53,7 @@ final class MessageSearchResults {
         state = .searching
         try? await Task.sleep(for: Self.debounce)
         guard !Task.isCancelled else { return }
-        let outcome = await store.searchMessages(query: trimmed)
+        let outcome = await store.searchMessages(query: trimmed, order: order)
         guard !Task.isCancelled else { return }
         query = trimmed
         apply(outcome, store: store, appending: false)
@@ -60,7 +63,19 @@ final class MessageSearchResults {
         guard !cursors.isEmpty, !isLoadingMore else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
-        apply(await store.searchMessages(query: query, cursors: cursors), store: store, appending: true)
+        apply(await store.searchMessages(query: query, order: order, cursors: cursors), store: store, appending: true)
+    }
+
+    /// Changes how the results come and asks again in that order.
+    func setOrder(_ next: MessageSearch.Order, store: HappierStore) async {
+        guard next != order else { return }
+        order = next
+        UserDefaults.standard.set(next.rawValue, forKey: Self.orderKey)
+        guard !query.isEmpty else { return }
+        state = .searching
+        let outcome = await store.searchMessages(query: query, order: next)
+        guard order == next else { return }
+        apply(outcome, store: store, appending: false)
     }
 
     func turnOn(_ machine: HappierStore.MessageSearchMachine, store: HappierStore) async {
@@ -69,7 +84,7 @@ final class MessageSearchResults {
         defer { turningOn = nil }
         guard await store.setMessageSearch(machineId: machine.id, enabled: true) != nil else { return }
         state = .searching
-        apply(await store.searchMessages(query: query), store: store, appending: false)
+        apply(await store.searchMessages(query: query, order: order), store: store, appending: false)
     }
 
     private func reset() {
@@ -83,7 +98,7 @@ final class MessageSearchResults {
 
     private func apply(_ outcome: HappierStore.MessageSearchOutcome, store: HappierStore, appending: Bool) {
         if case .results(let found, let next, let backfilling) = outcome {
-            hits = appending ? MessageSearch.merge([hits, found]) : found
+            hits = appending ? MessageSearch.merge([hits, found], order: order) : found
             cursors = next
             self.backfilling = backfilling
             localHits = []
@@ -116,23 +131,69 @@ struct MessageSearchSection: View {
 
     var body: some View {
         if results.hasContent {
-            Section("Messages") {
+            let byDay = results.order == .recent
+            Section {
                 status
-                ForEach(results.hits) { hit in hitRow(hit) }
-                if !results.cursors.isEmpty {
-                    Button {
-                        Task { await results.loadMore(store: store) }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text("Show More Messages")
-                            if results.isLoadingMore { HappierSpinner(size: HappierSpinner.mini) }
-                        }
-                    }
-                    .disabled(results.isLoadingMore)
-                    .accessibilityIdentifier("message-search-more")
+                if !byDay {
+                    ForEach(results.hits) { hit in hitRow(hit) }
+                    more
                 }
                 ForEach(results.localHits) { hit in hitRow(hit) }
+            } header: {
+                header
             }
+            if byDay {
+                // Newest day first; older ones follow as more pages come.
+                ForEach(MessageSearch.days(results.hits)) { day in
+                    Section(ChatDate.dayLabel(day.date)) {
+                        ForEach(day.hits) { hit in hitRow(hit, timeOnly: true) }
+                    }
+                }
+                if !results.cursors.isEmpty {
+                    Section { more }
+                }
+            }
+        }
+    }
+
+    /// "Messages", and how they come: the newest first (by day) or the best match first.
+    private var header: some View {
+        HStack {
+            Text("Messages")
+            Spacer()
+            if results.state == .results || !results.hits.isEmpty {
+                Menu {
+                    Picker("Order", selection: Binding(get: { results.order }, set: { order in
+                        AppHaptics.selection()
+                        Task { await results.setOrder(order, store: store) }
+                    })) {
+                        Label("Newest First", systemImage: "calendar").tag(MessageSearch.Order.recent)
+                        Label("Best Match", systemImage: "text.magnifyingglass").tag(MessageSearch.Order.relevance)
+                    }
+                } label: {
+                    Label(results.order == .recent ? "Newest First" : "Best Match", systemImage: "arrow.up.arrow.down")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                }
+                .textCase(nil)
+                .accessibilityIdentifier("message-search-order")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var more: some View {
+        if !results.cursors.isEmpty {
+            Button {
+                Task { await results.loadMore(store: store) }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("Show More Messages")
+                    if results.isLoadingMore { HappierSpinner(size: HappierSpinner.mini) }
+                }
+            }
+            .disabled(results.isLoadingMore)
+            .accessibilityIdentifier("message-search-more")
         }
     }
 
@@ -214,12 +275,12 @@ struct MessageSearchSection: View {
         }
     }
 
-    private func hitRow(_ hit: MessageSearch.Hit) -> some View {
+    private func hitRow(_ hit: MessageSearch.Hit, timeOnly: Bool = false) -> some View {
         Button {
             AppHaptics.selection()
             open(hit)
         } label: {
-            MessageHitRow(hit: hit, session: store.sessions[hit.sessionId])
+            MessageHitRow(hit: hit, session: store.sessions[hit.sessionId], timeOnly: timeOnly)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -231,6 +292,8 @@ struct MessageSearchSection: View {
 private struct MessageHitRow: View {
     let hit: MessageSearch.Hit
     let session: Session?
+    /// Under its day's heading, the time is enough.
+    var timeOnly = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -241,7 +304,7 @@ private struct MessageHitRow: View {
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Spacer(minLength: 6)
-                    Text(ChatDate.listLabel(hit.createdAt))
+                    Text(timeOnly ? hit.createdAt.formatted(date: .omitted, time: .shortened) : ChatDate.listLabel(hit.createdAt))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()

@@ -84,13 +84,21 @@ public enum MessageSearch {
         case refused(Refusal)
     }
 
-    public static func request(query: String, cursor: String?, limit: Int = pageSize) -> JSONValue {
+    /// How the results come: the newest message first, or the best match first.
+    public enum Order: String, CaseIterable, Sendable {
+        case recent, relevance
+    }
+
+    /// `order` goes out only for the newest first: a daemon from before it ranks by relevance
+    /// whatever is asked, and what it sends is then put in date order here (`merge`).
+    public static func request(query: String, cursor: String?, limit: Int = pageSize, order: Order = .relevance) -> JSONValue {
         var request: [String: JSONValue] = [
             "v": 2,
             "query": .string(query.trimmingCharacters(in: .whitespacesAndNewlines)),
             "limit": .number(Double(limit)),
         ]
         if let cursor { request["cursor"] = .string(cursor) }
+        if order == .recent { request["order"] = "recent" }
         return .object(request)
     }
 
@@ -125,11 +133,30 @@ public enum MessageSearch {
     }
 
     /// Several machines' answers as one list: a message found by more than one appears once,
-    /// best-ranked first, newest first among equals.
-    public static func merge(_ pages: [[Hit]]) -> [Hit] {
+    /// best-ranked first (newest first among equals), or newest first when asked that way.
+    public static func merge(_ pages: [[Hit]], order: Order = .relevance) -> [Hit] {
         var best: [String: Hit] = [:]
         for hit in pages.joined() where (best[hit.id]?.score ?? -.infinity) < hit.score { best[hit.id] = hit }
-        return best.values.sorted { ($0.score, $0.createdAt, $0.id) > ($1.score, $1.createdAt, $1.id) }
+        switch order {
+        case .relevance: return best.values.sorted { ($0.score, $0.createdAt, $0.id) > ($1.score, $1.createdAt, $1.id) }
+        case .recent: return best.values.sorted { ($0.createdAt, $0.score, $0.id) > ($1.createdAt, $1.score, $1.id) }
+        }
+    }
+
+    /// The messages found on one day.
+    public struct Day: Identifiable, Equatable, Sendable {
+        /// The day's start.
+        public let date: Date
+        public let hits: [Hit]
+        public var id: Date { date }
+    }
+
+    /// What was found, by the day it was written: the newest day first, each day's messages in the
+    /// order they came in.
+    public static func days(_ hits: [Hit], calendar: Calendar = .current) -> [Day] {
+        Dictionary(grouping: hits) { calendar.startOfDay(for: $0.createdAt) }
+            .map { Day(date: $0.key, hits: $0.value) }
+            .sorted { $0.date > $1.date }
     }
 
     /// The fallback while the Mac is away: what this device already has loaded, newest first.

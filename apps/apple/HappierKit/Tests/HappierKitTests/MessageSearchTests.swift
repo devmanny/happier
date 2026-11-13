@@ -73,6 +73,35 @@ private func user(_ id: String, _ text: String, seq: Int, at createdAt: Date) ->
         #expect(merged.map(\.id) == ["s1:1", "s3:2", "s2:4"])
     }
 
+    @Test func asksForTheNewestFirstAndKeepsThemThatWayAcrossMachines() {
+        // Best match first is the request every daemon already knows.
+        #expect(MessageSearch.request(query: "relay", cursor: nil, order: .relevance) == ["v": 2, "query": "relay", "limit": 20])
+        #expect(MessageSearch.request(query: "relay", cursor: "o:20", order: .recent)
+            == ["v": 2, "query": "relay", "limit": 20, "cursor": "o:20", "order": "recent"])
+        func hit(_ session: String, _ seq: Int, at: TimeInterval, score: Double) -> MessageSearch.Hit {
+            MessageSearch.Hit(sessionId: session, seq: seq, createdAt: Date(timeIntervalSince1970: at), fromUser: true,
+                              snippet: [.init(text: "x", isMatch: true)], score: score, title: nil, agentFlavor: nil)
+        }
+        let pages = [[hit("s1", 1, at: 10, score: 9), hit("s2", 4, at: 30, score: 1)], [hit("s3", 2, at: 20, score: 5), hit("s1", 1, at: 10, score: 2)]]
+        #expect(MessageSearch.merge(pages, order: .recent).map(\.id) == ["s2:4", "s3:2", "s1:1"])
+        #expect(MessageSearch.merge(pages, order: .relevance).map(\.id) == ["s1:1", "s3:2", "s2:4"])
+    }
+
+    @Test func groupsWhatWasFoundByDayNewestDayFirst() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Mexico_City")!
+        func hit(_ seq: Int, _ day: Int, _ hour: Int) -> MessageSearch.Hit {
+            let date = calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour))!
+            return MessageSearch.Hit(sessionId: "s", seq: seq, createdAt: date, fromUser: false, snippet: [.init(text: "x", isMatch: true)],
+                                     score: 1, title: nil, agentFlavor: nil)
+        }
+        // Late on the 11th and early on the 12th are different days, whatever the hours between them.
+        let days = MessageSearch.days([hit(1, 12, 9), hit(2, 10, 8), hit(3, 12, 1), hit(4, 11, 23)], calendar: calendar)
+        #expect(days.map { calendar.component(.day, from: $0.date) } == [12, 11, 10])
+        #expect(days.map { $0.hits.map(\.seq) } == [[1, 3], [4], [2]])
+        #expect(MessageSearch.days([], calendar: calendar).isEmpty)
+    }
+
     @Test func findsTheRowThatShowsAMessage() {
         let created = Date(timeIntervalSince1970: 1)
         let items: [ChatItem] = [

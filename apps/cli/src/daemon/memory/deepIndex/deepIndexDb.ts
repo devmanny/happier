@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, openSync } from 'node:fs';
 
-import type { MemorySearchSnippetSegmentV2 } from '@happier-dev/protocol';
+import type { MemorySearchOrderV2, MemorySearchSnippetSegmentV2 } from '@happier-dev/protocol';
 
 import { openSqliteDatabaseSync, type SqliteDatabaseSync } from '@/utils/sqlite/sqliteSync';
 
@@ -76,6 +76,8 @@ export type DeepIndexDbHandle = Readonly<{
     scope: DeepIndexSearchScope;
     limit: number;
     offset: number;
+    /** Best match first unless the newest messages are asked for. */
+    order?: MemorySearchOrderV2;
   }>) => Readonly<{ hits: DeepIndexMessageHit[]; hasMore: boolean }>;
   upsertEmbedding: (args: Readonly<DeepIndexMessageKey & {
     provider: string;
@@ -330,7 +332,7 @@ export function openDeepIndexDb(args: Readonly<{ dbPath: string; accountId: stri
     ORDER BY m.seq ASC
     LIMIT ?;
   `);
-  const searchSql = (scoped: boolean) => `
+  const searchSql = (scoped: boolean, order: MemorySearchOrderV2) => `
     SELECT
       m.sessionId AS sessionId,
       m.seq AS seq,
@@ -346,11 +348,13 @@ export function openDeepIndexDb(args: Readonly<{ dbPath: string; accountId: stri
       LEFT JOIN sessions s ON s.sessionId = m.sessionId
     WHERE messages_fts MATCH ?
       ${scoped ? 'AND m.sessionId = ?' : ''}
-    ORDER BY rank ASC, m.createdAtMs DESC, m.id DESC
+    ORDER BY ${order === 'recent' ? '' : 'rank ASC, '}m.createdAtMs DESC, m.id DESC
     LIMIT ? OFFSET ?;
   `;
-  const searchGlobalStmt = db.prepare(searchSql(false));
-  const searchSessionStmt = db.prepare(searchSql(true));
+  const searchStmts = {
+    relevance: { global: db.prepare(searchSql(false, 'relevance')), session: db.prepare(searchSql(true, 'relevance')) },
+    recent: { global: db.prepare(searchSql(false, 'recent')), session: db.prepare(searchSql(true, 'recent')) },
+  };
 
   const transaction = <T>(work: () => T): T => {
     db.exec('BEGIN IMMEDIATE');
@@ -392,14 +396,14 @@ export function openDeepIndexDb(args: Readonly<{ dbPath: string; accountId: stri
       if (!sid) return;
       upsertSessionStmt.run(sid, toNullableText(title), toNullableText(agent));
     },
-    searchMessages: ({ query, scope, limit, offset }) => {
+    searchMessages: ({ query, scope, limit, offset, order = 'relevance' }) => {
       const match = buildDeepIndexMatchQuery(query);
       if (!match) return { hits: [], hasMore: false };
       const pageSize = Math.max(1, Math.trunc(limit));
       const start = Math.max(0, Math.trunc(offset));
       const rows = (scope.type === 'session'
-        ? searchSessionStmt.all(match, String(scope.sessionId ?? '').trim(), pageSize + 1, start)
-        : searchGlobalStmt.all(match, pageSize + 1, start)) as Array<Record<string, unknown>>;
+        ? searchStmts[order].session.all(match, String(scope.sessionId ?? '').trim(), pageSize + 1, start)
+        : searchStmts[order].global.all(match, pageSize + 1, start)) as Array<Record<string, unknown>>;
       const hits = rows.slice(0, pageSize).map((row): DeepIndexMessageHit => {
         const text = String(row.text ?? '');
         const snippet = parseSnippet(String(row.snippet ?? ''));

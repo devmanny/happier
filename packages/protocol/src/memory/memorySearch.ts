@@ -107,10 +107,16 @@ export const MemorySearchHitV2Schema = z.object({
 }).passthrough();
 export type MemorySearchHitV2 = z.infer<typeof MemorySearchHitV2Schema>;
 
+/** How a page sequence is ordered: best match first, or newest message first. */
+export const MemorySearchOrderV2Schema = z.enum(['relevance', 'recent']);
+export type MemorySearchOrderV2 = z.infer<typeof MemorySearchOrderV2Schema>;
+
 export const MemorySearchQueryV2Schema = z.object({
   v: z.literal(2),
   query: z.string().trim().min(1).max(500),
   scope: MemorySearchScopeSchema.default({ type: 'global' }),
+  /** A daemon from before this field ranks by relevance whatever is asked. */
+  order: MemorySearchOrderV2Schema.default('relevance'),
   limit: z.number().int().min(1).max(MEMORY_SEARCH_V2_MAX_LIMIT).default(MEMORY_SEARCH_V2_DEFAULT_LIMIT),
   /** Opaque continuation from the previous page's `nextCursor`. */
   cursor: z.string().min(1).max(200).nullable().optional(),

@@ -143,6 +143,25 @@ describe('rpcHandlers.memory (deep search routing)', () => {
     expect([...first.hits, ...second.hits].find((hit) => hit.sessionId === 's2')?.session).toEqual({ title: null, agent: null });
   });
 
+  it('answers v2 newest first when the query asks for recent messages', async () => {
+    // The newest match is the least relevant one.
+    deep.upsertMessages({
+      sessionId: 's1',
+      messages: [{
+        seq: 12, createdAtMs: 120, role: 'assistant', kind: 'assistant_message',
+        text: 'A long closing note about relays, daemons, runners and budgets that names openclaw only once among many unrelated words.',
+      }],
+    });
+    const search = registerSearch(workerFor({ deep, settings: DEEP_SETTINGS, dbPath }));
+
+    const first = MemorySearchResultV2Schema.parse(await search({ v: 2, query: 'openclaw', limit: 2, order: 'recent' }));
+    if (!first.ok) throw new Error('search failed');
+    const second = MemorySearchResultV2Schema.parse(await search({ v: 2, query: 'openclaw', limit: 2, order: 'recent', cursor: first.nextCursor }));
+    if (!second.ok) throw new Error('search failed');
+    expect(second.nextCursor).toBeNull();
+    expect([...first.hits, ...second.hits].map((hit) => `${hit.sessionId}:${hit.seq}`)).toEqual(['s1:12', 's2:9', 's1:4', 's1:3']);
+  });
+
   it('tells v2 callers why the full-text index cannot answer', async () => {
     const disabled = registerSearch(workerFor({ deep: null, settings: { ...DEEP_SETTINGS, enabled: false }, dbPath }));
     expect(await disabled({ v: 2, query: 'openclaw' })).toEqual({

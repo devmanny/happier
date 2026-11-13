@@ -96,6 +96,12 @@ describe('memory message search (v2)', () => {
     expect(next.cursor).toBe('o:20');
   });
 
+  it('ranks by relevance unless the newest messages are asked for first', () => {
+    expect(MemorySearchQueryV2Schema.parse({ v: 2, query: 'relay' }).order).toBe('relevance');
+    expect(MemorySearchQueryV2Schema.parse({ v: 2, query: 'relay', order: 'recent' }).order).toBe('recent');
+    expect(MemorySearchQueryV2Schema.safeParse({ v: 2, query: 'relay', order: 'oldest' }).success).toBe(false);
+  });
+
   it('rejects blank queries and pages beyond the limit', () => {
     expect(MemorySearchQueryV2Schema.safeParse({ v: 2, query: '   ' }).success).toBe(false);
     expect(MemorySearchQueryV2Schema.safeParse({ v: 2, query: 'x', limit: MEMORY_SEARCH_V2_MAX_LIMIT + 1 }).success).toBe(false);

@@ -246,6 +246,17 @@ enum ChatDate {
         return date.formatted(date: .numeric, time: .omitted)
     }
 
+    /// A day as a heading: "Today", "Yesterday", the weekday within the last week, else the date.
+    static func dayLabel(_ day: Date, now: Date = .now) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return String(localized: "Today") }
+        if calendar.isDateInYesterday(day) { return String(localized: "Yesterday") }
+        if let days = calendar.dateComponents([.day], from: day, to: now).day, (0..<7).contains(days) {
+            return day.formatted(.dateTime.weekday(.wide))
+        }
+        return day.formatted(date: .abbreviated, time: .omitted)
+    }
+
     /// Centered separator inside a chat: "Today 10:42", "Monday 18:03", …
     static func separatorLabel(_ date: Date) -> String {
         let calendar = Calendar.current

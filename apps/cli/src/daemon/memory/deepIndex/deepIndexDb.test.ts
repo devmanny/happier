@@ -104,6 +104,29 @@ describe('deepIndexDb (full-text, one row per message)', () => {
     db.close();
   });
 
+  it('lists the newest matches first when asked, whatever their rank, and pages through them', () => {
+    const db = openDeepIndexDb({ dbPath, accountId: 'acct-1' });
+    db.upsertMessages({
+      sessionId: 's1',
+      messages: [
+        message(1, 'quota'),
+        message(2, 'quota quota'),
+        message(3, 'A long report about relays, daemons and runners that mentions the quota only once among many unrelated words.'),
+      ],
+    });
+
+    const ranked = db.searchMessages({ query: 'quota', scope: { type: 'global' }, limit: 10, offset: 0 });
+    expect(ranked.hits.at(-1)?.seq).toBe(3);
+
+    const first = db.searchMessages({ query: 'quota', scope: { type: 'global' }, limit: 2, offset: 0, order: 'recent' });
+    const second = db.searchMessages({ query: 'quota', scope: { type: 'session', sessionId: 's1' }, limit: 2, offset: 2, order: 'recent' });
+    expect(first.hits.map((hit) => hit.seq)).toEqual([3, 2]);
+    expect(first.hasMore).toBe(true);
+    expect(second.hits.map((hit) => hit.seq)).toEqual([1]);
+    expect(second.hasMore).toBe(false);
+    db.close();
+  });
+
   it('keeps the index across reopen and rebuilds it for another account or an older schema', () => {
     const first = openDeepIndexDb({ dbPath, accountId: 'acct-1' });
     expect(first.rebuilt).toBe(true);
