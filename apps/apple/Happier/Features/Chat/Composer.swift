@@ -18,6 +18,7 @@ struct Composer: View {
 
     private static let log = Logger(subsystem: "dev.happier.apple", category: "composer")
     @Environment(HappierStore.self) private var store
+    @Environment(\.userBubbleColor) private var accent
     @State private var sheet: SheetKind?
     /// Dragging the status line (see `statusDrag`).
     @State private var statusGrabbed = false
@@ -535,7 +536,7 @@ struct Composer: View {
         .buttonStyle(.glassProminent)
         .glassHover()
         .buttonBorderShape(.circle)
-        .tint(stop ? .red : .userBubble)
+        .tint(stop ? .red : accent)
         .disabled(!stop && !canSend)
         .accessibilityLabel(stop ? "Stop agent" : "Send")
     }

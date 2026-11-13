@@ -168,6 +168,7 @@ struct ReplyOptions: View {
     var chosen: String? = nil
     let onSelect: (String) -> Void
     @Environment(\.chatRowActions) private var rowActions
+    @Environment(\.userBubbleColor) private var accent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -177,15 +178,15 @@ struct ReplyOptions: View {
                     onSelect(option)
                 } label: {
                     if option == chosen {
-                        Label { pill(option) } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.userBubble) }
+                        Label { pill(option) } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
                     } else {
                         pill(option)
                     }
                 }
                 .disabled(chosen != nil)
                 .opacity(chosen != nil && option != chosen ? 0.45 : 1)
-                // Blue text on clear glass, like the composer's pills. Not `.tint`: on the Mac it
-                // fills the glass with the tint and the blue text vanishes into it.
+                // Colored text on clear glass, like the composer's pills. Not `.tint`: on the Mac it
+                // fills the glass with the tint and the text vanishes into it.
                 .buttonStyle(.glass)
                 .glassHover()
                 .onDrag {
@@ -213,7 +214,7 @@ struct ReplyOptions: View {
         Text(option)
             .font(.callout.weight(.medium))
             .multilineTextAlignment(.leading)
-            .foregroundStyle(Color.userBubble)
+            .foregroundStyle(accent)
     }
 }
 

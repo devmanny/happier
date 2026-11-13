@@ -748,6 +748,8 @@ struct SpeechControls: View {
 /// conversation as it arrives, queued after the one being read.
 struct AutoReadButton: View {
     let sessionId: String
+    /// The conversation's bubble color, shown while on.
+    var color: Color = .userBubble
     @State private var speaker = MessageSpeaker.shared
     @Environment(HappierStore.self) private var store
 
@@ -761,7 +763,7 @@ struct AutoReadButton: View {
             Label(on ? "Stop Reading New Messages" : "Read New Messages Aloud",
                   systemImage: on ? "speaker.wave.2.fill" : "speaker.wave.2")
         }
-        .tint(on ? Color.userBubble : nil)
+        .tint(on ? color : nil)
         .symbolEffect(.variableColor.iterative, isActive: on && speaker.speakingText != nil)
         .help(on ? "Stop reading new messages aloud" : "Read each new message aloud as it arrives")
     }

@@ -378,8 +378,9 @@ struct FolderColorMenu: View {
 }
 
 extension EnvironmentValues {
-    /// The color of your own message bubbles: the app's blue, or the conversation's project
-    /// folder color, set once by the conversation.
+    /// The color of your own message bubbles, and of what answers for you (send, reply options,
+    /// read aloud): the app's blue, or the conversation's project folder color, set once by the
+    /// conversation.
     @Entry var userBubbleColor: Color = .userBubble
 }
 
@@ -393,9 +394,9 @@ struct FolderWash: View {
     var body: some View {
         if let color, inSessionWindow {
             ZStack {
-                color.opacity(0.06)
+                color.opacity(0.04)
                 Rectangle()
-                    .strokeBorder(color.opacity(0.9), lineWidth: 22)
+                    .strokeBorder(color.opacity(0.55), lineWidth: 14)
                     .blur(radius: 26)
             }
             .clipped()

@@ -746,7 +746,7 @@ private struct SessionToolbar: ViewModifier {
                         SessionBrowserButton(sessionId: sessionId) { openBrowser() }
                     }
                 }
-                ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId) }
+                ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId, color: details.folderColor?.color ?? .userBubble) }
                 if !details.bellInMenu {
                     ToolbarItem(placement: .primaryAction) { SessionBellButton(sessionId: sessionId) }
                 } else if let open = details.sessionTasks {
