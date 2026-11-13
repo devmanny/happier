@@ -296,7 +296,8 @@ struct Composer: View {
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                if !canSend || dictation.isRecording || talking {
+                // Until something is typed: a photo alone can still be sent, or spoken about first.
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || dictation.isRecording || talking {
                     // Tap: dictate into the field. Hold: push to talk, sent when released, and the
                     // agent's answer is read aloud (a spoken conversation).
                     PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
