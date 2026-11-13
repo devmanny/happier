@@ -988,6 +988,38 @@ export async function requeueNotReceivedPendingQueueV2Delivery(params: {
     };
 }
 
+/**
+ * Replace a queued row's requested action — the operation a user's tap on a blocked row sends.
+ * For a row blocked before any provider effect was possible the server also clears the block and
+ * keeps the row's place in line; a possibly-delivered row is refused with `action-conflict`.
+ */
+export async function updatePendingQueueV2RequestedAction(params: {
+    token: string;
+    sessionId: string;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+}): Promise<{ didUpdate: boolean; pendingQueueState?: KnownPendingQueueState }> {
+    const localId = requirePendingLocalId(params.localId);
+    const serverUrl = resolveServerHttpBaseUrl();
+    const response = await axios.patch(
+        `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/${encodeURIComponent(localId)}/action`,
+        { requestedAction: params.requestedAction },
+        {
+            headers: buildSessionRunnerHttpHeaders(params.token, 'application/json'),
+            timeout: 10_000,
+        },
+    );
+    const data: unknown = response?.data;
+    if (!data || typeof data !== 'object' || (data as Record<string, unknown>).ok !== true) {
+        throw new Error('Invalid pending requested-action response');
+    }
+    const pendingQueueState = readKnownPendingQueueState(data);
+    return {
+        didUpdate: (data as Record<string, unknown>).didUpdate === true,
+        ...(pendingQueueState ? { pendingQueueState } : {}),
+    };
+}
+
 export async function blockPendingQueueV2Delivery(params: {
     token: string;
     sessionId: string;

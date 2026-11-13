@@ -157,6 +157,8 @@ const resolveAcceptedPendingDeliveryMock = vi.fn();
 const blockPendingDeliveryMock = vi.fn();
 const listProviderDeliveryLocalIdsMock = vi.fn();
 const listDeliveryStatusesMock = vi.fn();
+const listPendingRowsMock = vi.fn();
+const updatePendingRequestedActionMock = vi.fn();
 let sessionClientModulePromise: Promise<typeof import('./sessionClient')> | null = null;
 
 vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
@@ -168,6 +170,8 @@ vi.mock('./pendingQueueV2Transport', async (importOriginal) => {
     blockPendingQueueV2Delivery: (...args: unknown[]) => blockPendingDeliveryMock(...args),
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer: (...args: unknown[]) => listProviderDeliveryLocalIdsMock(...args),
     listPendingQueueV2DeliveryStatusesFromServer: (...args: unknown[]) => listDeliveryStatusesMock(...args),
+    listPendingQueueV2RowsFromServer: (...args: unknown[]) => listPendingRowsMock(...args),
+    updatePendingQueueV2RequestedAction: (...args: unknown[]) => updatePendingRequestedActionMock(...args),
   };
 });
 
@@ -388,6 +392,10 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     listProviderDeliveryLocalIdsMock.mockResolvedValue([]);
     listDeliveryStatusesMock.mockReset();
     listDeliveryStatusesMock.mockResolvedValue([]);
+    listPendingRowsMock.mockReset();
+    listPendingRowsMock.mockResolvedValue([]);
+    updatePendingRequestedActionMock.mockReset();
+    updatePendingRequestedActionMock.mockRejectedValue(new Error('not stubbed'));
     enqueueSessionTurnMock.mockClear();
     enqueueTranscriptMessageMock.mockClear();
     flushOutboxMock.mockClear();
@@ -1784,6 +1792,108 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     })).resolves.toEqual({
       type: 'deferred',
       reason: 'waiting_for_predecessor',
+    });
+  });
+
+  describe('queue head left blocked by a disposed previous runtime', () => {
+    const waitingForPredecessor = (pendingVersion: number) => ({
+      didMaterialize: false,
+      deferredReason: 'waiting_for_predecessor',
+      pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 1, pendingVersion },
+    });
+    const pendingRow = (
+      localId: string,
+      deliveryStatus: Record<string, unknown>,
+      requestedAction: Record<string, unknown> | null = { v: 1, kind: 'enqueue' },
+    ) => ({ localId, deliveryStatus, messageRole: 'user', requestedAction, content: null, createdAt: 1000 });
+    const disposedHead = (localId: string) => pendingRow(
+      localId,
+      { status: 'blocked', reason: 'runtime_disposed_before_delivery' },
+      { v: 1, kind: 'steer_if_active' },
+    );
+    const createStuckClient = () => createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 2,
+      pendingBlockedCount: 1,
+      pendingVersion: 7,
+    });
+
+    it('puts the proven-undelivered head back in line once and retries materialization', async () => {
+      const infoFileSpy = vi.spyOn(logger, 'infoFile').mockImplementation(() => {});
+      const client = await createStuckClient();
+      listPendingRowsMock.mockResolvedValue([
+        // A possibly-delivered blocked row does not hold the queue, so it is not the head.
+        pendingRow('maybe-delivered', { status: 'blocked', reason: 'delivery_outcome_uncertain' }),
+        disposedHead('disposed-head'),
+        pendingRow('later', { status: 'queued' }),
+      ]);
+      updatePendingRequestedActionMock.mockResolvedValueOnce({
+        didUpdate: true,
+        pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+      });
+      materializeNextMock
+        .mockResolvedValueOnce(waitingForPredecessor(7))
+        .mockResolvedValueOnce({
+          didMaterialize: false,
+          deferredReason: 'waiting_for_foreground_turn',
+          pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+        })
+        // A later pass finds the same row blocked again: the user decides from here.
+        .mockResolvedValueOnce(waitingForPredecessor(9));
+
+      await expect(client.materializeNextPendingMessageSafely({
+        reconcileWhenEmpty: 'force',
+      })).resolves.toEqual({ type: 'deferred', reason: 'waiting_for_foreground_turn' });
+
+      expect(updatePendingRequestedActionMock).toHaveBeenCalledTimes(1);
+      expect(updatePendingRequestedActionMock).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 's1',
+        localId: 'disposed-head',
+        requestedAction: { v: 1, kind: 'steer_if_active' },
+      }));
+      expect(materializeNextMock).toHaveBeenCalledTimes(2);
+      expect(materializeNextMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ expectedPendingVersion: 8 }));
+      expect(infoFileSpy.mock.calls.filter(([message]) => (
+        String(message).includes('requeued pending row blocked by a disposed previous runtime')
+      ))).toHaveLength(1);
+
+      await expect(client.materializeNextPendingMessageSafely({
+        reconcileWhenEmpty: 'force',
+      })).resolves.toEqual({ type: 'deferred', reason: 'waiting_for_predecessor' });
+      expect(updatePendingRequestedActionMock).toHaveBeenCalledTimes(1);
+      expect(materializeNextMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a head blocked for any other reason to the user', async () => {
+      const client = await createStuckClient();
+      listPendingRowsMock.mockResolvedValue([
+        pendingRow('rejected-head', { status: 'blocked', reason: 'invalid_prompt_text' }),
+        disposedHead('disposed-behind-head'),
+      ]);
+      materializeNextMock.mockResolvedValueOnce(waitingForPredecessor(7));
+
+      await expect(client.materializeNextPendingMessageSafely({
+        reconcileWhenEmpty: 'force',
+      })).resolves.toEqual({ type: 'deferred', reason: 'waiting_for_predecessor' });
+
+      expect(updatePendingRequestedActionMock).not.toHaveBeenCalled();
+      expect(materializeNextMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stays deferred and does not replay the write when the server refuses it', async () => {
+      const client = await createStuckClient();
+      listPendingRowsMock.mockResolvedValue([disposedHead('disposed-head'), pendingRow('later', { status: 'queued' })]);
+      updatePendingRequestedActionMock.mockRejectedValue(createPendingDeliveryHttpError(409, 'action-conflict'));
+      materializeNextMock.mockResolvedValue(waitingForPredecessor(7));
+
+      for (let pass = 0; pass < 2; pass += 1) {
+        await expect(client.materializeNextPendingMessageSafely({
+          reconcileWhenEmpty: 'force',
+        })).resolves.toEqual({ type: 'deferred', reason: 'waiting_for_predecessor' });
+      }
+
+      expect(updatePendingRequestedActionMock).toHaveBeenCalledTimes(1);
+      expect(materializeNextMock).toHaveBeenCalledTimes(2);
     });
   });
 

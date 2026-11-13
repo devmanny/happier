@@ -20,17 +20,20 @@ import {
     PendingQueueMaterializationTransportAmbiguousError,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedAction,
 } from './pendingQueueV2Transport';
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
     mockGet: vi.fn(),
     mockPost: vi.fn(),
+    mockPatch: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
     default: {
         get: mockGet,
         post: mockPost,
+        patch: mockPatch,
         isAxiosError: (error: unknown) => Boolean(
             error && typeof error === 'object' && (error as { isAxiosError?: unknown }).isAxiosError === true,
         ),
@@ -41,6 +44,7 @@ describe('pendingQueueV2Transport', () => {
     beforeEach(() => {
         mockGet.mockReset();
         mockPost.mockReset();
+        mockPatch.mockReset();
     });
 
     it('accepts a terminal enqueue rejoin only with the exact committed-message localId', async () => {
@@ -174,6 +178,28 @@ describe('pendingQueueV2Transport', () => {
         expect(socket.emitWithAck).not.toHaveBeenCalled();
         expect(mockGet).not.toHaveBeenCalled();
         expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('retries a blocked row through the requested-action operation and reads the resulting queue state', async () => {
+        mockPatch.mockResolvedValueOnce({
+            data: { ok: true, didUpdate: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+        });
+
+        await expect(updatePendingQueueV2RequestedAction({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: 'blocked/row',
+            requestedAction: { v: 1, kind: 'steer_if_active' },
+        })).resolves.toEqual({
+            didUpdate: true,
+            pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+        });
+
+        expect(mockPatch).toHaveBeenCalledWith(
+            expect.stringMatching(/\/v2\/sessions\/session-1\/pending\/blocked%2Frow\/action$/),
+            { requestedAction: { v: 1, kind: 'steer_if_active' } },
+            expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer token' }) }),
+        );
     });
 
     it('degrades a new conditional-steer settlement to a strict block on an older server', async () => {

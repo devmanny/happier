@@ -169,6 +169,7 @@ import {
     SessionRuntimeActivityCloseAckSchema,
     SessionRuntimeActivityCloseRequestSchema,
     SessionTranscriptObservationProvenanceV1Schema,
+    doesPendingDeliveryHoldLaterRowsV1,
 } from '@happier-dev/protocol';
 import {
     readSessionRuntimeActivityProjectionBoundary,
@@ -219,6 +220,7 @@ import {
     isAcceptedPendingQueueV2DeliveryNotFound,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedAction,
     type PendingMaterializationDeliveryState,
     type PendingQueueDeliveryBlockedReason,
     type PendingQueueMaterializedMessage,
@@ -650,6 +652,8 @@ export class ApiSessionClient extends EventEmitter {
     // Generic reversible provider-path blocks retain identity so exact late provider evidence can
     // still settle the row. A proven pre-provider lifecycle failure retires it after durable block.
     private readonly serverBlockedCanonicalPendingDeliveryLocalIds = new Set<string>();
+    /** One automatic requeue per row per runner process; a row blocked again waits for the user. */
+    private readonly disposedRuntimePendingHeadRequeueAttemptedLocalIds = new Set<string>();
     // The provider can report a precise rejection while a terminal turn observer reports only
     // ambiguity. Serialize those writes per exact claim so a later weaker report observes the
     // already-settled claim instead of overwriting the durable reason.
@@ -6714,6 +6718,16 @@ export class ApiSessionClient extends EventEmitter {
                 return { didMaterialize: false, result: { type: 'deferred', reason: 'pending_version_mismatch' } };
             }
             if (materializeResult.deferredReason === 'waiting_for_predecessor') {
+                const requeued = await this.requeuePendingQueueHeadBlockedByDisposedRuntime();
+                if (requeued) {
+                    return await this.runMaterializeNextPendingMessageInner({
+                        ...opts,
+                        // The requeue advanced the pending version this attempt was fenced on.
+                        ...(opts.expectedPendingVersion !== undefined
+                            ? { expectedPendingVersion: requeued.pendingQueueState?.pendingVersion }
+                            : {}),
+                    });
+                }
                 return { didMaterialize: false, result: { type: 'deferred', reason: 'waiting_for_predecessor' } };
             }
             if (materializeResult.deferredReason === 'waiting_for_foreground_turn') {
@@ -7006,6 +7020,80 @@ export class ApiSessionClient extends EventEmitter {
             onDiagnosticPhase: opts.onDiagnosticPhase,
         });
         return inner.result;
+    }
+
+    /**
+     * A row a previous runtime blocked as `runtime_disposed_before_delivery` was never handed to a
+     * provider, yet as FIFO head it holds every later row until someone retries it. Put it back in
+     * line once with the user's own retry operation, keeping its requested action and position.
+     * Any other blocked reason, a row this process claimed, and a row already retried by this
+     * process are left for the user. Returns null when nothing was requeued.
+     */
+    private async requeuePendingQueueHeadBlockedByDisposedRuntime(): Promise<{
+        pendingQueueState?: KnownPendingQueueState;
+    } | null> {
+        if (this.closed || this.runtimeTerminationStarted) return null;
+        const supervisor = this.sessionConnectionSupervisor;
+        let localId: string | null = null;
+        try {
+            const listRows = () => listPendingQueueV2RowsFromServer({ token: this.token, sessionId: this.sessionId });
+            const rows = supervisor
+                ? await runSupervisedRequest({ supervisor, requireAuth: true, requireOnline: false, request: listRows })
+                : await listRows();
+            // Same head the server's FIFO uses: the first queued row that still holds later rows.
+            const head = rows.find((row) => (
+                row.deliveryStatus.status !== 'discarded'
+                && doesPendingDeliveryHoldLaterRowsV1(row.deliveryStatus)
+            ));
+            if (
+                !head
+                || head.deliveryStatus.status !== 'blocked'
+                || head.deliveryStatus.reason !== 'runtime_disposed_before_delivery'
+                || head.requestedAction === null
+                || this.canonicalPendingDeliveryByLocalId.has(head.localId)
+                || this.disposedRuntimePendingHeadRequeueAttemptedLocalIds.has(head.localId)
+                || this.closed
+                || this.runtimeTerminationStarted
+            ) {
+                return null;
+            }
+            localId = head.localId;
+            const requestedAction = head.requestedAction;
+            // Recorded before the write: an uncertain outcome is never replayed.
+            this.disposedRuntimePendingHeadRequeueAttemptedLocalIds.add(localId);
+            const requeue = () => updatePendingQueueV2RequestedAction({
+                token: this.token,
+                sessionId: this.sessionId,
+                localId: head.localId,
+                requestedAction,
+            });
+            const result = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    purpose: 'durable_write',
+                    requireAuth: true,
+                    requireOnline: false,
+                    request: requeue,
+                })
+                : await requeue();
+            if (result.pendingQueueState) {
+                this.applyPendingQueueState(result.pendingQueueState);
+            }
+            logger.infoFile('[pendingQueue] requeued pending row blocked by a disposed previous runtime', {
+                sessionId: this.sessionId,
+                localId,
+                requestedAction: requestedAction.kind,
+                pendingVersion: result.pendingQueueState?.pendingVersion ?? null,
+            });
+            return result.pendingQueueState ? { pendingQueueState: result.pendingQueueState } : {};
+        } catch (error) {
+            logger.infoFile('[pendingQueue] requeue of pending row blocked by a disposed previous runtime failed', {
+                sessionId: this.sessionId,
+                localId,
+                error: serializeOutboundError(error),
+            });
+            return null;
+        }
     }
 
     /**
