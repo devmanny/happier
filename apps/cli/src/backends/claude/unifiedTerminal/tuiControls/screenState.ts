@@ -161,8 +161,11 @@ const EFFORT_CHANGE_DIALOG = /change effort level\?/i;
 const EFFORT_DEFAULT_NUDGE_DIALOG = /\buse\s+\S.*?\s+at\s+([a-z]+)\s+effort by default\?/i;
 // Selection-dialog option shape shared by every observed confirmation dialog (2.1.170 Switch
 // model?, 2.1.173 Change effort level?): a terminal focus glyph directly on a numbered option line.
-// Used to fail closed on dialogs we do NOT recognize. Composer prompt echoes (`❯ <prompt>`) only
-// match when the prompt itself starts with `<digit>.` — accepted false-positive toward safety.
+// Used to fail closed on dialogs we do NOT recognize. A draft that itself starts with `<digit>.`
+// has the same row shape; it is read as the composer only when it is rule-boxed (see
+// `resolveRuleBoxedNumberedComposer`) and is emptied out of the text this pattern scans. A numbered
+// transcript echo (`❯ 1. …` above the composer) still matches unless the host cursor proves the
+// composer owns input.
 const NUMBERED_SELECTION_OPTION = new RegExp(
   `(?:^|\\n)[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SOURCE}[^\\S\\n]*\\d+\\.`,
   'u',
@@ -210,7 +213,9 @@ const EFFORT_STATUS_LINE = /\beffort:\s*([a-z]+)\b/im;
 // Input prompt line: `>`, `›` (U+203A), `❯` (U+276F), or the shell-mode `!`, followed by
 // optional content (inside an optional box border). The negative lookahead excludes menu-selection
 // lines (`❯ 1. Yes`) — the same `❯` glyph marks dialog choices — so a dialog never reads as an
-// interactive composer (fail-closed: an ambiguous numbered line is treated as not-a-composer).
+// interactive composer (fail-closed: an ambiguous numbered line is treated as not-a-composer). The
+// one numbered row that IS a composer, a rule-boxed numbered draft, is matched separately by
+// `resolveRuleBoxedNumberedComposer`.
 // Shell recognition needs its following footer so the hint cannot match itself. Both prompt kinds
 // participate in the SAME last-input selection: an old shell capture cannot outrank a newer normal
 // draft, and an old normal composer cannot make the active shell prompt ready for ordinary input.
@@ -251,27 +256,86 @@ const COMPOSER_CONTINUATION_STOP = /^[\s]*(?:[⏵←⏺✻✶·]|⚠)/;
  * 20327): a draft longer than the pane width wraps onto indented lines inside the composer box.
  * Capturing only the `❯` line truncated the draft, so an own-injected leftover could never
  * exact-match the own-text registry. Continuation = indented, non-border, non-status lines
- * between the composer line and the box bottom border.
+ * between the composer line and the box bottom border. `rowCount` is the number of rows read
+ * before the scan stopped and `closedByBorder` says whether it stopped on the box bottom border.
  */
-function readComposerContinuationLines(text: string, afterIndex: number): string[] {
-  const rest = text.slice(afterIndex);
-  const lines = rest.length === 0 ? [] : rest.split('\n');
+function scanComposerContinuation(lines: readonly string[]): Readonly<{
+  continuation: string[];
+  rowCount: number;
+  closedByBorder: boolean;
+}> {
   const continuation: string[] = [];
+  let rowCount = 0;
+  let closedByBorder = false;
   for (const rawLine of lines) {
     // Strip box border verticals so `│   wrapped text   │` reads as an indented line.
     const line = rawLine.replace(/^[^\S\n]*[│|]/, '').replace(/[│|][^\S\n]*$/, '');
-    if (COMPOSER_BORDER_LINE.test(line)) break;
+    if (COMPOSER_BORDER_LINE.test(line)) {
+      closedByBorder = true;
+      break;
+    }
     if (COMPOSER_CONTINUATION_STOP.test(line)) break;
     const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continuation.push('');
-      continue;
-    }
-    if (!/^[^\S\n]/.test(line)) break;
+    if (trimmed.length > 0 && !/^[^\S\n]/.test(line)) break;
     continuation.push(trimmed);
+    rowCount += 1;
   }
   while (continuation.at(-1) === '') continuation.pop();
-  return continuation;
+  return { continuation, rowCount, closedByBorder };
+}
+
+function readComposerContinuationLines(text: string, afterIndex: number): string[] {
+  const rest = text.slice(afterIndex);
+  return scanComposerContinuation(rest.length === 0 ? [] : rest.split('\n')).continuation;
+}
+
+// A composer row whose draft starts with `<digit>.` (a numbered list is an ordinary message). Same
+// capture groups as COMPOSER_LINE: [1] prompt glyph, [2] content. The glyph sits at the start of
+// the row (after an optional box vertical); selection dialogs that indent their focused option
+// stay out.
+const NUMBERED_COMPOSER_ROW = /^(?:[│|] ?)?[>›❯][^\S\n]*\d+\./u;
+const NUMBERED_COMPOSER_ROW_MATCH = /(?:^|\n)(?:[│|] ?)?([>›❯])[^\S\n]*(\d+\..*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)/y;
+
+/**
+ * A numbered `❯` row is the composer, not a selection option, only when it is rule-boxed (live
+ * capture 2026-11-13: a delivered message starting with `1. ` was typed and never submitted): a
+ * border row DIRECTLY above the glyph row, then only draft continuation rows, then the closing
+ * border. Every observed dialog puts a heading or question between any rule and its first option
+ * and has no closing rule under its options. Anything else stays a selection (fail closed), as
+ * does a numbered row that is not the last composer on screen.
+ *
+ * `selectionScanText` is the screen with that draft emptied (the bare prompt glyph is kept), so
+ * selection detection never reads the draft's own numbered rows as options.
+ */
+function resolveRuleBoxedNumberedComposer(
+  text: string,
+  lastComposerMatch: RegExpExecArray | null,
+): Readonly<{ match: RegExpExecArray; selectionScanText: string }> | null {
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 1; index -= 1) {
+    const line = lines[index] ?? '';
+    if (!NUMBERED_COMPOSER_ROW.test(line)) continue;
+    if (!COMPOSER_BORDER_LINE.test(lines[index - 1] ?? '')) return null;
+    const scan = scanComposerContinuation(lines.slice(index + 1));
+    if (!scan.closedByBorder) return null;
+    const draftEnd = index + scan.rowCount;
+    if (lines.slice(index, draftEnd + 1).some((row) => SELECTION_CONFIRM_HINT.test(row))) return null;
+    const rowStart = lines.slice(0, index).reduce((offset, row) => offset + row.length + 1, 0);
+    const pattern = new RegExp(NUMBERED_COMPOSER_ROW_MATCH.source, NUMBERED_COMPOSER_ROW_MATCH.flags);
+    pattern.lastIndex = rowStart - 1;
+    const match = pattern.exec(text);
+    if (!match) return null;
+    if (lastComposerMatch && lastComposerMatch.index > match.index) return null;
+    const glyph = match[1] ?? '';
+    const selectionScanText = lines
+      .map((row, rowIndex) => {
+        if (rowIndex === index) return glyph;
+        return rowIndex > index && rowIndex <= draftEnd ? '' : row;
+      })
+      .join('\n');
+    return { match, selectionScanText };
+  }
+  return null;
 }
 
 function readComposerContentStartColumn(line: string): number | null {
@@ -733,7 +797,11 @@ function resolveDialogSelectionPresentation(
 
 export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenParseContext): ClaudeScreenState {
   const text = normalizeCapturedScreen(rawText);
-  const visibleTail = tailLines(text, 30);
+  const plainComposerMatch = lastMatch(new RegExp(COMPOSER_LINE.source, `${COMPOSER_LINE.flags}g`), text);
+  const numberedComposer = resolveRuleBoxedNumberedComposer(text, plainComposerMatch);
+  const lastComposerMatch = numberedComposer?.match ?? plainComposerMatch;
+  const selectionScanText = numberedComposer?.selectionScanText ?? text;
+  const visibleTail = tailLines(selectionScanText, 30);
   const usageLimitSemanticMatch = (
     USAGE_LIMIT_DIALOG.test(visibleTail)
     || CROPPED_USAGE_LIMIT_DIALOG.test(visibleTail)
@@ -744,7 +812,6 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   const visibleNumberedDialog = usageLimitDialogCandidate ?? resolveGenericNumberedDialog(visibleTail);
   const visibleDialogSelection = resolveDialogSelectionPresentation(visibleTail, visibleNumberedDialog);
   const rewindSelectionVisible = REWIND_SELECTION.test(visibleTail);
-  const lastComposerMatch = lastMatch(new RegExp(COMPOSER_LINE.source, `${COMPOSER_LINE.flags}g`), text);
   // A notice above the current composer belongs to transcript history, not the active footer.
   const currentFooter = lastComposerMatch
     ? text.slice(lastComposerMatch.index + lastComposerMatch[0].length)
@@ -787,7 +854,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     && visibleDialogSelection?.kind !== 'focused';
 
   const unrecognizedConfirmationDialogVisible =
-    (NUMBERED_SELECTION_OPTION.test(text) || visibleDialogSelection?.kind === 'focused')
+    (NUMBERED_SELECTION_OPTION.test(selectionScanText) || visibleDialogSelection?.kind === 'focused')
     && !activeComposerOwnsInput
     && !switchModelDialogVisible
     && !usageLimitDialogVisible

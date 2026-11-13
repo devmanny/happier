@@ -26,6 +26,21 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
     expect(policy.isPromptStagedBeforeSubmit({ promptText, screenText: '❯ [Pasted text #1' })).toBe(false);
   });
 
+  it('sees a prompt that starts with a list number staged in the rule-boxed composer', () => {
+    const policy = createClaudePromptSubmitVerificationPolicy();
+    const rule = '────────────────────────────────────────────────';
+    const footer = '  ⏵⏵ bypass permissions on (shift+tab to cycle)';
+    const single = '1. Paso uno listo';
+    expect(policy.isPromptStagedBeforeSubmit({
+      promptText: single,
+      screenText: ['❯ earlier prompt', '', '⏺ Done.', '', rule, `❯ ${single}`, rule, footer].join('\n'),
+    })).toBe(true);
+    expect(policy.isPromptStagedBeforeSubmit({
+      promptText: '1. foo\n2. bar',
+      screenText: ['⏺ Done.', '', rule, '❯ 1. foo', '  2. bar', rule, footer].join('\n'),
+    })).toBe(true);
+  });
+
   it('verifies every non-empty prompt after submit', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
 

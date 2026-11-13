@@ -1404,6 +1404,104 @@ describe('parseClaudeScreenState — soft-wrapped composer draft (C11)', () => {
   });
 });
 
+// Live capture 2026-11-13 (Claude Code under the unified terminal, tmux): a delivered message that
+// starts with `<digit>. ` sits in the composer as `❯ 1. …`. Reading that row as a numbered
+// selection option left the message typed but never submitted, behind an "unrecognized dialog"
+// notice. The composer is told apart by its rule box: a border directly above the `❯` row (no
+// heading/question in between) and a closing border below the draft.
+describe('parseClaudeScreenState — numbered draft in the rule-boxed composer', () => {
+  const RULE = '────────────────────────────────────────────────────────────────────────────────';
+  const LIVE_NUMBERED_DRAFT = [
+    '✻ Crunched for 13s · done 11:13 AM',
+    '',
+    RULE,
+    '❯ 1. Paso uno listo y me dijo que soy “manny” en minúsculas',
+    RULE,
+    '  Fable 5.2',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+
+  it.each([
+    ['without cursor evidence', undefined],
+    ['with the cursor after the draft', { cursor: { x: 60, y: 3 } }],
+  ])('reads the live numbered draft as the composer, not a dialog (%s)', (_label, context) => {
+    const state = parseClaudeScreenState(LIVE_NUMBERED_DRAFT, context);
+    expect(state.composerContent).toBe('1. Paso uno listo y me dijo que soy “manny” en minúsculas');
+    expect(state.userDraftPresent).toBe(true);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.unrecognizedConfirmationDialog).toBeNull();
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(state.inputBoxInteractive).toBe(true);
+    expect(state.modeMarker).toBe('bypassPermissions');
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
+  });
+
+  it('reads a multi-line numbered draft with its continuation rows', () => {
+    const state = parseClaudeScreenState([
+      '⏺ Done.',
+      '',
+      RULE,
+      '❯ 1. foo',
+      '  2. bar',
+      RULE,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    expect(state.composerContent).toBe('1. foo\n2. bar');
+    expect(state.userDraftPresent).toBe(true);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+  });
+
+  it('reads a numbered draft inside a box-bordered composer', () => {
+    const state = parseClaudeScreenState([
+      '╭──────────────────────────────╮',
+      '│ > 1. foo                     │',
+      '│   2. bar                     │',
+      '╰──────────────────────────────╯',
+      '  ? for shortcuts',
+    ].join('\n'));
+    expect(state.composerContent).toBe('1. foo\n2. bar');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+  });
+
+  it('still surfaces a real numbered dialog shown above a numbered composer draft', () => {
+    const state = parseClaudeScreenState([
+      'Archive this conversation?',
+      '',
+      '❯ 1. Yes, archive',
+      '  2. No, go back',
+      '',
+      RULE,
+      '❯ 1. foo',
+      RULE,
+    ].join('\n'));
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(state.unrecognizedConfirmationDialog?.options).toEqual([
+      { choice: '1', label: 'Yes, archive' },
+      { choice: '2', label: 'No, go back' },
+    ]);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+  });
+
+  it.each([
+    ['a heading sits between the rule and the options', [RULE, '  What do you want to do?', '❯ 1. Stop and wait', '  2. Upgrade your plan', RULE]],
+    ['a blank row separates the rule from the options', [RULE, '', '❯ 1. Stop and wait', '  2. Upgrade your plan', RULE]],
+    ['no closing rule follows the options', ['Question', RULE, '❯ 1. Stop and wait', '  2. Upgrade your plan']],
+    ['a footer hint precedes the closing rule', [RULE, '❯ 1. Stop and wait', '  2. Upgrade your plan', 'Enter to confirm · Esc to cancel', RULE]],
+    ['the focused option is indented under the rule', [RULE, '  ❯ 1. Stop and wait', '    2. Upgrade your plan', RULE]],
+  ])('keeps a numbered selection failing closed when %s', (_label, lines) => {
+    const state = parseClaudeScreenState(lines.join('\n'));
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(state.composerContent).toBeNull();
+    expect(state.inputBoxInteractive).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
+  });
+});
+
 // Live capture 2026-06-12 11:50 (orchestrator runner pid 58731, zellij dump): the AGENTS panel
 // ("← for agents", `↑/↓ to select · Enter to view`) renders its selection cursor as
 // `❯ ◯ <agent-type> <title>` rows. The cursor row parsed as a composer draft → false `user_draft`
