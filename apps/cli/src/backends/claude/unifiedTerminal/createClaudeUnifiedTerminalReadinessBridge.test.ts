@@ -925,6 +925,40 @@ describe('createClaudeUnifiedTerminalReadinessBridge', () => {
     expect(diagnostics?.sessionStartObserved).toBe(true);
     expect(diagnostics?.lastLivenessPaneAlive).toBe(true);
     expect(diagnostics?.lastScreenTail).toContain('Initializing Claude Code');
+    expect(diagnostics?.notReadyReason).toBe('no_interactive_composer');
+
+    bridge.dispose();
+  });
+
+  it('names the screen blocker that kept startup readiness from passing in the timeout diagnostics', async () => {
+    // Live incident 2026-11-13: the screen parser reported a confirmation dialog on every poll, the
+    // launcher burned its relaunch budget, and nothing recorded WHY readiness never passed.
+    const unrecognizedDialogScreen = [
+      'What do you want to do?',
+      '❯ 1. Stop and wait for the build to finish',
+      '  2. Cancel the build',
+    ].join('\n');
+    const bridge = createClaudeUnifiedTerminalReadinessBridge({
+      hostAdapter: {
+        evaluateLiveness: vi.fn().mockResolvedValue({ paneAlive: true, observedAt: Date.now() }),
+        captureInputState: vi.fn().mockResolvedValue({
+          stable: true,
+          currentInput: unrecognizedDialogScreen,
+          observedAt: Date.now(),
+        }),
+      },
+      handle,
+      arbiter: createArbiter(),
+      pollIntervalMs: 5,
+      timeoutMs: 20,
+    });
+
+    const started = bridge.start({ abortSignal: new AbortController().signal });
+    const error = await Promise.resolve(started).then(() => null, (rejection: unknown) => rejection);
+
+    expect(isClaudeUnifiedTerminalReadinessTimeoutError(error)).toBe(true);
+    expect((error as ClaudeUnifiedTerminalReadinessTimeoutError).diagnostics?.notReadyReason)
+      .toBe('unrecognized_confirmation_dialog');
 
     bridge.dispose();
   });

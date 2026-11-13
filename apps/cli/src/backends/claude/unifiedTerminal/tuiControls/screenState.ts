@@ -949,24 +949,27 @@ function hasClaudeInteractiveComposer(state: ClaudeScreenState): boolean {
   return state.inputBoxInteractive && hasCapturedClaudeComposer(state);
 }
 
+/** Names the overlay that blocks a clean composer; the names carry no screen text. */
+function resolveBlockingOverlayReason(state: ClaudeScreenState): string | null {
+  if (state.permissionPromptVisible) return 'permission_prompt';
+  if (state.trustFolderPromptVisible) return 'trust_prompt';
+  if (state.switchModelDialogVisible) return 'switch_model_dialog';
+  if (state.usageLimitDialogVisible) return 'usage_limit_dialog';
+  if (state.resumeChoiceDialogVisible) return 'resume_choice_dialog';
+  if (state.safeguardPauseDialogVisible) return 'safeguard_pause_dialog';
+  if (state.effortChangeDialogVisible) return 'effort_change_dialog';
+  if (state.unrecognizedConfirmationDialogVisible) return 'unrecognized_confirmation_dialog';
+  if (state.permissionEditorOpen) return 'permission_editor';
+  if (state.slashPickerOpen || (state.composerContent?.startsWith('/') ?? false)) return 'slash_picker';
+  if (state.selectionListVisible) return 'selection_list';
+  if (state.queuedMessageBannerVisible) return 'queued_message_banner';
+  if (state.userDraftPresent) return 'user_draft';
+  if (state.generating) return 'generating';
+  return null;
+}
+
 function hasBlockingOverlay(state: ClaudeScreenState): boolean {
-  return (
-    state.generating
-    || state.slashPickerOpen
-    || (state.composerContent?.startsWith('/') ?? false)
-    || state.permissionEditorOpen
-    || state.permissionPromptVisible
-    || state.trustFolderPromptVisible
-    || state.switchModelDialogVisible
-    || state.usageLimitDialogVisible
-    || state.resumeChoiceDialogVisible
-    || state.safeguardPauseDialogVisible
-    || state.effortChangeDialogVisible
-    || state.unrecognizedConfirmationDialogVisible
-    || state.queuedMessageBannerVisible
-    || state.userDraftPresent
-    || state.selectionListVisible
-  );
+  return resolveBlockingOverlayReason(state) !== null;
 }
 
 /**
@@ -979,7 +982,13 @@ function hasBlockingOverlay(state: ClaudeScreenState): boolean {
  * boxed composers (`│ > │`) and produced false-negative "not ready" detections that killed live hosts.
  */
 export function isClaudeScreenReadyForInput(state: ClaudeScreenState): boolean {
-  return hasClaudeInteractiveComposer(state) && !hasBlockingOverlay(state);
+  return resolveClaudeScreenInputReadinessBlocker(state) === null;
+}
+
+/** Why `isClaudeScreenReadyForInput` is false, or null when the screen is ready. */
+export function resolveClaudeScreenInputReadinessBlocker(state: ClaudeScreenState): string | null {
+  return resolveBlockingOverlayReason(state)
+    ?? (hasClaudeInteractiveComposer(state) ? null : 'no_interactive_composer');
 }
 
 /** Safe to type `/model` / `/effort` and submit only on a clean, interactive composer. */
