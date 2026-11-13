@@ -384,20 +384,23 @@ extension EnvironmentValues {
     @Entry var userBubbleColor: Color = .userBubble
 }
 
-/// The project folder's color as a soft glow along the inside of the window's edges, over a
-/// barely tinted ground, so a conversation in a window of its own tells its project at a glance.
-/// Not in the main window, where the glow would frame only one pane. Static: nothing to animate.
+/// The project folder's color as a barely tinted ground under the conversation and, in a window
+/// of its own, a soft glow along the inside of the window's edges, so it tells its project at a
+/// glance. No glow in the main window, where it would frame only one pane. Static: nothing to
+/// animate.
 struct FolderWash: View {
     let color: Color?
     @Environment(\.inSessionWindow) private var inSessionWindow
 
     var body: some View {
-        if let color, inSessionWindow {
+        if let color {
             ZStack {
                 color.opacity(0.03)
-                Rectangle()
-                    .strokeBorder(color.opacity(0.32), lineWidth: 10)
-                    .blur(radius: 26)
+                if inSessionWindow {
+                    Rectangle()
+                        .strokeBorder(color.opacity(0.32), lineWidth: 10)
+                        .blur(radius: 26)
+                }
             }
             .clipped()
             // Not sideways: on the Mac that would run the glow's edges under the sidebar.

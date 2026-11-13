@@ -340,12 +340,16 @@ struct SessionListView: View {
         ForEach(treeRows(nodes)) { tree in row(tree.session, tree: tree) }
     }
 
+    /// How long a session that isn't running stays in the list itself before it waits in its group.
+    private static let recentWindow: TimeInterval = 48 * 3600
+
     /// The usual list (the default filter, which leaves out the sessions tasks started, except the
     /// ones you pinned).
     @ViewBuilder
     private func groupedList() -> some View {
         let now = Date.now, filter = filter, context = filterContext
         let groups = SessionSidebar.groups(sessions, pinned: store.pinnedSessionIds, date: { store.listDate($0, now: now) },
+                                           recentSince: now.addingTimeInterval(-Self.recentWindow),
                                            shows: { filter.includes($0, context: context) })
         if !groups.pinned.isEmpty {
             Section("Pinned") { outline(groups.pinned) }
@@ -357,6 +361,10 @@ struct SessionListView: View {
                 // Set apart from Pinned, and from the agents above them.
                 if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty { Text("Active") }
             }
+        }
+        // Resting or stopped, used in the last two days: still in view, one tap away.
+        if !groups.recent.isEmpty {
+            Section("Recent") { outline(groups.recent) }
         }
         Section {
             olderFolder("Resting", systemImage: "moon.zzz", groups.resting, section: .resting)
@@ -373,7 +381,8 @@ struct SessionListView: View {
         }
     }
 
-    /// The Resting or Stopped row, counting every session of its families; hidden while empty.
+    /// The Resting or Stopped row, counting the sessions not in Recent; its window lists them all.
+    /// Hidden while empty.
     @ViewBuilder
     private func olderFolder(_ title: LocalizedStringKey, systemImage: String, _ group: [SessionTreeNode<Session>],
                              section: OlderSessionsSection) -> some View {

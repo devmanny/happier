@@ -37,6 +37,23 @@ import Testing
         #expect(ids(groups.stopped) == ["stopped", "old"])
     }
 
+    @Test func whatWasUsedLatelyStaysInViewAndTheRestWaitsInItsGroup() throws {
+        // `updatedAt` is in milliseconds: 100 s and later counts as lately here.
+        let groups = SessionSidebar.groups([
+            try session("run", active: true, at: 1_000),
+            try session("freshStopped", active: false, at: 300_000),
+            try session("freshResting", active: false, at: 200_000, resting: true),
+            try session("oldResting", active: false, at: 50_000, resting: true),
+            try session("oldStopped", active: false, at: 40_000),
+            try session("oldParent", active: false, at: 10_000),
+            try session("freshChild", active: false, at: 150_000, parent: "oldParent"),
+        ], pinned: [], recentSince: Date(timeIntervalSince1970: 100))
+        #expect(ids(groups.active) == ["run"])
+        #expect(ids(groups.recent) == ["freshStopped", "freshResting", "oldParent(freshChild)"])
+        #expect(ids(groups.resting) == ["oldResting"])
+        #expect(ids(groups.stopped) == ["oldStopped"])
+    }
+
     @Test func aRunningChildKeepsItsFamilyInTheMainList() throws {
         let groups = SessionSidebar.groups([
             try session("parent", active: false, at: 10, resting: true),
