@@ -6,7 +6,8 @@ import Testing
     @Test func claudeFallsBackToStaticCatalogWithEffort() {
         let controls = SessionControls(metadata: ["flavor": "claude"], agentId: "claude")
         #expect(controls.selectedModelId == "default")
-        #expect(controls.models.first?.id == "claude-fable-5-1")
+        #expect(controls.models.first?.id == "claude-fable-5-2")
+        #expect(controls.models.first?.name == "Fable 5.2")
         let opus = controls.models.first { $0.id == "claude-opus-5-5" }
         #expect(opus?.effortLevels == ["low", "medium", "high", "xhigh", "max"])
         #expect(opus?.defaultEffort == "medium")
@@ -28,7 +29,7 @@ import Testing
         ]
         #expect(SessionControls.newSessionModels(agentId: "codex", sessions: sessions).map(\.id) == ["gpt-a", "gpt-b"])
         // Claude falls back to its catalog; an agent never run here has nothing to offer yet.
-        #expect(SessionControls.newSessionModels(agentId: "claude", sessions: sessions).first?.id == "claude-fable-5-1")
+        #expect(SessionControls.newSessionModels(agentId: "claude", sessions: sessions).first?.id == "claude-fable-5-2")
         #expect(SessionControls.newSessionModels(agentId: "opencode", sessions: sessions).isEmpty)
     }
 

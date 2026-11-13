@@ -76,6 +76,9 @@ describe('resolveClaudeContextWindowTokensForModelId', () => {
 
   it('resolves 1M for always-1M models even with a BASE id (Unified hook/JSONL model is the base id)', () => {
     expect(resolveClaudeContextWindowTokensForModelId('claude-fable-5-1')).toBe(1_000_000);
+    expect(resolveClaudeContextWindowTokensForModelId('claude-fable-5-2')).toBe(1_000_000);
+    expect(isClaude1mAlwaysOnModelId('claude-fable-5-2')).toBe(true);
+    expect(isClaude1mContextOptInModelId('claude-fable-5-2')).toBe(false);
     expect(resolveClaudeContextWindowTokensForModelId('claude-opus-5-5')).toBe(1_000_000);
     expect(resolveClaudeContextWindowTokensForModelId('claude-fable-5')).toBe(1_000_000);
     expect(resolveClaudeContextWindowTokensForModelId('claude-opus-5')).toBe(1_000_000);

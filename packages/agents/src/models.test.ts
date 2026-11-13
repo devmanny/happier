@@ -27,7 +27,8 @@ describe('agent model config', () => {
     const claudeModels = getAgentStaticModels('claude');
     const geminiModels = getAgentStaticModels('gemini');
 
-    expect(claude.staticModels?.slice(0, 2)).toMatchObject([
+    expect(claude.staticModels?.slice(0, 3)).toMatchObject([
+      { id: 'claude-fable-5-2', name: 'Fable 5.2', contextWindowTokens: 1_000_000 },
       { id: 'claude-fable-5-1', name: 'Fable 5.1', contextWindowTokens: 1_000_000 },
       { id: 'claude-opus-5-5', name: 'Opus 5.5', contextWindowTokens: 1_000_000 },
     ]);
@@ -136,8 +137,8 @@ describe('agent model config', () => {
     expect(claude.staticModels?.map((model) => model.id)).toEqual(claude.allowedModes);
     expect(gemini.staticModels?.map((model) => model.id)).toEqual(gemini.allowedModes);
     expect(claudeModels[0]).toMatchObject({
-      id: 'claude-fable-5-1',
-      name: 'Fable 5.1',
+      id: 'claude-fable-5-2',
+      name: 'Fable 5.2',
       description: expect.any(String),
       contextWindowTokens: 1_000_000,
     });
@@ -149,7 +150,7 @@ describe('agent model config', () => {
     const optionIdsFor = (modelId: string): string[] =>
       claudeModels.find((model) => model.id === modelId)?.modelOptions?.map((option) => option.id) ?? [];
 
-    for (const modelId of ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7']) {
+    for (const modelId of ['claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7']) {
       expect(optionIdsFor(modelId)).toContain('ultracode');
       const ultracode = claudeModels
         .find((model) => model.id === modelId)?.modelOptions?.find((option) => option.id === 'ultracode');
@@ -176,6 +177,7 @@ describe('agent model config', () => {
     // Always-1M on the API: no opt-in toggle surfaced.
     expect(variantFor('claude-opus-5')).toBeUndefined();
     expect(variantFor('claude-opus-5-5')).toBeUndefined();
+    expect(variantFor('claude-fable-5-2')).toBeUndefined();
     expect(variantFor('claude-fable-5-1')).toBeUndefined();
     expect(variantFor('claude-sonnet-5-5')).toBeUndefined();
     expect(variantFor('claude-sonnet-5')).toBeUndefined();

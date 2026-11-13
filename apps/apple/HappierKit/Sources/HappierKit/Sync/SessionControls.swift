@@ -205,7 +205,7 @@ public struct SessionControls: Equatable, Sendable {
     static let claudeLargeWindow = 1_000_000
     /// Claude models that always run with the 1M window.
     static let claudeAlwaysLargeWindow: Set<String> = [
-        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5",
+        "claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5",
         "claude-opus-4-8", "claude-opus-4-7",
     ]
 
@@ -282,7 +282,8 @@ enum ClaudeCatalog {
     private static let full = ["low", "medium", "high", "xhigh", "max"]
 
     static let models: [ModelChoice] = [
-        model("claude-fable-5-1", "Fable 5.1", full, "For your hardest challenges"),
+        model("claude-fable-5-2", "Fable 5.2", full, "For your hardest challenges"),
+        model("claude-fable-5-1", "Fable 5.1", full),
         model("claude-opus-5-5", "Opus 5.5", full, "For complex work and everyday tasks", defaultEffort: "medium"),
         model("claude-sonnet-5-5", "Sonnet 5.5", full, "More efficient for simpler tasks"),
         model("claude-opus-5", "Opus 5", full),
