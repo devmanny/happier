@@ -394,9 +394,9 @@ struct FolderWash: View {
     var body: some View {
         if let color, inSessionWindow {
             ZStack {
-                color.opacity(0.04)
+                color.opacity(0.03)
                 Rectangle()
-                    .strokeBorder(color.opacity(0.55), lineWidth: 14)
+                    .strokeBorder(color.opacity(0.32), lineWidth: 10)
                     .blur(radius: 26)
             }
             .clipped()
