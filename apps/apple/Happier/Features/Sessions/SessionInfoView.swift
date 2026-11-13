@@ -104,9 +104,7 @@ struct SessionInfoView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-            }
+            .sheetCloseButton()
         }
     }
 

@@ -38,6 +38,7 @@ struct NotificationCenterView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            .sheetCloseButton()
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Clear All", role: .destructive) {
@@ -45,7 +46,6 @@ struct NotificationCenterView: View {
                     }
                     .disabled(visible.isEmpty)
                 }
-                ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
             }
         }
         .task { await inbox.refresh() }

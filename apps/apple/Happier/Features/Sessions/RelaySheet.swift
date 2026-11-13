@@ -72,9 +72,7 @@ struct RelaySheet: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-        }
+        .sheetCloseButton()
         .task(id: store.server) { await check() }
         .refreshable { await check() }
         .alert("Add Relay", isPresented: $addingRelay) {

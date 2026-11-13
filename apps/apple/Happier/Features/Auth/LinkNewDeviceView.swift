@@ -56,9 +56,7 @@ struct LinkNewDeviceView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Link New Device")
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-        }
+        .sheetCloseButton()
     }
 
     private func approve(_ link: String) {

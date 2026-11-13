@@ -41,6 +41,7 @@ struct BrowserView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 BrowserNavigationBar()
             }
+            .sheetCloseButton(inSheet)
             .toolbar {
                 // Native placement reserves the Mac window controls and iPad's
                 // system chrome; never overlay the logo on the title bar.
@@ -59,9 +60,6 @@ struct BrowserView: View {
                         .frame(minWidth: 200, idealWidth: 760, maxWidth: 1600)
                 }
                 .sharedBackgroundVisibility(.hidden)
-                if inSheet {
-                    ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { browser.newTab() } label: { Label("New Tab", systemImage: "plus") }
                         .keyboardShortcut("t", modifiers: .command)

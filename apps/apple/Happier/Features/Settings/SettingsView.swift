@@ -99,9 +99,9 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+        .sheetCloseButton()
         .toolbar {
             if inSheet {
-                ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
             }
         }
         .task { await store.refreshAccountSettings() }

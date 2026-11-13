@@ -93,9 +93,7 @@ struct AgentActivitySheet: View {
             .navigationDestination(for: Subagent.self) { subagent in
                 SubagentThreadView(sessionId: sessionId, subagent: subagent)
             }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
-            }
+            .sheetCloseButton()
         }
         .task(id: session?.runtimeActivityRevision) {
             await store.refreshSubagentStatus(sessionId)

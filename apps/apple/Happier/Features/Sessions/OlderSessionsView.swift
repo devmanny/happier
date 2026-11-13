@@ -128,8 +128,8 @@ struct OlderSessionsView: View {
             .searchable(text: $query, prompt: "Search")
             #endif
             .navigationTitle("Resting, Stopped & Archived")
+            .sheetCloseButton()
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { SheetCloseButton() }
                 ToolbarItem(placement: .primaryAction) { UnreadFilterButton(isOn: $unreadOnly) }
             }
             .task { await archive.loadAll(from: store) }

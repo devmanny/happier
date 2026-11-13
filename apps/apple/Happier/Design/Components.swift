@@ -270,15 +270,29 @@ enum ChatDate {
 /// The way out of a sheet whose choices apply at once (Account, Relay, Notifications, Background,
 /// the model picker…): the system's close button (the glass X, placed and localized by it).
 /// Sheets that pick something keep a Cancel button.
-struct SheetCloseButton: View {
+/// A modifier on the sheet's content, not a view inside the toolbar item: on the Mac, `dismiss`
+/// read from inside a toolbar item does nothing, so the sheet never closed.
+private struct SheetCloseToolbar: ViewModifier {
+    let shown: Bool
     @Environment(\.dismiss) private var dismiss
 
-    var body: some View {
-        Button(role: .close) {
-            AppHaptics.light()
-            dismiss()
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if shown {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) {
+                        AppHaptics.light()
+                        dismiss()
+                    }
+                }
+            }
         }
     }
+}
+
+extension View {
+    /// `shown: false` where the same screen also lives outside a sheet (the browser's own window).
+    func sheetCloseButton(_ shown: Bool = true) -> some View { modifier(SheetCloseToolbar(shown: shown)) }
 }
 
 /// The one style for a control the system has no style for (a transcript line that unfolds, a

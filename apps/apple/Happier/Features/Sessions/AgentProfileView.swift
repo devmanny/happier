@@ -57,7 +57,7 @@ struct AgentProfileView: View {
             if let profile {
                 NavigationStack {
                     AgentMemoryView(agent: profile)
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { SheetCloseButton() } }
+                        .sheetCloseButton()
                 }
                 #if os(macOS)
                 .frame(minWidth: 460, minHeight: 560)
