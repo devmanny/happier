@@ -553,6 +553,10 @@ struct Composer: View {
                 .glassHover()
                 .disabled(!enabled)
                 .accessibilityLabel(stop ? "Stop agent" : "Send")
+                #if os(macOS)
+                // The Mac draws its glass circles past their layout frame (measured on screen).
+                .padding(-3)
+                #endif
             }
     }
 

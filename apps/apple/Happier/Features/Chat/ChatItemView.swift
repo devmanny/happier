@@ -185,9 +185,9 @@ struct ReplyOptions: View {
                 }
                 .disabled(chosen != nil)
                 .opacity(chosen != nil && option != chosen ? 0.45 : 1)
-                // Colored text on clear glass, like the composer's pills. Not `.tint`: on the Mac it
-                // fills the glass with the tint and the text vanishes into it.
-                .buttonStyle(.glass)
+                // Glass washed in the conversation's color under plain text: colored text on it
+                // was too faint to read on the Mac.
+                .buttonStyle(.glass(.regular.tint(accent.opacity(0.3))))
                 .glassHover()
                 .onDrag {
                     rowActions?.replyDragStarted(option)
@@ -214,7 +214,7 @@ struct ReplyOptions: View {
         Text(option)
             .font(.callout.weight(.medium))
             .multilineTextAlignment(.leading)
-            .foregroundStyle(accent)
+            .foregroundStyle(.primary)
     }
 }
 
