@@ -7,15 +7,16 @@ struct BackgroundActivityPill: View {
     let count: Int
     let action: () -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.userBubbleColor) private var accent
 
     var body: some View {
-        // White on the blue: a soft tint in dark mode (with a blue robot), solid blue in light mode
+        // White on the color: a soft tint in dark mode (with a colored robot), solid in light mode
         // where white on a pale tint didn't read.
         let light = colorScheme == .light
         Button(action: action) {
             HStack(spacing: 4) {
                 RobotIcon(size: 13)
-                    .foregroundStyle(light ? Color.white : Color.userBubble)
+                    .foregroundStyle(light ? Color.white : accent)
                 Text(count, format: .number)
                     .monospacedDigit()
                     .contentTransition(.numericText())
@@ -25,7 +26,7 @@ struct BackgroundActivityPill: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             // Not `.interactive()`: interactive glass keeps the tap from reaching the button.
-            .glassEffect(.regular.tint(Color.userBubble.opacity(light ? 0.9 : 0.18)), in: Capsule())
+            .glassEffect(.regular.tint(accent.opacity(light ? 0.9 : 0.18)), in: Capsule())
             .contentShape(Capsule())
         }
         .buttonStyle(.pressable)
@@ -108,11 +109,12 @@ struct AgentActivitySheet: View {
 private struct SubagentRow: View {
     let subagent: Subagent
     let now: Date
+    @Environment(\.userBubbleColor) private var accent
 
     var body: some View {
         HStack(spacing: 10) {
             RobotIcon(size: 18)
-                .foregroundStyle(subagent.status == .running ? Color.userBubble : .secondary)
+                .foregroundStyle(subagent.status == .running ? accent : .secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(subagent.title).lineLimit(2)
                 HStack(spacing: 4) {

@@ -772,6 +772,7 @@ private struct SessionToolbar: ViewModifier {
             }
             .sheet(isPresented: $showActivity) {
                 AgentActivitySheet(sessionId: sessionId)
+                    .environment(\.userBubbleColor, details.folderColor?.color ?? .userBubble)
                     #if os(macOS)
                     .frame(minWidth: 480, minHeight: 520)
                     #endif

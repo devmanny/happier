@@ -518,27 +518,42 @@ struct Composer: View {
         #endif
     }
 
+    /// A circle in the conversation's color, drawn by hand: the system's prominent glass loses its
+    /// tint in a window that isn't in front, and the color is how the window tells its project.
+    /// A hidden prominent button gives it the size of the glass buttons beside it.
     @ViewBuilder private var sendButton: some View {
         let stop = working && !canSend
-        Button {
-            if stop {
-                AppHaptics.warning()
-                onStop()
-            } else {
-                send()
+        let enabled = stop || canSend
+        Button {} label: { Color.clear.frame(width: 22, height: 22) }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.circle)
+            .hidden()
+            .accessibilityHidden(true)
+            .overlay {
+                Button {
+                    if stop {
+                        AppHaptics.warning()
+                        onStop()
+                    } else {
+                        send()
+                    }
+                } label: {
+                    Circle()
+                        .fill(stop ? Color.red : accent)
+                        .overlay {
+                            Image(systemName: stop ? "stop.fill" : "arrow.up")
+                                .font(.body.weight(.bold))
+                                .foregroundStyle(.white)
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                        .opacity(enabled ? 1 : 0.4)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.pressable)
+                .glassHover()
+                .disabled(!enabled)
+                .accessibilityLabel(stop ? "Stop agent" : "Send")
             }
-        } label: {
-            Image(systemName: stop ? "stop.fill" : "arrow.up")
-                .font(.body.weight(.bold))
-                .frame(width: 22, height: 22)
-                .contentTransition(.symbolEffect(.replace))
-        }
-        .buttonStyle(.glassProminent)
-        .glassHover()
-        .buttonBorderShape(.circle)
-        .tint(stop ? .red : accent)
-        .disabled(!stop && !canSend)
-        .accessibilityLabel(stop ? "Stop agent" : "Send")
     }
 
     // MARK: Slash commands (`composerSuggestionGrammar.ts`: token at start or after whitespace)
