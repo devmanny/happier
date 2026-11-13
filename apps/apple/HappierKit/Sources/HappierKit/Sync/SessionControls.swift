@@ -172,7 +172,7 @@ public struct SessionControls: Equatable, Sendable {
         return (b["updatedAt"]?.doubleValue ?? 0) > (a["updatedAt"]?.doubleValue ?? 0) ? b : a
     }
 
-    private static func providerMatches(agentId: String?) -> (String?) -> Bool {
+    static func providerMatches(agentId: String?) -> (String?) -> Bool {
         { provider in
             guard let provider, let agentId else { return false }
             return provider == agentId || (agentId == "customAcp" && provider.hasPrefix("acp:"))

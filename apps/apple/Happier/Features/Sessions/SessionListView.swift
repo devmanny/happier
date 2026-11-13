@@ -1055,13 +1055,36 @@ struct SessionRow: View, Equatable {
                     Spacer(minLength: 4)
                     RowTrailing(session: session, now: now)
                 }
-                // "Mateo · manny-agenda": the agent it works as, then the folder's own name.
-                Text(session.listDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    // "Mateo · manny-agenda": the agent it works as, then the folder's own name.
+                    Text(session.listDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if let model = session.runningModel {
+                        ModelPill(word: model.word)
+                    }
+                }
             }
         }
+    }
+}
+
+/// The model a session runs on, in one word under the row's time; the same quiet gray on every row.
+private struct ModelPill: View {
+    let word: String
+
+    var body: some View {
+        Text(word)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(.fill.tertiary, in: Capsule())
+            .accessibilityLabel(Text("Model \(word)"))
     }
 }
 

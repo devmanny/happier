@@ -48,8 +48,10 @@ public enum SessionSidebar {
 }
 
 extension Session {
-    /// The sidebar search: title or folder.
+    /// The sidebar search: title, folder, or the model it runs on ("opus", "Opus 5.5", "gpt-6.1").
     public func matches(_ query: String) -> Bool {
-        title.localizedCaseInsensitiveContains(query) || (displayPath ?? "").localizedCaseInsensitiveContains(query)
+        if title.localizedCaseInsensitiveContains(query) || (displayPath ?? "").localizedCaseInsensitiveContains(query) { return true }
+        guard let model = runningModel else { return false }
+        return model.word.localizedCaseInsensitiveContains(query) || RunningModel.name(for: model.id).localizedCaseInsensitiveContains(query)
     }
 }

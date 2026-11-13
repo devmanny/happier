@@ -1,7 +1,7 @@
 import Foundation
 
-/// Which sessions the list shows: their kind, state and agent, and optionally only those that need
-/// you. Stored on the device (JSON); the default is the usual list (running, resting and stopped
+/// Which sessions the list shows: their kind, state, agent, provider and model, and optionally only
+/// those that need you. Stored on the device (JSON); the default is the usual list (running, resting and stopped
 /// sessions, archive apart) without the sessions tasks started.
 public struct SessionListFilter: Equatable, Sendable, Codable {
     /// Every session has exactly one kind; a sub-session a task started counts as a task session.
@@ -52,12 +52,22 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
     /// Only sessions waiting for you, unread, or with open tasks.
     public var attentionOnly: Bool
     public var agent: AgentChoice
+    /// Only sessions of this provider (the agent's id: "claude", "codex"…).
+    public var provider: String?
+    /// Only sessions running a model of this family (`RunningModel.word`: "Opus").
+    public var modelFamily: String?
+    /// Only sessions running exactly this model (`RunningModel.id`); narrows `modelFamily`.
+    public var modelId: String?
 
-    public init(kinds: Set<Kind>, states: Set<State>, attentionOnly: Bool = false, agent: AgentChoice = .all) {
+    public init(kinds: Set<Kind>, states: Set<State>, attentionOnly: Bool = false, agent: AgentChoice = .all,
+                provider: String? = nil, modelFamily: String? = nil, modelId: String? = nil) {
         self.kinds = kinds
         self.states = states
         self.attentionOnly = attentionOnly
         self.agent = agent
+        self.provider = provider
+        self.modelFamily = modelFamily
+        self.modelId = modelId
     }
 
     public static let `default` = SessionListFilter(kinds: [.normal, .sub], states: [.active, .inactive])
@@ -126,6 +136,15 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
         case .none: if session.agentIdentity != nil { return false }
         case .agent(let id): if session.agentIdentity?.id != id { return false }
         }
+        if let provider, session.agentId != provider { return false }
+        if modelId != nil || modelFamily != nil {
+            guard let model = session.runningModel else { return false }
+            if let modelId {
+                if model.id != modelId { return false }
+            } else if model.word != modelFamily {
+                return false
+            }
+        }
         return !attentionOnly || context.needsAttention(session, now: now)
     }
 
@@ -143,7 +162,63 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
         case .none: parts.append(String(localized: "No agent"))
         case .agent(let id): parts.append(agentName(id) ?? String(localized: "An agent"))
         }
+        if let provider { parts.append(Agent.displayNames[provider] ?? provider) }
+        if let model = modelId.map(RunningModel.name(for:)) ?? modelFamily { parts.append(model) }
         return parts.joined(separator: " · ")
+    }
+
+    // MARK: Providers and models to choose from
+
+    /// What the filter offers: the providers the sessions run on and their models, by family.
+    public struct ModelOptions: Equatable, Sendable {
+        public struct Model: Identifiable, Equatable, Sendable {
+            public let id: String
+            public let name: String
+        }
+
+        public struct Family: Identifiable, Equatable, Sendable {
+            public let provider: String
+            public let word: String
+            /// Newest first.
+            public let models: [Model]
+            public var id: String { provider + "/" + word }
+        }
+
+        /// Agent ids, ordered by their name.
+        public let providers: [String]
+        public let families: [Family]
+
+        public init(sessions: [Session]) {
+            var providers: Set<String> = []
+            // Provider, family, model id: the model's name.
+            var names: [String: [String: [String: String]]] = [:]
+            for session in sessions {
+                guard let provider = session.agentId else { continue }
+                providers.insert(provider)
+                guard let model = session.runningModel else { continue }
+                let known = names[provider]?[model.word]?[model.id]
+                guard known == nil || known == model.id else { continue }
+                var name = RunningModel.name(for: model.id)
+                // A model the catalog doesn't know goes by the name a session lists it with.
+                if name == model.id {
+                    name = SessionControls(metadata: session.metadata, agentId: provider).models
+                        .first { RunningModel.normalized($0.id) == model.id }?.name ?? model.id
+                }
+                names[provider, default: [:]][model.word, default: [:]][model.id] = name
+            }
+            func name(_ provider: String) -> String { Agent.displayNames[provider] ?? provider }
+            self.providers = providers.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }
+            families = self.providers.flatMap { provider in
+                (names[provider] ?? [:]).sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { word, models in
+                    Family(provider: provider, word: word, models: models.map { Model(id: $0.key, name: $0.value) }
+                        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedDescending })
+                }
+            }
+        }
+
+        public func families(for provider: String?) -> [Family] {
+            provider.map { provider in families.filter { $0.provider == provider } } ?? families
+        }
     }
 
     // MARK: Storage
