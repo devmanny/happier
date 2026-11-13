@@ -1056,12 +1056,20 @@ struct SessionRow: View, Equatable {
                     RowTrailing(session: session, now: now)
                 }
                 HStack(spacing: 6) {
-                    // "Mateo · manny-agenda": the agent it works as, then the folder's own name.
-                    Text(session.listDetail)
+                    // Left, where it works (the folder's own name); right, who works there:
+                    // the agent it works as, by the model it runs on.
+                    Text(session.listPlace)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    if let agent = session.agentIdentity?.name {
+                        Text(agent)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
                     if let model = session.runningModel {
                         ModelPill(word: model.word)
                     }

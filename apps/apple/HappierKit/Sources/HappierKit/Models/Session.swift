@@ -225,6 +225,9 @@ public struct Session: Identifiable, Sendable, Equatable {
         [agentIdentity?.name, folderName ?? host].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// Where it works, for a list row that names the agent elsewhere: its folder, else its machine.
+    public var listPlace: String { folderName ?? host ?? "" }
+
     public var displayPath: String? {
         guard let path else { return nil }
         if let home = metadata["homeDir"]?.stringValue, !home.isEmpty, path == home || path.hasPrefix(home + "/") {
