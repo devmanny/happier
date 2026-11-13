@@ -1221,7 +1221,7 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
     ].join('\n')).unrecognizedConfirmationDialogVisible).toBe(false);
   });
 
-  it('lets direct cursor ownership of an empty composer override a selection-shaped transcript artifact', () => {
+  it('reads a selection-shaped transcript row above a rule-boxed composer as history, with or without cursor', () => {
     const screen = [
       'Assistant response:',
       '❯ 2. Payment: cash only',
@@ -1239,6 +1239,26 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
 
     const cursorElsewhere = parseClaudeScreenState(screen, { cursor: { x: 2, y: 1 } });
     expect(cursorElsewhere.composerCursorRelation).toBeNull();
+    expect(cursorElsewhere.unrecognizedConfirmationDialogVisible).toBe(false);
+
+    const cursorUnavailable = parseClaudeScreenState(screen);
+    expect(cursorUnavailable.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(cursorUnavailable)).toBeNull();
+  });
+
+  it('still needs direct cursor ownership when the composer below the selection-shaped row is not rule-boxed', () => {
+    const screen = [
+      'Assistant response:',
+      '❯ 2. Payment: cash only',
+      '',
+      '❯',
+    ].join('\n');
+
+    const cursorOwned = parseClaudeScreenState(screen, { cursor: { x: 2, y: 3 } });
+    expect(cursorOwned.composerCursorRelation).toBe('at_content_start');
+    expect(cursorOwned.unrecognizedConfirmationDialogVisible).toBe(false);
+
+    const cursorElsewhere = parseClaudeScreenState(screen, { cursor: { x: 2, y: 1 } });
     expect(cursorElsewhere.unrecognizedConfirmationDialogVisible).toBe(true);
 
     const cursorUnavailable = parseClaudeScreenState(screen);
@@ -1467,23 +1487,20 @@ describe('parseClaudeScreenState — numbered draft in the rule-boxed composer',
     expect(state.visibleNumberedDialog).toBeNull();
   });
 
-  it('still surfaces a real numbered dialog shown above a numbered composer draft', () => {
+  it('still surfaces a numbered dialog rendered beneath a rule-boxed composer', () => {
     const state = parseClaudeScreenState([
+      RULE,
+      '❯ 1. foo',
+      RULE,
+      '',
       'Archive this conversation?',
       '',
       '❯ 1. Yes, archive',
       '  2. No, go back',
-      '',
-      RULE,
-      '❯ 1. foo',
-      RULE,
     ].join('\n'));
     expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
-    expect(state.unrecognizedConfirmationDialog?.options).toEqual([
-      { choice: '1', label: 'Yes, archive' },
-      { choice: '2', label: 'No, go back' },
-    ]);
     expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
   });
 
   it.each([
@@ -1499,6 +1516,58 @@ describe('parseClaudeScreenState — numbered draft in the rule-boxed composer',
     expect(state.inputBoxInteractive).toBe(false);
     expect(isClaudeScreenReadyForInput(state)).toBe(false);
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
+  });
+});
+
+// Live capture 2026-11-13: once a message starting with `<digit>. ` is submitted, its transcript
+// echo (`❯ 1. …`) stays above the composer and kept reading as an unrecognized numbered dialog.
+// Claude dialogs REPLACE the composer (every real capture ends on the dialog), so numbered glyph
+// rows above a proven rule-boxed composer that is the bottom-most prompt glyph are history.
+describe('parseClaudeScreenState — numbered transcript echo above the rule-boxed composer', () => {
+  const RULE = '────────────────────────────────────────────────────────────────────────────────';
+  const FOOTER = ['  Fable 5.2', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+  const screenWith = (echo: readonly string[], composer: readonly string[]) => [
+    ...echo,
+    '',
+    '⏺ (assistant output …)',
+    '',
+    '✻ Brewed for 2m 49s · done 3:24 PM',
+    '',
+    RULE,
+    ...composer,
+    RULE,
+    ...FOOTER,
+  ].join('\n');
+  const SINGLE_ECHO = ['❯ 1. Paso uno listo y me dijo que soy “manny” en minúsculas'];
+  const LIST_ECHO = ['❯ 1. foo', '  2. bar', '  3. baz'];
+
+  it.each([
+    ['no cursor evidence', undefined],
+    ['the cursor on the composer', { cursor: { x: 2, y: 7 } }],
+    ['the cursor on the echo row', { cursor: { x: 2, y: 0 } }],
+  ])('keeps the live echo screen ready for input with %s', (_label, context) => {
+    const state = parseClaudeScreenState(screenWith(SINGLE_ECHO, ['❯ ']), context);
+    expect(state.composerContent).toBe('');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.unrecognizedConfirmationDialog).toBeNull();
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
+  });
+
+  it.each([
+    ['an empty composer', ['❯'], ''],
+    ['a single-line draft', ['❯ next message'], 'next message'],
+    ['a multi-line draft', ['❯ next message', '  second row'], 'next message\nsecond row'],
+    ['a numbered draft', ['❯ 1. uno', '  2. dos'], '1. uno\n2. dos'],
+  ])('reads a multi-row numbered echo as history above %s', (_label, composer, content) => {
+    const state = parseClaudeScreenState(screenWith(LIST_ECHO, composer));
+    expect(state.composerContent).toBe(content);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(state.inputBoxInteractive).toBe(true);
   });
 });
 

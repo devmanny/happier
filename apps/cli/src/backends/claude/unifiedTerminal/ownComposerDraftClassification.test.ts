@@ -74,7 +74,6 @@ describe('classifyClaudeOwnComposerDraft', () => {
     ['effort dialog', ['Change effort level?', 'Switching to high means the full history will be used.', '❯ 1. Yes, switch to high', '  2. No, go back']],
     ['permission prompt', ['Do you want to proceed?', '❯ 1. Yes', '  2. No']],
     ['trust folder prompt', ['Do you trust the files in this folder?', '❯ 1. Yes, proceed', '  2. No, exit']],
-    ['unrecognized confirmation dialog', ['What do you want to do?', '❯ 1. Stop and wait', '  2. Upgrade your plan']],
   ] as const)('does not classify composer-shaped text on %s as foreign', (_name, dialogLines) => {
     const rawText = [
       ...dialogLines,
@@ -82,6 +81,22 @@ describe('classifyClaudeOwnComposerDraft', () => {
       ...boxedComposer('Continue where you left off').split('\n'),
     ].join('\n');
 
+    expect(classifyScreen(rawText)).toBe('non_input_state');
+  });
+
+  // An unrecognized numbered dialog replaces the composer, so the composer-shaped text left on
+  // screen with it is a transcript echo, never a rule-boxed composer beneath the dialog (numbered
+  // rows above a proven rule-boxed composer are history, see screenState).
+  it('does not classify a transcript echo beside an unrecognized confirmation dialog as foreign', () => {
+    const rawText = [
+      '❯ Continue where you left off',
+      '',
+      'What do you want to do?',
+      '❯ 1. Stop and wait',
+      '  2. Upgrade your plan',
+    ].join('\n');
+
+    expect(parseClaudeScreenState(rawText).composerContent).toBe('Continue where you left off');
     expect(classifyScreen(rawText)).toBe('non_input_state');
   });
 
