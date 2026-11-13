@@ -177,18 +177,24 @@ struct ReplyOptions: View {
                     AppHaptics.confirm()
                     onSelect(option)
                 } label: {
-                    if option == chosen {
-                        Label { pill(option) } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
-                    } else {
-                        pill(option)
+                    Group {
+                        if option == chosen {
+                            Label { pill(option) } icon: { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
+                        } else {
+                            pill(option)
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(accent.opacity(0.2), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(accent.opacity(0.55), lineWidth: 1) }
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .disabled(chosen != nil)
                 .opacity(chosen != nil && option != chosen ? 0.45 : 1)
-                // Glass washed in the conversation's color under plain text: colored text on it
-                // was too faint to read on the Mac.
-                .buttonStyle(.glass(.regular.tint(accent.opacity(0.3))))
-                .glassHover()
+                // Drawn by hand in the conversation's color under plain text: the Mac's glass shows
+                // no tint, and colored text on it was too faint to read.
+                .buttonStyle(.pressable)
                 .onDrag {
                     rowActions?.replyDragStarted(option)
                     return NSItemProvider(object: option as NSString)
