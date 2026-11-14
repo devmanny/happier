@@ -1,9 +1,8 @@
 import Foundation
 
-/// Apple Pencil Pro squeezes on the composer: one squeeze starts dictation (the composer's blue
-/// mic, not push to talk); two in quick succession while it listens stop it and keep the text in
-/// the field, unsent. A lone squeeze while listening does nothing, so a stray one doesn't cut the
-/// dictation short.
+/// Apple Pencil Pro squeezes on the composer: two in quick succession start dictation (the
+/// composer's blue mic, not push to talk), so a stray squeeze doesn't open the mic; one squeeze
+/// while it listens stops it and keeps the text in the field, unsent.
 public struct PencilSqueezeDictation: Sendable {
     public enum Action: Sendable, Equatable {
         case start
@@ -12,22 +11,22 @@ public struct PencilSqueezeDictation: Sendable {
         case none
     }
 
-    /// The most time between the two squeezes that stop dictation (about a double-click's).
+    /// The most time between the two squeezes that start dictation (about a double-click's).
     public static let doubleSqueezeWindow: TimeInterval = 0.6
 
-    /// The last squeeze while listening that hasn't been paired yet.
+    /// The last squeeze while idle that hasn't been paired yet.
     private var pendingSqueeze: Date?
 
     public init() {}
 
     public mutating func squeezed(at now: Date, recording: Bool) -> Action {
-        guard recording else {
+        guard !recording else {
             pendingSqueeze = nil
-            return .start
+            return .finish
         }
         if let pending = pendingSqueeze, now.timeIntervalSince(pending) <= Self.doubleSqueezeWindow {
             pendingSqueeze = nil
-            return .finish
+            return .start
         }
         pendingSqueeze = now
         return .none

@@ -31,9 +31,10 @@ struct Composer: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
     #if os(iOS)
-    /// Apple Pencil Pro squeezes: one starts dictating, two stop and keep the text.
+    /// Apple Pencil Pro squeezes: two start dictating, one stops and keeps the text.
     @State private var pencilSqueeze = PencilSqueezeDictation()
     @Environment(\.preferredPencilSqueezeAction) private var preferredPencilSqueezeAction
+    @Environment(\.preferredPencilDoubleTapAction) private var preferredPencilDoubleTapAction
     /// Only the window with the focus opens its mic on a squeeze (`FrontWindow.takesInput`).
     @Environment(\.appearsActive) private var windowActive
     @State private var keyWindow = KeyWindowState()
@@ -185,7 +186,7 @@ struct Composer: View {
             if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
         #if os(iOS)
-        // Apple Pencil Pro: squeeze once to dictate, twice to stop and keep the text, unsent
+        // Apple Pencil Pro: squeeze twice to dictate, once to stop and keep the text, unsent
         // (`PencilSqueezeDictation`). Off when the Pencil's squeeze is set to do nothing.
         .background(KeyWindowReader(state: keyWindow))
         .onPencilSqueeze { phase in
@@ -194,6 +195,14 @@ struct Composer: View {
             case .start: startDictating()
             case .finish: finishDictating()
             case .none: break
+            }
+        }
+        // Apple Pencil double tap: send, like the send button, after the dictation's last words.
+        .onPencilDoubleTap { _ in
+            guard preferredPencilDoubleTapAction != .ignore, !talking, hasFocus else { return }
+            Task {
+                if dictation.isRecording { await dictation.finish() }
+                if canSend { send() }
             }
         }
         #endif
@@ -251,7 +260,7 @@ struct Composer: View {
     }
     #endif
 
-    /// The blue mic's tap (or one Pencil squeeze): dictate into the field.
+    /// The blue mic's tap (or a double Pencil squeeze): dictate into the field.
     private func startDictating() {
         AppHaptics.light()
         dictation.toggle(prefix: text) { text = $0 }

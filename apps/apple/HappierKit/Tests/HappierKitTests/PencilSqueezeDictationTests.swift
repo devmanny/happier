@@ -2,34 +2,34 @@ import Foundation
 import Testing
 @testable import HappierKit
 
-/// Squeezing the Apple Pencil Pro dictates into the composer: one squeeze starts the mic, two in
-/// quick succession stop it and keep the text, unsent. A lone squeeze while dictating does nothing,
-/// so a stray one doesn't cut you off.
+/// Squeezing the Apple Pencil Pro dictates into the composer: two squeezes in quick succession
+/// start the mic, so a stray one doesn't open it; one squeeze while dictating stops it and keeps
+/// the text, unsent.
 struct PencilSqueezeDictationTests {
     private let t0 = Date(timeIntervalSince1970: 1_000)
 
-    @Test func oneSqueezeStartsDictation() {
+    @Test func twoQuickSqueezesStartDictation() {
         var squeeze = PencilSqueezeDictation()
-        #expect(squeeze.squeezed(at: t0, recording: false) == .start)
+        #expect(squeeze.squeezed(at: t0, recording: false) == .none)
+        #expect(squeeze.squeezed(at: t0.addingTimeInterval(0.4), recording: false) == .start)
     }
 
-    @Test func twoQuickSqueezesWhileDictatingStopIt() {
+    @Test func aLoneSqueezeDoesNotOpenTheMic() {
         var squeeze = PencilSqueezeDictation()
-        #expect(squeeze.squeezed(at: t0, recording: true) == .none)
-        #expect(squeeze.squeezed(at: t0.addingTimeInterval(0.4), recording: true) == .finish)
-    }
-
-    @Test func aLoneSqueezeWhileDictatingIsIgnored() {
-        var squeeze = PencilSqueezeDictation()
-        #expect(squeeze.squeezed(at: t0, recording: true) == .none)
-        #expect(squeeze.squeezed(at: t0.addingTimeInterval(2), recording: true) == .none)
+        #expect(squeeze.squeezed(at: t0, recording: false) == .none)
+        #expect(squeeze.squeezed(at: t0.addingTimeInterval(2), recording: false) == .none)
         // The second of those starts a new pair.
-        #expect(squeeze.squeezed(at: t0.addingTimeInterval(2.3), recording: true) == .finish)
+        #expect(squeeze.squeezed(at: t0.addingTimeInterval(2.3), recording: false) == .start)
     }
 
-    @Test func theSqueezeThatStartedDictationDoesNotCountTowardStoppingIt() {
+    @Test func oneSqueezeWhileDictatingStopsIt() {
         var squeeze = PencilSqueezeDictation()
-        #expect(squeeze.squeezed(at: t0, recording: false) == .start)
-        #expect(squeeze.squeezed(at: t0.addingTimeInterval(0.3), recording: true) == .none)
+        #expect(squeeze.squeezed(at: t0, recording: true) == .finish)
+    }
+
+    @Test func theSqueezeThatStoppedDictationDoesNotCountTowardStartingIt() {
+        var squeeze = PencilSqueezeDictation()
+        #expect(squeeze.squeezed(at: t0, recording: true) == .finish)
+        #expect(squeeze.squeezed(at: t0.addingTimeInterval(0.3), recording: false) == .none)
     }
 }
