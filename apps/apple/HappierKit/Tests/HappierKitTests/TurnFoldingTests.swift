@@ -53,6 +53,13 @@ import Testing
         #expect(shape(ChatRow.rows(from: [user("q"), tool("1"), event("switch"), text("done")], working: false)) == ["user:q", "work2", "text:done"])
     }
 
+    @Test func aNoticeFromTheRunnerStaysInTheConversation() {
+        // "Claude's terminal did not become ready…": said to the user, so it isn't folded away.
+        let notice = ChatItem.event(TranscriptEvent(id: "n", kind: "message", data: ["message": "Your queued message is paused"], createdAt: .distantPast))
+        #expect(shape(ChatRow.rows(from: [user("q"), tool("1"), notice], working: false)) == ["user:q", "work1", "event"])
+        #expect(shape(ChatRow.rows(from: [user("q"), notice, tool("1"), text("done")], working: false)) == ["user:q", "event", "work1", "text:done"])
+    }
+
     @Test func pendingApprovalsStayVisible() {
         let items = [user("q"), tool("1"), tool("2", pending: true)]
         #expect(shape(ChatRow.rows(from: items, working: true)) == ["user:q", "work1…", "tool:2"])

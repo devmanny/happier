@@ -128,7 +128,15 @@ struct PendingBubble: View {
             Button(sendNowLabel) { AppHaptics.light(); confirmSendNow = true }
             Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
             Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
-        case .blocked:
+        case .blocked(let reason):
+            if reason == Self.terminalNotReady {
+                // A plain retry goes back to the terminal that never came up.
+                Button("Restart Session & Retry") {
+                    AppHaptics.confirm()
+                    Task { await store.restartSessionAndRetry(message.localId, in: sessionId) }
+                }
+                .disabled(store.restartingSessions.contains(sessionId))
+            }
             Button("Retry") { AppHaptics.confirm(); Task { await store.requeuePending(message.localId, in: sessionId) } }
             Button(sendNowLabel) { AppHaptics.light(); confirmSendNow = true }
             Button("Edit") { AppHaptics.light(); beginEdit() }
@@ -173,16 +181,21 @@ struct PendingBubble: View {
         case .queued: working ? String(localized: "Queued · waiting for the current turn") : String(localized: "Queued")
         case .delivering: String(localized: "Delivering…")
         case .discarded: String(localized: "Discarded")
+        case .blocked where store.restartingSessions.contains(sessionId): String(localized: "Restarting the session…")
         case .blocked(let reason): String(localized: "Blocked · \(Self.reasonLabel(reason))")
         case .uncertain: String(localized: "Not sure it reached the agent")
         }
     }
+
+    /// The runner gave up starting its terminal (`terminal_host_unreachable`).
+    static let terminalNotReady = "terminal_host_unreachable"
 
     static func reasonLabel(_ reason: String) -> String {
         switch reason {
         case "steering_unavailable": String(localized: "steering unavailable")
         case "terminal_composer_draft": String(localized: "a draft is open in the terminal")
         case "payload_too_large": String(localized: "message too large")
+        case terminalNotReady: String(localized: "the agent’s terminal didn’t start")
         default: reason.replacingOccurrences(of: "_", with: " ")
         }
     }

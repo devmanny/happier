@@ -64,6 +64,8 @@ public final class HappierStore {
     /// Observed per session, like `sessions`.
     public let transcripts = KeyedStore<Transcript>(isSame: { _, _ in false })
     public let resumingSessions = KeyedStore<Bool>()
+    /// Sessions being stopped and resumed for a fresh terminal (`restartSessionAndRetry`).
+    public private(set) var restartingSessions: Set<String> = []
     public private(set) var hasOlderMessages: [String: Bool] = [:]
     public private(set) var isLoadingSessions = false
     /// True once the session list has been fetched at least once since sign-in.
@@ -2762,6 +2764,37 @@ public final class HappierStore {
             report(error)
             return false
         }
+    }
+
+    /// A message the runner paused because its terminal never became usable goes back to that same
+    /// terminal on a plain retry. This stops the session (its daemon closes the terminal),
+    /// resumes it on a fresh one and queues the message again.
+    public func restartSessionAndRetry(_ localId: String, in sessionId: String) async {
+        guard let api, !restartingSessions.contains(sessionId) else { return }
+        restartingSessions.insert(sessionId)
+        defer { restartingSessions.remove(sessionId) }
+        guard await stop(sessionId) else { return }
+        // Resume needs the relay to see the session inactive, as archiving after a stop does
+        // (`confirmStop`, same wait).
+        let deadline = ContinuousClock.now + .seconds(75)
+        while sessions[sessionId]?.active == true {
+            do {
+                if let row = try await api.session(id: sessionId), row["active"]?.boolValue == false {
+                    try sessions[sessionId]?.apply(update: row)
+                    break
+                }
+            } catch {
+                report(error)
+                return
+            }
+            guard ContinuousClock.now < deadline else {
+                lastError = String(localized: "The session stopped but still shows as running. Reactivate it in a moment, then retry the message.")
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        guard await resumeSession(sessionId) else { return }
+        await requeuePending(localId, in: sessionId)
     }
 
     public func abort(_ sessionId: String) async {
