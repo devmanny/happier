@@ -323,6 +323,18 @@ import Testing
         #expect(store.usage(for: "s1")?.providerId == "claude")
     }
 
+    @Test func aSessionMovedToAnotherAccountShowsTheAccountItRunsOnNowNotTheOneReadLast() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        // It ran on Julián's account, then moved to Tomás's (published last); Julián's other
+        // sessions keep his record fresher, but that's not this session's account any more.
+        let refs: [String: JSONValue] = ["flavor": "claude", "providerAccountUsageRefsV1": ["recordIds": ["r-julian", "r-tomas"]]]
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2, metadata: refs)]
+        await store.refreshSessions()
+        await store.refreshProviderUsage("s1")
+        #expect(store.usage(for: "s1")?.recordId == "r-tomas")
+    }
+
     @Test func aReadingTheSessionNoLongerPointsAtIsNotItsUsage() async throws {
         let relay = Relay()
         let store = relay.store()
@@ -661,8 +673,10 @@ private final class Relay: @unchecked Sendable {
             let plain = Data(#"{"t":"plain"}"#.utf8).base64EncodedString()
             return (200, ["machine": ["id": "m1", "active": true, "dataEncryptionKey": .string(plain)]])
         case ("GET", let path) where path.hasPrefix("/v3/connect/provider-account-usage/"):
-            let provider = path.hasSuffix("r-claude") ? "claude" : "codex"
-            let snapshot: JSONValue = ["v": 1, "providerId": .string(provider), "fetchedAtMs": provider == "codex" ? 2_000 : 1_000,
+            // `r-codex` is Codex's account; any other record is a Claude account (`r-julian` read last).
+            let provider = path.hasSuffix("r-codex") ? "codex" : "claude"
+            let fetchedAtMs = path.hasSuffix("r-julian") ? 3_000 : provider == "codex" ? 2_000 : 1_000
+            let snapshot: JSONValue = ["v": 1, "providerId": .string(provider), "fetchedAtMs": .number(Double(fetchedAtMs)),
                                        "staleAfterMs": 300_000, "meters": [["meterId": "session", "utilizationPct": 40]]]
             return (200, ["content": ["t": "plain", "v": snapshot]])
         case ("GET", "/v2/changes"):

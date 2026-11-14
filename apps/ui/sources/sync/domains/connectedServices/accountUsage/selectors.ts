@@ -46,7 +46,9 @@ function selectCandidateAccountUsageSnapshots(params: Readonly<{
     if (!snapshot) continue;
     candidates.push(snapshot);
   }
-  return candidates.sort((left, right) => right.fetchedAtMs - left.fetchedAtMs);
+  // The daemon lists the account the session runs on now last (`providerAccountUsageRefsV1.ts`).
+  // An earlier account's record can be fresher, since its other sessions keep reading it.
+  return candidates.reverse();
 }
 
 function isProviderUsageDisplayCandidateForProvider(

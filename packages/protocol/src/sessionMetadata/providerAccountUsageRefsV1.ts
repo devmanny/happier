@@ -66,8 +66,9 @@ export function writeProviderAccountUsageRecordIdToMetadata(
   const parsedRecordId = ProviderAccountUsageRecordIdSchema.safeParse(input.recordId);
   if (!parsedRecordId.success) return base;
 
+  // Most recently published last: the last ref is the account the session runs on now.
   const recordIds = normalizeProviderAccountUsageMetadataRecordIds([
-    ...readRawRecordIds(metadata),
+    ...readRawRecordIds(metadata).filter((recordId) => recordId !== parsedRecordId.data),
     parsedRecordId.data,
   ]);
 

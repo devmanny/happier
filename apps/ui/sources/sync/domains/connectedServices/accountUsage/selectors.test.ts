@@ -101,6 +101,24 @@ describe('selectProviderUsageDisplaySnapshot', () => {
     });
   });
 
+  it('shows the account the session runs on now (its last ref), not an earlier account read more recently', () => {
+    const earlierAccount = accountUsageSnapshot({ providerId: 'claude', accountSubjectId: 'julian', fetchedAtMs: 3_000 });
+    const currentAccount = accountUsageSnapshot({ providerId: 'claude', accountSubjectId: 'tomas', fetchedAtMs: 1_000 });
+
+    const source = selectProviderUsageDisplaySnapshot({
+      providerId: 'claude',
+      metadataRecordIds: [earlierAccount.recordId, currentAccount.recordId],
+      accountUsageSnapshotsByRecordId: {
+        [earlierAccount.recordId]: earlierAccount,
+        [currentAccount.recordId]: currentAccount,
+      },
+      connectedServiceProfileRef: null,
+      connectedServiceQuotaView: null,
+    });
+
+    expect(source?.kind === 'account_usage' ? source.accountUsageSnapshot.recordId : null).toBe(currentAccount.recordId);
+  });
+
   it('projects native account usage metadata into a non-connected provider usage display snapshot', () => {
     const usage = accountUsageSnapshot();
 

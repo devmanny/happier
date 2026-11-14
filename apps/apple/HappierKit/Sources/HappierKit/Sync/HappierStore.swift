@@ -3418,8 +3418,8 @@ public final class HappierStore {
     /// Usage limits left on the provider account each open session runs on.
     public private(set) var providerUsage: [String: ProviderUsage] = [:]
 
-    /// Reads the provider usage the daemon published for the session; the newest snapshot wins
-    /// when it has several (`sync/domains/accountUsage/selectors.ts`).
+    /// Reads the provider usage the daemon published for the session: the account it runs on now,
+    /// the last record it lists (`sync/domains/connectedServices/accountUsage/selectors.ts`).
     /// The usage shown for a session: its current agent's provider only. A session switched to
     /// another agent keeps the old provider's reading (and its record) until it's read again.
     public func usage(for sessionId: String) -> ProviderUsage? {
@@ -3433,8 +3433,10 @@ public final class HappierStore {
 
     public func refreshProviderUsage(_ sessionId: String) async {
         guard let api, let session = sessions[sessionId] else { return }
-        var newest: ProviderUsage?
-        for recordId in ProviderUsage.recordIds(in: session.metadata) {
+        var current: ProviderUsage?
+        // The daemon lists the account the session runs on now last (`providerAccountUsageRefsV1.ts`);
+        // an earlier account's record can be fresher (its other sessions keep reading it) but isn't this one's.
+        for recordId in ProviderUsage.recordIds(in: session.metadata).reversed() {
             do {
                 guard let snapshot = try await api.providerAccountUsage(recordId: recordId, machineKey: keys?.content.secretKey),
                       var usage = ProviderUsage(snapshot: snapshot) else {
@@ -3444,12 +3446,15 @@ public final class HappierStore {
                 // A record of the session's previous agent isn't its usage now.
                 guard usage.providerId == nil || usage.providerId == session.agentId else { continue }
                 usage.recordId = recordId
-                if (usage.fetchedAt ?? .distantPast) >= (newest?.fetchedAt ?? .distantPast) { newest = usage }
+                current = usage
+                break
             } catch {
+                // Not an older account's numbers instead: keep what was shown until the next read.
                 log.error("provider usage \(recordId, privacy: .public): \(String(describing: error), privacy: .public)")
+                return
             }
         }
-        if providerUsage[sessionId] != newest { providerUsage[sessionId] = newest }
+        if providerUsage[sessionId] != current { providerUsage[sessionId] = current }
     }
 
     public func requestStop(_ sessionId: String) {
