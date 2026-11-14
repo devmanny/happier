@@ -30,6 +30,11 @@ struct Composer: View {
     @State private var showAgentCard = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
+    #if os(iOS)
+    /// Apple Pencil Pro squeezes: one starts dictating, two stop and keep the text.
+    @State private var pencilSqueeze = PencilSqueezeDictation()
+    @Environment(\.preferredPencilSqueezeAction) private var preferredPencilSqueezeAction
+    #endif
     @State private var showPhotos = false
     @State private var loadingAttachments = 0
     @State private var showFiles = false
@@ -176,6 +181,18 @@ struct Composer: View {
         .onDisappear {
             if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
+        #if os(iOS)
+        // Apple Pencil Pro: squeeze once to dictate, twice to stop and keep the text, unsent
+        // (`PencilSqueezeDictation`). Off when the Pencil's squeeze is set to do nothing.
+        .onPencilSqueeze { phase in
+            guard case .ended = phase, preferredPencilSqueezeAction != .ignore, !talking else { return }
+            switch pencilSqueeze.squeezed(at: .now, recording: dictation.isRecording) {
+            case .start: startDictating()
+            case .finish: finishDictating()
+            case .none: break
+            }
+        }
+        #endif
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 8)
@@ -218,6 +235,19 @@ struct Composer: View {
                 store.lastError = error
             }
         }
+    }
+
+    /// The blue mic's tap (or one Pencil squeeze): dictate into the field.
+    private func startDictating() {
+        AppHaptics.light()
+        dictation.toggle(prefix: text) { text = $0 }
+    }
+
+    /// Stop dictating and keep the text in the field, unsent. The last words still come in (see
+    /// `Dictation.toggle`).
+    private func finishDictating() {
+        Task { await dictation.finish() }
+        AppHaptics.light()
     }
 
     // MARK: Card
@@ -302,14 +332,7 @@ struct Composer: View {
                     // agent's answer is read aloud (a spoken conversation).
                     PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
                                      trashOffset: trashX.flatMap { trash in micX.map { trash - $0 } }) {
-                        if dictation.isRecording {
-                            // The last words still come in (see `Dictation.toggle`).
-                            Task { await dictation.finish() }
-                            AppHaptics.light()
-                        } else {
-                            AppHaptics.light()
-                            dictation.toggle(prefix: text) { text = $0 }
-                        }
+                        if dictation.isRecording { finishDictating() } else { startDictating() }
                     } onHoldStart: {
                         startTalking()
                     } onHoldEnd: { cancelled in
