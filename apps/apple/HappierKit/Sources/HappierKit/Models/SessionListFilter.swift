@@ -1,8 +1,8 @@
 import Foundation
 
 /// Which sessions the list shows: their kind, state, agent, provider and model, and optionally only
-/// those that need you. Stored on the device (JSON); the default is the usual list (running, resting and stopped
-/// sessions, archive apart) without the sessions tasks started.
+/// those that need you. Stored on the device (JSON); the default is the usual list: running, resting and
+/// stopped sessions of every kind, the ones your agents work tasks in included, archive apart.
 public struct SessionListFilter: Equatable, Sendable, Codable {
     /// Every session has exactly one kind; a sub-session a task started counts as a task session.
     public enum Kind: String, CaseIterable, Sendable, Codable, Identifiable {
@@ -70,7 +70,7 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
         self.modelId = modelId
     }
 
-    public static let `default` = SessionListFilter(kinds: [.normal, .sub], states: [.active, .inactive])
+    public static let `default` = SessionListFilter(kinds: Set(Kind.allCases), states: [.active, .inactive])
     public static let all = SessionListFilter(kinds: Set(Kind.allCases), states: Set(State.allCases))
     public static let waitingForMe = SessionListFilter(kinds: Set(Kind.allCases), states: [.active, .inactive], attentionOnly: true)
     public static let activeWithoutTasks = SessionListFilter(kinds: [.normal, .sub], states: [.active])
@@ -229,7 +229,13 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
 
     /// Kept in the device's settings as JSON; anything unreadable is the default.
     public init(stored: String) {
-        self = (try? JSONDecoder().decode(Self.self, from: Data(stored.utf8))) ?? .default
+        self = (try? JSONDecoder().decode(Self.self, from: Data(stored.utf8)))?.upgradingPreviousDefault ?? .default
+    }
+
+    /// The usual list hid task sessions until 13 Nov 2026; stored as that, it's still the usual list
+    /// (now with them), not a filter that keeps hiding them.
+    var upgradingPreviousDefault: SessionListFilter {
+        self == SessionListFilter(kinds: [.normal, .sub], states: [.active, .inactive]) ? .default : self
     }
 
     public var stored: String {
@@ -274,7 +280,10 @@ public struct SessionListFilterChoice: Equatable, Sendable, Codable {
         let data = Data(stored.utf8)
         if let choice = try? JSONDecoder().decode(Self.self, from: data) {
             self = choice
-        } else if let filter = try? JSONDecoder().decode(SessionListFilter.self, from: data), !filter.isDefault {
+            chosen = choice.chosen.upgradingPreviousDefault
+            if chosen.isDefault { isOn = false }
+        } else if let filter = (try? JSONDecoder().decode(SessionListFilter.self, from: data))?.upgradingPreviousDefault,
+                  !filter.isDefault {
             chosen = filter
             isOn = true
         } else {

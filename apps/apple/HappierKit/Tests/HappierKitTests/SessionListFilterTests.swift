@@ -37,13 +37,26 @@ import Testing
         return sessions.filter { filter.includes($0, context: context) }.map(\.id)
     }
 
-    @Test func theDefaultHidesTaskSessionsAndTheArchiveButKeepsTheRest() throws {
+    @Test func theUsualListStoredBeforeTaskSessionsWereShownStillReadsAsTheUsualList() {
+        let previousDefault = SessionListFilter(kinds: [.normal, .sub], states: [.active, .inactive])
+        #expect(SessionListFilter(stored: previousDefault.stored) == .default)
+        // Stored as the plain filter, and as a chosen filter that is off or (wrongly) on.
+        #expect(SessionListFilterChoice(stored: previousDefault.stored).applied == .default)
+        for isOn in [false, true] {
+            let stored = #"{"chosen":\#(previousDefault.stored),"isOn":\#(isOn)}"#
+            let choice = SessionListFilterChoice(stored: stored)
+            #expect(choice.applied == .default)
+            #expect(!choice.hasChosenFilter)
+        }
+    }
+
+    @Test func theDefaultShowsTheSessionsAgentsWorkTasksInAndHidesOnlyTheArchive() throws {
         let sessions = [
             try session("normal"), try session("stopped", active: false), try session("child", parent: "normal"),
             try session("worked"), try session("repeat", active: false), try session("archived", archived: true),
         ]
         let tasks = [task("t1", threads: ["worked"]), task("t2", occurrenceSession: "repeat")]
-        #expect(shown(.default, sessions, tasks: tasks) == ["normal", "stopped", "child"])
+        #expect(shown(.default, sessions, tasks: tasks) == ["normal", "stopped", "child", "worked", "repeat"])
         #expect(SessionListFilter.default.isDefault)
         #expect(!SessionListFilter.default.includesArchived)
     }
