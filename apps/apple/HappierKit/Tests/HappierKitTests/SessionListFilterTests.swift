@@ -57,6 +57,15 @@ import Testing
         #expect(context.kind(of: sessions[1]) == .task)
     }
 
+    @Test func aSessionThatTakesTheTaskItWroteStaysANormalSession() throws {
+        // A coordinating session writes tasks and assigns them to itself: no task started it, so
+        // the default list keeps it, with its sub-sessions under it.
+        let sessions = [try session("coordinator"), try session("child", parent: "coordinator")]
+        let tasks = [task("t", threads: ["coordinator"], source: "coordinator")]
+        #expect(SessionListFilter.Context(tasks: tasks).kind(of: sessions[0]) == .normal)
+        #expect(shown(.default, sessions, tasks: tasks) == ["coordinator", "child"])
+    }
+
     @Test func eachTypeCanBeShownAlone() throws {
         let sessions = [try session("normal"), try session("child", parent: "normal"), try session("worked")]
         let tasks = [task("t", threads: ["worked"])]

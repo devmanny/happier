@@ -103,7 +103,11 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
             var open: Set<String> = []
             for task in tasks {
                 for link in task.linkedSessions {
-                    if link.reasons.contains(.worked) || link.reasons.contains(.occurrence) { started.insert(link.sessionId) }
+                    // The session a task was written in existed before it: taking its own task
+                    // doesn't make it a task session.
+                    if !link.reasons.contains(.source), link.reasons.contains(.worked) || link.reasons.contains(.occurrence) {
+                        started.insert(link.sessionId)
+                    }
                     if task.isOpen { open.insert(link.sessionId) }
                 }
             }
