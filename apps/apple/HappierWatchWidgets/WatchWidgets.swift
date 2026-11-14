@@ -27,7 +27,10 @@ struct WatchProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<WatchEntry>) -> Void) {
         // The app reloads these whenever the iPhone sends something new; this only re-reads now and then.
-        completion(Timeline(entries: [WatchEntry(date: .now, context: WatchContext.load())], policy: .after(.now.addingTimeInterval(30 * 60))))
+        // Times redraw every 30 s, in whole minutes (`WidgetClock`).
+        let context = WatchContext.load()
+        let dates = WidgetClock.dates(from: .now)
+        completion(Timeline(entries: dates.map { WatchEntry(date: $0, context: context) }, policy: .after(dates.last ?? .now)))
     }
 }
 
@@ -125,7 +128,7 @@ private struct WorkingView: View {
         switch family {
         case .accessoryInline:
             if let first = working.first {
-                Text("\(working.count) working · \(first.since, style: .timer)")
+                Text("\(working.count) working · \(WidgetClock.elapsed(from: first.since, to: entry.date))")
             } else {
                 Text("No agents working")
             }
@@ -134,7 +137,7 @@ private struct WorkingView: View {
                 .font(.title3.weight(.bold).monospacedDigit())
                 .widgetCurvesContent()
                 .widgetLabel {
-                    if let first = working.first { Text(first.since, style: .timer) } else { Text("Idle") }
+                    if let first = working.first { Text(WidgetClock.elapsed(from: first.since, to: entry.date)) } else { Text("Idle") }
                 }
         case .accessoryRectangular:
             VStack(alignment: .leading, spacing: 1) {
@@ -146,7 +149,7 @@ private struct WorkingView: View {
                     HStack(spacing: 4) {
                         Text(item.title).font(.caption).lineLimit(1)
                         Spacer(minLength: 2)
-                        Text(item.since, style: .timer).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        Text(WidgetClock.elapsed(from: item.since, to: entry.date)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
                 }

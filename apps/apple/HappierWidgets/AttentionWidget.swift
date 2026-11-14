@@ -50,8 +50,10 @@ struct AttentionProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<AttentionEntry>) -> Void) {
         // The app reloads the widget whenever what's waiting changes; this only re-reads now and then.
-        let entry = AttentionEntry(date: .now, snapshot: AttentionSnapshot.load())
-        completion(Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(30 * 60))))
+        // Times redraw every 30 s, in whole minutes (`WidgetClock`).
+        let snapshot = AttentionSnapshot.load()
+        let dates = WidgetClock.dates(from: .now)
+        completion(Timeline(entries: dates.map { AttentionEntry(date: $0, snapshot: snapshot) }, policy: .after(dates.last ?? .now)))
     }
 }
 
@@ -122,7 +124,7 @@ struct AttentionWidgetView: View {
                 caughtUp
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(items.prefix(3)) { SessionRow(item: $0) }
+                    ForEach(items.prefix(3)) { SessionRow(item: $0, now: entry.date) }
                     Spacer(minLength: 0)
                 }
             }
@@ -143,11 +145,11 @@ struct AttentionWidgetView: View {
             if items.isEmpty {
                 caughtUp
             } else {
-                ForEach(items.prefix(6)) { SessionRow(item: $0) }
+                ForEach(items.prefix(6)) { SessionRow(item: $0, now: entry.date) }
             }
             Spacer(minLength: 0)
             if let updated = snapshot?.updatedAt {
-                Text("Updated \(updated, style: .relative) ago")
+                Text("Updated \(WidgetClock.elapsed(from: updated, to: entry.date)) ago")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -226,6 +228,8 @@ struct AttentionWidgetView: View {
 /// One waiting session: its agent, its title and why it's waiting; tapping opens it.
 private struct SessionRow: View {
     let item: AttentionSnapshot.Item
+    /// The entry's time, to say how long ago in whole minutes.
+    let now: Date
 
 
     var body: some View {
@@ -240,7 +244,7 @@ private struct SessionRow: View {
                             .foregroundStyle(item.reason == .waitingForYou ? Color.orange : Color.blue)
                         Text(item.reason == .waitingForYou ? "Waiting for you" : "New reply")
                         Text("·")
-                        Text(item.date, style: .relative)
+                        Text(WidgetClock.elapsed(from: item.date, to: now))
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)

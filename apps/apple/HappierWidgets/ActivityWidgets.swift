@@ -21,8 +21,11 @@ struct ActivityProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ActivityEntry>) -> Void) {
         // The app reloads the widgets when anything shown changes; this only re-reads now and then.
-        completion(Timeline(entries: [ActivityEntry(date: .now, snapshot: ActivitySnapshot.load())],
-                            policy: .after(.now.addingTimeInterval(30 * 60))))
+        // Times redraw every 30 s, in whole minutes (`WidgetClock`).
+        let snapshot = ActivitySnapshot.load()
+        let dates = WidgetClock.dates(from: .now)
+        completion(Timeline(entries: dates.map { ActivityEntry(date: $0, snapshot: snapshot) },
+                            policy: .after(dates.last ?? .now)))
     }
 }
 
@@ -132,7 +135,7 @@ private struct WorkingView: View {
                 Text(working.isEmpty ? "No agents working" : "\(working.count) working").font(.headline)
                 if let first = working.first {
                     Text(first.title).font(.caption).lineLimit(1)
-                    Text(first.since, style: .timer).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(WidgetClock.elapsed(from: first.since, to: entry.date)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -151,7 +154,7 @@ private struct WorkingView: View {
                     HStack(spacing: 4) {
                         Text(first.title).lineLimit(1)
                         Spacer(minLength: 2)
-                        Text(first.since, style: .timer).monospacedDigit().multilineTextAlignment(.trailing)
+                        Text(WidgetClock.elapsed(from: first.since, to: entry.date)).monospacedDigit().multilineTextAlignment(.trailing)
                     }
                     .font(.caption2.weight(.medium))
                     .padding(.top, 2)
@@ -182,7 +185,7 @@ private struct WorkingView: View {
                                     }
                                 }
                                 Spacer(minLength: 4)
-                                Text(item.since, style: .timer)
+                                Text(WidgetClock.elapsed(from: item.since, to: entry.date))
                                     .font(.caption.weight(.semibold).monospacedDigit())
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 64, alignment: .trailing)
@@ -240,11 +243,7 @@ private struct RecentView: View {
                                         .accessibilityHidden(true)
                                     Text(item.label)
                                     Text("·")
-                                    if item.state == .working {
-                                        Text(item.since, style: .timer).monospacedDigit()
-                                    } else {
-                                        Text(item.since, style: .relative)
-                                    }
+                                    Text(WidgetClock.elapsed(from: item.since, to: entry.date)).monospacedDigit()
                                 }
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -345,10 +344,10 @@ private struct UsageView: View {
                             }
                             ProgressView(value: item.usedPercent, total: 100).tint(tint(item.usedPercent))
                             HStack(spacing: 4) {
-                                if let reset = item.resetsAt { Text("Resets in \(reset, style: .relative)") }
+                                if let reset = item.resetsAt { Text("Resets in \(WidgetClock.elapsed(from: entry.date, to: reset))") }
                                 if let fetched = item.fetchedAt {
                                     Spacer(minLength: 4)
-                                    Text("Read \(fetched, style: .relative) ago")
+                                    Text("Read \(WidgetClock.elapsed(from: fetched, to: entry.date)) ago")
                                 }
                             }
                             .font(.caption2)
