@@ -1,0 +1,24 @@
+
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/effort high[39m
+[38;5;246m[49m  ⎿  [39mSet effort level to high (saved as your default for new sessions):
+     Comprehensive implementation with extensive testing and documentation
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/effort xhigh[39m
+[38;5;246m[49m  ⎿  [39mSet effort level to xhigh (saved as your default for new sessions): Deeper
+     reasoning than high, just below maximum (on supported models)
+
+[38;5;246m[48;5;237m❯ [38;5;231mSame harmless UI test: call SendFeedback once more (type bug, title "Second [39m
+  [38;5;231mtest draft please discard", details "UI test only"). Nothing else.[39m
+
+[38;5;114m[49m⏺[39m [1mSendFeedback[0m(Second test draft please discard)
+
+[38;5;231m⏺[39m I queued the second draft with the title "Second test draft please discard"
+  and the details "UI test only". Nothing was sent.
+
+[38;5;246m✻[39m [38;5;246mChurned for 2s · done 9:48 PM[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · 2 feedback drafts[39m

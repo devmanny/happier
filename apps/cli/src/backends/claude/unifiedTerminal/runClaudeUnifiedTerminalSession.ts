@@ -2568,6 +2568,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                   },
                 }
               : {}),
+            ...(hostResolution.adapter.captureInputState
+              ? {
+                  isTurnRunningOnScreen: async () => {
+                    const captureInputState = hostResolution.adapter.captureInputState;
+                    if (!captureInputState) return false;
+                    const inputState = await captureInputState(activeHandle);
+                    return parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor }).generating;
+                  },
+                }
+              : {}),
             runtimeActivityAdapter: opts.runtimeActivityAdapter ?? null,
             providerActivityLedger: opts.providerActivityLedger,
             onSessionEnd: (event) => {

@@ -181,6 +181,12 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onSessionEnd?: ((event: ClaudeUnifiedSessionEndEvent) => void | Promise<void>) | undefined;
   turnStallScreenProbe?: ClaudeUnifiedTurnStallScreenProbe | undefined;
   turnEndScreenProbe?: ClaudeUnifiedTurnEndScreenProbe | undefined;
+  /**
+   * Reads whether Claude's TUI shows a running turn (its spinner) when this bridge starts. A runner
+   * that attaches to a live terminal mid-turn never sees that turn's UserPromptSubmit; without this
+   * read the session reads idle until the next tool call or result lands in the transcript.
+   */
+  isTurnRunningOnScreen?: (() => Promise<boolean>) | undefined;
   runtimeActivityAdapter?: ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null | undefined;
   providerActivityLedger?: ReturnType<typeof createClaudeProviderActivityLedger> | undefined;
 }>): ClaudeUnifiedHookLifecycleBridge {
@@ -205,6 +211,9 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   let terminalSideEffects: Promise<void> = Promise.resolve();
   let anonymousPermissionBlockCount = 0;
   let nativeResumeContinuationPending = false;
+  // Bumped on every lifecycle transition so a start-time screen read that a hook or transcript row
+  // overtook cannot reopen the turn that evidence already settled.
+  let lifecycleTransitionEpoch = 0;
   const pendingPermissionRequestIds = new Set<string>();
 
   const clearQuietDrainTimer = (): void => {
@@ -577,12 +586,28 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     settleIdleAfterTerminalEffects();
   };
 
+  const openTurnRunningOnScreenAtStart = (): void => {
+    const readTurnRunningOnScreen = opts.isTurnRunningOnScreen;
+    if (!readTurnRunningOnScreen) return;
+    const epoch = lifecycleTransitionEpoch;
+    void readTurnRunningOnScreen().then((running) => {
+      const activeLifecycle = lifecycle;
+      if (!running || disposed || !activeLifecycle || epoch !== lifecycleTransitionEpoch) return;
+      if (activeLifecycle.snapshot().active) return;
+      logger.infoFile('[unified]: Claude is mid-turn on screen as this runner starts observing; opening the turn');
+      activeLifecycle.observe({ type: 'turn_started', providerTurnId: null, source: 'claude_screen_running_at_start' });
+    }).catch((error) => {
+      logger.debug('[unified]: Claude unified terminal start-time running-turn screen read failed', error);
+    });
+  };
+
   return {
     start() {
       if (disposed || unsubscribe) return;
       lifecycle = createLocalTurnLifecycleController({
         completionQuiescenceMs: opts.completionQuiescenceMs,
         onStateChange: (snapshot, event) => {
+          lifecycleTransitionEpoch += 1;
           if (snapshot.active && !snapshot.terminal) {
             nativeResumeContinuationPending = false;
             // A new turn is active — the turn-stall probe now covers it, so cancel any pending
@@ -708,6 +733,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
         }
         tracker?.observeHook(data);
       }) ?? null;
+      openTurnRunningOnScreenAtStart();
     },
     observeTranscript(message) {
       noteTurnStallProgress();

@@ -1555,5 +1555,166 @@ describe('createClaudeUnifiedHookLifecycleBridge', () => {
     }
   });
 
+  // Live session cmwd9winf25v7qh016b8qv8pi (13 Nov): a runner restarted while Claude ran a 2-minute
+  // Bash call reattached to the live pane. Its lifecycle never saw that turn's UserPromptSubmit, so
+  // Claude worked for five more minutes while the app showed the turn finished.
+  it('opens the running turn from main-chain tool progress when this runner never saw it start', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const observeLifecycle = vi.fn();
+    const onThinkingChange = vi.fn();
+    const onReady = vi.fn();
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle,
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+      onReady,
+    });
 
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      // A subagent's tool call is not the main conversation's turn.
+      bridge.observeTranscript({
+        type: 'assistant',
+        uuid: 'sidechain-tool-use',
+        isSidechain: true,
+        message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_side', name: 'Read', input: {} }] },
+        sessionId: 'claude-session-id',
+      } as any);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onThinkingChange).not.toHaveBeenCalledWith(true);
+
+      bridge.observeTranscript({
+        type: 'user',
+        uuid: 'main-tool-result',
+        isSidechain: false,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_bash', content: 'moved to background' }] },
+        sessionId: 'claude-session-id',
+      } as any);
+      expect(onThinkingChange).toHaveBeenLastCalledWith(true);
+      expect(observeLifecycle).toHaveBeenCalledWith({ type: 'turn_state', state: 'running' });
+
+      bridge.observeTranscript({
+        type: 'assistant',
+        uuid: 'main-tool-use',
+        isSidechain: false,
+        message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_ls', name: 'Bash', input: {} }] },
+        sessionId: 'claude-session-id',
+      } as any);
+      expect(onThinkingChange).toHaveBeenCalledTimes(1);
+
+      hook({ hook_event_name: 'Stop', session_id: 'claude-session-id' });
+      await vi.waitFor(() => {
+        expect(onReady).toHaveBeenCalledTimes(1);
+      });
+      expect(onThinkingChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it.each([
+    { screen: 'still generating', running: true },
+    { screen: 'idle at its prompt', running: false },
+  ])('reads whether Claude is mid-turn when this runner starts observing a terminal $screen', async ({ running }) => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onThinkingChange = vi.fn();
+    const onReady = vi.fn();
+    const isTurnRunningOnScreen = vi.fn().mockResolvedValue(running);
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+      onReady,
+      isTurnRunningOnScreen,
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      await vi.waitFor(() => {
+        expect(isTurnRunningOnScreen).toHaveBeenCalledTimes(1);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (!running) {
+        expect(onThinkingChange).not.toHaveBeenCalled();
+        return;
+      }
+      expect(onThinkingChange).toHaveBeenLastCalledWith(true);
+
+      hook({ hook_event_name: 'Stop', session_id: 'claude-session-id' });
+      await vi.waitFor(() => {
+        expect(onReady).toHaveBeenCalledTimes(1);
+      });
+      expect(onThinkingChange).toHaveBeenLastCalledWith(false);
+    } finally {
+      bridge.dispose();
+    }
+  });
+
+  it('does not open a turn from a start-time screen read that a lifecycle event overtook', async () => {
+    let subscribedHook: ((data: SessionHookData) => void) | undefined;
+    const onThinkingChange = vi.fn();
+    let resolveScreen: ((running: boolean) => void) | undefined;
+    const bridge = createClaudeUnifiedHookLifecycleBridge({
+      subscribeClaudeSessionHooks: (callback) => {
+        subscribedHook = callback;
+        return () => {
+          subscribedHook = undefined;
+        };
+      },
+      arbiter: {
+        observeLifecycle: vi.fn(),
+        confirmPromptAcceptedByProvider: vi.fn().mockResolvedValue(true),
+        drainWhenSafe: vi.fn().mockResolvedValue(undefined),
+      },
+      completionQuiescenceMs: 0,
+      onThinkingChange,
+      onReady: vi.fn(),
+      isTurnRunningOnScreen: () => new Promise<boolean>((resolve) => {
+        resolveScreen = resolve;
+      }),
+    });
+
+    try {
+      bridge.start({ abortSignal: new AbortController().signal });
+      const hook = subscribedHook;
+      if (typeof hook !== 'function') throw new Error('Claude session hook subscription was not registered');
+
+      // The turn the screen showed ends before the read returns.
+      hook({ hook_event_name: 'Stop', session_id: 'claude-session-id' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      onThinkingChange.mockClear();
+      resolveScreen?.(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onThinkingChange).not.toHaveBeenCalled();
+    } finally {
+      bridge.dispose();
+    }
+  });
 });

@@ -594,13 +594,15 @@ describe('createClaudeLocalLifecycleTracker', () => {
     } as any);
     expect(observedEvents).toEqual([]);
 
+    // A text reaction keeps this row on the notification-correlation path: any live main-chain tool
+    // call opens a turn on its own (claude_transcript_tool_progress).
     tracker.observeTranscript({
       type: 'assistant',
       uuid: 'wrong-session-reaction',
       parentUuid: 'notification-row',
       session_id: 'other-session',
       isSidechain: false,
-      message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'wrong-tool' }] },
+      message: { stop_reason: null, content: [{ type: 'text', text: 'Reacting in another session.' }] },
     } as any);
     tracker.observeTranscript({
       type: 'assistant',

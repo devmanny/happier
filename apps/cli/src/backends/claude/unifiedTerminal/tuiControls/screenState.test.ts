@@ -303,6 +303,27 @@ describe('parseClaudeScreenState — generation and queued banners', () => {
     expect(isSafeWindowForSlashControl(state)).toBe(false);
   });
 
+  // Claude Code 2.1.322 animates the spinner through `·✢✳✶✻✽` (`*` replaces `✳` off macOS) and the
+  // line carries no "esc to interrupt". Live session cmwd9winf25v7qh016b8qv8pi (13 Nov): two 50 ms
+  // apart captures both landed on the `✢` frame during a 2-minute Bash call, so the turn-stall probe
+  // read an idle prompt and settled a turn Claude was still running.
+  it.each(['·', '✢', '✳', '✶', '✻', '✽', '*'])('detects generation on the %s spinner frame', (frame) => {
+    const liveCapture = [
+      '⏺ Bash(find / -path "*c2f1dc80*" 2>/dev/null | head)',
+      '  ⎿  Running…',
+      '',
+      `${frame} Billowing… (1m 2s · ↓ 24.8k tokens)`,
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  Opus 5.5',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const state = parseClaudeScreenState(liveCapture);
+    expect(state.generating).toBe(true);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+  });
+
   it('does not mistake a completion line (no parens) for generation', () => {
     const state = parseClaudeScreenState('✻ Crunched for 6s\n╭───╮\n│ ❯   │\n╰───╯');
     expect(state.generating).toBe(false);
@@ -1743,5 +1764,96 @@ describe('parseClaudeScreenState — bash mode prompt (2.1.301)', () => {
     expect(isSafeWindowForSlashControl(state)).toBe(false);
     expect(isSafeWindowForModeCycle(state)).toBe(false);
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('no_interactive_composer');
+  });
+});
+
+// Claude Code 2.1.322 shows a "feedback draft" card above the composer after the model calls its
+// SendFeedback tool. Keystrokes still go to the composer, so the card never blocks input; it is
+// reported separately because a composer holding only `0`/`1`/`2` for ~400ms is consumed as a card
+// hotkey (2 = arm send, 2 again = send) and Escape on an empty composer dismisses it.
+const INCIDENT_2026_11_13_FEEDBACK_DRAFT_CARD = [
+  '✻ Cogitated for 3m 53s · done 7:55 PM',
+  '╭──────────────────────────────────────────────────────────────────────────────╮',
+  '│ ✻ Bug report drafted: Model edited marketing copy on its own judgment after… │',
+  '│ │ - **What happened:** While coordinating a site redesign, the model         │',
+  '│ │ proposed re-cutting a demo and relabeling it. The user declined ("this is  │',
+  '│ │ an idea... to bring…                                                       │',
+  '│ 1 to review · 2 to send · 0 to dismiss                                       │',
+  '╰──────────────────────────────────────────────────────────────────────────────╯',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '❯',
+].join('\n');
+
+function readFeedbackFixture(name: string): string {
+  return readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), 'utf8');
+}
+
+describe('Claude feedback draft card (2.1.322 SendFeedback)', () => {
+  it('reports the incident card as visible on a clean, ready composer — never a draft or dialog', () => {
+    const state = parseClaudeScreenState(INCIDENT_2026_11_13_FEEDBACK_DRAFT_CARD);
+
+    expect(state.feedbackDraftCardVisible).toBe(true);
+    expect(state.composerContent).toBe('');
+    expect(state.userDraftPresent).toBe(false);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.selectionListVisible).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+  });
+
+  it('reports the live 2.1.322 card capture and its turn-off follow-up as visible', () => {
+    for (const fixture of [
+      'claude-2.1.322-feedback-draft-card.ansi',
+      'claude-2.1.322-feedback-draft-turnoff-prompt.ansi',
+    ]) {
+      const state = parseClaudeScreenState(readFeedbackFixture(fixture), { cursor: { x: 2, y: 21 } });
+      expect(state.feedbackDraftCardVisible, fixture).toBe(true);
+      expect(state.composerContent, fixture).toBe('');
+      expect(isClaudeScreenReadyForInput(state), fixture).toBe(true);
+    }
+  });
+
+  it('does not read the collapsed "· N feedback draft" footer as a card or a draft', () => {
+    const collapsed = parseClaudeScreenState(readFeedbackFixture('claude-2.1.322-feedback-draft-collapsed.ansi'), {
+      cursor: { x: 2, y: 21 },
+    });
+    expect(collapsed.feedbackDraftCardVisible).toBe(false);
+    expect(collapsed.composerContent).toBe('');
+    expect(collapsed.modeMarker).toBe('auto');
+    expect(isClaudeScreenReadyForInput(collapsed)).toBe(true);
+
+    // Incident pane after the card collapsed (bypass mode, background shell running).
+    const bypass = parseClaudeScreenState([
+      '✻ Churned for 2m 29s · done 9:38 PM · 1 shell still running',
+      '',
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  Fable 5.2',
+      '  ⏵⏵ bypass permissions on · 1 shell · 1 feedback draft',
+    ].join('\n'));
+    expect(bypass.feedbackDraftCardVisible).toBe(false);
+    expect(bypass.composerContent).toBe('');
+    expect(bypass.userDraftPresent).toBe(false);
+    expect(bypass.modeMarker).toBe('bypassPermissions');
+    expect(isClaudeScreenReadyForInput(bypass)).toBe(true);
+  });
+
+  it('ignores the card text when it only appears in transcript history above the composer', () => {
+    const state = parseClaudeScreenState([
+      '╭──────────────────────────────────────────╮',
+      '│ ✻ Bug report drafted: Old draft          │',
+      '│ 1 to review · 2 to send · 0 to dismiss   │',
+      '╰──────────────────────────────────────────╯',
+      '',
+      '⏺ The card above was dismissed earlier; continuing with the task.',
+      '',
+      '✻ Baked for 4s',
+      '',
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · 1 feedback draft',
+    ].join('\n'));
+    expect(state.feedbackDraftCardVisible).toBe(false);
   });
 });

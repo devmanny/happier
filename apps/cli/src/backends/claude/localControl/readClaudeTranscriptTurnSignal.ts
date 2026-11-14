@@ -88,6 +88,25 @@ export function isClaudeMainChainCompactBoundary(message: RawJSONLines): boolean
     && readStringFlag(message, 'subtype') === 'compact_boundary';
 }
 
+/**
+ * A main-conversation tool call or tool result. Claude only runs tools inside a turn, and every turn
+ * that reaches one writes a later end (`end_turn`, an interrupt or an API error row), so this row
+ * proves a turn is running even when the observer never saw its prompt — a runner that attached to
+ * a live terminal mid-turn, or one that settled the turn early. A background task's completion
+ * notification is excluded: it arrives as a tool result while Claude is idle.
+ */
+export function isClaudeMainChainToolProgress(message: RawJSONLines): boolean {
+  if (isClaudeSidechainTranscriptMessage(message)) return false;
+  if (message.type === 'assistant') {
+    return !readBooleanFlag(message, 'isApiErrorMessage')
+      && readMessageRecord(message)?.stop_reason === 'tool_use';
+  }
+  return message.type === 'user'
+    && !isClaudeInternalTranscriptMessage(message)
+    && !isClaudeTranscriptTaskNotification(message)
+    && hasToolResultContent(readMessageRecord(message)?.content);
+}
+
 export function readClaudeTranscriptTurnSignal(message: RawJSONLines): LocalTurnLifecycleEvent | null {
   if (isClaudeSidechainTranscriptMessage(message)) return null;
 

@@ -93,6 +93,14 @@ export type ClaudeScreenState = Readonly<{
    */
   selectionListVisible: boolean;
   /**
+   * Claude Code 2.1.322 SendFeedback card (`✻ Bug report drafted: …` / `1 to review · 2 to send ·
+   * 0 to dismiss`) or its `Turn off Claude-drafted feedback?` follow-up, directly above the
+   * composer. NOT an input blocker: typed text still lands in the composer. It is surfaced because
+   * the card consumes a composer that holds only `0`/`1`/`2` for ~400ms as a hotkey (`2` twice
+   * sends the report) and Escape on an empty composer dismisses it (live probe 2.1.322).
+   */
+  feedbackDraftCardVisible: boolean;
+  /**
    * Exact (trimmed) content of the BOTTOM composer line, `''` when the composer is empty and null
    * when no composer line is found. The control modules use it to (a) detect a leftover
    * slash-command draft that passes the safe-window check with the picker closed and (b) prove the
@@ -124,8 +132,10 @@ const ESC_TO_INTERRUPT = /esc to interrupt/i;
 // Real spinner lines do not always carry "esc to interrupt" (live capture 2026-06-11:
 // `✽ Billowing… (10m 24s · ↓ 20.4k tokens)`). Detect the spinner-line shape: an animation glyph,
 // a single status word, an ellipsis, then a parenthesized status group. Completion lines
-// (`✻ Crunched for 6s`) have no parenthesized group and must NOT match.
-const GENERATING_SPINNER_LINE = /(?:^|\n)[^\S\n]*[✶✻✽✳·∗*][^\S\n]+\S+…[^\S\n]*\(/u;
+// (`✻ Crunched for 6s`) have no parenthesized group and must NOT match. The glyph class covers every
+// frame Claude Code 2.1.322 animates (`·✢✳✶✻✽`, `*` replacing `✳` off macOS): a missing frame reads
+// a running turn as an idle prompt whenever a capture lands on it.
+const GENERATING_SPINNER_LINE = /(?:^|\n)[^\S\n]*[✢✶✻✽✳·∗*][^\S\n]+\S+…[^\S\n]*\(/u;
 const QUEUED_MESSAGE_BANNER = /press up to edit queued messages/i;
 const SWITCH_MODEL_DIALOG = /switch model\?/i;
 // Claude renders the focused-row cursor according to terminal capabilities. Real captures include
@@ -248,6 +258,14 @@ function lineIndexAt(text: string, index: number): number {
 // Composer-box bottom border / horizontal rule. Require a horizontal/corner glyph: whitespace-only
 // rows and vertical-only box rows can be intentional blank paragraphs inside the composer.
 const COMPOSER_BORDER_LINE = /^[\s─━—╰╯╭╮│|]*[─━—╰╯╭╮][\s─━—╰╯╭╮│|]*$/;
+// Claude Code 2.1.322 feedback draft card. Keyed on the stable rows inside its box (the hint row in
+// every card state, and the `<type> drafted:` title) rather than the model-written title text.
+const FEEDBACK_DRAFT_CARD_ROW = /^[^\S\n]*│.*(?:\bto review\b.*\bto (?:send|dismiss)\b|\bclear text to (?:review|open review|dismiss|answer it)\b|\bsend without reviewing\b|\b(?:bug report|product feedback|feature request|feedback) drafted:)/iu;
+const FEEDBACK_DRAFT_TURN_OFF_PROMPT = /^[^\S\n]*turn off claude-drafted feedback\?/iu;
+const BOX_BOTTOM_ROW = /^[^\S\n]*╰─+╯[^\S\n]*$/u;
+const BOX_TOP_ROW = /^[^\S\n]*╭/u;
+// Right-aligned indicators Claude renders between the card and the composer (`● high · /effort`).
+const RIGHT_ALIGNED_STATUS_ROW = /^[^\S\n]{16,}\S/u;
 // Status glyphs that can follow the composer when no border is rendered (fail-closed stop set).
 const COMPOSER_CONTINUATION_STOP = /^[\s]*(?:[⏵←⏺✻✶·]|⚠)/;
 
@@ -355,6 +373,29 @@ function resolveRuleBoxedComposer(
     })
     .join('\n');
   return { match, selectionScanText };
+}
+
+/**
+ * The card counts only when it is the block directly above the composer's top rule (blank rows
+ * and right-aligned indicators between them); a card quoted in transcript history never does.
+ */
+function resolveFeedbackDraftCardVisible(text: string, composerMatch: RegExpExecArray): boolean {
+  const lines = text.split('\n');
+  const composerRow = lineIndexAt(text, composerMatch.index + composerMatch[0].search(/[>›❯]/u));
+  if (!COMPOSER_BORDER_LINE.test(lines[composerRow - 1] ?? '')) return false;
+  let row = composerRow - 2;
+  while (row >= 0 && ((lines[row] ?? '').trim() === '' || RIGHT_ALIGNED_STATUS_ROW.test(lines[row] ?? ''))) {
+    row -= 1;
+  }
+  const nearest = lines[row] ?? '';
+  if (FEEDBACK_DRAFT_TURN_OFF_PROMPT.test(nearest)) return true;
+  if (!BOX_BOTTOM_ROW.test(nearest)) return false;
+  for (let boxRow = row - 1; boxRow >= 0; boxRow -= 1) {
+    const line = lines[boxRow] ?? '';
+    if (BOX_TOP_ROW.test(line)) return false;
+    if (FEEDBACK_DRAFT_CARD_ROW.test(line)) return true;
+  }
+  return false;
 }
 
 function readComposerContentStartColumn(line: string): number | null {
@@ -871,6 +912,9 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     && composerContent.length > 0
     && !composerHasSlash
     && visibleDialogSelection?.kind !== 'focused';
+  const feedbackDraftCardVisible = hasComposer
+    && lastComposerMatch !== null
+    && resolveFeedbackDraftCardVisible(text, lastComposerMatch);
 
   const unrecognizedConfirmationDialogVisible =
     (NUMBERED_SELECTION_OPTION.test(selectionScanText) || visibleDialogSelection?.kind === 'focused')
@@ -932,6 +976,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     queuedMessageBannerVisible,
     userDraftPresent,
     selectionListVisible: rewindSelectionVisible || SELECTION_CURSOR_ROW.test(text) || (SELECTION_LIST_HINT.test(text) && !hasComposer),
+    feedbackDraftCardVisible,
     composerContent,
     shellComposerContent: anyDialog ? null : composerState.shellContent,
     composerCursorRelation: composerState.cursorRelation,
