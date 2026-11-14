@@ -30,10 +30,8 @@ struct ChatView: View {
             deletable: session?.canDelete ?? false,
             folderPath: session?.path,
             folderColor: store.folderColor(of: session),
-            // Where there's no Tasks panel (iPhone), the session's own tasks are one tap away.
+            // Where there's no Tasks panel (iPhone), the session's own tasks are in the ⓘ menu.
             sessionTasks: tasksPanelAvailable ? nil : sessionTaskCount,
-            // iPhone: the bell lives in the ⓘ menu so the bar keeps its shape; iPad and Mac keep it in the bar.
-            bellInMenu: !tasksPanelAvailable,
             notificationsMuted: session?.notificationsMuted == true)
     }
 
@@ -729,41 +727,44 @@ private struct SessionToolbar: ViewModifier {
     @State private var showBrowser = false
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.inSessionWindow) private var inSessionWindow
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
     @Environment(BrowserModel.self) private var browser
 
+    /// A back button sits left of the title: the conversation was pushed over the session list
+    /// (iPhone, a narrow iPad window). A window of its own has none.
+    private var hasBackButton: Bool {
+        #if os(iOS)
+        horizontalSizeClass == .compact && !inSessionWindow
+        #else
+        false
+        #endif
+    }
+
     func body(content: Content) -> some View {
+        // The title matters most: at most three buttons beside it, two beside a back button
+        // (`SessionToolbarLayout`); everything else is in the ⓘ menu.
+        let slots = SessionToolbarLayout.slots(hasBackButton: hasBackButton)
         content
+            #if os(macOS)
+            // Search keeps its shortcut now that it lives in the ⓘ menu.
+            .background {
+                Button("Search Here") { startFinding() }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+            #endif
             .toolbar {
-                #if os(macOS)
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Search Here", systemImage: "magnifyingglass") { startFinding() }
-                        .keyboardShortcut("f", modifiers: .command)
-                }
-                #endif
-                // Once the agent has used the browser, its tab is one tap away (✨ while it works).
-                if browser.hasTabs(for: sessionId) {
-                    ToolbarItem(placement: .primaryAction) {
-                        SessionBrowserButton(sessionId: sessionId) { openBrowser() }
-                    }
-                }
-                ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId, color: details.folderColor?.color ?? .userBubble) }
-                if !details.bellInMenu {
-                    ToolbarItem(placement: .primaryAction) { SessionBellButton(sessionId: sessionId) }
-                } else if let open = details.sessionTasks {
-                    // iPhone: the session's own tasks, where the bell was; only when it has linked tasks.
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            perform(.sessionTasks)
-                        } label: {
-                            Label("Session Tasks", systemImage: "checklist")
-                        }
-                        .badge(open)
-                        .accessibilityLabel(open == 0 ? "Session tasks" : "Session tasks, \(open) open")
-                    }
+                if slots.contains(.readAloud) {
+                    ToolbarItem(placement: .primaryAction) { AutoReadButton(sessionId: sessionId, color: details.folderColor?.color ?? .userBubble) }
                 }
                 SessionUsageToolbar(sessionId: sessionId)
                 ToolbarItem(placement: .primaryAction) {
-                    SessionDetailsMenu(details: details, perform: perform).equatable()
+                    SessionDetailsMenu(details: details, readAloudInMenu: !slots.contains(.readAloud), perform: perform).equatable()
                 }
             }
             .modifier(RenameSessionAlert(session: $renaming))
@@ -810,6 +811,9 @@ private struct SessionToolbar: ViewModifier {
         case .search: startFinding()
         case .background: AppHaptics.light(); showActivity = true
         case .sessionTasks: AppHaptics.light(); showSessionTasks = true
+        case .toggleReadAloud:
+            AppHaptics.light()
+            MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
         case .toggleNotifications:
             AppHaptics.selection()
             let muted = store.sessions[sessionId]?.notificationsMuted == true
@@ -840,27 +844,6 @@ private struct SessionToolbar: ViewModifier {
         case .delete:
             AppHaptics.warning()
             if let session = store.sessions[sessionId] { store.requestDelete(session) }
-        }
-    }
-}
-
-/// The session's tab in the integrated browser; it pulses while the agent is using it.
-private struct SessionBrowserButton: View {
-    let sessionId: String
-    let action: () -> Void
-    @Environment(BrowserModel.self) private var browser
-
-    var body: some View {
-        // The pulse animates by itself; the view updates once more, when the agent's use ends
-        // (it ticked every second whenever the session had a tab).
-        let activeUntil = browser.tabs.filter { $0.sessionId == sessionId }.compactMap(\.agentActiveUntil).max() ?? .distantPast
-        TimelineView(.explicit(activeUntil > .now ? [activeUntil] : [])) { context in
-            let working = activeUntil > context.date
-            Button(action: action) {
-                Label("Browser", systemImage: "safari")
-                    .symbolEffect(.pulse, isActive: working)
-            }
-            .help(working ? "The agent is using the browser" : "Browser")
         }
     }
 }
@@ -1062,21 +1045,24 @@ private struct SessionDetailsMenu: View, Equatable {
         let folderColor: AccountSettings.FolderColor?
         /// Open tasks linked to this session; nil hides the entry (none linked, or a Tasks panel exists).
         var sessionTasks: Int? = nil
-        var bellInMenu = false
         var notificationsMuted = false
     }
 
     enum Action {
-        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete, sessionTasks, toggleNotifications
+        case info, search, openInWindow, browser, rename, moveToTopLevel, background, jump(String), stopAgent, stopSession, archive, unarchive, delete, sessionTasks, toggleNotifications, toggleReadAloud
         case folderColor(AccountSettings.FolderColor?)
     }
 
     let details: Details
+    /// No room for "read aloud" in the bar (`SessionToolbarLayout`).
+    let readAloudInMenu: Bool
     let perform: (Action) -> Void
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @Environment(\.inSessionWindow) private var inSessionWindow
 
-    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.details == rhs.details }
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.details == rhs.details && lhs.readAloudInMenu == rhs.readAloudInMenu
+    }
 
     var body: some View {
         Menu {
@@ -1096,12 +1082,20 @@ private struct SessionDetailsMenu: View, Equatable {
                 if details.hasBackground {
                     Button("Subagents & Tasks", systemImage: "square.stack.3d.down.right") { perform(.background) }
                 }
-                if details.bellInMenu {
-                    // The session's bell, with its state: on by default; off, it never notifies you.
-                    Button(details.notificationsMuted ? "Turn On Notifications" : "Mute Notifications",
-                           systemImage: details.notificationsMuted ? "bell.slash" : "bell") {
-                        perform(.toggleNotifications)
+                if let open = details.sessionTasks {
+                    // The session's own tasks (no Tasks panel here); only when it has linked tasks.
+                    Button(open == 0 ? "Session Tasks" : "Session Tasks · \(open) open", systemImage: "checklist") {
+                        perform(.sessionTasks)
                     }
+                }
+                if readAloudInMenu {
+                    ReadAloudMenuButton(sessionId: details.sessionId) { perform(.toggleReadAloud) }
+                }
+                // The session's bell, with its state: on by default; off, it never notifies you. It
+                // still reports to its parent session, which notifies as usual.
+                Button(details.notificationsMuted ? "Turn On Notifications" : "Mute Notifications",
+                       systemImage: details.notificationsMuted ? "bell.slash" : "bell") {
+                    perform(.toggleNotifications)
                 }
                 // This session's tab in the integrated browser, where its agent browses.
                 Button("Browser", systemImage: "safari") { perform(.browser) }
@@ -1154,21 +1148,15 @@ final class ChatScrollState {
     var followScheduled = false
 }
 
-/// The session's bell: on by default. Off, the session never notifies you; it still reports to
-/// its parent session, which notifies as usual.
-struct SessionBellButton: View {
+/// "Read new messages aloud" in the ⓘ menu, with its state, when the bar has no room for it.
+private struct ReadAloudMenuButton: View {
     let sessionId: String
-    @Environment(HappierStore.self) private var store
+    let action: () -> Void
+    @State private var speaker = MessageSpeaker.shared
 
     var body: some View {
-        let muted = store.sessions[sessionId]?.notificationsMuted == true
-        Button {
-            AppHaptics.selection()
-            Task { await store.setNotificationsMuted(!muted, in: sessionId) }
-        } label: {
-            Label(muted ? "Turn On Notifications" : "Mute Notifications", systemImage: muted ? "bell.slash" : "bell")
-        }
-        .help(muted ? "This session doesn't notify you. Turn its notifications back on."
-                    : "Stop notifications from this session. It still reports to its parent session.")
+        let on = speaker.autoReadSessionId == sessionId
+        Button(on ? "Stop Reading New Messages" : "Read New Messages Aloud",
+               systemImage: on ? "speaker.wave.2.fill" : "speaker.wave.2", action: action)
     }
 }

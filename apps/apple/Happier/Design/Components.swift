@@ -355,13 +355,22 @@ extension AccountSettings.FolderColor {
     var name: LocalizedStringKey {
         switch self {
         case .red: "Red"
+        case .crimson: "Crimson"
+        case .coral: "Coral"
         case .orange: "Orange"
+        case .brown: "Brown"
         case .yellow: "Yellow"
+        case .lime: "Lime"
         case .green: "Green"
+        case .mint: "Mint"
         case .teal: "Teal"
+        case .sky: "Sky"
         case .blue: "Blue"
+        case .navy: "Navy"
         case .indigo: "Indigo"
         case .purple: "Purple"
+        case .plum: "Plum"
+        case .magenta: "Magenta"
         case .pink: "Pink"
         case .gray: "Gray"
         }

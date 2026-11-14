@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import HappierKit
 
@@ -40,8 +41,35 @@ struct FolderColorTests {
         }
     }
 
-    @Test func noTwoFolderColorsLookTheSame() {
-        let all = AccountSettings.FolderColor.allCases.map(\.vivid)
-        #expect(Set(all.map { "\($0.red) \($0.green) \($0.blue)" }).count == all.count)
+    /// Enough colors to tell many projects apart, and none mistaken for another: every pair is at
+    /// least a clearly visible step apart (CIE76 ΔE ≥ 15).
+    @Test func manyFolderColorsAndNoTwoLookAlike() {
+        let all = AccountSettings.FolderColor.allCases
+        #expect(all.count >= 19)
+        for (index, color) in all.enumerated() {
+            for other in all[(index + 1)...] {
+                #expect(Self.distance(color.vivid, other.vivid) >= 15, "\(color) and \(other) look alike")
+            }
+        }
+    }
+
+    @Test func aColorFromTheWiderPaletteIsReadBack() {
+        var settings = AccountSettings(values: [:])
+        settings = settings.merging(settings.delta(folderColor: AccountSettings.FolderColor(rawValue: "navy"), for: "/a"))
+        #expect(settings.folderColor(for: "/a")?.rawValue == "navy")
+    }
+
+    private static func distance(_ a: AccountSettings.RGB, _ b: AccountSettings.RGB) -> Double {
+        func lab(_ c: AccountSettings.RGB) -> (Double, Double, Double) {
+            func linear(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            let r = linear(c.red), g = linear(c.green), b = linear(c.blue)
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+            func f(_ t: Double) -> Double { t > 0.008856 ? cbrt(t) : 7.787 * t + 16 / 116 }
+            return (116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z)))
+        }
+        let p = lab(a), q = lab(b)
+        return ((p.0 - q.0) * (p.0 - q.0) + (p.1 - q.1) * (p.1 - q.1) + (p.2 - q.2) * (p.2 - q.2)).squareRoot()
     }
 }

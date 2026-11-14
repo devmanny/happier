@@ -134,20 +134,30 @@ public struct AccountSettings: Sendable, Equatable {
     /// A project folder's color, so each window shows which project it's in (native app only;
     /// other apps keep the key as it is).
     public enum FolderColor: String, CaseIterable, Sendable {
-        case red, orange, yellow, green, teal, blue, indigo, purple, pink, gray
+        // In hue order, as the picker lists them. Stored by name, so the order can change freely.
+        case red, crimson, coral, orange, brown, yellow, lime, green, mint, teal, sky, blue, navy, indigo, purple, plum, magenta, pink, gray
 
         /// The color as a fill under white text (your bubbles, the avatar's disc): saturated,
         /// and no lighter than white text can be read on.
         public var vivid: RGB {
             switch self {
             case .red: RGB(0xF0293E)
+            case .crimson: RGB(0xB8002E)
+            case .coral: RGB(0xE8503A)
             case .orange: RGB(0xE65C00)
+            case .brown: RGB(0xA0522D)
             case .yellow: RGB(0xC28500)
+            case .lime: RGB(0x5A9A00)
             case .green: RGB(0x16A04A)
+            case .mint: RGB(0x009C80)
             case .teal: RGB(0x008C99)
+            case .sky: RGB(0x0A84E0)
             case .blue: RGB(0x1A6DFF)
+            case .navy: RGB(0x2F4BC8)
             case .indigo: RGB(0x5E4FF0)
             case .purple: RGB(0xA63DF0)
+            case .plum: RGB(0x9C2B8C)
+            case .magenta: RGB(0xC81EC8)
             case .pink: RGB(0xF02D7D)
             case .gray: RGB(0x6E7480)
             }
