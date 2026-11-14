@@ -209,6 +209,9 @@ private final class TouchWatcher: UIGestureRecognizer, UIGestureRecognizerDelega
         self.touched = touched
         super.init(target: nil, action: nil)
         cancelsTouchesInView = false
+        // A click with a mouse or trackpad (also a Mac's, through Universal Control) focuses a
+        // window as a finger does.
+        allowedTouchTypes = [UITouch.TouchType.direct, .pencil, .indirect, .indirectPointer].map { NSNumber(value: $0.rawValue) }
         delaysTouchesBegan = false
         delaysTouchesEnded = false
         delegate = self

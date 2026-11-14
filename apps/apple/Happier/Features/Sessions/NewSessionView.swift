@@ -207,6 +207,21 @@ struct NewSessionView: View {
             // A dismissed wizard must not leave its mic running or start it after permission UI.
             if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
+        #if os(iOS)
+        // The Apple Pencil as in a conversation's composer; a double tap starts the session.
+        .pencilComposerGestures(recording: dictation.isRecording, talking: talking) {
+            AppHaptics.light()
+            dictation.toggle(prefix: firstMessage) { firstMessage = $0 }
+        } finishDictating: {
+            AppHaptics.light()
+            Task { await dictation.finish() }
+        } send: {
+            Task {
+                if dictation.isRecording { await dictation.finish() }
+                if canStart { start(approve: false) }
+            }
+        }
+        #endif
         .alert("Create Folder?", isPresented: Binding(get: { folderToApprove != nil }, set: { if !$0 { folderToApprove = nil } })) {
             Button("Create and Start") { start(approve: true) }
             Button("Cancel", role: .cancel) { AppHaptics.light() }

@@ -30,15 +30,6 @@ struct Composer: View {
     @State private var showAgentCard = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dictation = Dictation()
-    #if os(iOS)
-    /// Apple Pencil Pro squeezes: two start dictating, one stops and keeps the text.
-    @State private var pencilSqueeze = PencilSqueezeDictation()
-    @Environment(\.preferredPencilSqueezeAction) private var preferredPencilSqueezeAction
-    @Environment(\.preferredPencilDoubleTapAction) private var preferredPencilDoubleTapAction
-    /// Only the window with the focus opens its mic on a squeeze (`FrontWindow.takesInput`).
-    @Environment(\.appearsActive) private var windowActive
-    @State private var keyWindow = KeyWindowState()
-    #endif
     @State private var showPhotos = false
     @State private var loadingAttachments = 0
     @State private var showFiles = false
@@ -186,20 +177,9 @@ struct Composer: View {
             if talking { stopTalking(cancelled: true) } else { dictation.stop() }
         }
         #if os(iOS)
-        // Apple Pencil Pro: squeeze twice to dictate, once to stop and keep the text, unsent
-        // (`PencilSqueezeDictation`). Off when the Pencil's squeeze is set to do nothing.
-        .background(KeyWindowReader(state: keyWindow))
-        .onPencilSqueeze { phase in
-            guard case .ended = phase, preferredPencilSqueezeAction != .ignore, !talking, hasFocus else { return }
-            switch pencilSqueeze.squeezed(at: .now, recording: dictation.isRecording) {
-            case .start: startDictating()
-            case .finish: finishDictating()
-            case .none: break
-            }
-        }
-        // Apple Pencil double tap: send, like the send button, after the dictation's last words.
-        .onPencilDoubleTap { _ in
-            guard preferredPencilDoubleTapAction != .ignore, !talking, hasFocus else { return }
+        .pencilComposerGestures(recording: dictation.isRecording, talking: talking,
+                                startDictating: startDictating, finishDictating: finishDictating) {
+            // Send like the send button, after the dictation's last words.
             Task {
                 if dictation.isRecording { await dictation.finish() }
                 if canSend { send() }
@@ -250,17 +230,7 @@ struct Composer: View {
         }
     }
 
-    #if os(iOS)
-    /// This composer's window has the focus: the one touched last among the iPad's windows.
-    private var hasFocus: Bool {
-        let touched = TouchedWindow.shared.id
-        let onScreen = UIApplication.shared.connectedScenes.filter { $0.activationState == .foregroundActive }.count
-        return FrontWindow.takesInput(active: windowActive, isKey: touched != nil && touched == keyWindow.id,
-                                      anyWindowIsKey: touched != nil, onlyWindow: onScreen <= 1)
-    }
-    #endif
-
-    /// The blue mic's tap (or a double Pencil squeeze): dictate into the field.
+    /// The blue mic's tap (or two Pencil squeezes): dictate into the field.
     private func startDictating() {
         AppHaptics.light()
         dictation.toggle(prefix: text) { text = $0 }
