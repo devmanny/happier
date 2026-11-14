@@ -17,4 +17,15 @@ struct FrontWindowTests {
     @Test func aPromptIsNotLostWhenNoWindowIsKey() {
         #expect(FrontWindow.showsPrompts(active: true, isKey: false, anyWindowIsKey: false))
     }
+
+    /// The microphone (an Apple Pencil squeeze) opens in the one window with the focus, never in
+    /// every visible window, nor in one behind.
+    @Test func onlyTheFocusedWindowOpensTheMicrophone() {
+        #expect(FrontWindow.takesInput(active: true, isKey: true, anyWindowIsKey: true, onlyWindow: false))
+        #expect(!FrontWindow.takesInput(active: true, isKey: false, anyWindowIsKey: true, onlyWindow: false))
+        #expect(!FrontWindow.takesInput(active: false, isKey: true, anyWindowIsKey: true, onlyWindow: true))
+        // Before any window is touched, only a window alone on screen takes it.
+        #expect(!FrontWindow.takesInput(active: true, isKey: false, anyWindowIsKey: false, onlyWindow: false))
+        #expect(FrontWindow.takesInput(active: true, isKey: false, anyWindowIsKey: false, onlyWindow: true))
+    }
 }

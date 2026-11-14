@@ -157,7 +157,8 @@ final class KeyWindowState {
     var id: ObjectIdentifier?
 }
 
-private struct KeyWindowReader: UIViewRepresentable {
+/// Reports the window a view sits in (`KeyWindowState`) and records touches in it (`TouchedWindow`).
+struct KeyWindowReader: UIViewRepresentable {
     let state: KeyWindowState
 
     func makeUIView(context: Context) -> Probe { Probe(state: state) }

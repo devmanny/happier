@@ -9,4 +9,11 @@ public enum FrontWindow {
     public static func showsPrompts(active: Bool, isKey: Bool, anyWindowIsKey: Bool) -> Bool {
         active && (isKey || !anyWindowIsKey)
     }
+
+    /// Whether this window takes input meant for one window only (an Apple Pencil squeeze opening
+    /// the microphone): the window with the focus, the one touched last. Unlike a prompt, it is
+    /// never shown in several at once: with none touched yet, only a window alone on screen takes it.
+    public static func takesInput(active: Bool, isKey: Bool, anyWindowIsKey: Bool, onlyWindow: Bool) -> Bool {
+        active && (isKey || (!anyWindowIsKey && onlyWindow))
+    }
 }

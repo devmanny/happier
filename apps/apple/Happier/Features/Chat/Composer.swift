@@ -34,6 +34,9 @@ struct Composer: View {
     /// Apple Pencil Pro squeezes: one starts dictating, two stop and keep the text.
     @State private var pencilSqueeze = PencilSqueezeDictation()
     @Environment(\.preferredPencilSqueezeAction) private var preferredPencilSqueezeAction
+    /// Only the window with the focus opens its mic on a squeeze (`FrontWindow.takesInput`).
+    @Environment(\.appearsActive) private var windowActive
+    @State private var keyWindow = KeyWindowState()
     #endif
     @State private var showPhotos = false
     @State private var loadingAttachments = 0
@@ -184,8 +187,9 @@ struct Composer: View {
         #if os(iOS)
         // Apple Pencil Pro: squeeze once to dictate, twice to stop and keep the text, unsent
         // (`PencilSqueezeDictation`). Off when the Pencil's squeeze is set to do nothing.
+        .background(KeyWindowReader(state: keyWindow))
         .onPencilSqueeze { phase in
-            guard case .ended = phase, preferredPencilSqueezeAction != .ignore, !talking else { return }
+            guard case .ended = phase, preferredPencilSqueezeAction != .ignore, !talking, hasFocus else { return }
             switch pencilSqueeze.squeezed(at: .now, recording: dictation.isRecording) {
             case .start: startDictating()
             case .finish: finishDictating()
@@ -236,6 +240,16 @@ struct Composer: View {
             }
         }
     }
+
+    #if os(iOS)
+    /// This composer's window has the focus: the one touched last among the iPad's windows.
+    private var hasFocus: Bool {
+        let touched = TouchedWindow.shared.id
+        let onScreen = UIApplication.shared.connectedScenes.filter { $0.activationState == .foregroundActive }.count
+        return FrontWindow.takesInput(active: windowActive, isKey: touched != nil && touched == keyWindow.id,
+                                      anyWindowIsKey: touched != nil, onlyWindow: onScreen <= 1)
+    }
+    #endif
 
     /// The blue mic's tap (or one Pencil squeeze): dictate into the field.
     private func startDictating() {
