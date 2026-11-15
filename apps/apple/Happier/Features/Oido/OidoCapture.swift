@@ -2,8 +2,10 @@ import AVFoundation
 import HappierKit
 import os
 
-/// The microphone for Oído: the input converted to 16 kHz mono and fed to an `OidoPipeline` on its
-/// own queue (the tap's thread must not encode or write files). Independent of dictation's engine.
+/// Oído's ear on the app's microphone (`Microphone`, shared with dictation): the input converted
+/// to 16 kHz mono and fed to an `OidoPipeline` on its own queue (the tap's thread must not encode
+/// or write files). While a call or another app has the microphone, the stream ends there, so what
+/// was heard is chunked and queued, and a new one starts when the audio comes back.
 final class OidoCapture: @unchecked Sendable {
     struct Snapshot: Sendable {
         var levelDBFS: Float
@@ -16,70 +18,61 @@ final class OidoCapture: @unchecked Sendable {
     private let pipeline: OidoPipeline
     private let onChunks: @Sendable (Int) -> Void
     private let onSnapshot: @Sendable (Snapshot) -> Void
+    private let onPhase: @Sendable (MicrophoneRecovery.Phase) -> Void
     private let onFailure: @Sendable (String) -> Void
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(Oido.sampleRate), channels: 1, interleaved: false)!
 
-    private var engine: AVAudioEngine?
+    private var microphone: Microphone.Tap?
+    private var stopped = false
     private var converter: AVAudioConverter?
     private var samplesInStream = 0
     private var streamStart = Date()
     private var lastSnapshot = Date.distantPast
-    private var configurationObserver: NSObjectProtocol?
 
-    init(pipeline: OidoPipeline, onChunks: @escaping @Sendable (Int) -> Void,
-         onSnapshot: @escaping @Sendable (Snapshot) -> Void, onFailure: @escaping @Sendable (String) -> Void) {
+    init(pipeline: OidoPipeline, onChunks: @escaping @Sendable (Int) -> Void, onSnapshot: @escaping @Sendable (Snapshot) -> Void,
+         onPhase: @escaping @Sendable (MicrophoneRecovery.Phase) -> Void, onFailure: @escaping @Sendable (String) -> Void) {
         self.pipeline = pipeline
         self.onChunks = onChunks
         self.onSnapshot = onSnapshot
+        self.onPhase = onPhase
         self.onFailure = onFailure
     }
 
-    func start() throws {
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
-        try session.setActive(true)
-        #endif
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0, let converter = AVAudioConverter(from: format, to: target) else {
-            throw OidoCaptureError.microphoneUnavailable
-        }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+    /// Starts listening. The microphone may be busy (a call): it comes to Oído once it's free, and
+    /// `onPhase` says when.
+    func start() async throws {
+        let microphone = try await Microphone.shared.attach(.listening, onBuffer: { [weak self] buffer in
             self?.receive(buffer)
+        }, onPhase: { [weak self] phase in
+            self?.phaseChanged(phase)
+        })
+        // Paused while the microphone was coming up.
+        let keep = queue.sync {
+            if !stopped { self.microphone = microphone }
+            return !stopped
         }
-        engine.prepare()
-        try engine.start()
-        queue.sync {
-            self.engine = engine
-            self.converter = converter
-            self.beginStream(at: Date())
-        }
-        // The input device changed (headset, another mic): start over with its format.
-        configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
-            guard let self else { return }
-            Self.log.notice("audio configuration changed; restarting the microphone")
-            self.stop()
-            do { try self.start() } catch { self.onFailure(error.localizedDescription) }
-        }
+        if !keep { Microphone.shared.detach(microphone) }
     }
 
     /// Stops listening; what was heard is chunked and queued.
     func stop() {
-        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
-        configurationObserver = nil
+        let microphone = queue.sync {
+            stopped = true
+            let microphone = self.microphone
+            self.microphone = nil
+            return microphone
+        }
+        if let microphone { Microphone.shared.detach(microphone) }
         queue.sync {
-            engine?.inputNode.removeTap(onBus: 0)
-            engine?.stop()
-            engine = nil
             converter = nil
             endStream()
         }
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        #endif
+    }
+
+    private func phaseChanged(_ phase: MicrophoneRecovery.Phase) {
+        // After the buffers already handed over: they belong to the stream that ends here.
+        if phase != .running { queue.async { [weak self] in self?.endStream() } }
+        onPhase(phase)
     }
 
     private func receive(_ buffer: AVAudioPCMBuffer) {
@@ -90,10 +83,15 @@ final class OidoCapture: @unchecked Sendable {
     }
 
     private func process(_ buffer: AVAudioPCMBuffer, arrived: Date) {
+        guard !stopped else { return }
+        // The input's format changes with the hardware (AirPods, another microphone).
+        if converter?.inputFormat != buffer.format { converter = AVAudioConverter(from: buffer.format, to: target) }
         guard let converter, let samples = convert(buffer, with: converter), !samples.isEmpty else { return }
+        let duration = Double(samples.count) / Double(Oido.sampleRate)
+        // Back after an interruption: a new stream from now.
+        if !pipeline.isRunning { beginStream(at: arrived.addingTimeInterval(-duration)) }
         // The stream's clock is its sample count. Audio that stopped coming (sleep, a stalled device)
         // would put every later chunk at the wrong time: start a new stream at the real time instead.
-        let duration = Double(samples.count) / Double(Oido.sampleRate)
         let expected = streamStart.addingTimeInterval(Double(samplesInStream) / Double(Oido.sampleRate) + duration)
         if abs(arrived.timeIntervalSince(expected)) > 2 {
             Self.log.notice("oido stream clock off by \(arrived.timeIntervalSince(expected), privacy: .public) s; new stream")
@@ -154,13 +152,13 @@ final class OidoCapture: @unchecked Sendable {
 }
 
 enum OidoCaptureError: LocalizedError {
-    case microphoneUnavailable
     case permissionDenied
 
     var errorDescription: String? {
-        switch self {
-        case .microphoneUnavailable: String(localized: "The microphone isn't available right now.")
-        case .permissionDenied: String(localized: "Happier doesn't have access to the microphone. Allow it in System Settings › Privacy & Security › Microphone.")
-        }
+        #if os(macOS)
+        String(localized: "Happier doesn't have access to the microphone. Allow it in System Settings › Privacy & Security › Microphone.")
+        #else
+        String(localized: "Happier doesn't have access to the microphone. Allow it in Settings › Apps › Happier.")
+        #endif
     }
 }

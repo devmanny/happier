@@ -36,6 +36,9 @@ struct OidoSettingsView: View {
                     .autocorrectionDisabled()
                 TextField("This Device's Name", text: $deviceName)
                     .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
                     .onSubmit(applyDeviceName)
             } header: {
                 Text("Destination")
@@ -97,19 +100,27 @@ struct OidoStatusRows: View {
         }
     }
 
-    private var stateText: String {
-        switch oido.state {
+    private var stateText: String { oido.stateDescription }
+    private var color: Color { oido.stateColor }
+}
+
+extension OidoController {
+    /// The state in words, the same in Settings, the menu bar and the iPhone's button.
+    var stateDescription: String {
+        switch state {
         case .paused: String(localized: "Paused")
         case .starting: String(localized: "Starting…")
-        case .listening: oido.hearingSpeech ? String(localized: "Listening · hearing speech") : String(localized: "Listening")
+        case .listening: hearingSpeech ? String(localized: "Listening · hearing speech") : String(localized: "Listening")
+        case .interrupted: String(localized: "Paused while a call or another app uses the microphone; resumes by itself")
         case .failed(let message): message
         }
     }
 
-    private var color: Color {
-        switch oido.state {
-        case .listening: oido.hearingSpeech ? .green : .blue
+    var stateColor: Color {
+        switch state {
+        case .listening: hearingSpeech ? .green : .blue
         case .starting: .yellow
+        case .interrupted: .orange
         case .paused: .secondary
         case .failed: .red
         }
@@ -136,13 +147,7 @@ struct OidoMenuBarContent: View {
     }
 
     private var summary: String {
-        var parts: [String] = []
-        switch oido.state {
-        case .paused: parts.append(String(localized: "Paused"))
-        case .starting: parts.append(String(localized: "Starting…"))
-        case .listening: parts.append(String(localized: "Listening"))
-        case .failed(let message): parts.append(message)
-        }
+        var parts = [oido.stateDescription]
         if oido.upload.pending > 0 { parts.append(String(localized: "\(oido.upload.pending) waiting to send")) }
         return parts.joined(separator: " · ")
     }
@@ -154,6 +159,83 @@ struct OidoMenuBarLabel: View {
     var body: some View {
         Image(systemName: oido.isListening ? "ear.fill" : "ear")
             .accessibilityLabel(oido.isListening ? Text("Oído is listening") : Text("Oído is paused"))
+    }
+}
+#endif
+
+#if os(iOS)
+/// Oído beside Settings at the foot of the sessions list (the iPhone has no menu bar): a tap
+/// turns it on or off, touching and holding shows how it's doing and its settings. The ear
+/// says the state: filled while on, with a warning while the microphone is taken or it failed.
+struct OidoQuickButton: View {
+    @Environment(OidoController.self) private var oido
+    @State private var showSettings = false
+
+    var body: some View {
+        Menu {
+            Section {
+                Text(oido.stateDescription)
+                if oido.machineId == nil {
+                    Text("Choose the Mac that transcribes in Oído Settings.")
+                }
+                if oido.upload.pending > 0 {
+                    Text("\(oido.upload.pending) waiting to send")
+                }
+                if let error = oido.upload.lastError, oido.upload.pending > 0 {
+                    Text(error)
+                }
+            }
+            Button(oido.isListening ? "Pause Listening" : "Start Listening",
+                   systemImage: oido.isListening ? "pause.fill" : "ear") { toggle() }
+            Button("Oído Settings…", systemImage: "gearshape") { showSettings = true }
+        } label: {
+            Image(systemName: symbol)
+                .font(.title2)
+                .foregroundStyle(tint)
+                .symbolEffect(.pulse, isActive: oido.state == .starting || oido.state == .listening && oido.hearingSpeech)
+        } primaryAction: {
+            toggle()
+        }
+        .buttonStyle(.glass)
+        .glassHover()
+        .buttonBorderShape(.circle)
+        .controlSize(.large)
+        .accessibilityLabel(Text("Oído"))
+        .accessibilityValue(Text(oido.stateDescription))
+        .accessibilityHint(Text("Turns listening on or off. Touch and hold for more."))
+        .accessibilityIdentifier("oido-quick-button")
+        .sheet(isPresented: $showSettings) {
+            NavigationStack {
+                OidoSettingsView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showSettings = false }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var symbol: String {
+        switch oido.state {
+        case .listening, .starting: "ear.fill"
+        case .interrupted, .failed: "ear.trianglebadge.exclamationmark"
+        case .paused: "ear"
+        }
+    }
+
+    private var tint: Color {
+        oido.state == .paused ? .primary : oido.stateColor
+    }
+
+    /// Without a Mac to send to, starting would only fill the queue: the settings open instead.
+    private func toggle() {
+        AppHaptics.light()
+        if !oido.isListening, oido.machineId == nil {
+            showSettings = true
+        } else {
+            oido.toggle()
+        }
     }
 }
 #endif

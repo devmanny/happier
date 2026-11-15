@@ -75,7 +75,7 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoadsInWebContent: true
         NSCameraUsageDescription: Happier uses the camera to attach photos to your messages and scan pairing QR codes.
-        NSMicrophoneUsageDescription: Happier uses the microphone to dictate messages to your agents.
+        NSMicrophoneUsageDescription: Happier uses the microphone to dictate messages to your agents and, when you turn on Oído, to send what's said to your Mac for transcription.
         NSSpeechRecognitionUsageDescription: Happier turns your voice into text so you can dictate messages to your agents.
         UILaunchScreen: {}
         # Reading messages aloud keeps going with the app minimized or the phone locked.

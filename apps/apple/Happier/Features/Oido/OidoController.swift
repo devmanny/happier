@@ -19,6 +19,8 @@ final class OidoController {
         case paused
         case starting
         case listening
+        /// On, but a call or another app has the microphone (or it isn't free yet): it comes back by itself.
+        case interrupted
         case failed(String)
     }
 
@@ -69,6 +71,8 @@ final class OidoController {
     private let spool: OidoSpool?
     private let uploader: OidoUploader?
     private var capture: OidoCapture?
+    /// Wakes the uploader whenever the relay connection comes back (the app returning to the front).
+    @ObservationIgnored private var connectionWatch: Task<Void, Never>?
     #if os(macOS)
     /// Keeps the Mac awake and out of App Nap while listening (as `caffeinate -i` did for the Python client).
     private var activity: NSObjectProtocol?
@@ -115,10 +119,32 @@ final class OidoController {
         store.restore()
         reconfigureUploads()
         Task { await uploader.start() }
-        if UserDefaults.standard.bool(forKey: Key.listening) { Task { await start() } }
+        watchConnection(uploader)
+        if wantsToListen { Task { await start() } }
     }
 
-    var isListening: Bool { state == .listening || state == .starting }
+    /// Whether the user turned Oído on (kept across launches; a call or a failure doesn't change it).
+    private var wantsToListen: Bool { UserDefaults.standard.bool(forKey: Key.listening) }
+
+    /// On: listening, coming up, or waiting for the microphone to be free again.
+    var isListening: Bool { state == .listening || state == .starting || state == .interrupted }
+
+    /// Chunks that failed to send while the app was in the background (the relay connection
+    /// closes there) go as soon as the connection is back, instead of at the next backoff.
+    private func watchConnection(_ uploader: OidoUploader) {
+        connectionWatch?.cancel()
+        connectionWatch = Task { [store] in
+            for await online in Observations({ @MainActor in store.connection == .online }) where online {
+                await uploader.wake()
+            }
+        }
+    }
+
+    /// Back in front: an Oído that's on but failed (the microphone permission given meanwhile, an
+    /// earlier launch in the background) tries again. The microphone itself recovers on its own.
+    func appBecameActive() {
+        if wantsToListen, case .failed = state { Task { await start() } }
+    }
 
     func toggle() {
         if isListening { pause() } else { Task { await start() } }
@@ -145,29 +171,65 @@ final class OidoController {
             }
         })
         let uploader = uploader
+        let sink = CaptureSink()
+        sink.controller = self
         let capture = OidoCapture(pipeline: pipeline, onChunks: { _ in
             Task { await uploader?.wake() }
         }, onSnapshot: { snapshot in
-            Task { @MainActor [weak self] in
-                self?.levelDBFS = snapshot.levelDBFS
-                self?.hearingSpeech = snapshot.hearingSpeech
+            Task { @MainActor in
+                guard let controller = sink.current else { return }
+                controller.levelDBFS = snapshot.levelDBFS
+                controller.hearingSpeech = snapshot.hearingSpeech
             }
+        }, onPhase: { phase in
+            Task { @MainActor in sink.current?.microphoneChanged(phase) }
         }, onFailure: { message in
-            Task { @MainActor [weak self] in self?.captureFailed(message) }
+            Task { @MainActor in sink.current?.captureFailed(message) }
         })
+        sink.capture = capture
+        // Set first: pausing while the microphone comes up stops this capture.
+        self.capture = capture
         do {
-            try capture.start()
+            try await capture.start()
         } catch {
+            guard self.capture === capture else { return }
+            self.capture = nil
             state = .failed(error.localizedDescription)
             return
         }
-        self.capture = capture
-        listeningSince = Date()
-        state = .listening
+        guard self.capture === capture else { return }
         #if os(macOS)
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "Oído is listening")
         #endif
+    }
+
+    /// Hands a capture's reports to the controller while it's still the current capture (a late
+    /// report from one already paused changes nothing), without a cycle.
+    private final class CaptureSink: @unchecked Sendable {
+        @MainActor weak var controller: OidoController?
+        @MainActor weak var capture: OidoCapture?
+
+        @MainActor var current: OidoController? {
+            guard let controller, let capture, controller.capture === capture else { return nil }
+            return controller
+        }
+    }
+
+    private func microphoneChanged(_ phase: MicrophoneRecovery.Phase) {
+        switch phase {
+        case .running:
+            if listeningSince == nil { listeningSince = Date() }
+            state = .listening
+        case .starting:
+            if state != .listening { state = .starting }
+        case .interrupted, .waiting:
+            levelDBFS = -120
+            hearingSpeech = false
+            state = .interrupted
+        case .off:
+            break
+        }
     }
 
     func pause() {

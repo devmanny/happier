@@ -38,6 +38,7 @@ struct HappierApp: App {
                         MessageSpeaker.shared.appMovedToBackground(false)
                         store.appDidBecomeActive()
                         delegate.browser.appBecameActive()
+                        delegate.oido.appBecameActive()
                         // Folder colors and other synced settings changed elsewhere show up here.
                         if store.phase == .ready { Task { await store.refreshAccountSettings() } }
                     case .background:
