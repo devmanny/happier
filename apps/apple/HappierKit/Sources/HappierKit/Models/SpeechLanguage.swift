@@ -43,6 +43,19 @@ public enum SpeechLanguage {
         return nil
     }
 
+    /// The recognizer locale with a language chosen in Settings › Dictation (a language code such
+    /// as `es`; nil is Automatic): the chosen language in the user's region's variant, else, when
+    /// the recognizers don't support it, the automatic choice from the user's languages.
+    public static func dictationLocale(chosen: String?, preferred: [String], region: String?, supported: [String]) -> String? {
+        dictationLocale(preferred: (chosen.map { [$0] } ?? []) + preferred, region: region, supported: supported)
+    }
+
+    /// The languages Settings › Dictation offers: each supported language once (`es`, not every region).
+    public static func dictationLanguages(supported: [String]) -> [String] {
+        var seen = Set<String>()
+        return supported.map(languageCode).filter { !$0.isEmpty && seen.insert($0).inserted }.sorted()
+    }
+
     /// An installed voice; `quality` is 0 (default), 1 (enhanced) or 2 (premium).
     public struct Voice: Identifiable, Equatable, Sendable {
         public let id: String

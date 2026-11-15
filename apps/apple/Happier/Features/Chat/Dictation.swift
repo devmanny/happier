@@ -55,7 +55,7 @@ final class Dictation {
     init() {
         // Listing the supported languages is slow: done ahead, off the main thread, so the first
         // push to talk after launch listens at once.
-        Task.detached(priority: .utility) { _ = Dictation.language }
+        Task.detached(priority: .utility) { _ = Dictation.supportedLocales }
     }
     /// Waiting for the engine's last words after `finish()`.
     @ObservationIgnored private var finishing = false
@@ -218,14 +218,30 @@ final class Dictation {
     // Speech and audio call these closures on their own background queues. They are built in
     // nonisolated helpers so Swift 6 does not attach (and trap on) a main-actor assumption.
 
-    /// The dictation language, worked out once (listing the supported locales is slow, and push
-    /// to talk should listen the moment it's held).
-    nonisolated private static let language: String? = SpeechLanguage.dictationLocale(
-        preferred: Locale.preferredLanguages, region: Locale.current.region?.identifier,
-        supported: SFSpeechRecognizer.supportedLocales().map(\.identifier))
+    /// Settings › Dictation's language, a language code (`es`); none is Automatic, by the user's
+    /// languages. Both engines, Whisper and Apple's, dictate in it.
+    static let languageKey = "happier.dictation.language"
 
+    /// The recognizers' languages, listed once (listing them is slow, and push to talk should
+    /// listen the moment it's held).
+    nonisolated private static let supportedLocales: [String] = SFSpeechRecognizer.supportedLocales().map(\.identifier)
+
+    /// The recognizer locale for a take: the language chosen in Settings, else the user's own.
     /// Off the main thread: the first time it lists every supported language.
-    nonisolated static func dictationLanguage() async -> String? { language }
+    nonisolated static func dictationLanguage() async -> String? {
+        await dictationLanguage(chosen: UserDefaults.standard.string(forKey: languageKey))
+    }
+
+    /// The locale `chosen` (nil: Automatic) resolves to on this device.
+    nonisolated static func dictationLanguage(chosen: String?) async -> String? {
+        SpeechLanguage.dictationLocale(chosen: chosen, preferred: Locale.preferredLanguages,
+                                       region: Locale.current.region?.identifier, supported: supportedLocales)
+    }
+
+    /// The languages Settings › Dictation offers.
+    nonisolated static func languageChoices() async -> [String] {
+        SpeechLanguage.dictationLanguages(supported: supportedLocales)
+    }
 
     /// The microphone (the app's one, shared with Oído). It comes up off the main thread: it blocks
     /// for a noticeable moment (longer while something was playing), and push to talk shows at once.

@@ -302,7 +302,8 @@ only those WhisperKit's device table lists for the device. Each downloads once, 
 then compiles for the device; they are kept in Application Support and each is deletable. Several
 can be kept: the one tapped (else the latest download, else the most accurate left) is in use.
 While one is in use and the device can run it,
-dictation transcribes on the device in the dictation language, never auto-detected, with text
+dictation transcribes on the device in the dictation language (Settings › Dictation › Language;
+Automatic takes the device's first language it supports), never auto-detected, with text
 appearing about once a second and the rest when you stop (tap or release); silence is not
 transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
 SFSpeechRecognizer. `Dictation` owns the take, on the app's shared microphone (see Oído); `DictationEngine.choose` picks
