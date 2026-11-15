@@ -24,6 +24,16 @@ open Happier.xcodeproj          # Run the "Happier" scheme on My Mac or an iPhon
 (cd HappierKit && HAPPIER_LIVE_SERVER=https://api.happier.dev swift test --filter LiveServerTests)
 ```
 
+## Oído
+
+Oído (Settings › Oído, and the menu bar on the Mac) listens all day, keeps only speech, and sends
+it in AAC chunks to the `oido` server on a chosen machine. The audio goes through the relay to that
+machine's daemon (`daemon.bulkTransfer.upload.*`), which writes `<startMs>_<id>.m4a` and then its
+`.json` manifest into `~/.local/share/oido/inbox/<device>/`; `oido` reads that folder with
+`[inbox] enabled = true`. Chunks wait in `Application Support/Oido/spool` until the daemon has them.
+`LiveOidoRelayTests` runs a recording through the capture pipeline and the real relay; its header
+lists the environment it needs.
+
 ## Passkeys in the iOS browser
 
 The integrated browser uses WebKit's WebAuthn implementation and the system credential picker.
