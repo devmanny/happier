@@ -618,7 +618,7 @@ struct TasksView: View {
             assigneeName: { store.taskAssigneeName($0) },
             sessionTitle: { store.sessions[$0]?.title },
             machineName: { id in store.machines.first { $0.id == id }?.name }))
-        return taskSearch.search(query, in: tasks)
+        return taskSearch.search(query, in: tasks, lingering: completions.lingeringIds)
     }
 
     private var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -641,7 +641,10 @@ struct TasksView: View {
                 if isSearching {
                     ForEach(results) { result in
                         NavigationLink(value: TaskRoute(id: result.id, origin: listOrigin)) {
-                            TaskRow(task: result.task, openSessionId: openSessionId, match: result) { open($0) }
+                            TaskRow(task: result.task, openSessionId: openSessionId,
+                                    completedHere: completions.lingeringIds.contains(result.id),
+                                    toggleDone: selecting ? nil : { toggleDone(result.task) },
+                                    match: result) { open($0) }
                         }
                         .tag(result.id)
                         .modifier(TaskRowDrag(task: result.task, enabled: dragsTasks, dragging: $draggingTask))
@@ -1133,6 +1136,9 @@ struct TaskRow: View {
     }
 
     /// The leading circle: completes an open task; a repeating or archived task shows why it doesn't.
+    /// Its button answers a finger's width around the glyph (44 pt, without taking more room in the
+    /// row), so a tap that misses the glyph by a little completes the task instead of falling
+    /// through to the row and opening the detail.
     @ViewBuilder private var circle: some View {
         let done = task.status == .done || completedHere
         if task.isArchived {
@@ -1146,6 +1152,7 @@ struct TaskRow: View {
                 Image(systemName: done ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                     .contentTransition(.symbolEffect(.replace))
+                    .contentShape(Rectangle().inset(by: -11))
             }
             .buttonStyle(.borderless)
             .accessibilityLabel(done ? "Mark as not done" : "Complete")

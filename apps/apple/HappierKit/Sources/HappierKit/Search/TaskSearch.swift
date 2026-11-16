@@ -76,11 +76,14 @@ public final class TaskSearch {
     }
 
     /// The tasks matching `query`: open ones first, then completed and archived; within each, by
-    /// rank, and the nearest due date breaks ties.
-    public func search(_ query: String, in tasks: [AgentTask]) -> [Result] {
+    /// rank, and equal ranks in the Tasks list's order, so results don't trade places between
+    /// searches. `lingering`: completed from the list moments ago, kept among the open ones while
+    /// the completion can be undone, so the row doesn't jump away from the finger.
+    public func search(_ query: String, in tasks: [AgentTask], lingering: Set<String> = []) -> [Result] {
         let byId = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let hits = index.search(query) { a, b in
-            (byId[a]?.dueAt ?? .infinity) < (byId[b]?.dueAt ?? .infinity)
+            guard let a = byId[a], let b = byId[b] else { return a < b }
+            return AgentTask.listOrder(a, b)
         }
         var open: [Result] = [], closed: [Result] = []
         for hit in hits {
@@ -93,7 +96,7 @@ public final class TaskSearch {
                 snippet = (Field(rawValue: field.tag) ?? .description, SearchSnippet(text: field.text, matches: ranges))
             }
             let result = Result(task: task, titleHighlights: title, snippet: snippet)
-            if result.isClosed { closed.append(result) } else { open.append(result) }
+            if result.isClosed, !lingering.contains(task.id) { closed.append(result) } else { open.append(result) }
         }
         return open + closed
     }

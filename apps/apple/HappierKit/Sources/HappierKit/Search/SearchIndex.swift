@@ -112,6 +112,8 @@ public final class SearchIndex<ID: Hashable & Sendable> {
     }
 
     /// The documents matching at least one query word, best first; `tieBreak` orders equal ranks.
+    /// Give it a total order for a list people watch: ties it leaves come out in hash order, which
+    /// differs from one search to the next.
     public func search(_ query: String, tieBreak: (ID, ID) -> Bool = { _, _ in false }) -> [SearchHit<ID>] {
         var words: [[UInt32]] = []
         for token in Self.tokens(query) where !words.contains(token.folded) { words.append(token.folded) }

@@ -540,7 +540,9 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             }
             let ordered = groups.values.sorted { a, b in
                 if a.assignee.groupRank != b.assignee.groupRank { return a.assignee.groupRank < b.assignee.groupRank }
-                return a.assignee.label.localizedStandardCompare(b.assignee.label) == .orderedAscending
+                let byName = a.assignee.label.localizedStandardCompare(b.assignee.label)
+                // Two alike named (sessions with one title): by who they are, not the dictionary's order.
+                return byName != .orderedSame ? byName == .orderedAscending : a.assignee.groupKey < b.assignee.groupKey
             }
             return (linked.isEmpty ? [] : [Section(kind: .linkedToOpenSession, tasks: linked)])
                 + ordered.map { Section(kind: .assignee($0.assignee), tasks: $0.tasks) }
@@ -561,8 +563,17 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case only(Status)
     }
 
-    /// The matching tasks, soonest due first (no due date last), then oldest first. Archived tasks
-    /// only with `showArchived`; "Open" adds the completed ones with `showCompleted`.
+    /// The order tasks list in: soonest due first (no due date last), then oldest first, then by id,
+    /// so tasks with equal dates never trade places (the store moves a task to its end on every write).
+    public static func listOrder(_ a: AgentTask, _ b: AgentTask) -> Bool {
+        let aDue = a.dueAt ?? .infinity, bDue = b.dueAt ?? .infinity
+        if aDue != bDue { return aDue < bDue }
+        if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+        return a.id < b.id
+    }
+
+    /// The matching tasks in `listOrder`. Archived tasks only with `showArchived`; "Open" adds the
+    /// completed ones with `showCompleted`.
     public static func filter(_ tasks: [AgentTask], assignee: AssigneeFilter, status: StatusFilter,
                               showCompleted: Bool = false, showArchived: Bool = false) -> [AgentTask] {
         tasks.filter { task in
@@ -579,10 +590,7 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
             case .only(let only): return task.status == only
             }
         }
-        .sorted { a, b in
-            let aDue = a.dueAt ?? .infinity, bDue = b.dueAt ?? .infinity
-            return aDue != bDue ? aDue < bDue : a.createdAt < b.createdAt
-        }
+        .sorted(by: listOrder)
     }
 
     // MARK: Due date (`describeTaskDue`)

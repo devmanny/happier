@@ -104,6 +104,33 @@ import Testing
         #expect(engine.search("boletos", in: tasks).isEmpty)
     }
 
+    @Test func equallyRankedResultsKeepTheListsOrderAcrossSearchesAndLiveChanges() {
+        // Every "Kelpie" task matches alike and none is due: they list like the Tasks list (oldest
+        // first), the same on every search, and re-indexing one (a sync's echo) moves nothing.
+        let tasks = (0..<24).map { i in Self.task("k\(i)", "Kelpie pendiente \(i)", ["createdAt": .number(Double(100 - i))]) }
+        let expected = tasks.sorted { $0.createdAt < $1.createdAt }.map(\.id)
+        let engine = TaskSearch()
+        engine.sync(tasks, context: .init())
+        for _ in 0..<5 { #expect(engine.search("kelpie", in: tasks).map(\.id) == expected) }
+        var echoed = tasks
+        echoed[5].version = 7
+        echoed[17].updatedAt = 99
+        engine.sync(echoed, context: .init())
+        #expect(engine.search("kelpie", in: echoed).map(\.id) == expected)
+    }
+
+    @Test func aTaskJustCompletedFromTheListStaysInPlaceWhileItCanBeUndone() {
+        let tasks = [
+            Self.task("a", "Kelpie uno", ["createdAt": 1]),
+            Self.task("b", "Kelpie dos", ["createdAt": 2, "status": "done"]),
+            Self.task("c", "Kelpie tres", ["createdAt": 3]),
+        ]
+        let engine = TaskSearch()
+        engine.sync(tasks, context: .init())
+        #expect(engine.search("kelpie", in: tasks).map(\.id) == ["a", "c", "b"])
+        #expect(engine.search("kelpie", in: tasks, lingering: ["b"]).map(\.id) == ["a", "b", "c"])
+    }
+
     @Test func typoBudgetFollowsWordLength() {
         func folded(_ s: String) -> [UInt32] { SearchIndex<String>.tokens(s)[0].folded }
         #expect(SearchIndex<String>.allowedTypos(4) == 0 && SearchIndex<String>.allowedTypos(5) == 1 && SearchIndex<String>.allowedTypos(9) == 2)

@@ -49,12 +49,8 @@ public struct TaskWidgetSnapshot: Codable, Equatable, Sendable {
     public init(tasks: [AgentTask], limit: Int, now: Date = .now) {
         let nowMs = now.timeIntervalSince1970 * 1000
         let open = tasks.filter { $0.assignee == .user && $0.isOpen }
-        let ordered = open.sorted { a, b in
-            let aLate = (a.dueAt ?? .infinity) <= nowMs, bLate = (b.dueAt ?? .infinity) <= nowMs
-            if aLate != bLate { return aLate }
-            if a.dueAt != b.dueAt { return (a.dueAt ?? .infinity) < (b.dueAt ?? .infinity) }
-            return a.createdAt < b.createdAt
-        }
+        // As the Tasks list orders them: soonest due first puts the overdue ones on top.
+        let ordered = open.sorted(by: AgentTask.listOrder)
         total = ordered.count
         overdue = ordered.filter { ($0.dueAt ?? .infinity) <= nowMs }.count
         items = ordered.prefix(limit).map { task in

@@ -55,7 +55,8 @@ import Testing
     }
 
     @Test func theListHidesCompletedAndArchivedUnlessAsked() {
-        let tasks = [Self.task(["id": "open"]), Self.task(["id": "done", "status": "done"]), Self.task(["id": "gone", "archivedAt": 3])]
+        let tasks = [Self.task(["id": "open", "createdAt": 1]), Self.task(["id": "done", "status": "done", "createdAt": 2]),
+                     Self.task(["id": "gone", "archivedAt": 3, "createdAt": 3])]
         #expect(AgentTask.filter(tasks, assignee: .all, status: .open).map(\.id) == ["open"])
         #expect(AgentTask.filter(tasks, assignee: .all, status: .open, showCompleted: true).map(\.id) == ["open", "done"])
         #expect(AgentTask.filter(tasks, assignee: .all, status: .open, showArchived: true).map(\.id) == ["open", "gone"])

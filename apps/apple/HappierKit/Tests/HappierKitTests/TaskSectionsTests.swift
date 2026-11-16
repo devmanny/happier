@@ -44,6 +44,16 @@ import Testing
         #expect(AgentTask.sections(tasks, scope: .all, openSessionId: "other", status: .open).first?.kind == .assignee(.user))
     }
 
+    @Test func groupsWithTheSameNameKeepOneOrder() {
+        // Two sessions titled alike: their groups don't swap from one redraw to the next.
+        var one = Self.task("one"), two = Self.task("two")
+        one.assignee = .session(id: "s-1", title: "Kelpie")
+        two.assignee = .session(id: "s-2", title: "Kelpie")
+        for _ in 0..<8 {
+            #expect(AgentTask.sections([two, one], scope: .all, openSessionId: nil, status: .open).flatMap(\.tasks).map(\.id) == ["one", "two"])
+        }
+    }
+
     @Test func thisSessionShowsOnlyItsLinkedTasks() {
         let tasks = [Self.task("a", threads: ["open"]), Self.task("b"), Self.task("c", agent: "mateo", sourceSession: "open", status: "done")]
         #expect(AgentTask.sections(tasks, scope: .thisSession, openSessionId: "open", status: .all).flatMap(\.tasks).map(\.id) == ["a", "c"])

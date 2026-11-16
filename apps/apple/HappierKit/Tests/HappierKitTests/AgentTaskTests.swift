@@ -176,6 +176,13 @@ import Testing
         #expect(AgentTask.filter(tasks, assignee: .all, status: .only(.done)).map(\.id) == ["done"])
     }
 
+    @Test func tasksDueAndCreatedAtTheSameTimeKeepOneOrderWhateverTheStoreOrder() {
+        // The store moves a task to its end on every write; equal dates mustn't follow that.
+        let tasks = ["c", "a", "d", "b"].map { Self.task(["id": .string($0), "createdAt": 5]) }
+        #expect(AgentTask.filter(tasks, assignee: .all, status: .open).map(\.id) == ["a", "b", "c", "d"])
+        #expect(AgentTask.filter(tasks.reversed(), assignee: .all, status: .open).map(\.id) == ["a", "b", "c", "d"])
+    }
+
     @Test func describesTheDueDateLikeTheAgentBoard() {
         let now = 100 * Self.hour
         #expect(Self.task(["dueAt": .number(now - Self.hour)]).due(now: now) == AgentTask.Due(text: "overdue by 1 h", overdue: true))
