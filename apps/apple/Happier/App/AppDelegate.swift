@@ -22,8 +22,12 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
         store.deviceBrowserHost = browser
         return browser
     }()
+    /// Always-on voice capture for the Mac mini's transcriber (Settings › Oído, the menu bar).
+    lazy var oido = OidoController(store: store)
     #if os(iOS)
     private var backgroundUploads: BackgroundUploads?
+    /// The dictation keyboard's microphone and takes (it listens for the keyboard from launch).
+    lazy var keyboard = DictationKeyboardService()
     #endif
     private var metricKitReports: MetricKitReports?
     private let log = Logger(subsystem: "dev.happier.apple", category: "push")
@@ -167,6 +171,8 @@ extension AppDelegate: UIApplicationDelegate {
         metricKitReports = MetricKitReports(store: store)
         WatchBridge.shared.store = store
         WatchBridge.shared.activate()
+        oido.resume()
+        _ = keyboard
         return true
     }
 
@@ -184,6 +190,10 @@ extension AppDelegate: NSApplicationDelegate {
         Self.current = self
         UNUserNotificationCenter.current().delegate = self
         metricKitReports = MetricKitReports(store: store)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        oido.resume()
     }
 
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

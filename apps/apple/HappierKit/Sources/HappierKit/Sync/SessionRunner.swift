@@ -86,4 +86,22 @@ public enum MachineRPCCall {
         }
         return .object(call)
     }
+
+    /// One machine RPC over the relay socket (`apiSocket.ts:410-443`): params sealed with the
+    /// machine's content key, the answer opened with it. `emit` is the socket's acknowledged emit.
+    nonisolated(nonsending) public static func call(_ machine: Machine, method: String, params: JSONValue, timeout: Duration,
+                            emit: (String, JSONValue, Duration) async throws -> [JSONValue]) async throws -> JSONValue {
+        let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
+        let ack = try await emit("rpc-call", payload(
+            machineId: machine.id, method: method, params: params, encoded: encoded,
+            timeoutMs: Int(timeout.components.seconds * 1000)), timeout + .seconds(5))
+        guard let response = ack.first, response["ok"]?.boolValue == true else {
+            throw HappierStore.RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.",
+                                        code: ack.first?["errorCode"]?.stringValue)
+        }
+        var result = response["result"] ?? .null
+        if case .array(let items) = result, items.count == 1 { result = items[0] }
+        if let cipher = machine.cipher, let ciphertext = result.stringValue { result = try cipher.decryptBase64(ciphertext) }
+        return result
+    }
 }

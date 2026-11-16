@@ -6,6 +6,8 @@ public enum AppLink: Equatable, Sendable {
     case browserImport(UUID)
     /// One task's detail (`happier-native://task/<id>`), as the My Tasks widget links it.
     case task(String)
+    /// Opened from the dictation keyboard: turn the microphone on and listen.
+    case keyboardDictation
 
     public init?(url: URL, isBrowserRole: Bool = false) {
         switch (url.scheme?.lowercased(), url.host?.lowercased()) {
@@ -13,6 +15,7 @@ public enum AppLink: Equatable, Sendable {
         case ("happier-native", "new"): self = .newSession
         case ("happier-native", "share"): self = .share
         case ("happier-native", "tasks"): self = .tasks
+        case ("happier-native", "keyboard-dictation"): self = .keyboardDictation
         case ("happier-native", "task"):
             let id = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
             self = url.pathComponents.count == 2 && !id.isEmpty && id != "/" ? .task(id) : .tasks

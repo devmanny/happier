@@ -8,7 +8,10 @@ import UIKit
 /// (once, over the network) to dictate on the device itself: several can be kept, one is in use.
 struct DictationSettingsView: View {
     @State private var engine: DictationEngine?
-    @State private var language: String?
+    /// What Automatic resolves to on this device, for its label.
+    @State private var automatic: String?
+    @State private var choices: [String] = []
+    @AppStorage(Dictation.languageKey) private var chosenLanguage: String?
     @State private var deleting: WhisperModel?
     private let library = WhisperModels.library
 
@@ -16,9 +19,14 @@ struct DictationSettingsView: View {
         Form {
             Section {
                 LabeledContent("Engine", value: engine.map(Self.name) ?? "…")
-                LabeledContent("Language", value: languageName)
+                Picker("Language", selection: $chosenLanguage) {
+                    Text(automaticTitle).tag(String?.none)
+                    ForEach(choices, id: \.self) { code in
+                        Text(Self.languageName(code)).tag(Optional(code))
+                    }
+                }
             } footer: {
-                Text("Whisper runs on this device: your voice never leaves it. Until a Whisper model is downloaded, dictation uses Apple's speech recognition.")
+                Text("Whisper runs on this device: your voice never leaves it. Until a Whisper model is downloaded, dictation uses Apple's speech recognition. Automatic dictates in your device's first language; choose one if you speak another.")
             }
             Section {
                 ForEach(WhisperModel.allCases) { model in
@@ -33,10 +41,8 @@ struct DictationSettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Dictation")
-        .task(id: library.inUse) {
-            language = await Dictation.dictationLanguage()
-            engine = await DictationRecognizers.engine(language: language)
-        }
+        .task(id: library.inUse) { await refresh() }
+        .task(id: chosenLanguage) { await refresh() }
         .confirmationDialog("Delete this Whisper model?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible, presenting: deleting) { model in
             Button("Delete \(model.title)", role: .destructive) {
@@ -54,9 +60,26 @@ struct DictationSettingsView: View {
         }
     }
 
-    private var languageName: String {
-        guard let language else { return "…" }
-        return Locale.current.localizedString(forIdentifier: language) ?? language
+    private func refresh() async {
+        if choices.isEmpty {
+            choices = await Dictation.languageChoices().sorted {
+                Self.languageName($0).localizedStandardCompare(Self.languageName($1)) == .orderedAscending
+            }
+        }
+        automatic = await Dictation.dictationLanguage(chosen: nil)
+        let language = await Dictation.dictationLanguage(chosen: chosenLanguage)
+        engine = await DictationRecognizers.engine(language: language)
+    }
+
+    private var automaticTitle: String {
+        guard let automatic else { return String(localized: "Automatic") }
+        return String(localized: "Automatic (\(Self.languageName(SpeechLanguage.languageCode(automatic))))")
+    }
+
+    /// A language in its own words (Español, English): how its speakers look for it.
+    static func languageName(_ code: String) -> String {
+        let own = Locale(identifier: code)
+        return own.localizedString(forLanguageCode: code)?.capitalized(with: own) ?? code
     }
 
     static func name(_ engine: DictationEngine) -> String {
