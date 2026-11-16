@@ -173,6 +173,29 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(server.mutateCalls == 2)
     }
 
+    @Test func anAgentsChatIsMadeOnceAndStaysOutOfTheRooms() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        let store = store(server)
+        await store.refreshRooms()
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        let chat = try #require(await store.openDirectRoom(with: mateo, machineId: "m1", directory: "/p"))
+        #expect(chat.directAgentId == "a-mateo")
+        // It takes the name the user goes by in their rooms.
+        #expect(chat.userName == "Manny")
+        #expect(server.row(AgentRoom.kvKey(id: chat.id)) != nil)
+        // Opened again, it is the same chat.
+        let again = await store.openDirectRoom(with: mateo, machineId: "m9", directory: "/elsewhere")
+        #expect(again?.id == chat.id && again?.members.first?.machineId == "m1")
+        #expect(server.mutateCalls == 1)
+        #expect(store.directRoom(agentId: "a-mateo")?.id == chat.id)
+        #expect(store.activeRooms.map(\.id) == ["r1"])
+        // Another device that hasn't read it yet finds it instead of making a second one.
+        let other = self.store(server)
+        #expect(await other.openDirectRoom(with: mateo, machineId: "m9", directory: "/elsewhere")?.id == chat.id)
+        #expect(server.mutateCalls == 1)
+    }
+
     @Test func aMembersAnswersOtherAgentsChangesInARoomAlreadyMade() async throws {
         let server = RoomKVServer()
         try seed(server, lastSeq: 2, version: 5)

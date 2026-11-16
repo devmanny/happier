@@ -9,9 +9,29 @@ extension HappierStore {
 
     public func room(id: String) -> AgentRoom? { rooms.first { $0.id == id } }
 
-    /// The rooms that aren't archived, newest activity first.
+    /// The group rooms that aren't archived, newest activity first (the agents' chats open from their circles).
     public var activeRooms: [AgentRoom] {
-        rooms.filter { $0.archivedAt == nil }.sorted { $0.updatedAt > $1.updatedAt }
+        rooms.filter { $0.archivedAt == nil && !$0.isDirect }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// The agent's chat with the user, once it has one.
+    public func directRoom(agentId: String) -> AgentRoom? {
+        room(id: AgentRoom.directId(agentId: agentId))
+    }
+
+    /// The agent's chat, made the first time (working in `directory` on `machineId`, under the name
+    /// the user goes by in their rooms). Another device may have made it: the rooms are read again
+    /// before making one, and a write that finds it already there reads it instead.
+    public func openDirectRoom(with agent: AgentProfile, machineId: String, directory: String) async -> AgentRoom? {
+        if let room = directRoom(agentId: agent.id) { return room }
+        await refreshRooms()
+        if let room = directRoom(agentId: agent.id) { return room }
+        let userName = rooms.filter { $0.archivedAt == nil }.max { $0.updatedAt < $1.updatedAt }?.userName
+        if let made = await createRoom(AgentRoom.direct(with: agent, machineId: machineId, directory: directory, userName: userName)) {
+            return made
+        }
+        await refreshRooms()
+        return directRoom(agentId: agent.id)
     }
 
     public func refreshRooms() async {
@@ -87,6 +107,8 @@ extension HappierStore {
                 roomSeats[room.id] = []
                 return saved
             case .conflict:
+                // An agent's chat another device just made is no error: it is read instead (`openDirectRoom`).
+                if room.isDirect { return nil }
                 throw RPCError(message: String(localized: "A room with this id already exists."), code: "version-mismatch")
             }
         } catch {

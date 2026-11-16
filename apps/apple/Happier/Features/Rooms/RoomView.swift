@@ -9,6 +9,11 @@ import SwiftUI
 /// the Mac) quotes a message and reaches only its author, plus whoever you mention. An agent's
 /// `<options>` show as the session chat's buttons; picking one answers only that agent. Delivery is
 /// the members' daemons' (`decideRoomDelivery`).
+///
+/// An agent's own chat (`AgentRoom.isDirect`, opened by `AgentChatView`) reads like Messages: no
+/// names or avatars, bubbles with their tail on the last of a run, the time centered between runs,
+/// "Read" under your last message once the agent has it, its typing bubble while it works, and no @:
+/// everything you write reaches it. Its header and info are `AgentChatView`'s.
 struct RoomView: View {
     let roomId: String
     @Environment(HappierStore.self) private var store
@@ -55,16 +60,34 @@ struct RoomView: View {
     private func chat(_ room: AgentRoom) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: room.isDirect ? 3 : 10) {
                     if messages.isEmpty {
-                        Text("Mention an agent with @ to start, or everyone with @todos: \(room.members.compactMap(\.name).map { "@\($0)" }.joined(separator: ", ")).")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
+                        Group {
+                            if room.isDirect {
+                                Text("Write to \(room.title). It works in \(room.members.first?.directory ?? "")")
+                            } else {
+                                Text("Mention an agent with @ to start, or everyone with @todos: \(room.members.compactMap(\.name).map { "@\($0)" }.joined(separator: ", ")).")
+                            }
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
                     }
+                    let layout = room.isDirect ? DirectLayout(messages: messages, seats: seats) : nil
                     ForEach(messages) { message in
-                        RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq) { option in
+                        if let separator = layout?.separators[message.seq] {
+                            Text(verbatim: ChatDate.separatorLabel(separator))
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 10)
+                                .padding(.bottom, 2)
+                        }
+                        RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq,
+                                       direct: room.isDirect, tail: layout?.tails.contains(message.seq) ?? true,
+                                       read: layout?.readSeq == message.seq) { option in
                             Task { await store.answerRoomOption(roomId: roomId, message: message, option: option) }
                         } reply: {
                             startReply(to: message)
@@ -73,12 +96,20 @@ struct RoomView: View {
                         }
                         .id(message.seq)
                     }
-                    ForEach(replying(room)) { member in
-                        Label("\(member.name ?? member.agentId) is replying…", systemImage: "ellipsis.bubble")
-                            .font(.footnote)
-                            .foregroundStyle(Color.userBubble)
-                            .padding(.leading, 4)
-                            .id("replying-\(member.agentId)")
+                    if room.isDirect {
+                        if !replying(room).isEmpty {
+                            TypingIndicator()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id("replying")
+                        }
+                    } else {
+                        ForEach(replying(room)) { member in
+                            Label("\(member.name ?? member.agentId) is replying…", systemImage: "ellipsis.bubble")
+                                .font(.footnote)
+                                .foregroundStyle(Color.userBubble)
+                                .padding(.leading, 4)
+                                .id("replying-\(member.agentId)")
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -96,6 +127,12 @@ struct RoomView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
+            if !room.isDirect { groupToolbar(room) }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private func groupToolbar(_ room: AgentRoom) -> some ToolbarContent {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     AppHaptics.light()
@@ -115,7 +152,6 @@ struct RoomView: View {
                 .help(Text(room.isPaused ? "Resume: deliver what's waiting" : "Pause: nothing more is delivered; running turns finish"))
                 .accessibilityIdentifier("room-pause")
             }
-        }
     }
 
     private func startReply(to message: AgentRoomMessage) {
@@ -257,7 +293,9 @@ struct RoomView: View {
                 replyBar(room, quoted: quoted, recipients: mentioned)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if let partial = partialMention(), case let chips = AgentRoom.mentionSuggestions(for: partial, members: room.members), !chips.isEmpty {
+            if room.isDirect {
+                EmptyView()
+            } else if let partial = partialMention(), case let chips = AgentRoom.mentionSuggestions(for: partial, members: room.members), !chips.isEmpty {
                 // Completing the @ being typed: everyone first.
                 chipRow(chips, room: room) { complete(with: $0.label(members: room.members)) }
             } else if !typed.isEmpty, mentioned.isEmpty {
@@ -272,7 +310,9 @@ struct RoomView: View {
                 .accessibilityIdentifier("room-suggest-mention")
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Message the room · @ to mention, @todos for everyone", text: $draft, axis: .vertical)
+                TextField(room.isDirect ? LocalizedStringKey("Message \(room.title)")
+                                        : LocalizedStringKey("Message the room · @ to mention, @todos for everyone"),
+                          text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($composing)
                     .padding(.horizontal, 14)
@@ -389,6 +429,35 @@ struct RoomView: View {
     }
 }
 
+/// How an agent's chat lays its messages out, as Messages does: the time centered before the first
+/// message and after each pause (`ChatDate.separatorGap`), the tail on the last bubble of each run
+/// of one author, and "Read" under your last message once the agent has it (its seat read through it,
+/// or its turn is reading it).
+private struct DirectLayout {
+    /// The time shown above each message that starts after a pause, by seq.
+    var separators: [Int: Date] = [:]
+    /// The messages that end a run.
+    var tails: Set<Int> = []
+    /// Your last message, once the agent has read it.
+    var readSeq: Int?
+
+    init(messages: [AgentRoomMessage], seats: [AgentRoomSeat]) {
+        func date(_ message: AgentRoomMessage) -> Date { Date(timeIntervalSince1970: message.at / 1000) }
+        for (index, message) in messages.enumerated() {
+            let previous = index > 0 ? messages[index - 1] : nil
+            if previous.map({ date(message).timeIntervalSince(date($0)) > ChatDate.separatorGap }) ?? true {
+                separators[message.seq] = date(message)
+            }
+        }
+        for (index, message) in messages.enumerated() {
+            let next = index + 1 < messages.count ? messages[index + 1] : nil
+            if next.map({ $0.author != message.author || separators[$0.seq] != nil }) ?? true { tails.insert(message.seq) }
+        }
+        let read = seats.map { max($0.readThroughSeq, $0.inFlight?.throughSeq ?? 0) }.max() ?? 0
+        if let last = messages.last(where: { $0.author == .user }), last.seq <= read { readSeq = last.seq }
+    }
+}
+
 /// One message: yours on the right in your color; an agent's on the left under its emoji and name,
 /// Markdown like the session chat, with its `<options>` as the chat's buttons. Mentions are in bold;
 /// the message it answers is quoted above it (tap it to go there). Reply is in its menu, a swipe to
@@ -399,10 +468,16 @@ private struct RoomMessageRow: View {
     let messages: [AgentRoomMessage]
     /// Lit for a moment: a quote of it was tapped.
     let highlighted: Bool
+    /// In an agent's chat: no name or avatar, the tail only on the last of a run, and "Read".
+    var direct = false
+    var tail = true
+    var read = false
     let pick: (String) -> Void
     let reply: () -> Void
     let showQuoted: (Int) -> Void
     @Environment(HappierStore.self) private var store
+    /// Its TL;DR is shown instead of it (`TLDRButton`).
+    @State private var showsSummary = false
     #if os(iOS)
     /// How far the message is dragged to the left to reply (≤ 0).
     @State private var swipe: CGFloat = 0
@@ -432,15 +507,15 @@ private struct RoomMessageRow: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            if isUser { Spacer(minLength: 48) }
+            if isUser { Spacer(minLength: direct ? 64 : 48) }
             #if os(macOS)
             if isUser { hoverReply }
             #endif
-            if !isUser {
+            if !isUser, !direct {
                 AgentAvatar(agentId: providerId, size: 28, emoji: emoji, photo: message.author.agentId.flatMap { store.agentPhotos[$0] })
             }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                if !isUser {
+                if !isUser, !direct {
                     Text(room.displayName(of: message.author)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 if let replyTo = message.replyTo, let answered = messages.first(where: { $0.seq == replyTo }) {
@@ -449,14 +524,23 @@ private struct RoomMessageRow: View {
                 Group {
                     if isUser { userBubble } else { agentBubble }
                 }
-                Text(Date(timeIntervalSince1970: message.at / 1000), format: .dateTime.hour().minute())
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                if !direct {
+                    Text(Date(timeIntervalSince1970: message.at / 1000), format: .dateTime.hour().minute())
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else if read {
+                    Text("Read")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                        .padding(.bottom, 4)
+                        .accessibilityIdentifier("room-read")
+                }
             }
             #if os(macOS)
             if !isUser { hoverReply }
             #endif
-            if !isUser { Spacer(minLength: 48) }
+            if !isUser { Spacer(minLength: direct ? 64 : 48) }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .background {
@@ -544,13 +628,13 @@ private struct RoomMessageRow: View {
         }
         // No `.textSelection`: on the Mac a selectable text answers a right-click with the text
         // system's menu, hiding Reply; Copy is in the bubble's menu, as in the session chat.
+        let shape = direct ? AnyShape(BubbleShape(fromUser: true, tail: tail)) : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         return Text(text)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .modifier(BubbleInsets(direct: direct, fromUser: true))
             .foregroundStyle(Color.white)
-            .background(Color.userBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.userBubble, in: shape)
             #if os(iOS)
-            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(.contextMenuPreview, shape)
             #endif
             .contextMenu { actions }
     }
@@ -567,18 +651,36 @@ private struct RoomMessageRow: View {
         }
         let options = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
         if !content.isEmpty {
-            MarkdownText(segments: content)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.agentBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            let shape = direct ? AnyShape(BubbleShape(fromUser: false, tail: tail && options.isEmpty))
+                               : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            let summaryId = "room-\(message.roomId)-\(message.seq)"
+            let summary = showsSummary ? MessageSummaries.shared.summaries[summaryId] : nil
+            MarkdownText(segments: summary.map { MarkdownSegments.cached($0) } ?? content)
+                .modifier(BubbleInsets(direct: direct, fromUser: false))
+                .background(Color.agentBubble, in: shape)
                 #if os(iOS)
-                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(.contextMenuPreview, shape)
                 #endif
                 .contextMenu { actions }
+                .tldr(id: summaryId, text: message.text, showsSummary: $showsSummary)
         }
         if !options.isEmpty {
             ReplyOptions(options: options, chosen: AgentRoom.chosenOption(on: message, options: options, messages: messages), onSelect: pick)
                 .accessibilityIdentifier("room-options-\(message.seq)")
+        }
+    }
+}
+
+/// A bubble's insets: Messages' (room for the tail) in an agent's chat, the room's plain ones elsewhere.
+private struct BubbleInsets: ViewModifier {
+    let direct: Bool
+    let fromUser: Bool
+
+    func body(content: Content) -> some View {
+        if direct {
+            content.bubblePadding(fromUser: fromUser)
+        } else {
+            content.padding(.horizontal, 12).padding(.vertical, 8)
         }
     }
 }

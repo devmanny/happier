@@ -497,7 +497,7 @@ private struct ChatConversationContent: View, Equatable {
         let row = rows[index]
         let previous = index > 0 ? rows[index - 1] : nil
         let next = index + 1 < rows.count ? rows[index + 1] : nil
-        if previous.map({ row.createdAt.timeIntervalSince($0.createdAt) > 15 * 60 }) ?? true {
+        if previous.map({ row.createdAt.timeIntervalSince($0.createdAt) > ChatDate.separatorGap }) ?? true {
             Text(ChatDate.separatorLabel(row.createdAt))
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.secondary)

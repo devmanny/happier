@@ -221,6 +221,53 @@ import Testing
         #expect(!AgentRoom.brakeHolds(agents + [Self.message(8, by: Self.user)]))
     }
 
+    @Test func anAgentsChatIsARoomOfJustItWhereEveryMessageReachesItWithoutAMention() throws {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        let chat = AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: "Manny", now: 7)
+        // One chat per agent: every device makes the same one.
+        #expect(chat.id == AgentRoom.directId(agentId: "a-mateo"))
+        #expect(chat.isDirect && chat.directAgentId == "a-mateo")
+        #expect(chat.title == "Mateo" && chat.userName == "Manny" && chat.members.map(\.agentId) == ["a-mateo"])
+        #expect(chat.members.first?.machineId == "m1" && chat.members.first?.directory == "/p")
+        let opened = try #require(AgentRoom.open(try chat.sealed(machineKey: Self.machineKey), machineKey: Self.machineKey))
+        #expect(opened.isDirect && opened.directAgentId == "a-mateo")
+        // No @ needed: it is the only one there.
+        let (_, message) = try #require(chat.appendingUserMessage("¿Qué estás haciendo?", now: 8))
+        #expect(message.mentions == ["a-mateo"])
+        // A group room still reaches only who is mentioned.
+        #expect(!Self.room().isDirect && Self.room().directAgentId == nil)
+        #expect(Self.room().appendingUserMessage("hola", now: 8)?.message.mentions == [])
+    }
+
+    @Test func anAgentsChatWorksWhereTheAgentLastWorkedElseAtAMachinesHome() throws {
+        func session(_ id: String, agent: String?, machine: String, path: String, at: Double) throws -> Session {
+            var metadata: [String: JSONValue] = ["path": .string(path), "machineId": .string(machine)]
+            if let agent { metadata["agentIdentityV1"] = ["v": 1, "id": .string(agent), "name": "x"] }
+            return try Session(row: ["id": .string(id), "seq": 1, "createdAt": 1, "updatedAt": .number(at), "active": false, "encryptionMode": "plain",
+                                     "metadata": .string(String(decoding: try JSONValue.object(metadata).encoded(), as: UTF8.self)), "metadataVersion": 1],
+                               keys: nil)
+        }
+        func machine(_ id: String, active: Bool, home: String, revoked: Bool = false) throws -> Machine {
+            let marker = Data(#"{"t":"plain","v":null}"#.utf8).base64EncodedString()
+            let doc = Data(#"{"t":"plain","v":{"host":"h","homeDir":"\#(home)"}}"#.utf8).base64EncodedString()
+            var row: [String: JSONValue] = ["id": .string(id), "active": .bool(active), "dataEncryptionKey": .string(marker), "metadata": .string(doc)]
+            if revoked { row["revokedAt"] = 5 }
+            return try Machine(row: .object(row), keys: nil)
+        }
+        let sessions = [try session("a", agent: "a-mateo", machine: "m1", path: "/p/movil", at: 10),
+                        try session("b", agent: "a-mateo", machine: "m2", path: "/p/radar", at: 30),
+                        try session("c", agent: "a-tomas", machine: "m1", path: "/p/escritorio", at: 50)]
+        let machines = [try machine("m0", active: true, home: "/old", revoked: true),
+                        try machine("m1", active: false, home: "/Users/a"),
+                        try machine("m2", active: true, home: "/Users/b")]
+        let mateo = try #require(AgentRoom.directPlacement(agentId: "a-mateo", sessions: sessions, machines: machines))
+        #expect(mateo.machineId == "m2" && mateo.directory == "/p/radar")
+        // An agent with no session yet starts at the home of a machine that's on (never a revoked one).
+        let leo = try #require(AgentRoom.directPlacement(agentId: "a-leo", sessions: sessions, machines: machines))
+        #expect(leo.machineId == "m2" && leo.directory == "/Users/b")
+        #expect(AgentRoom.directPlacement(agentId: "a-leo", sessions: [], machines: [machines[0]]) == nil)
+    }
+
     @Test func theSidebarSelectsARoomLikeASessionButNeverReadsItAsOne() {
         let selection = AgentRoom.selection(id: "r1")
         #expect(AgentRoom.id(inSelection: selection) == "r1")

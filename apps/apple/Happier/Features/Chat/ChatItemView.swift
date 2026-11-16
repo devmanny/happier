@@ -134,20 +134,24 @@ private struct AgentBubble: View {
     let tail: Bool
     let sessionId: String
     @Environment(HappierStore.self) private var store
+    /// Its TL;DR is shown instead of it (`TLDRButton`).
+    @State private var showsSummary = false
 
     var body: some View {
         let segments = MarkdownSegments.cached(text)
         let content = segments.filter { if case .options = $0 { false } else { true } }
         let options: [String] = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
+        let summary = showsSummary ? MessageSummaries.shared.summaries[itemId] : nil
         VStack(alignment: .leading, spacing: 6) {
             if !content.isEmpty {
                 HStack {
-                    MarkdownText(segments: content)
+                    MarkdownText(segments: summary.map { MarkdownSegments.cached($0) } ?? content)
                         .bubblePadding(fromUser: false)
                         .background(Color.agentBubble, in: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
                         .messageActions(text: text, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty), selectionId: itemId,
                                         target: seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .assistant) })
                         .selectableMessage(id: itemId, markdown: text, fromUser: false, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
+                        .tldr(id: itemId, text: text, showsSummary: $showsSummary)
                     Spacer(minLength: 40)
                 }
             }

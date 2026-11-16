@@ -87,11 +87,17 @@ struct SessionDrawer: View {
         if selection == NewChat.id {
             NewSessionView()
         } else if let agentId = AgentProfile.id(inSelection: selection) {
-            AgentProfileView(agentId: agentId)
+            AgentChatView(agentId: agentId)
                 .id(agentId)
         } else if let roomId = AgentRoom.id(inSelection: selection) {
-            RoomView(roomId: roomId)
-                .id(roomId)
+            // A notification about an agent's chat opens it as its circle does.
+            if let agentId = store.room(id: roomId)?.directAgentId {
+                AgentChatView(agentId: agentId)
+                    .id(agentId)
+            } else {
+                RoomView(roomId: roomId)
+                    .id(roomId)
+            }
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

@@ -100,6 +100,41 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
 
     public var isPaused: Bool { pausedAt != nil }
 
+    // MARK: An agent's chat
+
+    /// An agent's own chat with the user (its circle in the sidebar opens it): a room of just that
+    /// agent, marked `kind: "direct"`, where every message of the user reaches it without a mention.
+    /// Daemons deliver it like any room and keep `kind` as an unknown field.
+    public var isDirect: Bool { extra["kind"]?.stringValue == "direct" }
+
+    /// The agent whose chat this is; nil for a group room.
+    public var directAgentId: String? { isDirect ? members.first?.agentId : nil }
+
+    /// One chat per agent, the same id on every device, so two devices opening it at once make one.
+    public static func directId(agentId: String) -> String { "direct-\(agentId.lowercased())" }
+
+    /// The agent's chat, working in `directory` on `machineId` (`directPlacement`).
+    public static func direct(with agent: AgentProfile, machineId: String, directory: String, userName: String?,
+                              now: Double = ServerClock.nowMs()) -> AgentRoom {
+        var room = AgentRoom(id: directId(agentId: agent.id), title: agent.name, userName: userName,
+                             members: [Member(agent, machineId: machineId, directory: directory)], now: now)
+        room.extra["kind"] = "direct"
+        return room
+    }
+
+    /// Where an agent's chat works: the machine and folder of its latest session, else the home of
+    /// a machine that's on (else any machine still linked); nil without a linked machine.
+    public static func directPlacement(agentId: String, sessions: [Session], machines: [Machine]) -> (machineId: String, directory: String)? {
+        let linked = machines.filter { $0.revokedAt == nil && $0.replacedByMachineId == nil }
+        if let latest = sessions.filter({ $0.agentIdentity?.id == agentId && $0.path?.isEmpty == false && $0.machineId != nil })
+            .max(by: { $0.sortDate < $1.sortDate }),
+           let machineId = latest.machineId, let path = latest.path, linked.contains(where: { $0.id == machineId }) {
+            return (machineId, path)
+        }
+        guard let machine = linked.first(where: \.active) ?? linked.first, let home = machine.homeDir, !home.isEmpty else { return nil }
+        return (machine.id, home)
+    }
+
     public init(id: String = UUID().uuidString.lowercased(), title: String, userName: String?, members: [Member],
                 now: Double = ServerClock.nowMs()) {
         self.id = id.lowercased()
@@ -174,7 +209,7 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
     // MARK: Messages
 
     /// The room after the user's message, and the message: it takes the next seq, with the members
-    /// it mentions. Both are written together (`appendRoomMessage`); nil for an empty text.
+    /// it mentions (in an agent's chat, always that agent). Both are written together (`appendRoomMessage`); nil for an empty text.
     /// `mentions` overrides the ones found in the text (an option's answer reaches only its author).
     public func appendingUserMessage(_ text: String, now: Double, replyTo: Int? = nil,
                                      mentions: [String]? = nil) -> (room: AgentRoom, message: AgentRoomMessage)? {
@@ -184,7 +219,8 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         room.lastSeq += 1
         room.updatedAt = now
         let message = AgentRoomMessage(roomId: id, seq: room.lastSeq, at: now, author: .user, text: text,
-                                       mentions: mentions ?? Self.mentions(in: text, members: members), replyTo: replyTo)
+                                       mentions: mentions ?? (isDirect ? members.map(\.agentId) : Self.mentions(in: text, members: members)),
+                                       replyTo: replyTo)
         return (room, message)
     }
 

@@ -16,6 +16,10 @@ import { SESSION_PERMISSION_INTENT_INPUTS } from '../sessionMetadata/sessionPerm
  *
  * Every schema is passthrough: a field this build doesn't know (written by a newer one) is kept
  * when the record is read and rewritten.
+ *
+ * An agent's own chat with the user is a room too, written by the Apple app: id
+ * `direct-<agentId>` (one per agent, whichever device makes it), `kind: 'direct'`, that agent as
+ * its only member, and every user message mentioning it. Daemons deliver it like any room.
  */
 export const AGENT_ROOM_KV_PREFIX = 'room/';
 export const AGENT_ROOM_MESSAGE_KV_PREFIX = 'roommsg/';

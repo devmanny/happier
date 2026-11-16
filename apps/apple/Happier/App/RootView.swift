@@ -231,12 +231,18 @@ struct MainView: View {
         if selection == NewChat.id {
             NewSessionView()
         } else if let agentId = AgentProfile.id(inSelection: selection) {
-            // Straight in the detail column, as a conversation is: its title and Edit are the column's.
-            AgentProfileView(agentId: agentId)
+            // Its chat, in the detail column as a conversation is; its info opens from the chat's header.
+            AgentChatView(agentId: agentId)
                 .id(agentId)
         } else if let roomId = AgentRoom.id(inSelection: selection) {
-            RoomView(roomId: roomId)
-                .id(roomId)
+            // A notification about an agent's chat opens it as its circle does.
+            if let agentId = store.room(id: roomId)?.directAgentId {
+                AgentChatView(agentId: agentId)
+                    .id(agentId)
+            } else {
+                RoomView(roomId: roomId)
+                    .id(roomId)
+            }
         } else if let selection, store.sessions.keys.contains(selection) {
             ChatView(sessionId: selection)
                 .id(selection)

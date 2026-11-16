@@ -298,6 +298,9 @@ enum ChatDate {
         return day.formatted(date: .abbreviated, time: .omitted)
     }
 
+    /// A pause this long between two messages puts the time between them, as Messages does.
+    static let separatorGap: TimeInterval = 15 * 60
+
     /// Centered separator inside a chat: "Today 10:42", "Monday 18:03", …
     static func separatorLabel(_ date: Date) -> String {
         let calendar = Calendar.current
