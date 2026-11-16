@@ -68,7 +68,10 @@ stays on in the background for 5 minutes after the last take
 (`DictationKeyboardService.standbyDuration`), and Whisper stays loaded meanwhile
 (`WhisperRuntime.keepLoadedInBackground`), so later taps start takes without leaving the app in
 use. iOS doesn't let an app start recording from the background: when the standby ran out, a call
-took the microphone or the app was killed, the next tap opens Happier again.
+took the microphone or the app was killed, the next tap opens Happier again. A take ends when the
+keyboard closes (another keyboard, another app) or Happier comes to the front; what was heard after
+the keyboard closed isn't typed. A take left recording would keep Whisper working and hold the
+audio, so reading a message aloud wouldn't start.
 
 The two sides talk through `HappierKit/Keyboard/DictationKeyboard.swift`: the app writes
 `status.json` and the keyboard `command.json` in the App Group's `DictationKeyboard/` folder, each

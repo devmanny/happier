@@ -115,7 +115,15 @@ final class KeyboardModel {
         statusChanged()
     }
 
+    /// The keyboard went away (another field's keyboard, the app closed, the message sent): a take
+    /// still listening ends, so it doesn't record on with no field to type into.
     func disappeared() {
+        if listening, let take = status?.take {
+            log.notice("keyboard closed while listening: finishing the take")
+            send(.finish)
+            typing.leave(take: take)
+            saveTyping()
+        }
         observer = nil
         fallback?.cancel()
         waiting = false
@@ -236,6 +244,10 @@ final class KeyboardModel {
             for _ in 0..<edit.delete { proxy.deleteBackward() }
             if !edit.insert.isEmpty { proxy.insertText(edit.insert) }
         }
+        saveTyping()
+    }
+
+    private func saveTyping() {
         if let data = try? JSONEncoder().encode(typing) {
             UserDefaults.standard.set(data, forKey: Self.typingKey)
         }

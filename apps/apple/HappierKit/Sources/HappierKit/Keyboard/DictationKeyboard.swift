@@ -288,6 +288,13 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
         return edit
     }
 
+    /// The keyboard closed during `take` (another keyboard, another field): nothing more of it is
+    /// typed, even if it's still being transcribed when the keyboard comes back.
+    public mutating func leave(take: Int) {
+        typedThrough = max(typedThrough ?? take, take)
+        sync.reset()
+    }
+
     /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
     /// dictate the rest; in a text field that period is almost always one to delete. Question and
     /// exclamation marks, ellipses and the periods between sentences stay.

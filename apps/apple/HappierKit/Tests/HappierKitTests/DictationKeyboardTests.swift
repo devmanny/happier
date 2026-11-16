@@ -126,6 +126,15 @@ import Testing
         #expect(typing.edit(for: status(5, "Pues...", final: true), before: "") == .init(delete: 0, insert: "Pues..."))
     }
 
+    @Test func aTakeLeftWhenTheKeyboardClosedIsNotTypedOnReturn() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(8, "hola"), before: "")
+        // Switched to another keyboard mid-take: what was heard after that isn't typed on return.
+        typing.leave(take: 8)
+        #expect(typing.edit(for: status(8, "hola y otras cosas", final: true), before: "hola") == nil)
+        #expect(typing.edit(for: status(9, "nuevo"), before: "hola") == .init(delete: 0, insert: " nuevo"))
+    }
+
     @Test func eachTakeIsTypedOnceAcrossKeyboardReloads() throws {
         var typing = KeyboardTyping()
         _ = typing.edit(for: status(1, "hola"), before: "")

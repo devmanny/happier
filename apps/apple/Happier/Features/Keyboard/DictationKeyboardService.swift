@@ -61,6 +61,15 @@ final class DictationKeyboardService {
         takeEnded()
     }
 
+    /// Back in Happier: a keyboard take still recording was left behind in the app you were typing
+    /// in (no stop tapped). It ends here, typing its last words there; left running it would keep
+    /// Whisper working and hold the audio, so reading a message aloud wouldn't start.
+    func appBecameActive() {
+        guard dictation.isRecording else { return }
+        Self.log.notice("keyboard dictation: back in the app with a take still recording; finishing it")
+        Task { await finishTake() }
+    }
+
     /// The microphone off now (the panel's button, or the keyboard's).
     func turnOff() {
         if dictation.isRecording { dictation.stop() }
