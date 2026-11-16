@@ -69,7 +69,7 @@ struct KeyboardView: View {
         if let error = status?.error, !(status?.isListening ?? false) {
             Text(error).font(.footnote).foregroundStyle(.red).lineLimit(2)
         } else if model.hasFullAccess, !model.microphoneOn, !model.listening {
-            Text("The first time, Happier opens to turn on the microphone. Come back with ◀ and tap again.")
+            Text("The first time, Happier opens to turn on the microphone. Come back with ◀ and it starts listening.")
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)

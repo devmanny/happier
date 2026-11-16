@@ -29,7 +29,7 @@ struct DictationKeyboardPanel: View {
                             .foregroundStyle(.red)
                             .multilineTextAlignment(.center)
                     } else {
-                        Text("Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now go back to the app you were typing in and tap the microphone again to dictate.")
+                        Text("Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now go back to the app you were typing in: the keyboard starts listening as soon as you’re back.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)

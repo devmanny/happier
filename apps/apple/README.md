@@ -63,7 +63,8 @@ the app leaves what it hears, needs it).
 A keyboard can't use the microphone or hold a Whisper model, so the app does the listening. The
 first tap opens Happier (`happier-native://keyboard-dictation`), which only turns the microphone on
 (`AudioUse.standby`, mixing like Oído) and explains how to go back with the system's ◀, which returns
-to the exact app you came from; the next tap in the keyboard starts the take. The microphone then
+to the exact app you came from; back there, the keyboard starts the take by itself once the
+microphone is on (`KeyboardAutoStart`, within 2 minutes of the tap). The microphone then
 stays on in the background for 5 minutes after the last take
 (`DictationKeyboardService.standbyDuration`), and Whisper stays loaded meanwhile
 (`WhisperRuntime.keepLoadedInBackground`), so later taps start takes without leaving the app in
@@ -79,7 +80,8 @@ followed by a Darwin notification. `KeyboardTyping` decides which takes the keyb
 once, across keyboard reloads, without the period Whisper closes every take with) and
 `KeyboardTextSync` turns each revision into deletes and inserts. Deleting, the trackpad, or any edit
 that leaves the field no longer ending with what the take typed ends the take: nothing more of it
-is typed into the user's fix.
+is typed into the user's fix. A field that empties under the typed words was sent: the take goes
+on, and only what is said after them is typed into the next message.
 
 ## Passkeys in the iOS browser
 
@@ -340,7 +342,8 @@ appearing about once a second and the rest when you stop (tap or release); silen
 noises (under 0.3 s) are not transcribed, and the phrases Whisper writes for silence ("Gracias.",
 "Gracias por ver el video.") are dropped from a pass with under half a second of speech. Each pass
 is decoded on its own, so a word Whisper capitalized only because a pass starts mid-sentence takes
-the lowercase it was written in elsewhere in the take; in Spanish a lone "C." is "Sí." Settings ›
+the lowercase it was written in elsewhere in the take; a segment with no word in it ("." for a
+breath) is dropped; in Spanish a lone "C." is "Sí." Settings ›
 Dictation › Writing Style (`DictationStyle`) sets how every take is written, in the composer and
 the keyboard: opening ¿ ¡, capital letters, and periods between sentences (off: commas, no closing
 period). By default text is written as dictated. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else

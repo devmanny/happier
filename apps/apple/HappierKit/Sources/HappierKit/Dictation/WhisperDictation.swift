@@ -136,8 +136,10 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
     /// The segments of a pass that started at `confirmedEnd`, over audio with `speech` seconds of
     /// speech (`DictationSpeech.speechSeconds`).
     public mutating func update(_ segments: [Segment], final: Bool, speech: Float = .infinity) {
+        // A segment with no word in it ("." or "..." for a breath or a noise before speaking) is
+        // not text: it put a period at the start of the take.
         let decoded = segments.filter {
-            !$0.text.trimmingCharacters(in: .whitespaces).isEmpty
+            $0.text.contains { $0.isLetter || $0.isNumber }
                 && !(speech < Self.silencePhraseSpeech && Self.isSilencePhrase($0.text))
         }
         // Nothing decoded (Whisper judged it silent): the words already shown stay, and on the

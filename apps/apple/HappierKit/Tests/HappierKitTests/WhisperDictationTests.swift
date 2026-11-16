@@ -63,6 +63,21 @@ struct WhisperDictationTests {
         #expect(WhisperStreamTranscript.isSilencePhrase(" Subtítulos realizados por la comunidad de Amara.org"))
     }
 
+    @Test func aSegmentWithoutWordsIsDropped() {
+        // A breath or a noise before speaking: Whisper writes "." or "..." for it, and the take
+        // started with ". pero pues acá hay…".
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" .", 0, 0.8), segment(" Pero pues acá hay marcas de lujo", 0.8, 3), segment(" y restaurantes caros.", 3, 4.5)], final: true)
+        #expect(transcript.text == "Pero pues acá hay marcas de lujo y restaurantes caros.")
+        var dots = WhisperStreamTranscript()
+        dots.update([segment(" ...", 0, 1), segment(" -", 1, 2)], final: true)
+        #expect(dots.text == "")
+        // Numbers are words.
+        var number = WhisperStreamTranscript()
+        number.update([segment(" 25.", 0, 1)], final: true)
+        #expect(number.text == "25.")
+    }
+
     @Test func aRealThankYouIsKept() {
         var transcript = WhisperStreamTranscript()
         // "Gracias" said for real lasts half a second or more.

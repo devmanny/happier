@@ -66,6 +66,47 @@ import Testing
         #expect(sync.edit(take: 2, text: "Sí", before: "Hola A mundo") == .init(delete: 0, insert: " Sí"))
     }
 
+    @Test func afterSendingOnlyWhatIsSaidNextIsTyped() {
+        // Dictating on while sending: the field empties, the take goes on. What was typed went
+        // with the message; Whisper revising its last words must not type them again.
+        var sync = KeyboardTextSync()
+        var field = ""
+        apply(sync.edit(take: 1, text: "Te mando el mensaje en el siguiente", before: field), to: &field)
+        field = ""   // sent
+        apply(sync.edit(take: 1, text: "Te mando el mensaje en el siguiente turno", before: field), to: &field)
+        #expect(field == "turno")
+        apply(sync.edit(take: 1, text: "Te mando el mensaje en el siguiente turno. Otra cosa, ya ves", before: field), to: &field)
+        #expect(field == "turno. Otra cosa, ya ves")
+    }
+
+    @Test func aRevisionOfTheSentWordsIsNotTypedAgain() {
+        var sync = KeyboardTextSync()
+        var field = ""
+        apply(sync.edit(take: 1, text: "no sé cómo le llames", before: field), to: &field)
+        field = ""
+        // Whisper changed the sent words and closed the sentence: nothing new was said.
+        #expect(sync.edit(take: 1, text: "No sé cómo le llamas.", before: field).isEmpty)
+        // A word that grew ("turno" → "turnos") isn't typed half.
+        apply(sync.edit(take: 1, text: "No sé cómo le llamas. Pasó de nuevo", before: field), to: &field)
+        #expect(field == "Pasó de nuevo")
+        // And a second message works the same.
+        field = ""
+        apply(sync.edit(take: 1, text: "No sé cómo le llamas. Pasó de nuevo, así que no es aislado", before: field), to: &field)
+        #expect(field == "así que no es aislado")
+        var grown = KeyboardTextSync()
+        var other = ""
+        apply(grown.edit(take: 2, text: "en el siguiente turno", before: other), to: &other)
+        other = ""
+        apply(grown.edit(take: 2, text: "en el siguiente turnos y más", before: other), to: &other)
+        #expect(other == "y más")
+    }
+
+    @Test func aFieldThatReportsNothingIsNotTakenAsSent() {
+        var sync = KeyboardTextSync()
+        _ = sync.edit(take: 1, text: "hola", before: "")
+        #expect(sync.edit(take: 1, text: "hola mundo", before: nil) == .init(delete: 0, insert: " mundo"))
+    }
+
     @Test func aFieldThatShowsOnlyPartOfTheTextIsTrusted() {
         var sync = KeyboardTextSync()
         _ = sync.edit(take: 1, text: "una frase bastante larga", before: "")
@@ -167,5 +208,55 @@ import Testing
         #expect(reloaded.edit(for: status(1, "hola mundo", final: true), before: "hola") == .init(delete: 0, insert: " mundo"))
         // The same final status again (a second notification): nothing more.
         #expect(reloaded.edit(for: status(1, "hola mundo", final: true), before: "hola mundo") == nil)
+    }
+}
+
+/// Tapping the microphone with it off opens Happier to turn it on; back in the app you were typing
+/// in, the take starts by itself: the tap already asked for it.
+@Suite struct KeyboardAutoStartTests {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+
+    private func starts(_ start: inout KeyboardAutoStart, after seconds: TimeInterval, on: Bool = true, listening: Bool = false) -> Bool {
+        start.shouldStart(at: now.addingTimeInterval(seconds), microphoneOn: on, listening: listening)
+    }
+
+    @Test func theTakeStartsOnceTheMicrophoneIsOnWhenYouComeBack() {
+        var start = KeyboardAutoStart()
+        start.opened(at: now)
+        let turningOn = starts(&start, after: 3, on: false)
+        let on = starts(&start, after: 8)
+        let again = starts(&start, after: 9)
+        #expect(!turningOn)
+        #expect(on)
+        #expect(!again)
+    }
+
+    @Test func aTapLongAgoStartsNothing() {
+        var start = KeyboardAutoStart()
+        start.opened(at: now)
+        let late = starts(&start, after: 180)
+        #expect(!late)
+        #expect(start.requested == nil)
+    }
+
+    @Test func aTakeAlreadyListeningOrAStopCancelsIt() {
+        var listening = KeyboardAutoStart()
+        listening.opened(at: now)
+        let whileListening = starts(&listening, after: 5, listening: true)
+        #expect(!whileListening)
+        #expect(listening.requested == nil)
+        var cancelled = KeyboardAutoStart()
+        cancelled.opened(at: now)
+        cancelled.cancel()
+        let afterCancel = starts(&cancelled, after: 5)
+        #expect(!afterCancel)
+    }
+
+    @Test func itSurvivesTheKeyboardBeingReloaded() throws {
+        var start = KeyboardAutoStart()
+        start.opened(at: now)
+        var reloaded = try JSONDecoder().decode(KeyboardAutoStart.self, from: JSONEncoder().encode(start))
+        let started = starts(&reloaded, after: 5)
+        #expect(started)
     }
 }

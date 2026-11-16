@@ -202,6 +202,11 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
     /// The text before the cursor stopped ending with what was typed (the cursor moved, or the
     /// user edited): the user is fixing the text, and nothing more of the take is typed.
     public private(set) var stopped = false
+    /// Characters of the take's text that went out with a message: the field emptied (sent) while
+    /// the take went on. Only what comes after them is typed.
+    private var sentLength = 0
+    /// Where in the take's text what was typed begins.
+    private var typedFrom = 0
 
     public init() {}
 
@@ -213,7 +218,17 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
             typed = ""
             separator = nil
             stopped = false
+            sentLength = 0
+            typedFrom = 0
         }
+        // The field emptied under typed words: the message was sent. They went with it, even if
+        // Whisper revises them now.
+        if let before, before.isEmpty, !typed.isEmpty, !stopped {
+            sentLength = typedFrom + typed.count - (separator ?? "").count
+            typed = ""
+            separator = nil
+        }
+        let text = sentLength == 0 ? text : Self.after(sentLength, in: text, from: &typedFrom)
         if separator == nil, !text.isEmpty {
             separator = Self.needsSpace(before: before, text: text) ? " " : ""
         }
@@ -224,6 +239,20 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
         let edit = Edit(delete: typed.count - common, insert: String(target.dropFirst(common)))
         typed = target
         return edit
+    }
+
+    /// The take's text after its first `sent` characters, for the next message: not the rest of a
+    /// word cut there ("turno" sent, now "turnos"), nor the space or punctuation that closed the
+    /// sent words. `from` is where it begins.
+    static func after(_ sent: Int, in text: String, from: inout Int) -> String {
+        let chars = Array(text)
+        var index = min(sent, chars.count)
+        if index > 0, index < chars.count, chars[index - 1].isLetter || chars[index - 1].isNumber {
+            while index < chars.count, chars[index].isLetter || chars[index].isNumber { index += 1 }
+        }
+        while index < chars.count, chars[index].isWhitespace || ".,;:".contains(chars[index]) { index += 1 }
+        from = index
+        return String(chars[index...])
     }
 
     /// The take is over: the next update belongs to a new one.
@@ -339,5 +368,34 @@ public enum KeyboardCursor {
             let below = parts[1].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first?.count ?? 0
             return rest + 1 + min(column % width, below)
         }
+    }
+}
+
+/// The microphone tap that opened Happier to turn the microphone on. A keyboard can't listen by
+/// itself, so that tap leaves for the app; back in the app being typed in, the take starts as soon
+/// as the microphone is on, without a second tap. Saved: the system often reloads the keyboard
+/// while another app is in front.
+public struct KeyboardAutoStart: Codable, Equatable, Sendable {
+    /// Longer than this to come back and the tap is stale: the keyboard waits for a new one.
+    public static let window: TimeInterval = 120
+
+    public private(set) var requested: Date?
+
+    public init() {}
+
+    public mutating func opened(at date: Date = .now) { requested = date }
+
+    public mutating func cancel() { requested = nil }
+
+    /// Whether to start a take now; true once per tap.
+    public mutating func shouldStart(at date: Date = .now, microphoneOn: Bool, listening: Bool) -> Bool {
+        guard let requested else { return false }
+        if listening || date.timeIntervalSince(requested) > Self.window {
+            self.requested = nil
+            return false
+        }
+        guard microphoneOn else { return false }
+        self.requested = nil
+        return true
     }
 }

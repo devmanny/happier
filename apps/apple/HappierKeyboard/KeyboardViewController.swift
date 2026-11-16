@@ -89,7 +89,10 @@ final class KeyboardModel {
     @ObservationIgnored private var observer: DictationKeyboard.Observer?
     @ObservationIgnored private var typing = KeyboardTyping()
     @ObservationIgnored private var fallback: Task<Void, Never>?
+    /// The microphone tap that went to Happier: the take starts by itself once back.
+    @ObservationIgnored private var autoStart = KeyboardAutoStart()
     private static let typingKey = "keyboard.typing"
+    private static let autoStartKey = "keyboard.autoStart"
 
     init(controller: KeyboardViewController) {
         self.controller = controller
@@ -108,6 +111,10 @@ final class KeyboardModel {
         if let data = UserDefaults.standard.data(forKey: Self.typingKey),
            let saved = try? JSONDecoder().decode(KeyboardTyping.self, from: data) {
             typing = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.autoStartKey),
+           let saved = try? JSONDecoder().decode(KeyboardAutoStart.self, from: data) {
+            autoStart = saved
         }
         observer = DictationKeyboard.observe(DictationKeyboard.statusNotification) { [weak self] in
             self?.statusChanged()
@@ -153,6 +160,8 @@ final class KeyboardModel {
         let current = channel.readStatus()
         log.notice("mic tapped: app \(current.map { "\($0.phase.rawValue) on=\($0.microphoneOn())" } ?? "silent", privacy: .public)")
         if current?.isListening == true {
+            autoStart.cancel()
+            saveAutoStart()
             send(.finish)
         } else if current?.microphoneOn() == true {
             send(.start)
@@ -235,6 +244,8 @@ final class KeyboardModel {
     // MARK: The app
 
     private func open() {
+        autoStart.opened()
+        saveAutoStart()
         waiting = true
         controller?.openApp(DictationKeyboard.openURL)
     }
@@ -249,6 +260,13 @@ final class KeyboardModel {
         if status != self.status { self.status = status }
         if status.isListening || status.final || status.phase == .off { waiting = false }
         typeTake(status)
+        // Back from Happier, which turned the microphone on for the tap that opened it.
+        let hadRequest = autoStart.requested != nil
+        if autoStart.shouldStart(microphoneOn: status.microphoneOn(), listening: status.isListening) {
+            log.notice("back from Happier with the microphone on: starting the take")
+            send(.start)
+        }
+        if hadRequest { saveAutoStart() }
     }
 
     private func typeTake(_ status: DictationKeyboard.Status) {
@@ -269,6 +287,12 @@ final class KeyboardModel {
             if !edit.insert.isEmpty { proxy.insertText(edit.insert) }
         }
         saveTyping()
+    }
+
+    private func saveAutoStart() {
+        if let data = try? JSONEncoder().encode(autoStart) {
+            UserDefaults.standard.set(data, forKey: Self.autoStartKey)
+        }
     }
 
     private func saveTyping() {
