@@ -18,8 +18,9 @@ import SwiftUI
 /// archived or gone), "Read" under your last message once the agent has it, its typing bubble while
 /// it works, and no @: everything you write reaches it. What you write while it works waits for that turn to end: those
 /// messages sit dimmed below the typing bubble, with why they wait (`AgentRoom.queued`), and can be
-/// edited or canceled until the agent gets them (`HappierStore.reviseQueuedRoomMessage`); once it
-/// does, they take their place by seq. Its header and info are `AgentChatView`'s.
+/// edited or canceled until the agent gets them (`HappierStore.reviseQueuedRoomMessage`), or sent
+/// into the turn it is working (Steer Now, when its daemon and its thread can take it); once it
+/// has them, they take their place by seq. Its header and info are `AgentChatView`'s.
 struct RoomView: View {
     let roomId: String
     @Environment(HappierStore.self) private var store
@@ -79,7 +80,7 @@ struct RoomView: View {
             Button("Save") {
                 let text = queuedEditText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let seq = editingQueued, !text.isEmpty, text != messages.first(where: { $0.seq == seq })?.text else { return }
-                revise(seq, text: text)
+                revise(seq, .edit(text))
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -231,34 +232,56 @@ struct RoomView: View {
     // MARK: What waits for the agent
 
     /// Your messages the agent doesn't have yet, dimmed at the bottom of its chat with why they
-    /// wait: edit or cancel one from its menu (or a tap) until the agent gets it.
+    /// wait: edit or cancel one from its menu (or a tap) until the agent gets it, or send it into the
+    /// turn the agent is working (Steer Now). The ones sent now, and those before them, go first.
     @ViewBuilder
     private func queuedRows(_ room: AgentRoom, _ queue: AgentRoom.Queue?, proxy: ScrollViewProxy) -> some View {
         let name = room.title
         VStack(alignment: .trailing, spacing: 3) {
             if let queue {
-                let status = queue.reason == .afterCurrentTurn
-                    ? String(localized: "Waiting · \(name) gets this after the current turn")
-                    : String(localized: "Waiting · Not delivered yet")
-                ForEach(queue.messages) { message in
-                    let waiting = RoomMessageRow.Waiting(status: status, revisable: queue.revisable,
-                                                         edit: { beginEdit(message) }, cancel: { revise(message.seq, text: nil) })
-                    RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq,
-                                   direct: true, tail: message.seq == queue.messages.last?.seq, waiting: waiting,
-                                   pick: { _ in }, reply: {}, showQuoted: { show($0, proxy: proxy) })
-                        .id(message.seq)
-                        .transition(.opacity)
+                let steeringThrough = queue.sendingNowThroughSeq ?? 0
+                let steering = queue.messages.filter { $0.seq <= steeringThrough }
+                let waiting = queue.messages.filter { $0.seq > steeringThrough }
+                if !steering.isEmpty {
+                    queuedRun(room, steering, status: String(localized: "Steering · \(name) gets this while working"),
+                              revisable: queue.revisable, steerNow: false, statusId: "room-queue-steering", proxy: proxy)
                 }
-                Text(verbatim: status)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.trailing, 4)
-                    .padding(.bottom, 4)
-                    .accessibilityIdentifier("room-queue-status")
+                if !waiting.isEmpty {
+                    // Its daemon takes it into the running turn, and its thread can take it right now.
+                    let steerNow = queue.sendNowSupported
+                        && directSession.flatMap { store.sessions[$0] }?.canSteerNow(at: store.presenceDate()) == true
+                    queuedRun(room, waiting, status: queue.reason == .afterCurrentTurn
+                                  ? String(localized: "Waiting · \(name) gets this after the current turn")
+                                  : String(localized: "Waiting · Not delivered yet"),
+                              revisable: queue.revisable, steerNow: steerNow, statusId: "room-queue-status", proxy: proxy)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: queue?.messages.map(\.seq))
+        .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: queue?.sendingNowThroughSeq)
+    }
+
+    /// A run of waiting messages that wait alike, the tail on the last, and why below them.
+    @ViewBuilder
+    private func queuedRun(_ room: AgentRoom, _ run: [AgentRoomMessage], status: String, revisable: Bool, steerNow: Bool,
+                           statusId: String, proxy: ScrollViewProxy) -> some View {
+        ForEach(run) { message in
+            let waiting = RoomMessageRow.Waiting(status: status, revisable: revisable,
+                                                 edit: { beginEdit(message) }, cancel: { revise(message.seq, .cancel) },
+                                                 steerNow: steerNow ? { revise(message.seq, .sendNow) } : nil)
+            RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq,
+                           direct: true, tail: message.seq == run.last?.seq, waiting: waiting,
+                           pick: { _ in }, reply: {}, showQuoted: { show($0, proxy: proxy) })
+                .id(message.seq)
+                .transition(.opacity)
+        }
+        Text(verbatim: status)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.trailing, 4)
+            .padding(.bottom, 4)
+            .accessibilityIdentifier(statusId)
     }
 
     private func beginEdit(_ message: AgentRoomMessage) {
@@ -266,11 +289,14 @@ struct RoomView: View {
         editingQueued = message.seq
     }
 
-    /// Edits (`text`) or cancels the waiting message; when the agent got it first, says so.
-    private func revise(_ seq: Int, text: String?) {
+    /// Edits, cancels or sends now the waiting message. When the agent got it first, an edit or a
+    /// cancel says so; a Steer Now got what it asked for (the agent has it).
+    private func revise(_ seq: Int, _ change: HappierStore.QueuedChange) {
         Task {
-            switch await store.reviseQueuedRoomMessage(roomId: roomId, seq: seq, text: text) {
+            switch await store.reviseQueuedRoomMessage(roomId: roomId, seq: seq, change) {
             case .done:
+                AppHaptics.success()
+            case .alreadyDelivered where change == .sendNow:
                 AppHaptics.success()
             case .alreadyDelivered:
                 AppHaptics.warning()
@@ -692,7 +718,8 @@ private struct DirectLayout {
 /// names as cards between its bubbles (`SessionReferenceCard`). Mentions are in bold;
 /// the message it answers is quoted above it (tap it to go there). Reply is in its menu, a swipe to
 /// the left on iPhone and iPad, and a button on hover on the Mac. One of yours the agent doesn't
-/// have yet (`waiting`) is dimmed, and a tap or its menu edits, cancels or copies it instead.
+/// have yet (`waiting`) is dimmed, and a tap or its menu steers it into the running turn, edits,
+/// cancels or copies it instead.
 private struct RoomMessageRow: View {
     /// Your message waiting for the agent (`AgentRoom.queued`), and what can be done with it.
     struct Waiting {
@@ -702,6 +729,8 @@ private struct RoomMessageRow: View {
         let revisable: Bool
         let edit: () -> Void
         let cancel: () -> Void
+        /// Steer Now: sends it into the turn the agent is working; nil when that isn't offered.
+        let steerNow: (() -> Void)?
     }
 
     let message: AgentRoomMessage
@@ -824,6 +853,7 @@ private struct RoomMessageRow: View {
         .accessibilityActions {
             if let waiting {
                 if waiting.revisable {
+                    if let steerNow = waiting.steerNow { Button("Steer Now", action: steerNow) }
                     Button("Edit", action: waiting.edit)
                     Button("Cancel Message", action: waiting.cancel)
                 }
@@ -870,10 +900,14 @@ private struct RoomMessageRow: View {
         }
     }
 
-    /// A waiting message's actions: Edit and Cancel Message while the agent hasn't got it, and Copy.
+    /// A waiting message's actions: Steer Now while the agent can take it in its running turn, Edit
+    /// and Cancel Message while the agent hasn't got it, and Copy.
     @ViewBuilder
     private func waitingActions(_ waiting: Waiting) -> some View {
         if waiting.revisable {
+            if let steerNow = waiting.steerNow {
+                Button("Steer Now", systemImage: "arrow.turn.down.right") { AppHaptics.confirm(); steerNow() }
+            }
             Button("Edit", systemImage: "pencil") { AppHaptics.light(); waiting.edit() }
             Button("Cancel Message", systemImage: "xmark.circle", role: .destructive) { AppHaptics.warning(); waiting.cancel() }
         }
@@ -1004,8 +1038,8 @@ private struct RoomMessageRow: View {
     }
 }
 
-/// A tap on a waiting message shows its actions (Edit, Cancel Message, Copy); other messages keep
-/// theirs in the menu only.
+/// A tap on a waiting message shows its actions (Steer Now, Edit, Cancel Message, Copy); other
+/// messages keep theirs in the menu only.
 private struct WaitingTap<Actions: View>: ViewModifier {
     let waiting: RoomMessageRow.Waiting?
     let text: String

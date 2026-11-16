@@ -134,6 +134,78 @@ describe('AgentRoomStore', () => {
     expect((await store.getRoom('r1'))!.room.lastSeq).toBe(1);
   });
 
+  it('claims a Steer Now past the delivery in flight at the seat version it read', async () => {
+    const kv = createInMemoryAccountKv();
+    await seedRoom(kv);
+    const store = new AgentRoomStore({ transport: kv.transport, material, now: () => 7 });
+    const seatOf = async () => (await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!;
+    // A plain delivery says its daemon honors Steer Now.
+    await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n1', throughSeq: 1 }, null);
+    expect((await seatOf()).seat.inFlight).toEqual({ localId: 'room.r1.a-mateo.n1', throughSeq: 1, at: 7, sendNowSupported: true });
+    await store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, sessionId: 's1', inFlight: { ...seat.inFlight!, sent: true } }));
+    const read = await seatOf();
+
+    const steer = { localId: 'room.r1.a-mateo.n2', throughSeq: 3, steers: { localId: 'room.r1.a-mateo.n1', throughSeq: 1 } };
+    expect(await store.startDelivery('r1', 'a-mateo', steer, read)).toBe(true);
+    expect((await seatOf()).seat).toMatchObject({ sessionId: 's1', readThroughSeq: 0 });
+    expect((await seatOf()).seat.inFlight).toEqual({ ...steer, at: 7, sendNowSupported: true });
+
+    // A claim on the seat as it was before changes nothing.
+    const after = await seatOf();
+    expect(await store.startDelivery('r1', 'a-mateo', { ...steer, localId: 'room.r1.a-mateo.n3' }, read)).toBe(false);
+    expect(await seatOf()).toEqual(after);
+  });
+
+  it('posts the reply of a turn a Steer Now was sent past and keeps the Steer Now in flight', async () => {
+    const author = { kind: 'agent' as const, agentId: 'a-mateo', name: 'Mateo' };
+    const setup = async () => {
+      const kv = createInMemoryAccountKv();
+      await seedRoom(kv);
+      const store = new AgentRoomStore({ transport: kv.transport, material });
+      for (const text of ['uno', 'dos', 'tres']) await store.appendMessage('r1', { author: { kind: 'user' }, text, mentions: ['a-mateo'] });
+      await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n1', throughSeq: 1 }, null);
+      await store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, sessionId: 's1', inFlight: { ...seat.inFlight!, sent: true } }));
+      const read = (await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!;
+      await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n2', throughSeq: 3, steers: { localId: 'room.r1.a-mateo.n1', throughSeq: 1 } }, read);
+      await store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, inFlight: { ...seat.inFlight!, sent: true } }));
+      const finish = (nonce: string, text: string, atReady = false) =>
+        store.finishTurn({ roomId: 'r1', agentId: 'a-mateo', localId: `room.r1.a-mateo.${nonce}`, author, text, atReady });
+      const seat = async () => (await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat;
+      return { store, finish, seat };
+    };
+
+    // Ended from the transcript before its ready (the daemon): the proof that it ended first stays
+    // until that ready, which drops it and posts nothing again.
+    const steered = await setup();
+    expect(await steered.finish('n1', 'A')).toMatchObject({ finished: true, message: { seq: 4, text: 'A' } });
+    expect(await steered.seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: 'room.r1.a-mateo.n2', throughSeq: 3, sent: true } });
+    expect((await steered.seat()).inFlight!.steers).toEqual({ localId: 'room.r1.a-mateo.n1', throughSeq: 1, ended: true });
+    const ended = await steered.seat();
+    expect(await steered.finish('n1', 'A otra vez')).toEqual({ finished: false });
+    expect(await steered.seat()).toEqual(ended);
+    expect(await steered.finish('n1', 'A otra vez', true)).toEqual({ finished: false });
+    expect(await steered.seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: 'room.r1.a-mateo.n2', throughSeq: 3, sent: true } });
+    expect((await steered.seat()).inFlight!.steers).toBeUndefined();
+    expect((await steered.store.getRoom('r1'))!.room.lastSeq).toBe(4);
+    expect(await steered.finish('n2', 'B')).toMatchObject({ finished: true, message: { seq: 5, text: 'B' } });
+    expect(await steered.seat()).toMatchObject({ readThroughSeq: 3 });
+    expect((await steered.seat()).inFlight).toBeUndefined();
+
+    // Ended at its ready (the runner's): nothing to keep.
+    const atReady = await setup();
+    expect(await atReady.finish('n1', 'A', true)).toMatchObject({ finished: true, message: { seq: 4, text: 'A' } });
+    expect(await atReady.seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: 'room.r1.a-mateo.n2', throughSeq: 3, sent: true } });
+    expect((await atReady.seat()).inFlight!.steers).toBeUndefined();
+
+    // The Steer Now's reply first: the turn it was sent past has no reply of its own.
+    const joined = await setup();
+    expect(await joined.finish('n2', 'B')).toMatchObject({ finished: true });
+    expect(await joined.seat()).toMatchObject({ readThroughSeq: 3 });
+    expect((await joined.seat()).inFlight).toBeUndefined();
+    expect(await joined.finish('n1', 'A')).toEqual({ finished: false });
+    expect((await joined.store.getRoom('r1'))!.room.lastSeq).toBe(4);
+  });
+
   it('lets only one of two concurrent deliveries claim a member', async () => {
     const kv = createInMemoryAccountKv();
     await seedRoom(kv);

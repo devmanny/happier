@@ -4,11 +4,12 @@ import Testing
 
 /// Steering and the server pending queue (`submitMode.ts`, `pendingRoutes.ts`, `pendingQueueV2.ts`).
 @Suite struct PendingQueueTests {
-    private func session(active: Bool = true, seq: Int = 5, agentStateVersion: Int = 2, capabilities: JSONValue? = nil) throws -> Session {
+    private func session(active: Bool = true, seq: Int = 5, agentStateVersion: Int = 2, thinking: Bool = false,
+                         capabilities: JSONValue? = nil) throws -> Session {
         var row: [String: JSONValue] = [
             "id": "s", "seq": .number(Double(seq)), "createdAt": 1, "updatedAt": 1, "active": .bool(active), "activeAt": 1,
             "encryptionMode": "plain", "metadata": #"{"path":"/a"}"#, "metadataVersion": 1, "agentStateVersion": .number(Double(agentStateVersion)),
-            "pendingVersion": 3,
+            "pendingVersion": 3, "thinking": .bool(thinking),
         ]
         if let capabilities {
             row["agentState"] = .string(String(decoding: try (["capabilities": capabilities] as JSONValue).encoded(), as: UTF8.self))
@@ -30,6 +31,16 @@ import Testing
         let steerable = try session(capabilities: ["inFlightSteerSupported": true])
         #expect(SendDecision.action(for: "/compact", session: steerable) == .enqueue)
         #expect(SendDecision.action(for: " /clear ", session: steerable) == .enqueue)
+    }
+
+    /// Steer Now, in the session chat and in an agent's chat: a turn is under way and the agent can
+    /// take a steer into it right now.
+    @Test func steerNowIsOfferedOnlyWhileATurnRunsThatCanTakeIt() throws {
+        let now = Date(timeIntervalSince1970: 1)
+        #expect(try session(thinking: true, capabilities: ["inFlightSteerAvailable": true]).canSteerNow(at: now))
+        #expect(try session(thinking: true, capabilities: ["inFlightSteer": true]).canSteerNow(at: now))
+        #expect(try !session(thinking: true, capabilities: ["inFlightSteerSupported": true, "inFlightSteerAvailable": false]).canSteerNow(at: now))
+        #expect(try !session(thinking: false, capabilities: ["inFlightSteerAvailable": true]).canSteerNow(at: now))
     }
 
     @Test func firstTurnSendsNow() throws {

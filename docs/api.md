@@ -183,22 +183,23 @@ prefixes:
   changes only the model and effort of the session of that agent's seat, never the agent or provider:
   the chat sends with `sendRoomMessage`, which never applies an armed agent switch. Each message is its own row
   `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?,
-  replyTo? {seq}}`
+  replyTo? {seq}, sendNow?}`
   created with version -1 in the same atomic write that moves the room's `lastSeq` to its seq, so
   concurrent writers (the app, every member's thread) get gap-free ordered seqs and re-run on a
   conflict. Messages are read by exact key through `POST /v1/kv/bulk` (≤100 keys per call), never
   listed, so a long room never crowds a listing. A member's seat holds its thread (`sessionId`), its
   read marker (`readThroughSeq`) and the delivery in flight (`inFlight {localId, throughSeq, at,
-  sent?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
+  sent?, steers? {localId, throughSeq, ended?}, sendNowSupported?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
   picker; "Que conteste" is the user's own message mentioning that member); the daemon of each
   member's machine writes that member's seat; the member's thread posts its replies. The app may
-  also withdraw or edit a user message its member hasn't got (seq above both `readThroughSeq` and
-  `inFlight.throughSeq`): one atomic `kvMutate` that deletes (null value) or rewrites the message at
-  its version and writes that member's seat back byte for byte at the version it read. That seat
+  also withdraw, edit or flag `sendNow` (Steer Now) a user message its member hasn't got (seq above
+  both `readThroughSeq` and `inFlight.throughSeq`): one atomic `kvMutate` that deletes (null value)
+  or rewrites the message at its version and writes that member's seat back byte for byte at the
+  version it read. That seat
   write is only a version guard; seat content stays daemon-owned. The daemon reads seats before
-  messages and claims a delivery with a CAS on the seat version it read, so either the withdrawal
-  lands first and the claim fails (the next run reads the room without the message), or the app's
-  write conflicts and the returned seat shows the member already has it. Daemons skip missing
+  messages and claims a delivery with a CAS on the seat version it read, so either the app's write
+  lands first and the claim fails (the next run reads the room as it is then), or the app's write
+  conflicts and the returned seat shows the member already has it. Daemons skip missing
   messages (pinned by `reconcileRoomDeliveries.test.ts`). A withdrawn message's seq stays a gap for
   good: the relay keeps the deleted key as a tombstone (null value, higher version), appends only
   take the seq after `lastSeq` (which the withdrawal leaves as it was), and an edit that finds the
@@ -251,13 +252,35 @@ prefixes:
   Push previews leave them out (`buildAssistantMessagePreview`). The other
   members are not woken by a reply that doesn't mention them; it stays in the room's history, so
   their next delivery (or `sala_leer`) includes it. A member mid-turn gets
-  nothing new: what arrives meanwhile is delivered together once that turn ends. The user's messages
-  without `@` go to no one. When a room turn is ready (`sendReadyWithPushNotification`, after the
+  nothing new: what arrives meanwhile is delivered together once that turn ends, except what the
+  user sends now. Steer Now (the Apple app, in an agent's own chat) flags a waiting message
+  `sendNow`; once the delivery in flight was sent, is in its thread's transcript and its turn still
+  runs, the member's daemon claims a new delivery (`decideRoomDelivery` returns `steer`) through the
+  newest flagged user message that mentions the member, earlier unflagged ones riding along and
+  later ones staying queued, with `steers` naming the delivery it was sent past. It carries only the
+  messages after that one's `throughSeq` and goes through the ordinary send path (no requested
+  action, so the relay's pending queue steers it into the turn while the turn can take it and
+  otherwise runs it right after). A flag at or below `inFlight.throughSeq` does nothing. A retried
+  send of it carries the same messages; its thread gone, it is dropped together with the delivery
+  it was sent past, the marker unmoved, and the next run gives a new thread everything since the
+  marker. Every delivery a daemon starts carries `sendNowSupported: true`: the app offers Steer Now
+  only on a seat that has it, while the thread's session is working and can steer. The user's
+  messages without `@` go to no one. When a room turn is ready (`sendReadyWithPushNotification`, after the
   transcript is flushed) the thread posts the turn's final assistant text as its reply (mentions
   resolved by name, `@<userName>` sets `mentionsUser`), moves its marker to what the delivery read
   through (messages that came during the turn stay unread) and clears the delivery, all in one
   atomic write; the daemon finishes a turn from the thread's transcript when its runner ended
-  without doing so. An agent's mention wakes a member only when that member's `wakeByAgents` is true
+  without doing so. Both apply one rule (`settleRoomTurn`): the delivery a Steer Now was sent past
+  posts its own reply when its turn ended first (the marker moves to its `throughSeq` and the Steer
+  Now stays in flight), and the delivery in flight posts the text after its own user row when its
+  turn ends, which also ends the one sent past when the steer joined that turn (it gets no reply of
+  its own). The runner drops `steers` at the ready of the turn it names; when the daemon posted that
+  reply first, from the transcript, `steers` stays as `ended` until that ready, which then posts
+  nothing again and takes over its notice, and no new Steer Now is claimed meanwhile. At a ready a
+  turn that ended without a completion marker is ended too, but only the one that ready ended:
+  never the Steer Now while the turn it was sent past is the one that finished. The runner keeps
+  tracking its room delivery until the seat's delivery in flight is finished, so a Steer Now that
+  reaches the transcript later is posted at its own ready. An agent's mention wakes a member only when that member's `wakeByAgents` is true
   (the app sets it, after the Consumer Terms 3.7 warning for Claude members; the CLI never decides
   by provider) and fewer than 6 agent messages came in a row since the user's last one (the brake);
   otherwise it waits for the user. `pausedAt` stops deliveries (running turns finish). The user gets

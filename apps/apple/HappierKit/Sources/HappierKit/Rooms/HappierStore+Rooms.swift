@@ -1,7 +1,7 @@
 import Foundation
 
 /// Rooms in the account's UserKVStore (`AgentRoom`): the app writes the rooms and the user's
-/// messages (and edits or cancels one its agent doesn't have yet, `reviseQueuedRoomMessage`); each
+/// messages (and edits, cancels or sends now one its agent doesn't have yet, `reviseQueuedRoomMessage`); each
 /// member's daemon delivers mentions and posts its replies and seats. Changes reach the app through
 /// the account's KV changes (`applyRoomChange`) and the catch-up.
 extension HappierStore {
@@ -266,7 +266,18 @@ extension HappierStore {
         }
     }
 
-    /// What became of an edit or a cancel of a message waiting for its agent (`reviseQueuedRoomMessage`).
+    /// A change to the user's message that waits for the agent in its chat (`reviseQueuedRoomMessage`).
+    public enum QueuedChange: Equatable, Sendable {
+        /// Its text instead (trimmed; an empty one changes nothing).
+        case edit(String)
+        /// Withdrawn: the agent never gets it.
+        case cancel
+        /// Steer Now: it reaches the agent in its running turn, with the messages waiting before it
+        /// (`AgentRoomMessage.sendNow`).
+        case sendNow
+    }
+
+    /// What became of a change to a message waiting for its agent (`reviseQueuedRoomMessage`).
     public enum QueuedRevision: Equatable, Sendable {
         case done
         /// Too late: the agent already has it; nothing was changed.
@@ -275,14 +286,15 @@ extension HappierStore {
         case failed
     }
 
-    /// Edits (`text`) or cancels (nil) the user's message that waits for the agent in its chat
+    /// Edits, cancels or sends now (`change`) the user's message that waits for the agent in its chat
     /// (`AgentRoom.queued`). One atomic write rewrites (or deletes) the message at its version and
     /// writes the agent's seat back exactly as it was read, at its version: the seat only guards the
     /// write, its content stays the daemon's. The daemon reads the seat, then the messages, and takes
-    /// a delivery by writing that seat at the version it read, so either this write wins (that
-    /// delivery fails and is read again, with the change) or it fails and the seat it returns says
-    /// whether the agent already has the message. A seat that moved without taking it is tried again.
-    public func reviseQueuedRoomMessage(roomId: String, seq: Int, text: String?) async -> QueuedRevision {
+    /// a delivery (or a steer into the running turn) by writing that seat at the version it read, so
+    /// either this write wins (that delivery fails and is read again, with the change) or it fails
+    /// and the seat it returns says whether the agent already has the message. A seat that moved
+    /// without taking it is tried again. A message already sent now is done without a write.
+    public func reviseQueuedRoomMessage(roomId: String, seq: Int, _ change: QueuedChange) async -> QueuedRevision {
         guard let api, let machineKey = keys?.content.secretKey, let agentId = room(id: roomId)?.directAgentId,
               var message = roomMessages[roomId]?.first(where: { $0.seq == seq }), message.author == .user else { return .failed }
         var seat = roomSeats[roomId]?.first { $0.agentId == agentId }
@@ -298,20 +310,28 @@ extension HappierStore {
                     storeSeats([current], roomId: roomId)
                     return .alreadyDelivered
                 }
-                var edited: AgentRoomMessage?
-                if let text {
-                    guard let rewritten = message.editing(text) else { return .failed }
-                    edited = rewritten
+                // The message as it is written; nil deletes it.
+                let revised: AgentRoomMessage?
+                switch change {
+                case .edit(let text):
+                    guard let edited = message.editing(text) else { return .failed }
+                    revised = edited
+                case .cancel:
+                    revised = nil
+                case .sendNow:
+                    // Sent now already, here or on another device.
+                    if message.sendNow { return .done }
+                    revised = message.sendingNow()
                 }
-                switch try await api.kvMutate([(messageKey, try edited?.sealed(machineKey: machineKey), message.version),
+                switch try await api.kvMutate([(messageKey, try revised?.sealed(machineKey: machineKey), message.version),
                                                (seatKey, unchanged, current.version)]) {
                 case .saved(let versions):
                     var guarded = current
                     guarded.version = versions[seatKey] ?? current.version + 1
                     storeSeats([guarded], roomId: roomId)
-                    if var edited {
-                        edited.version = versions[messageKey] ?? message.version + 1
-                        mergeRoomMessages([edited], into: roomId)
+                    if var revised {
+                        revised.version = versions[messageKey] ?? message.version + 1
+                        mergeRoomMessages([revised], into: roomId)
                     } else {
                         mergeRoomMessages([], removing: [seq], into: roomId)
                     }
@@ -328,7 +348,7 @@ extension HappierStore {
                         guard let value = changed.value, var latest = AgentRoomMessage.open(value, machineKey: machineKey) else {
                             // Canceled on another device meanwhile.
                             mergeRoomMessages([], removing: [seq], into: roomId)
-                            if text == nil { return .done }
+                            if change == .cancel { return .done }
                             throw RPCError(message: String(localized: "This message was canceled on another device."), code: "version-mismatch")
                         }
                         latest.version = changed.version

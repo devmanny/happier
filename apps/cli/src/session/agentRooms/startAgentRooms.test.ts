@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentRoomKvKey, sealAccountScopedBlobCiphertext, type AgentRoomV1 } from '@happier-dev/protocol';
 
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
+import { reconcileRoomDeliveries } from '@/daemon/agentRooms/reconcileRoomDeliveries';
 import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 
 import { notifyRoomTurnReady, resetAgentRoomsForTests, startAgentRooms } from './startAgentRooms';
@@ -93,5 +94,109 @@ describe('startAgentRooms', () => {
     expect(seat).toMatchObject({ readThroughSeq: 1 });
     expect(seat.inFlight).toBeUndefined();
     expect(push.sendToAllDevicesAsync).not.toHaveBeenCalled();
+  });
+
+  describe('with a Steer Now sent past the delivery its turn was working', () => {
+    const n1 = 'room.r1.a-mateo.n1';
+    const n2 = 'room.r1.a-mateo.n2';
+
+    /** Thread s1 got #1 (n1); the user sent #2 now (n2). `replies` is the transcript, changed between readies. */
+    async function steered(replies: Record<string, TurnReply | null>) {
+      const { rooms, session, push } = await setup(async (_sessionId, localId) => replies[localId] ?? null);
+      await rooms.store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo y el registro', mentions: ['a-mateo'] });
+      await rooms.store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, sessionId: 's1', inFlight: { ...seat.inFlight!, sent: true } }));
+      const read = (await rooms.store.getSeats('r1', ['a-mateo'])).get('a-mateo')!;
+      await rooms.store.startDelivery('r1', 'a-mateo', { localId: n2, throughSeq: 2, steers: { localId: n1, throughSeq: 1 } }, read);
+      await rooms.store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, inFlight: { ...seat.inFlight!, sent: true } }));
+      session.emit('provider-input-delivered', { localId: n1 });
+      session.emit('provider-input-delivered', { localId: n2 });
+      const posted = async () => (await rooms.store.readMessages('r1', { fromSeq: 3, toSeq: 10 })).map((message) => message.text);
+      const seat = async () => (await rooms.store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat;
+      // A run of the member's daemon on a room write (the Steer Now's own claim and `sent` writes each start one).
+      const daemonRun = () => reconcileRoomDeliveries('r1', {
+        store: rooms.store, machineId: 'm1', readAgentProfile: async () => null,
+        startThread: vi.fn(), sendToThread: vi.fn(), readTurnReply: async (_sessionId, localId) => replies[localId] ?? null, push,
+      });
+      return { push, posted, seat, daemonRun };
+    }
+
+    it('posts one reply, the one after the Steer Now, when it reached the running turn', async () => {
+      const { push, posted, seat } = await steered({ [n1]: { finished: false, text: 'Reviso' }, [n2]: { finished: true, text: 'B' } });
+
+      expect(await notifyRoomTurnReady('s1')).toBe(true);
+
+      expect(await posted()).toEqual(['B']);
+      expect(push.sendToAllDevicesAsync).toHaveBeenCalledTimes(1);
+      expect(await seat()).toMatchObject({ readThroughSeq: 2 });
+      expect((await seat()).inFlight).toBeUndefined();
+    });
+
+    it('the turn ended before the Steer Now reached the agent: its own reply now, the Steer Now\'s when its turn ends', async () => {
+      const replies: Record<string, TurnReply | null> = { [n1]: { finished: true, text: 'A' } };
+      const { push, posted, seat } = await steered(replies);
+
+      expect(await notifyRoomTurnReady('s1')).toBe(true);
+      expect(await posted()).toEqual(['A']);
+      expect(await seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: n2 } });
+
+      replies[n2] = { finished: true, text: 'B' };
+      expect(await notifyRoomTurnReady('s1')).toBe(true);
+      expect(await posted()).toEqual(['A', 'B']);
+      expect(await seat()).toMatchObject({ readThroughSeq: 2 });
+      expect((await seat()).inFlight).toBeUndefined();
+      expect(push.sendToAllDevicesAsync).toHaveBeenCalledTimes(2);
+    });
+
+    it('a Steer Now whose own turn has only just begun is not posted early', async () => {
+      const replies: Record<string, TurnReply | null> = { [n1]: { finished: true, text: 'A' }, [n2]: { finished: false, text: null } };
+      const { posted, seat } = await steered(replies);
+
+      expect(await notifyRoomTurnReady('s1')).toBe(true);
+      expect(await posted()).toEqual(['A']);
+      expect(await seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: n2 } });
+
+      replies[n2] = { finished: true, text: 'B' };
+      await notifyRoomTurnReady('s1');
+      expect(await posted()).toEqual(['A', 'B']);
+      expect((await seat()).inFlight).toBeUndefined();
+    });
+
+    describe('when its daemon ended the turn it was sent past before that turn\'s ready', () => {
+      it('keeps the Steer Now whose own turn has only just begun, and posts it at its own ready', async () => {
+        const replies: Record<string, TurnReply | null> = { [n1]: { finished: false, text: 'Reviso' } };
+        const { posted, seat, daemonRun } = await steered(replies);
+        replies[n1] = { finished: true, text: 'A' };
+        replies[n2] = { finished: false, text: null };
+        await daemonRun();
+        expect(await posted()).toEqual(['A']);
+
+        // The ready of the turn that ended: the room already told the user about it.
+        expect(await notifyRoomTurnReady('s1')).toBe(true);
+        expect(await posted()).toEqual(['A']);
+        expect(await seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: n2 } });
+
+        replies[n2] = { finished: true, text: 'B' };
+        expect(await notifyRoomTurnReady('s1')).toBe(true);
+        expect(await posted()).toEqual(['A', 'B']);
+        expect((await seat()).inFlight).toBeUndefined();
+      });
+
+      it('takes over that ready\'s notice while the Steer Now is not in the transcript yet, and ends the Steer Now at its own ready', async () => {
+        const replies: Record<string, TurnReply | null> = { [n1]: { finished: true, text: 'A' } };
+        const { push, posted, seat, daemonRun } = await steered(replies);
+        await daemonRun();
+        expect(push.sendToAllDevicesAsync).toHaveBeenCalledTimes(1);
+
+        expect(await notifyRoomTurnReady('s1')).toBe(true);
+        expect(await seat()).toMatchObject({ readThroughSeq: 1, inFlight: { localId: n2 } });
+
+        // Its own turn ended without a completion marker: its ready ends it all the same.
+        replies[n2] = { finished: false, text: 'B' };
+        expect(await notifyRoomTurnReady('s1')).toBe(true);
+        expect(await posted()).toEqual(['A', 'B']);
+        expect((await seat()).inFlight).toBeUndefined();
+        expect(push.sendToAllDevicesAsync).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 });

@@ -6,9 +6,9 @@ import Foundation
 /// message, created with version -1 in the same write that moves `lastSeq`) and
 /// `roomseat/<id>/<agentId>` (a member's thread and read marker, written by its daemon). The daemon
 /// of each member's machine delivers what mentions it; this app writes the room and the user's
-/// messages, and may rewrite or delete one of them its agent doesn't have yet (`queued`), writing
-/// that agent's seat back unchanged in the same atomic write as a guard. Keys this build doesn't
-/// know are kept on rewrite.
+/// messages, and may rewrite, delete or send now (`AgentRoomMessage.sendNow`) one of them its agent
+/// doesn't have yet (`queued`), writing that agent's seat back unchanged in the same atomic write as
+/// a guard. Keys this build doesn't know are kept on rewrite.
 public struct AgentRoom: Identifiable, Sendable, Equatable {
     public struct Member: Identifiable, Sendable, Equatable {
         public let agentId: String
@@ -225,9 +225,14 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         room.lastSeq += 1
         room.updatedAt = now
         let message = AgentRoomMessage(roomId: id, seq: room.lastSeq, at: now, author: .user, text: text,
-                                       mentions: mentions ?? (isDirect ? members.map(\.agentId) : Self.mentions(in: text, members: members)),
-                                       replyTo: replyTo)
+                                       mentions: mentions ?? recipients(of: text), replyTo: replyTo)
         return (room, message)
+    }
+
+    /// Whom the user's `text` reaches by itself: in an agent's chat always that agent, elsewhere the
+    /// members it mentions.
+    private func recipients(of text: String) -> [String] {
+        isDirect ? members.map(\.agentId) : Self.mentions(in: text, members: members)
     }
 
     /// The user's pick of an `<options>` option on an agent's message: "@Name option", mentioning only
@@ -239,12 +244,13 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
     }
 
     /// Who the user's reply to `quoted` reaches: its author when that is an agent of the room (never
-    /// the members it mentioned), then whoever `text` mentions, since the user named them.
+    /// the members it mentioned), then whoever `text` reaches by itself (the ones the user named; in
+    /// an agent's chat that agent, whoever wrote the message quoted).
     public func replyRecipients(to quoted: AgentRoomMessage, text: String) -> [String] {
         let author = quoted.author.agentId.flatMap { id in members.contains { $0.agentId == id } ? id : nil }
-        var recipients = author.map { [$0] } ?? []
-        for id in Self.mentions(in: text, members: members) where !recipients.contains(id) { recipients.append(id) }
-        return recipients
+        var reached = author.map { [$0] } ?? []
+        for id in recipients(of: text) where !reached.contains(id) { reached.append(id) }
+        return reached
     }
 
     /// The user's `text` quoting `quoted` (Reply): it answers that message and reaches `replyRecipients`.
@@ -437,6 +443,14 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         /// They can be edited or canceled: the agent has a seat to guard that write with
         /// (`HappierStore.reviseQueuedRoomMessage`). Before its first delivery it has none.
         public let revisable: Bool
+        /// One of them can be sent into the running turn (Steer Now, `AgentRoomMessage.sendNow`): the
+        /// agent's daemon stamped the delivery its thread is working (`InFlight.sendNowSupported`).
+        /// Whether that thread can take it right now is its session's (`Session.canSteerNow`).
+        public let sendNowSupported: Bool
+        /// The latest of them the user sent now: it and the ones before it reach the agent in its
+        /// running turn (`decideRoomDelivery`'s `steer`); the later ones still wait for it to end. Nil
+        /// while none is.
+        public let sendingNowThroughSeq: Int?
     }
 
     /// The seq up to which this room's messages can't change any more. In an agent's chat, the
@@ -448,14 +462,16 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
     }
 
     /// What waits for the agent in its chat: the user's messages past what it has, which its daemon
-    /// holds while its turn runs (`decideRoomDelivery`). Nil when nothing waits, and in a group room.
+    /// holds while its turn runs (`decideRoomDelivery`), unless the user sends one now. Nil when
+    /// nothing waits, and in a group room.
     public func queued(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> Queue? {
         guard let agentId = directAgentId else { return nil }
         let settled = settledThroughSeq(seats: seats)
         let waiting = messages.filter { $0.author == .user && $0.seq > settled }.sorted { $0.seq < $1.seq }
         guard !waiting.isEmpty else { return nil }
         let seat = seats.first { $0.agentId == agentId }
-        return Queue(messages: waiting, reason: seat?.inFlight != nil ? .afterCurrentTurn : .notDeliveredYet, revisable: seat != nil)
+        return Queue(messages: waiting, reason: seat?.inFlight != nil ? .afterCurrentTurn : .notDeliveredYet, revisable: seat != nil,
+                     sendNowSupported: seat?.inFlight?.sendNowSupported == true, sendingNowThroughSeq: waiting.last { $0.sendNow }?.seq)
     }
 }
 
@@ -522,21 +538,34 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
     public let replyTo: Int?
     /// The UserKVStore version this copy was read at (-1 for one not stored yet).
     public internal(set) var version = -1
+    /// The user sent it now (Steer Now) while it waited for the agent: it reaches the agent in its
+    /// running turn, with the user's messages before it, instead of after that turn
+    /// (`decideRoomDelivery`'s `steer`). Only the app sets it (`sendingNow`), on a message the agent
+    /// doesn't have yet; at or below what the agent has it means nothing.
+    public internal(set) var sendNow = false
     var extra: [String: JSONValue] = [:]
 
     public var id: Int { seq }
 
     /// The user's message with `text` instead, at the same seq: its time, mentions, the message it
-    /// answers and the fields this build doesn't know are kept (`HappierStore.reviseQueuedRoomMessage`).
-    /// Nil for an empty text.
+    /// answers, whether it was sent now and the fields this build doesn't know are kept
+    /// (`HappierStore.reviseQueuedRoomMessage`). Nil for an empty text.
     func editing(_ text: String) -> AgentRoomMessage? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         var edited = AgentRoomMessage(roomId: roomId, seq: seq, at: at, author: author, text: text, mentions: mentions,
                                       mentionsUser: mentionsUser, replyTo: replyTo)
         edited.version = version
+        edited.sendNow = sendNow
         edited.extra = extra
         return edited
+    }
+
+    /// The same message, sent now (`sendNow`); everything else is kept (`HappierStore.reviseQueuedRoomMessage`).
+    func sendingNow() -> AgentRoomMessage {
+        var flagged = self
+        flagged.sendNow = true
+        return flagged
     }
 
     init(roomId: String, seq: Int, at: Double, author: Author, text: String, mentions: [String], mentionsUser: Bool = false,
@@ -558,7 +587,8 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
         self.init(roomId: roomId, seq: seq, at: json["at"]?.doubleValue ?? 0, author: author, text: text,
                   mentions: json["mentions"]?.arrayValue?.compactMap(\.stringValue) ?? [],
                   mentionsUser: json["mentionsUser"]?.boolValue == true, replyTo: json["replyTo"]?["seq"]?.intValue)
-        let known: Set<String> = ["v", "roomId", "seq", "at", "author", "text", "mentions", "mentionsUser", "replyTo"]
+        sendNow = json["sendNow"]?.boolValue == true
+        let known: Set<String> = ["v", "roomId", "seq", "at", "author", "text", "mentions", "mentionsUser", "replyTo", "sendNow"]
         extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
     }
 
@@ -573,6 +603,7 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
         object["mentions"] = .array(mentions.map(JSONValue.string))
         if mentionsUser { object["mentionsUser"] = true }
         if let replyTo { object["replyTo"] = ["seq": .number(Double(replyTo))] }
+        if sendNow { object["sendNow"] = true }
         return .object(object)
     }
 
@@ -596,11 +627,15 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
 /// daemon of its machine. The app never changes it: it only writes it back exactly as it read it
 /// (`sealed`, at `version`) as the guard of a change to a message the member doesn't have yet
 /// (`HappierStore.reviseQueuedRoomMessage`). It is never rebuilt from this model, which leaves out
-/// fields the daemon needs (the delivery's `localId` and `sent`).
+/// fields the daemon needs (the delivery's `localId` and `sent`, and the delivery it was sent past,
+/// `steers`).
 public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
     public struct InFlight: Sendable, Equatable {
         public let throughSeq: Int
         public let at: Double
+        /// Its daemon sends a message the user sends now into this turn; an older one stamps nothing
+        /// and holds it to the turn's end (`AgentRoom.Queue.sendNowSupported`).
+        public var sendNowSupported = false
     }
 
     public let roomId: String
@@ -632,7 +667,8 @@ public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
               let agentId = json["agentId"]?.stringValue, !agentId.isEmpty else { return nil }
         let inFlight = json["inFlight"].flatMap { value -> InFlight? in
             guard let through = value["throughSeq"]?.intValue else { return nil }
-            return InFlight(throughSeq: through, at: value["at"]?.doubleValue ?? 0)
+            return InFlight(throughSeq: through, at: value["at"]?.doubleValue ?? 0,
+                            sendNowSupported: value["sendNowSupported"]?.boolValue == true)
         }
         self.init(roomId: roomId, agentId: agentId, sessionId: json["sessionId"]?.stringValue,
                   readThroughSeq: json["readThroughSeq"]?.intValue ?? 0, inFlight: inFlight)

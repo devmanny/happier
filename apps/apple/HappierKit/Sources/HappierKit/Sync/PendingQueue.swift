@@ -38,6 +38,10 @@ extension Session {
     public var steerAvailable: Bool {
         capabilities?["inFlightSteerAvailable"]?.boolValue ?? capabilities?["inFlightSteer"]?.boolValue ?? false
     }
+
+    /// Steer Now, in the session chat and in an agent's chat: a turn is under way (`status(at:)`) and
+    /// the agent can take a message into it right now. The one gate both offer it by.
+    public func canSteerNow(at now: Date) -> Bool { status(at: now) == .working && steerAvailable }
 }
 
 /// A row of the server pending queue (`GET /v2/sessions/:id/pending?includeDiscarded=1`).

@@ -18,7 +18,7 @@ import {
 
 import { spawnAsAgent, type AgentThreadSpawn } from '@/daemon/agents/agentThreadSpawn';
 import type { AgentRoomStore } from '@/session/agentRooms/agentRoomStore';
-import { completeRoomTurn, type RoomPushSender } from '@/session/agentRooms/completeRoomTurn';
+import { settleRoomTurn, type RoomPushSender } from '@/session/agentRooms/completeRoomTurn';
 import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 import { logger } from '@/ui/logger';
 
@@ -53,12 +53,17 @@ type Seat = Readonly<{ seat: AgentRoomSeatV1; version: number }>;
  * Brings one room's deliveries up to date for the members that work on this machine (each daemon
  * delivers to its own machine's members, so a room may span machines without a coordinator):
  *
- * - a member whose turn is in flight gets nothing new; once its thread's transcript shows that turn
- *   finished (its runner normally posts the reply itself) the turn is finished here. When that
- *   thread is gone mid-turn, the delivery is dropped without moving the marker, so what it carried
- *   goes again, in this same run, to a new thread with a new localId (a late reply of the old one
- *   can't finish it);
- * - a delivery that could not be sent is sent again with the same localId, so it lands once;
+ * - a member whose turn is in flight gets nothing new, except what the user sends now (Steer Now):
+ *   once the delivery in flight is in its thread's transcript and its turn still runs, the user's
+ *   messages up to the newest one flagged `sendNow` go into that turn as a new delivery that names
+ *   the one it was sent past (`inFlight.steers`) and carries only what that one didn't. What the
+ *   transcript shows ended is finished here (`settleRoomTurn`; its runner normally posts the reply
+ *   itself). When that thread is gone mid-turn, the delivery (with the one it was sent past) is
+ *   dropped without moving the marker, so what it carried goes again, in this same run, to a new
+ *   thread with a new localId (a late reply of the old one can't finish it);
+ * - a delivery that could not be sent is sent again with the same localId and the same messages, so
+ *   it lands once; a Steer Now whose thread is gone is dropped with the delivery it was sent past,
+ *   and the next run gives a new thread everything since the marker;
  * - otherwise, when `decideRoomDelivery` says so, everything the member hadn't read is sent to its
  *   thread in the room (opened in its folder, as its agent, the first time; a new thread for a
  *   member that had read the room gets the room so far, see `buildRoomDeliveryPrompt`).
@@ -93,26 +98,29 @@ async function reconcileMember(room: AgentRoomV1, member: AgentRoomMember, read:
   const inFlight = seat?.seat.inFlight;
   if (seat && inFlight) {
     if (!inFlight.sent) {
-      await send(room, member, seat.seat, inFlight.localId, inFlight.throughSeq, deps);
+      const fromSeq = Math.max(seat.seat.readThroughSeq, inFlight.steers?.throughSeq ?? 0) + 1;
+      await send(room, member, seat.seat, { localId: inFlight.localId, fromSeq, throughSeq: inFlight.throughSeq }, deps);
       return;
     }
     const sessionId = seat.seat.sessionId;
     if (!sessionId) return;
-    const reply = await deps.readTurnReply(sessionId, inFlight.localId);
-    if (!reply) return;
-    if (reply !== 'thread_gone') {
-      await completeRoomTurn({
-        store: deps.store,
-        delivery: { roomId: room.id, agentId: member.agentId, localId: inFlight.localId },
-        author: {
-          kind: 'agent', agentId: member.agentId, sessionId,
-          ...(member.name ? { name: member.name } : {}), ...(member.emoji ? { emoji: member.emoji } : {}),
-        },
-        reply,
-        push: deps.push,
-      });
-      return;
-    }
+    const settled = await settleRoomTurn({
+      store: deps.store,
+      delivery: { roomId: room.id, agentId: member.agentId },
+      inFlight,
+      sessionId,
+      author: {
+        kind: 'agent', agentId: member.agentId, sessionId,
+        ...(member.name ? { name: member.name } : {}), ...(member.emoji ? { emoji: member.emoji } : {}),
+      },
+      readTurnReply: deps.readTurnReply,
+      push: deps.push,
+      turnEnded: false,
+    });
+    // A finished turn wrote the seat, which runs the room again; one not in the transcript yet has
+    // nothing to steer into.
+    if (settled.turn === 'running') await steer(room, member, seat, inFlight, deps);
+    if (settled.turn !== 'thread_gone') return;
     logger.warn('[ROOMS] A member\'s room thread is gone mid-turn; its delivery goes to a new thread', { roomId: room.id, agentId: member.agentId, sessionId });
     await deps.store.updateSeat(room.id, member.agentId, (latest) => {
       if (latest.inFlight?.localId !== inFlight.localId) return latest;
@@ -131,26 +139,52 @@ async function reconcileMember(room: AgentRoomV1, member: AgentRoomMember, read:
   const localId = roomDeliveryLocalId({ roomId: room.id, agentId: member.agentId, nonce: deps.newNonce?.() ?? randomUUID().slice(0, 8) });
   if (!await deps.store.startDelivery(room.id, member.agentId, { localId, throughSeq: decision.toSeq }, seat)) return;
   const claimed = seat?.seat ?? { v: 1 as const, roomId: room.id, agentId: member.agentId, readThroughSeq: 0, updatedAt: 0 };
-  await send(room, member, claimed, localId, decision.toSeq, deps, messages, goneSessionId);
+  await send(room, member, claimed, { localId, fromSeq: decision.fromSeq, throughSeq: decision.toSeq }, deps, messages, goneSessionId);
 }
 
 /**
- * Sends the delivery (in flight with `localId`) to the member's thread, opening one when it has none
- * (or its thread is gone). A new thread for a member that had read the room gets the room so far,
- * with the thread before it (`goneSessionId`, or the one found gone here). The messages it answers
- * are read too, so the member sees what the user quoted.
+ * Steer Now: sends the user's messages up to the newest one flagged `sendNow` into the member's
+ * running turn, as a new delivery claimed at the seat version read before the messages (so a
+ * withdrawal, an edit or a turn that ended since makes the claim fail, and the room runs again).
+ * It goes through the ordinary send path, which steers it into the turn while the turn can take it
+ * and otherwise queues it for right after.
+ */
+async function steer(
+  room: AgentRoomV1,
+  member: AgentRoomMember,
+  read: Seat,
+  inFlight: NonNullable<AgentRoomSeatV1['inFlight']>,
+  deps: RoomDeliveryDeps,
+): Promise<void> {
+  if (room.lastSeq <= inFlight.throughSeq) return;
+  const messages = await deps.store.readMessages(room.id, { fromSeq: inFlight.throughSeq + 1, toSeq: room.lastSeq });
+  const decision = decideRoomDelivery({ room, member, seat: read.seat, messages });
+  if (decision.kind !== 'steer') return;
+  const localId = roomDeliveryLocalId({ roomId: room.id, agentId: member.agentId, nonce: deps.newNonce?.() ?? randomUUID().slice(0, 8) });
+  const steers = { localId: inFlight.localId, throughSeq: inFlight.throughSeq };
+  if (!await deps.store.startDelivery(room.id, member.agentId, { localId, throughSeq: decision.toSeq, steers }, read)) return;
+  await send(room, member, read.seat, { localId, fromSeq: decision.fromSeq, throughSeq: decision.toSeq }, deps, messages);
+}
+
+/**
+ * Sends the delivery (in flight with `localId`, carrying `fromSeq` to `throughSeq`) to the member's
+ * thread, opening one when it has none (or its thread is gone). A new thread for a member that had
+ * read the room gets the room so far, with the thread before it (`goneSessionId`, or the one found
+ * gone here). A delivery that starts past the marker (a Steer Now) never opens one: its thread gone,
+ * it is dropped with the delivery it was sent past, whose reply was never posted, and the next run
+ * gives a new thread everything since the marker. The messages it answers are read too, so the
+ * member sees what the user quoted.
  */
 async function send(
   room: AgentRoomV1,
   member: AgentRoomMember,
   seat: AgentRoomSeatV1,
-  localId: string,
-  throughSeq: number,
+  delivery: Readonly<{ localId: string; fromSeq: number; throughSeq: number }>,
   deps: RoomDeliveryDeps,
   known?: Parameters<typeof buildRoomDeliveryPrompt>[0]['messages'],
   goneSessionId?: string,
 ): Promise<void> {
-  const fromSeq = seat.readThroughSeq + 1;
+  const { localId, fromSeq, throughSeq } = delivery;
   const prompt = async (continuation?: RoomDeliveryContinuation) => {
     const read = continuation || !known
       ? await deps.store.readMessages(room.id, { fromSeq: continuation ? roomContinuationFromSeq(throughSeq) : fromSeq, toSeq: throughSeq })
@@ -173,6 +207,11 @@ async function send(
     }
     if (!GONE_THREAD_CODES.has(sent.code)) {
       logger.warn('[ROOMS] Could not send a room delivery (sent again on the room\'s next change)', { roomId: room.id, agentId: member.agentId, code: sent.code });
+      return;
+    }
+    if (fromSeq > seat.readThroughSeq + 1) {
+      logger.warn('[ROOMS] A member\'s room thread is gone under a Steer Now; everything since its marker goes to a new thread', { roomId: room.id, agentId: member.agentId });
+      await forThisDelivery(({ inFlight: _dropped, sessionId: _gone, ...latest }) => latest);
       return;
     }
     previousSessionId = seat.sessionId;

@@ -18,7 +18,7 @@ struct PendingBubble: View {
     @State private var editText = ""
 
     private var session: Session? { store.sessions[sessionId] }
-    private var canSteerNow: Bool { working && (session?.steerAvailable ?? false) }
+    private var canSteerNow: Bool { session?.canSteerNow(at: store.presenceDate()) ?? false }
 
     var body: some View {
         Group {
