@@ -9,8 +9,11 @@ public enum AudioUse: Sendable, Hashable {
     case dictating
     /// Reading a message aloud: plays with the silent switch on; lowers other audio when asked.
     case reading(ducksOthers: Bool)
+    /// The dictation keyboard's microphone, kept on in the background between takes (an app can't
+    /// start recording from the background, so the keyboard's takes ride on this). Mixes like Oído.
+    case standby
 
-    public var records: Bool { self == .listening || self == .dictating }
+    public var records: Bool { self == .listening || self == .dictating || self == .standby }
 
     /// Oído waits for a microphone that a call or another app holds and comes back by itself;
     /// a dictation take that can't open the microphone fails at once and says so.
@@ -51,7 +54,7 @@ public struct AudioSessionPlan: Sendable, Equatable {
         var listening = false, dictating = false, reading = false, readingDucks = false
         for use in uses {
             switch use {
-            case .listening: listening = true
+            case .listening, .standby: listening = true
             case .dictating: dictating = true
             case .reading(let ducks):
                 reading = true

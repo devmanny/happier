@@ -57,6 +57,11 @@ struct RootView: View {
             case .session:
                 showBrowser = false
                 if store.handleSessionLink(url) { AppHaptics.light() }
+            case .keyboardDictation:
+                #if os(iOS)
+                showBrowser = false
+                AppDelegate.current?.keyboard.openedFromKeyboard()
+                #endif
             case .website:
                 browser.show(url, forSession: nil)
                 if browser.openViews == 0 {
@@ -67,6 +72,9 @@ struct RootView: View {
             }
         }
         .modifier(BrowserSheet(shown: $showBrowser))
+        #if os(iOS)
+        .modifier(DictationKeyboardSheet())
+        #endif
         .sheet(isPresented: $showCookieImport) {
             NavigationStack { SafariCookieImportView(requestID: cookieImportID) }
         }

@@ -51,6 +51,9 @@ actor WhisperRuntime {
     /// In memory when the app left the screen: loaded again when the app is back.
     private var reloadOnReturn: URL?
     private var onScreen = true
+    /// The dictation keyboard's microphone is on: its takes run while the app is in the
+    /// background, so the model stays in memory there too.
+    private var keepsLoadedInBackground = false
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
@@ -119,8 +122,17 @@ actor WhisperRuntime {
         }
     }
 
+    /// While the dictation keyboard's microphone is on, the model isn't let go in the background.
+    func keepLoadedInBackground(_ keep: Bool) async {
+        keepsLoadedInBackground = keep
+        guard !keep, !onScreen else { return }
+        reloadOnReturn = folder ?? loading?.folder
+        await unload(.background)
+    }
+
     private func leftScreen() async {
         onScreen = false
+        guard !keepsLoadedInBackground else { return }
         reloadOnReturn = folder ?? loading?.folder
         await unload(.background)
     }
@@ -158,12 +170,15 @@ actor WhisperRuntime {
             do {
                 // The tokenizer is fetched once into the model's own folder (while preparing), so
                 // later loads work offline and deleting the model removes it too.
-                let config = WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: folder, verbose: false, logLevel: .error,
-                                              prewarm: prewarm, load: true, download: false)
+                // The spectrogram on the CPU rather than the GPU: an app in the background can't use
+                // the GPU, and the keyboard's takes run there. It's a small model either way.
+                let config = WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: folder,
+                                              computeOptions: ModelComputeOptions(melCompute: .cpuOnly),
+                                              verbose: false, logLevel: .error, prewarm: prewarm, load: true, download: false)
                 let loaded = try await WhisperKit(config)
                 let took = started.duration(to: .now)
                 Self.log.notice("whisper loaded in \(took, privacy: .public)")
-                guard onScreen else {
+                guard onScreen || keepsLoadedInBackground else {
                     await loaded.unloadModels()
                     reloadOnReturn = folder
                     await Self.report { status in

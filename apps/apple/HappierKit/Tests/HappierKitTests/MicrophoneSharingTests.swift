@@ -22,6 +22,19 @@ import Testing
         #expect(uses.plan == listening)
     }
 
+    @Test func theKeyboardsStandbyKeepsTheMicrophoneWithoutLoweringOtherAudio() {
+        var uses = AudioSessionUses<Int>()
+        // The app opened from the dictation keyboard keeps the microphone on for minutes in the
+        // background: music keeps playing, and a take on top of it doesn't reconfigure the session
+        // (in the background it couldn't be activated again).
+        #expect(uses.begin(.standby, by: 1) == .activate(listening))
+        #expect(uses.begin(.dictating, by: 2) == .activate(listening))
+        #expect(uses.end(by: 2) == .keep)
+        #expect(uses.end(by: 1) == .deactivate)
+        #expect(AudioUse.standby.records)
+        #expect(!AudioUse.standby.waitsForMicrophone)
+    }
+
     @Test func theLastHolderLeavingDeactivates() {
         var uses = AudioSessionUses<Int>()
         _ = uses.begin(.dictating, by: 1)

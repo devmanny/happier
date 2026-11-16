@@ -26,6 +26,9 @@ struct HappierApp: App {
                 .environment(delegate.inbox)
                 .environment(delegate.browser)
                 .environment(delegate.oido)
+                #if os(iOS)
+                .environment(delegate.keyboard)
+                #endif
                 .modifier(FollowsAppAppearance())
                 .task(id: store.phase == .ready) {
                     guard store.phase == .ready else { return }
@@ -42,6 +45,10 @@ struct HappierApp: App {
                         // Folder colors and other synced settings changed elsewhere show up here.
                         if store.phase == .ready { Task { await store.refreshAccountSettings() } }
                     case .background:
+                        #if os(iOS)
+                        // Back in the app being typed in: the keyboard shows what it hears.
+                        delegate.keyboard.showsPanel = false
+                        #endif
                         MessageSpeaker.shared.appMovedToBackground(true)
                         delegate.browser.appEnteredBackground()
                         store.appDidEnterBackground()

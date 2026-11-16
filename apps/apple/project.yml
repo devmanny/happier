@@ -57,6 +57,9 @@ targets:
       - target: HappierWidgets
       - target: HappierShare
       - target: HappierSafari
+      # The dictation keyboard (iPhone, iPad): the app listens, the keyboard types.
+      - target: HappierKeyboard
+        destinationFilters: [iOS]
       # The Apple Watch app rides inside the iPhone app (installed from it, TestFlight included).
       - target: HappierWatch
         destinationFilters: [iOS]
@@ -187,6 +190,38 @@ targets:
         ENABLE_HARDENED_RUNTIME: true
         SKIP_INSTALL: YES
         CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: HappierShare/HappierShare-macOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HappierKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: HappierKeyboard
+    dependencies:
+      - package: HappierKit
+    info:
+      path: HappierKeyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Happier
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: es-MX
+            # The App Group, where the app leaves what it hears, needs Full Access.
+            RequestsOpenAccess: true
+    entitlements:
+      path: HappierKeyboard/HappierKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.devmanny.happier]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmanny.happier.keyboard
+        PRODUCT_NAME: HappierKeyboard
+        SKIP_INSTALL: YES
         TARGETED_DEVICE_FAMILY: "1,2"
   HappierSafari:
     type: app-extension

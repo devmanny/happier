@@ -18,6 +18,7 @@ import Testing
         #expect(AppLink(url: URL(string: "happier-native://inbox")!) == .inbox)
         #expect(AppLink(url: URL(string: "happier-native://new")!) == .newSession)
         #expect(AppLink(url: URL(string: "happier-native://share")!) == .share)
+        #expect(AppLink(url: DictationKeyboard.openURL) == .keyboardDictation)
     }
 
     @Test func browserRoleLoadsSessionLandingPageBeforeOpeningNativeLink() throws {

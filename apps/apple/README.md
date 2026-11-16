@@ -50,6 +50,27 @@ retries after 1, 2, 4… up to 30 s while the microphone is still busy, and trie
 hardware (AirPods) and whenever the app comes back to the front. The relay connection closes with
 the app in the background, so chunks recorded then wait in the spool and go when it reconnects.
 
+## Dictation keyboard (iPhone, iPad)
+
+`HappierKeyboard` is a keyboard extension with a microphone button: the words appear in any app's
+text field as Whisper hears them, with the globe, space, delete and return keys. Add it in
+Settings › General › Keyboard › Keyboards and turn on **Allow Full Access** (the App Group, where
+the app leaves what it hears, needs it).
+
+A keyboard can't use the microphone or hold a Whisper model, so the app does the listening. The
+first tap opens Happier (`happier-native://keyboard-dictation`), which turns the microphone on
+(`AudioUse.standby`, mixing like Oído) and starts a take; you go back with the system's ◀. The
+microphone then stays on in the background for 5 minutes after the last take
+(`DictationKeyboardService.standbyDuration`), and Whisper stays loaded meanwhile
+(`WhisperRuntime.keepLoadedInBackground`), so later taps start takes without leaving the app in
+use. iOS doesn't let an app start recording from the background: when the standby ran out, a call
+took the microphone or the app was killed, the next tap opens Happier again.
+
+The two sides talk through `HappierKit/Keyboard/DictationKeyboard.swift`: the app writes
+`status.json` and the keyboard `command.json` in the App Group's `DictationKeyboard/` folder, each
+followed by a Darwin notification. `KeyboardTyping` decides which takes the keyboard types (each
+once, across keyboard reloads) and `KeyboardTextSync` turns each revision into deletes and inserts.
+
 ## Passkeys in the iOS browser
 
 The integrated browser uses WebKit's WebAuthn implementation and the system credential picker.
@@ -281,7 +302,8 @@ an App Shortcut on both the iPhone and the watch (Siri, Shortcuts, the Ultra's A
 
 Sign in by linking from another device (QR) or with the secret key; session list; chat with
 Markdown, thinking, tool calls, inline permission approval, agent questions, stop and archive;
-new sessions on a machine; attachments; dictation; push notifications.
+new sessions on a machine; attachments; dictation, also from any app with the dictation keyboard;
+push notifications.
 Not yet: live voice conversations, artifacts, file diffs.
 
 The session context menu's **New Session in This Folder** opens the normal new-session

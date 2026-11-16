@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
     lazy var oido = OidoController(store: store)
     #if os(iOS)
     private var backgroundUploads: BackgroundUploads?
+    /// The dictation keyboard's microphone and takes (it listens for the keyboard from launch).
+    lazy var keyboard = DictationKeyboardService()
     #endif
     private var metricKitReports: MetricKitReports?
     private let log = Logger(subsystem: "dev.happier.apple", category: "push")
@@ -171,6 +173,7 @@ extension AppDelegate: UIApplicationDelegate {
         WatchBridge.shared.store = store
         WatchBridge.shared.activate()
         oido.resume()
+        _ = keyboard
         return true
     }
 
