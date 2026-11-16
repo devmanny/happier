@@ -2001,7 +2001,8 @@ public final class HappierStore {
         }
         let localId = UUID().uuidString.lowercased()
         if transcripts[id] == nil { transcripts[id] = Transcript() }
-        transcripts[id]?.addPending(localId: localId, text: text)
+        transcripts[id]?.addPending(localId: localId, text: text,
+                                    resentAs: PendingMessage.sentAsNewLocalId(sessionId: id, localId: localId))
         // The current agent's choices that don't carry over: the new one's model and effort travel
         // in the selection, and a model meta would override it for the first turn.
         var meta = controls(for: id)?.messageMeta.objectValue ?? [:]
@@ -2053,7 +2054,8 @@ public final class HappierStore {
         let send = OutgoingSend(sessionId: id, text: text, attachments: attachments, permissionMode: permissionMode)
         outgoingSends[send.localId] = send
         if transcripts[id] == nil { transcripts[id] = Transcript() }
-        transcripts[id]?.addPending(localId: send.localId, text: text, attachments: attachments.map(\.name))
+        transcripts[id]?.addPending(localId: send.localId, text: text, attachments: attachments.map(\.name),
+                                    resentAs: PendingMessage.sentAsNewLocalId(sessionId: id, localId: send.localId))
         return await deliver(send, api: api)
     }
 
@@ -2553,6 +2555,9 @@ public final class HappierStore {
                     let items = await Task.detached { PendingMessage.list(rows, session: session) }.value
                     // Read again with the same messages: nothing to redraw.
                     if pendingQueues[id] != items { pendingQueues[id] = items }
+                    // A message sent from here that went in line again as new: its copy stands for it.
+                    let inLine = Set(items.map(\.localId))
+                    if transcripts[id]?.hasResent(among: inLine) == true { transcripts[id]?.releaseResent(seen: inLine) }
                 } catch {
                     log.error("pending refresh failed: \(String(describing: error), privacy: .public)")
                 }
@@ -2614,6 +2619,8 @@ public final class HappierStore {
                 try await api.dismissPendingDelivery(sessionId: id, localId: localId)
             } else {
                 try await api.removePending(sessionId: id, localId: localId)
+                // Removed for good: a bubble sent from here would otherwise stay as "Queued".
+                self.transcripts[id]?.removePending(localId: localId)
             }
         }
     }

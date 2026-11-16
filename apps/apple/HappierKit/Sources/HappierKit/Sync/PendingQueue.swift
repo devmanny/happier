@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// `requestedAction.kind` for `POST /v2/sessions/:id/pending`.
@@ -68,6 +69,15 @@ public struct PendingMessage: Identifiable, Sendable, Equatable {
     public var sessionNotice: SessionNotice? {
         guard sessionMessageOrigin == nil, files.isEmpty else { return nil }
         return SessionNotice.parse(text)
+    }
+
+    /// The id the relay gives the copy of a message it sends again as new, from a tap or from a
+    /// runner's recovery (`derivePendingSendAsNewLocalId` in `pendingMessageService.ts`). The relay
+    /// hides the original (`resent_as_new`) and the copy is what arrives, so this is how the device
+    /// that sent the original knows to let its own bubble go.
+    public static func sentAsNewLocalId(sessionId: String, localId: String) -> String {
+        let digest = SHA256.hash(data: Data("happier.pending.send-as-new.v1\0\(sessionId)\0\(localId)".utf8))
+        return "send-as-new-" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Blocked reasons after which the agent may already have the message

@@ -31,7 +31,10 @@ public struct Transcript: Sendable {
     private var reduced: Builder
     private var threads: [TranscriptMessage] = []
     private var agentState: JSONValue = .null
-    private var pending: [(localId: String, text: String, attachments: [String], createdAt: Date)] = []
+    /// Messages sent from here not yet in the conversation. `resentAs` is the id their copy would
+    /// carry if the relay sent them again as new (`PendingMessage.sentAsNewLocalId`): the relay hides
+    /// the original then, so only the copy's arrival tells that the original never will.
+    private var pending: [(localId: String, resentAs: String?, text: String, attachments: [String], createdAt: Date)] = []
 
     public init(sidechain: Bool = false) {
         isSidechain = sidechain
@@ -63,7 +66,7 @@ public struct Transcript: Sendable {
         // Paging back goes by the conversation's own rows, not subagent rows that arrived live.
         minSeq = rows.values.filter { isSidechain || $0.sidechainId == nil }.map(\.seq).min()
         let committed = Set(rows.values.compactMap(\.localId))
-        pending.removeAll { committed.contains($0.localId) }
+        pending.removeAll { committed.contains($0.localId) || $0.resentAs.map(committed.contains) == true }
         if extends {
             for row in newer { reduce(row) }
             ordered.append(contentsOf: newer)
@@ -81,8 +84,20 @@ public struct Transcript: Sendable {
         finish()
     }
 
-    public mutating func addPending(localId: String, text: String, attachments: [String] = [], at date: Date = .now) {
-        pending.append((localId, text, attachments, date))
+    public mutating func addPending(localId: String, text: String, attachments: [String] = [], at date: Date = .now, resentAs: String? = nil) {
+        pending.append((localId, resentAs, text, attachments, date))
+        finish()
+    }
+
+    /// Whether any message sent from here was sent again as new under one of these ids.
+    public func hasResent(among localIds: Set<String>) -> Bool {
+        pending.contains { $0.resentAs.map(localIds.contains) == true }
+    }
+
+    /// Drops messages sent from here whose copy is among these ids (in line or delivered).
+    public mutating func releaseResent(seen localIds: Set<String>) {
+        guard hasResent(among: localIds) else { return }
+        pending.removeAll { $0.resentAs.map(localIds.contains) == true }
         finish()
     }
 

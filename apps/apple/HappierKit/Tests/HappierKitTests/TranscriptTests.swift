@@ -156,6 +156,24 @@ import Testing
         #expect(t.items.first?.id == pendingId)
         #expect(pendingId == UserText.stableId(localId: "L1"))
     }
+
+    /// The relay hides a message it sent again as new and delivers the copy under the copy's id:
+    /// the bubble sent from here goes once the copy is in line or in the conversation.
+    @Test func aMessageSentAgainAsNewLeavesNoBubbleOfItsOwn() {
+        var queued = Transcript()
+        queued.addPending(localId: "L1", text: "hola", resentAs: "copy-L1")
+        queued.addPending(localId: "L2", text: "sigue", resentAs: "copy-L2")
+        queued.releaseResent(seen: ["copy-L1", "unrelated"])
+        #expect(queued.items.compactMap { if case .userText(let u) = $0 { u.localId } else { nil } } == ["L2"])
+
+        var delivered = Transcript()
+        delivered.addPending(localId: "L1", text: "hola", resentAs: "copy-L1")
+        delivered.apply([TranscriptMessage(id: "row", seq: 3, localId: "copy-L1", createdAt: .now,
+                                           record: ["role": "user", "content": ["type": "text", "text": "hola"]])])
+        #expect(delivered.items.count == 1)
+        guard case .userText(let user)? = delivered.items.first else { Issue.record("\(delivered.items)"); return }
+        #expect(user.localId == "copy-L1" && !user.isPending)
+    }
 }
 
 /// A conversation is fetched in full until its newest page has loaded, however it came to exist (a

@@ -442,12 +442,40 @@ import Testing
 
         await store.sendPendingAgain("p1", in: "s1")
         await store.removePending("p2", in: "s1")
-        try await until { store.pendingQueues["s1"]?.map(\.localId) == ["send-as-new-p1", "p2"] }
+        let copy = PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: "p1")
+        try await until { store.pendingQueues["s1"]?.map(\.localId) == [copy, "p2"] }
 
         #expect(store.lastError == nil)
         #expect(relay.log.values.filter { $0.hasPrefix("pending ") } == ["pending send-as-new p1", "pending dismiss p2"])
         // The copy waits in line as a new message; the original is hidden and the removed one kept as discarded.
         #expect(store.pendingQueues["s1"]?.map(\.state) == [.queued, .discarded])
+    }
+
+    /// A message sent from here that the relay sends again as new (from a tap here or elsewhere, or
+    /// the runner's own recovery) or that is removed from the line leaves no "Queued" bubble behind.
+    @Test func aMessageSentFromHereThatIsReplacedOrRemovedLeavesNoBubbleBehind() async throws {
+        let (relay, store) = try await openSession()
+        let ownBubbles = {
+            store.transcripts["s1"]?.items.compactMap { item -> String? in
+                if case .userText(let user) = item, user.isPending { user.localId } else { nil }
+            } ?? []
+        }
+        #expect(await store.send("hola", to: "s1"))
+        #expect(await store.send("sigue", to: "s1"))
+        let sent = ownBubbles()
+        try #require(sent.count == 2)
+        relay.pendingRows = [Relay.uncertainPendingRow(sent[0]), Relay.queuedPendingRow(sent[1])]
+        store.refreshPending("s1")
+        try await until { store.pendingQueues["s1"]?.count == 2 }
+
+        await store.sendPendingAgain(sent[0], in: "s1")
+        await store.removePending(sent[1], in: "s1")
+        let copy = PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: sent[0])
+        try await until { store.pendingQueues["s1"]?.map(\.localId) == [copy] }
+
+        #expect(store.lastError == nil)
+        // Only the copy is left, in line; neither original keeps a bubble of its own.
+        #expect(ownBubbles() == [])
     }
 
     @MainActor private func openSession(pending: [JSONValue] = []) async throws -> (Relay, HappierStore) {
@@ -730,6 +758,12 @@ private final class Relay: @unchecked Sendable {
 
     // MARK: Pending queue
 
+    static func queuedPendingRow(_ localId: String) -> JSONValue {
+        let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string("mensaje \(localId)")]]
+        return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": 2,
+                "createdAt": 1, "updatedAt": 1, "deliveryStatus": ["status": "queued"]]
+    }
+
     static func uncertainPendingRow(_ localId: String) -> JSONValue {
         let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string("mensaje \(localId)")]]
         return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": 1,
@@ -761,7 +795,7 @@ private final class Relay: @unchecked Sendable {
         case ("POST", ["delivery", "send-as-new"]) where mayHaveArrived:
             log.add("pending send-as-new \(localId)")
             var copy = row.objectValue ?? [:]
-            copy["localId"] = .string("send-as-new-\(localId)")
+            copy["localId"] = .string(PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: localId))
             copy["position"] = 9
             copy["deliveryState"] = .null
             copy["deliveryBlockedReason"] = .null
@@ -778,6 +812,10 @@ private final class Relay: @unchecked Sendable {
         case ("DELETE", []) where mayHaveArrived:
             log.add("pending delete \(localId)")
             return (409, ["error": "delivery-settlement-conflict"])
+        case ("DELETE", []):
+            log.add("pending delete \(localId)")
+            pendingRows.remove(at: index)
+            return (200, ["ok": true])
         case ("PATCH", ["action"]) where mayHaveArrived:
             log.add("pending action \(localId)")
             return (409, ["error": "action-conflict"])
