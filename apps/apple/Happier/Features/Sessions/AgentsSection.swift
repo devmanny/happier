@@ -1,11 +1,13 @@
 import HappierKit
 import SwiftUI
 
-/// "Agents" atop the session list: one compact row per agent with its open sessions, the weekly
-/// usage of its account and how many need you. Tapping one opens its whole profile the way a
-/// session opens (selected in the sidebar, the profile in the detail; full screen on the iPhone).
-/// The order is the account's (`AccountSettings.agentOrder`): Edit, or touching and holding a row,
-/// drags it into place. The list shows it once there are agents.
+/// "Agents" atop the session list: one circle per agent in a row that scrolls sideways, like
+/// stories. The ring around each one is the weekly usage of its account, the count on it the
+/// sessions that need you, and under its name what it is doing or when it last did something.
+/// Tapping one opens its whole profile the way a session opens (selected in the sidebar, the
+/// profile in the detail; full screen on the iPhone). The order is the account's
+/// (`AccountSettings.agentOrder`): Edit lays them out as rows with drag handles to reorder them.
+/// The section folds under its title. The list shows it once there are agents.
 struct AgentsSection: View {
     /// The list's sessions (throttled by the list), every state but archived.
     let sessions: [Session]
@@ -17,8 +19,8 @@ struct AgentsSection: View {
     let open: (String) -> Void
     /// "New Session with…": the list presents the new-session sheet for this agent.
     let newSession: (AgentProfile) -> Void
-    /// Edit shows the rows' drag handles. The list holds it: the edit mode only reaches the rows
-    /// set on the whole list.
+    /// Edit shows the agents as rows with drag handles. The list holds it: the edit mode only
+    /// reaches the rows set on the whole list.
     @Binding var editing: Bool
     @Environment(HappierStore.self) private var store
 
@@ -27,39 +29,42 @@ struct AgentsSection: View {
 
     var body: some View {
         let profiles = profiles
-        Section {
-            // Plain rows, exactly like the session rows below: no card or background of their own.
-            ForEach(profiles) { profile in
-                AgentRow(profile: profile, sessions: sessions, drawer: drawer,
-                         selected: selection == AgentProfile.selection(id: profile.id), open: open, newSession: newSession)
+        CollapsibleListSection("Agents", key: "agents", count: profiles.count, drawer: drawer, waiting: waiting(profiles)) {
+            if editing {
+                // Rows, to drag into place.
+                ForEach(profiles) { profile in
+                    AgentRow(profile: profile, sessions: sessions, drawer: drawer,
+                             selected: selection == AgentProfile.selection(id: profile.id), open: open, newSession: newSession)
+                }
+                .onMove { offsets, destination in
+                    let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
+                    AppHaptics.selection()
+                    Task { await store.updateAccountSettings { $0.delta(agentOrder: next) } }
+                }
+            } else {
+                AgentStrip(profiles: profiles, sessions: sessions, selection: selection, open: open, newSession: newSession)
             }
-            .onMove { offsets, destination in
-                let next = AgentRoster.order(afterMoving: offsets, to: destination, in: profiles.map(\.id), saved: savedOrder)
-                AppHaptics.selection()
-                Task { await store.updateAccountSettings { $0.delta(agentOrder: next) } }
+        } accessory: {
+            Button(editing ? "Done" : "Edit") {
+                AppHaptics.light()
+                withAnimation(.smooth(duration: 0.2)) { editing.toggle() }
             }
-        } header: {
-            header
+            .font(.subheadline.weight(editing ? .semibold : .regular))
+            .buttonStyle(.borderless)
+            .textCase(nil)
+            .disabled(store.accountSettings == nil)
+            .accessibilityIdentifier("agents-edit")
         }
         // Readings for agents with none shown yet: one read of one session each, when the section
         // appears or an agent gets a session to read from.
         .task(id: usageSources(profiles).map(\.id)) { await readMissingUsage(profiles) }
     }
 
-    private var header: some View {
-        HStack {
-            Text("Agents")
-            Spacer()
-            #if os(iOS)
-            Button(editing ? "Done" : "Edit") {
-                AppHaptics.light()
-                withAnimation(.smooth(duration: 0.2)) { editing.toggle() }
-            }
-            .font(.subheadline.weight(editing ? .semibold : .regular))
-            .textCase(nil)
-            .disabled(store.accountSettings == nil)
-            .accessibilityIdentifier("agents-edit")
-            #endif
+    /// The sessions that need you across every agent: what the folded section still shows.
+    private func waiting(_ profiles: [AgentProfile]) -> Int {
+        let context = SessionListFilter.Context(tasks: store.tasks), now = store.presenceDate()
+        return profiles.reduce(0) { total, profile in
+            total + AgentRoster.openSessions(of: profile, in: sessions).count { context.needsAttention($0, now: now) }
         }
     }
 
@@ -73,6 +78,127 @@ struct AgentsSection: View {
             guard AgentRoster.weeklyUsage(of: profile, sessions: sessions, usage: { store.usage(for: $0.id) }) == nil,
                   let session = AgentRoster.sessionToReadUsage(of: profile, sessions: sessions) else { continue }
             await store.refreshProviderUsage(session.id)
+        }
+    }
+}
+
+/// The agents as circles in one row that scrolls sideways, like stories.
+private struct AgentStrip: View {
+    let profiles: [AgentProfile]
+    let sessions: [Session]
+    let selection: String?
+    let open: (String) -> Void
+    let newSession: (AgentProfile) -> Void
+    @Environment(HappierStore.self) private var store
+    @Environment(\.sessionListOnScreen) private var onScreen
+
+    var body: some View {
+        // "Working" fades after two minutes without news, as in the session rows.
+        TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
+            let now = store.presenceDate(context.date)
+            let filter = SessionListFilter.Context(tasks: store.tasks)
+            ScrollView(.horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(profiles) { profile in
+                        AgentBubble(profile: profile,
+                                    summary: AgentRoster.summary(of: profile, sessions: sessions, context: filter, now: now,
+                                                                 usage: { store.usage(for: $0.id) }),
+                                    now: now, selected: selection == AgentProfile.selection(id: profile.id),
+                                    open: open, newSession: newSession)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+    }
+}
+
+/// One agent's circle: its avatar inside the ring of its account's weekly usage, a count of the
+/// sessions that need you (only when some do), its name, and under it "Working" or how long ago
+/// it last did something. Quiet for a day, it fades.
+private struct AgentBubble: View {
+    let profile: AgentProfile
+    let summary: AgentSummary
+    let now: Date
+    let selected: Bool
+    let open: (String) -> Void
+    let newSession: (AgentProfile) -> Void
+    /// A task from the Tasks panel is being dragged over it.
+    @State private var dropTargeted = false
+
+    private static let size: CGFloat = 70
+    /// The sessions-need-you count: the app's alert orange-red.
+    private static let waiting = Color(red: 0xC2 / 255, green: 0x41 / 255, blue: 0x0C / 255)
+
+    private var quiet: Bool {
+        guard summary.latestWorking == nil else { return false }
+        guard let last = summary.lastActivity else { return true }
+        return now.timeIntervalSince(last) > 24 * 3600
+    }
+
+    var body: some View {
+        Button {
+            AppHaptics.selection()
+            open(AgentProfile.selection(id: profile.id))
+        } label: {
+            VStack(spacing: 2) {
+                ZStack {
+                    // The disc is 82 % of the avatar; the ring sits just outside it.
+                    AgentAvatar(agentId: profile.providerId, size: Self.size, emoji: profile.emoji)
+                    AgentUsageRing(meter: summary.weekly, diameter: Self.size - 4, lineWidth: 3.5, tint: .userBubble)
+                }
+                .frame(width: Self.size, height: Self.size)
+                .overlay(alignment: .topTrailing) {
+                    if summary.needsYou > 0 {
+                        Text(summary.needsYou, format: .number)
+                            .font(.caption2.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .frame(minWidth: 22, minHeight: 22)
+                            .background(Self.waiting, in: Capsule())
+                            .offset(x: 2, y: -1)
+                    }
+                }
+                .padding(.bottom, 2)
+                Text(profile.name)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(selected ? Color.userBubble : Color.primary)
+                    .lineLimit(1)
+                activity
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .frame(width: Self.size + 8)
+            .opacity(quiet && !selected ? 0.5 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // A task dropped on it is assigned to the agent (nothing starts).
+        .overlay {
+            if dropTargeted { RowDropHighlight() }
+        }
+        .taskDrop(onto: profile, targeted: $dropTargeted)
+        .contextMenu {
+            Button("New Session with \(profile.name)", systemImage: "plus") { newSession(profile) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(summary.needsYou > 0 ? Text("\(summary.needsYou) need you") : Text(verbatim: ""))
+        .accessibilityIdentifier("agent-row-\(profile.id)")
+    }
+
+    @ViewBuilder
+    private var activity: some View {
+        if summary.latestWorking != nil {
+            Text("Working").fontWeight(.semibold).foregroundStyle(Color.userBubble)
+        } else if let last = summary.lastActivity {
+            Text(last, format: .relative(presentation: .numeric, unitsStyle: .narrow)).foregroundStyle(.secondary)
+        } else {
+            Text("No sessions").foregroundStyle(.secondary)
         }
     }
 }
@@ -248,22 +374,25 @@ private struct AgentEmoji: View {
     }
 }
 
-/// The account's weekly usage on a gray track: primary, red from 80 % used (`isNearLimit`, the
+/// The account's weekly usage on a gray track: primary (or the tint), red from 80 % used (`isNearLimit`, the
 /// rule every usage ring and bar draws); an empty track without a reading.
 private struct AgentUsageRing: View {
     let meter: ProviderUsage.Meter?
     var diameter: CGFloat = 20
+    var lineWidth: CGFloat = 2.6
+    /// The used part's color while it isn't near the limit.
+    var tint: Color = .primary
 
     private var fraction: Double? { meter.map { $0.usedPercent / 100 } }
 
     var body: some View {
         ZStack {
-            Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 2.6)
+            Circle().stroke(Color.secondary.opacity(0.3), lineWidth: lineWidth)
             if let fraction {
                 Circle()
                     .trim(from: 0, to: max(0.02, min(fraction, 1)))
-                    .stroke(meter?.isNearLimit == true ? Color.red : Color.primary,
-                            style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                    .stroke(meter?.isNearLimit == true ? Color.red : tint,
+                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
         }

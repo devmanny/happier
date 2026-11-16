@@ -3,7 +3,8 @@ import SwiftUI
 
 /// "Rooms" in the session list, under the agents: group chats of the user and the agents they
 /// invite (`AgentRoom`). A room opens like a session (selected in the sidebar, the chat in the
-/// detail; full screen on the iPhone); "+" starts a new one. The list shows it once there are agents.
+/// detail; full screen on the iPhone); "+" starts a new one. It folds under its title. The list
+/// shows it once there are agents.
 struct RoomsSection: View {
     let drawer: Bool
     /// What the list has selected: a session, an agent, or a room (`AgentRoom.selection(id:)`).
@@ -15,25 +16,21 @@ struct RoomsSection: View {
     @Environment(HappierStore.self) private var store
 
     var body: some View {
-        Section {
+        CollapsibleListSection("Rooms", key: "rooms", count: store.activeRooms.count, drawer: drawer) {
             ForEach(store.activeRooms) { room in
                 RoomRow(room: room, drawer: drawer, selected: selection == AgentRoom.selection(id: room.id), open: open)
             }
-        } header: {
-            HStack {
-                Text("Rooms")
-                Spacer()
-                Button {
-                    AppHaptics.light()
-                    newRoom()
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                .textCase(nil)
-                .accessibilityLabel(Text("New Room"))
-                .accessibilityIdentifier("rooms-new")
+        } accessory: {
+            Button {
+                AppHaptics.light()
+                newRoom()
+            } label: {
+                Image(systemName: "plus")
             }
+            .buttonStyle(.borderless)
+            .textCase(nil)
+            .accessibilityLabel(Text("New Room"))
+            .accessibilityIdentifier("rooms-new")
         }
         .task { await store.refreshRooms() }
     }

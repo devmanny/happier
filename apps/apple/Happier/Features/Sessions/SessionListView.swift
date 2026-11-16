@@ -352,19 +352,25 @@ struct SessionListView: View {
                                            recentSince: now.addingTimeInterval(-Self.recentWindow),
                                            shows: { filter.includes($0, context: context) })
         if !groups.pinned.isEmpty {
-            Section("Pinned") { outline(groups.pinned) }
+            CollapsibleListSection("Pinned", key: "pinned", count: Self.flatten(groups.pinned).count, drawer: isDrawer) {
+                outline(groups.pinned)
+            }
         }
         if !groups.active.isEmpty {
-            Section {
-                outline(groups.active)
-            } header: {
-                // Set apart from Pinned, and from the agents above them.
-                if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty { Text("Active") }
+            // Titled (and so foldable) to set it apart from Pinned, and from the agents above them.
+            if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty {
+                CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
+                    outline(groups.active)
+                }
+            } else {
+                Section { outline(groups.active) }
             }
         }
         // Resting or stopped, used in the last two days: still in view, one tap away.
         if !groups.recent.isEmpty {
-            Section("Recent") { outline(groups.recent) }
+            CollapsibleListSection("Recent", key: "recent", count: Self.flatten(groups.recent).count, drawer: isDrawer) {
+                outline(groups.recent)
+            }
         }
         Section {
             olderFolder("Resting", systemImage: "moon.zzz", groups.resting, section: .resting)
@@ -1313,6 +1319,81 @@ private struct SessionListStyle: ViewModifier {
 }
 
 #endif
+
+/// A section of the session list that folds under its title, like a folder in Files or Notes:
+/// tapping the title folds or unfolds it, and folded it shows how many things it keeps (and, for
+/// the agents, how many sessions wait for you). The sidebar (iPad, Mac) adds its own disclosure
+/// chevron; the drawer draws one after the title. Each device remembers how you left it.
+struct CollapsibleListSection<Content: View, Accessory: View>: View {
+    private let title: LocalizedStringKey
+    private let count: Int
+    private let drawer: Bool
+    private let waiting: Int
+    private let content: Content
+    private let accessory: Accessory
+    @AppStorage private var collapsed: Bool
+
+    /// The sessions-need-you count, as on the agents' circles.
+    static var waitingColor: Color { Color(red: 0xC2 / 255, green: 0x41 / 255, blue: 0x0C / 255) }
+
+    init(_ title: LocalizedStringKey, key: String, count: Int, drawer: Bool, waiting: Int = 0,
+         @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory) {
+        self.title = title
+        self.count = count
+        self.drawer = drawer
+        self.waiting = waiting
+        self.content = content()
+        self.accessory = accessory()
+        _collapsed = AppStorage(wrappedValue: false, "happier.sessionList.collapsed.\(key)")
+    }
+
+    var body: some View {
+        Section(isExpanded: Binding(get: { !collapsed }, set: { collapsed = !$0 })) {
+            content
+        } header: {
+            HStack(spacing: 6) {
+                Button {
+                    AppHaptics.light()
+                    withAnimation(.smooth(duration: 0.25)) { collapsed.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(title)
+                        if drawer {
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.bold))
+                                .rotationEffect(.degrees(collapsed ? 0 : 90))
+                                .accessibilityHidden(true)
+                        }
+                        if collapsed {
+                            Text(count, format: .number).foregroundStyle(.tertiary)
+                            if waiting > 0 {
+                                Text("\(waiting) waiting")
+                                    .font(.caption2.weight(.bold))
+                                    .textCase(nil)
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Self.waitingColor, in: Capsule())
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(collapsed ? Text("Collapsed") : Text("Expanded"))
+                if !collapsed { accessory }
+            }
+        }
+    }
+}
+
+extension CollapsibleListSection where Accessory == EmptyView {
+    init(_ title: LocalizedStringKey, key: String, count: Int, drawer: Bool, waiting: Int = 0,
+         @ViewBuilder content: () -> Content) {
+        self.init(title, key: key, count: count, drawer: drawer, waiting: waiting, content: content, accessory: { EmptyView() })
+    }
+}
 
 /// "Rename Session": the one rename prompt, from a session row's menu and from a conversation's ⓘ menu.
 struct RenameSessionAlert: ViewModifier {
