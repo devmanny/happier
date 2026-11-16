@@ -61,8 +61,8 @@ struct NotificationCenterView: View {
     private func open(_ notification: DeliveredNotification) {
         inbox.remove(notification)
         dismiss()
-        guard let sessionId = notification.sessionId else { return }
-        Task { await store.handle(PushTap(sessionId: sessionId, permission: nil)) }
+        guard notification.sessionId != nil || notification.roomId != nil else { return }
+        Task { await store.handle(PushTap(sessionId: notification.sessionId, roomId: notification.roomId, permission: nil)) }
     }
 
     private func delete(_ notification: DeliveredNotification) {

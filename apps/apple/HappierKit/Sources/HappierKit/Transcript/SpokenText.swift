@@ -39,7 +39,7 @@ public enum SpokenText {
             case .quote(let inner):
                 let text = from(segments: inner)
                 if !text.isEmpty { parts.append(text) }
-            case .code, .options:
+            case .code, .options, .sessions:
                 continue
             }
         }

@@ -34,6 +34,28 @@ import Testing
         #expect(callerOpens.log.values == ["spawn", "sessions", "send", "task", "title"])
     }
 
+    // MARK: Notification taps
+
+    @Test func tappingARoomNoticeOpensTheRoomAndAnAgentsChatAsItsCircleDoes() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        await store.refreshSessions()
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: ""))
+        store.rooms = [AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: nil, now: 1)]
+
+        #expect(await store.handle(PushTap(sessionId: nil, roomId: AgentRoom.directId(agentId: "a-mateo"), permission: nil)))
+        #expect(store.openRequest == AgentProfile.selection(id: "a-mateo"))
+        // A group room, or one not read yet on a cold start: the room, whose view shows an agent's chat once it is read.
+        store.openRequest = nil
+        #expect(await store.handle(PushTap(sessionId: nil, roomId: "r2", permission: nil)))
+        #expect(store.openRequest == AgentRoom.selection(id: "r2"))
+        // A session's notice still opens the session.
+        store.openRequest = nil
+        #expect(await store.handle(PushTap(sessionId: "s1", permission: nil)))
+        #expect(store.openRequest == "s1")
+    }
+
     // MARK: Message search
 
     @Test func messageSearchMergesEveryOnlineMachineWithSearchOn() async throws {

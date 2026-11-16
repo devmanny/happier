@@ -50,6 +50,7 @@ public enum MarkdownFilePreview {
             case .code(let source, _): "<pre><code>\(escape(source))</code></pre>"
             case .quote(let children): "<blockquote>\(render(children))</blockquote>"
             case .options(let items): "<ul>" + items.map { "<li>\(inline($0))</li>" }.joined() + "</ul>"
+            case .sessions(let ids): "<ul>" + ids.map { "<li><code>\(escape($0))</code></li>" }.joined() + "</ul>"
             case .table(let table):
                 "<div class=\"table-scroll\"><table><thead><tr>"
                     + table.headers.enumerated().map { cell($0.element, tag: "th", column: $0.offset, table: table) }.joined()

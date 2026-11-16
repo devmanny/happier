@@ -32,6 +32,11 @@ import Testing
         #expect(SpokenText.from(markdown: text) == "Estado:\nConversación: GasCorp. ¿Burbuja?: Sí.")
     }
 
+    @Test func sessionCardsAreNotReadAloud() {
+        let text = "Ando en dos sesiones:\n<session>cmabc1</session>\n<session>cmabc2</session>\nY ya quedó."
+        #expect(SpokenText.from(markdown: text) == "Ando en dos sesiones:\nY ya quedó.")
+    }
+
     @Test func readsInSentencesForSkipping() {
         let text = "## Resumen\nYa quedó listo. ¿Lo pruebas? Sí.\n\n- Primer punto"
         #expect(SpokenText.sentences(markdown: text) == ["Resumen", "Ya quedó listo.", "¿Lo pruebas?", "Sí.", "Primer punto"])

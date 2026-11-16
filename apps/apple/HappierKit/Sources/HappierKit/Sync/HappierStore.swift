@@ -538,6 +538,12 @@ public final class HappierStore {
     public internal(set) var rooms: [AgentRoom] = []
     public internal(set) var roomMessages: [String: [AgentRoomMessage]] = [:]
     public internal(set) var roomSeats: [String: [AgentRoomSeat]] = [:]
+    /// Per room opened here, the seq through which the messages held were read after their agent
+    /// had them, so they can't have changed since (`AgentRoom.settledThroughSeq`, `loadRoom`).
+    @ObservationIgnored var roomSettledThroughSeq: [String: Int] = [:]
+    /// Per room, the seqs of the messages removed here (canceled before their agent had them): a
+    /// seq is never used again, so a read answered before one went can't bring it back (`mergeRoomMessages`).
+    @ObservationIgnored var roomRemovedSeqs: [String: Set<Int>] = [:]
     public internal(set) var roomsError: String?
     public private(set) var tasksError: String?
     /// False when the tasks listing came back full: some tasks may be missing from it.
@@ -928,7 +934,7 @@ public final class HappierStore {
         return outcome
     }
 
-    /// What "Start Now" did, for whatever shows the task (its detail, the agent's profile).
+    /// What "Start Now" did, for whatever shows the task (its detail).
     public enum TaskStart: Equatable, Sendable {
         /// Running in this session (a new one as the agent, or the one it's assigned to); the
         /// caller opens it, after closing what showed the task.
@@ -1883,7 +1889,8 @@ public final class HappierStore {
         return (messages, failures)
     }
 
-    private func markRead(_ id: String) {
+    /// Reading a session (open, or its room on screen) reads it: at once here, then on the server.
+    func markRead(_ id: String) {
         guard let api else { return }
         sessions[id]?.unreadSince = nil
         Task { try? await api.setReadState(sessionId: id, read: true) }
@@ -3706,8 +3713,8 @@ public final class HappierStore {
         }
     }
 
-    /// Opens the notified session, answering a permission request first when an action button was
-    /// used. A reply typed in the notification is sent without opening anything; false if it failed.
+    /// Opens the notified session or room, answering a permission request first when an action button
+    /// was used. A reply typed in the notification is sent without opening anything; false if it failed.
     @discardableResult
     public func handle(_ tap: PushTap) async -> Bool {
         if let text = tap.reply, let sessionId = tap.sessionId {
@@ -3762,6 +3769,11 @@ public final class HappierStore {
     private func handlePendingPushTap() async {
         guard hasLoadedSessions, let tap = pendingPushTap else { return }
         pendingPushTap = nil
+        if let roomId = tap.roomId {
+            // A room not read yet (a cold start) opens as a room; its view shows an agent's chat once it is.
+            openRequest = room(id: roomId)?.selection ?? AgentRoom.selection(id: roomId)
+            return
+        }
         guard let sessionId = tap.sessionId, sessions[sessionId] != nil else { return }
         openRequest = sessionId
     }

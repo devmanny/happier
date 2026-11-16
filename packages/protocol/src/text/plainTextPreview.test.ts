@@ -89,6 +89,13 @@ describe('buildAssistantMessagePreview', () => {
     expect(buildAssistantMessagePreview('One two', { maxChars: 14 }).text).toBe('One two');
   });
 
+  it('leaves out the session lines a room shows as cards', () => {
+    expect(buildAssistantMessagePreview('Ando en dos sesiones:\n<session>cmabc1</session>\n  <session>cm_abc-2</session>\nY reviso el login.').text)
+      .toBe('Ando en dos sesiones: Y reviso el login.');
+    // Only an id alone on its line is a card; anything else stays text.
+    expect(buildAssistantMessagePreview('Mira <session>cmabc1</session> ahí').text).toBe('Mira <session>cmabc1</session> ahí');
+  });
+
   it('is empty when the message only holds a signature and options', () => {
     expect(buildAssistantMessagePreview('Mateo 🤖\n<options><option>Yes</option></options>')).toEqual({ text: '', options: ['Yes'] });
   });

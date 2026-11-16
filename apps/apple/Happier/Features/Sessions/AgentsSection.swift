@@ -3,10 +3,12 @@ import SwiftUI
 
 /// "Agents" atop the session list: one circle per agent in a row that scrolls sideways, like
 /// stories. The ring around each one is the weekly usage of its account, the count on it the
-/// sessions that need you, and under its name what it is doing or when it last did something.
-/// Tapping one opens its whole profile the way a session opens (selected in the sidebar, the
-/// profile in the detail; full screen on the iPhone). The order is the account's
-/// (`AccountSettings.agentOrder`): Edit lays them out as rows with drag handles to reorder them.
+/// sessions that need you, and under its name what it waits on you for (Approve or Reply, which
+/// opens where you answer it), else what it is doing or when it last did something.
+/// Tapping one opens its chat the way a session opens (selected in the sidebar, the chat in the
+/// detail; full screen on the iPhone). Agents that wait on you come first; the rest keep the
+/// account's order (`AccountSettings.agentOrder`), which rising never changes: Edit lays them out
+/// in that order as rows with drag handles to reorder them.
 /// The section folds under its title. The list shows it once there are agents.
 struct AgentsSection: View {
     /// The list's sessions (throttled by the list), every state but archived.
@@ -82,8 +84,10 @@ struct AgentsSection: View {
     }
 }
 
-/// The agents as circles in one row that scrolls sideways, like stories.
+/// The agents as circles in one row that scrolls sideways, like stories: those that wait on you
+/// first (`AgentRoster.needingYouFirst`), each group in the saved order.
 private struct AgentStrip: View {
+    /// In the saved order.
     let profiles: [AgentProfile]
     let sessions: [Session]
     let selection: String?
@@ -91,22 +95,29 @@ private struct AgentStrip: View {
     let newSession: (AgentProfile) -> Void
     @Environment(HappierStore.self) private var store
     @Environment(\.sessionListOnScreen) private var onScreen
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // "Working" fades after two minutes without news, as in the session rows.
         TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
             let now = store.presenceDate(context.date)
             let filter = SessionListFilter.Context(tasks: store.tasks)
+            // A reply in a room is read (and answered) in the room, not in its thread.
+            let threads = store.roomThreads
+            let summaries = AgentRoster.needingYouFirst(profiles.map { profile in
+                AgentRoster.summary(of: profile, sessions: sessions, context: filter, now: now,
+                                    usage: { store.usage(for: $0.id) }, threads: threads)
+            })
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(profiles) { profile in
-                        AgentBubble(profile: profile,
-                                    summary: AgentRoster.summary(of: profile, sessions: sessions, context: filter, now: now,
-                                                                 usage: { store.usage(for: $0.id) }),
-                                    now: now, selected: selection == AgentProfile.selection(id: profile.id),
+                    ForEach(summaries) { summary in
+                        AgentBubble(profile: summary.profile, summary: summary,
+                                    selected: selection == AgentProfile.selection(id: summary.id),
                                     open: open, newSession: newSession)
                     }
                 }
+                // An agent that starts or stops waiting on you slides to its place.
+                .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: summaries.map(\.id))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
@@ -118,12 +129,12 @@ private struct AgentStrip: View {
 }
 
 /// One agent's circle: its avatar inside the ring of its account's weekly usage, a count of the
-/// sessions that need you (only when some do), its name, and under it "Working" or how long ago
-/// it last did something. Quiet for a day, it fades.
+/// sessions that need you (only when some do), its name, and under it what it waits on you for
+/// (Approve or Reply, a button that opens where you answer it), else "Working", "Error" when its
+/// newest turn failed, or how long ago it last did something. Asleep (quiet for a day), it fades.
 private struct AgentBubble: View {
     let profile: AgentProfile
     let summary: AgentSummary
-    let now: Date
     let selected: Bool
     let open: (String) -> Void
     let newSession: (AgentProfile) -> Void
@@ -131,53 +142,64 @@ private struct AgentBubble: View {
     @State private var dropTargeted = false
 
     private static let size: CGFloat = 70
-    /// The sessions-need-you count: the app's alert orange-red.
+    /// The sessions-need-you count and what it waits on you for: the app's alert orange-red.
     private static let waiting = Color(red: 0xC2 / 255, green: 0x41 / 255, blue: 0x0C / 255)
 
-    private var quiet: Bool {
-        guard summary.latestWorking == nil else { return false }
-        guard let last = summary.lastActivity else { return true }
-        return now.timeIntervalSince(last) > 24 * 3600
-    }
-
     var body: some View {
-        Button {
-            AppHaptics.selection()
-            open(AgentProfile.selection(id: profile.id))
-        } label: {
-            VStack(spacing: 2) {
-                ZStack {
-                    // The disc is 82 % of the avatar; the ring sits just outside it.
-                    AgentProfileAvatar(profile: profile, size: Self.size)
-                    AgentUsageRing(meter: summary.weekly, diameter: Self.size - 4, lineWidth: 3.5, tint: .userBubble)
-                }
-                .frame(width: Self.size, height: Self.size)
-                .overlay(alignment: .topTrailing) {
-                    if summary.needsYou > 0 {
-                        Text(summary.needsYou, format: .number)
-                            .font(.caption2.weight(.bold))
-                            .monospacedDigit()
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .frame(minWidth: 22, minHeight: 22)
-                            .background(Self.waiting, in: Capsule())
-                            .offset(x: 2, y: -1)
+        VStack(spacing: 2) {
+            // The circle opens its chat; what it waits on you for is its own button, under it.
+            Button {
+                AppHaptics.selection()
+                open(AgentProfile.selection(id: profile.id))
+            } label: {
+                VStack(spacing: 2) {
+                    ZStack {
+                        // The disc is 82 % of the avatar; the ring sits just outside it.
+                        AgentProfileAvatar(profile: profile, size: Self.size)
+                        AgentUsageRing(meter: summary.weekly, diameter: Self.size - 4, lineWidth: 3.5, tint: .userBubble)
+                    }
+                    .frame(width: Self.size, height: Self.size)
+                    .overlay(alignment: .topTrailing) {
+                        if summary.needsYou > 0 {
+                            Text(summary.needsYou, format: .number)
+                                .font(.caption2.weight(.bold))
+                                .monospacedDigit()
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .frame(minWidth: 22, minHeight: 22)
+                                .background(Self.waiting, in: Capsule())
+                                .offset(x: 2, y: -1)
+                        }
+                    }
+                    .padding(.bottom, 2)
+                    Text(profile.name)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(selected ? Color.userBubble : Color.primary)
+                        .lineLimit(1)
+                    if summary.ask == nil {
+                        activity
+                            .font(.caption2)
+                            .lineLimit(1)
                     }
                 }
-                .padding(.bottom, 2)
-                Text(profile.name)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(selected ? Color.userBubble : Color.primary)
-                    .lineLimit(1)
-                activity
-                    .font(.caption2)
-                    .lineLimit(1)
+                .contentShape(Rectangle())
             }
-            .frame(width: Self.size + 8)
-            .opacity(quiet && !selected ? 0.5 : 1)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityValue(summary.needsYou > 0 ? Text("\(summary.needsYou) need you") : Text(verbatim: ""))
+            .accessibilityActions {
+                if let ask = summary.ask {
+                    Button(askTitle(ask)) { answer(ask) }
+                }
+            }
+            .accessibilityIdentifier("agent-row-\(profile.id)")
+            if let ask = summary.ask {
+                askButton(ask)
+                    .transition(.opacity)
+            }
         }
-        .buttonStyle(.plain)
+        .frame(width: Self.size + 8)
+        .opacity(summary.state == .asleep && !selected ? 0.5 : 1)
         // A task dropped on it is assigned to the agent (nothing starts).
         .overlay {
             if dropTargeted { RowDropHighlight() }
@@ -186,19 +208,55 @@ private struct AgentBubble: View {
         .contextMenu {
             Button("New Session with \(profile.name)", systemImage: "plus") { newSession(profile) }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(summary.needsYou > 0 ? Text("\(summary.needsYou) need you") : Text(verbatim: ""))
-        .accessibilityIdentifier("agent-row-\(profile.id)")
+    }
+
+    private func askTitle(_ ask: AgentSummary.Ask) -> LocalizedStringKey {
+        switch ask.action {
+        case .approve: "Approve"
+        case .reply: "Reply"
+        }
+    }
+
+    private func answer(_ ask: AgentSummary.Ask) {
+        AppHaptics.selection()
+        open(ask.selection)
+    }
+
+    /// "Approve" (a request, on its session) or "Reply" (its chat or room, else the session that
+    /// asks), in the count's orange-red.
+    private func askButton(_ ask: AgentSummary.Ask) -> some View {
+        Button {
+            answer(ask)
+        } label: {
+            Text(askTitle(ask))
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 2)
+                .background(Self.waiting, in: Capsule())
+                // A taller target than the capsule draws.
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ask.action == .approve ? Text("Approve \(profile.name)'s request") : Text("Reply to \(profile.name)"))
+        .accessibilityIdentifier("agent-ask-\(profile.id)")
     }
 
     @ViewBuilder
     private var activity: some View {
-        if summary.latestWorking != nil {
+        switch summary.state {
+        case .working:
             Text("Working").fontWeight(.semibold).foregroundStyle(Color.userBubble)
-        } else if let last = summary.lastActivity {
-            Text(last, format: .relative(presentation: .numeric, unitsStyle: .narrow)).foregroundStyle(.secondary)
-        } else {
-            Text("No sessions").foregroundStyle(.secondary)
+        case .failed:
+            Text("Error").fontWeight(.semibold).foregroundStyle(.red)
+        case .needsYou, .idle, .asleep:
+            if let last = summary.lastActivity {
+                Text(last, format: .relative(presentation: .numeric, unitsStyle: .narrow)).foregroundStyle(.secondary)
+            } else {
+                Text("No sessions").foregroundStyle(.secondary)
+            }
         }
     }
 }

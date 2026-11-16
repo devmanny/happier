@@ -220,11 +220,6 @@ public struct Session: Identifiable, Sendable, Equatable {
         path?.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init)
     }
 
-    /// A list row's second line: the agent it works as, then its folder (else its machine).
-    public var listDetail: String {
-        [agentIdentity?.name, folderName ?? host].compactMap { $0 }.joined(separator: " · ")
-    }
-
     /// Where it works, for a list row that names the agent elsewhere: its folder, else its machine.
     public var listPlace: String { folderName ?? host ?? "" }
 

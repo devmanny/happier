@@ -45,7 +45,6 @@ async function setup() {
     sendToThread: vi.fn(async () => ({ ok: true as const })),
     readTurnReply: async () => null,
     push: null,
-    pushEnabled: () => true,
   };
   return { store, deps };
 }

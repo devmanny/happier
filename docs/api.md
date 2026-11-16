@@ -88,6 +88,12 @@ prefixes:
   by `updatedAt`) with a versioned write (concurrent migrations: one lands, the other re-reads), and
   keep the old key in step on edit/delete; the old key is never deleted by the migration. Drop the
   legacy read/write once no older build is installed.
+  Optional `canDo: string[]` is what the user says the agent can do, shown on its card in the native
+  app; written only when non-empty, each item trimmed and none blank (clearing the list removes the
+  key). Only the native app reads and writes it: the daemon's passthrough `AgentProfileV1Schema`
+  keeps it, and the spawn identity leaves it out, so the agent is never told. A future TypeScript
+  reader must parse it leniently (drop non-string and blank items, read a malformed value as empty,
+  never reject the profile over it), as the app does.
   A spawn carries only `agentIdentityV1` `{v, id, name, emoji?, description?}`; the runner keeps
   `{v, id, name, emoji?}` in session metadata `agentIdentityV1` and adds the description to the
   coding prompt (`packages/protocol/src/agentProfiles/agentIdentity.ts`).
@@ -170,8 +176,12 @@ prefixes:
 - `room/<uuid>`, `roommsg/<uuid>/<seq10>`, `roomseat/<uuid>/<agentId>` — rooms (salas): group chats
   of the user and the agents they invite, kind `agent_room`
   (`packages/protocol/src/rooms/agentRoom.ts`, delivery policy in `agentRoomDelivery.ts`). The room
-  holds `{title, userName?, members [{agentId, name?, emoji?, machineId, directory, wakeByAgents?,
-  permissionMode?, dismissedMentionSeq?}], lastSeq, pausedAt?, archivedAt?}`; each message is its own row
+  holds `{title, kind?, userName?, members [{agentId, name?, emoji?, machineId, directory, wakeByAgents?,
+  permissionMode?, dismissedMentionSeq?}], lastSeq, pausedAt?, archivedAt?}`; `kind: 'direct'` marks an
+  agent's own chat (id `direct-<agentId>`, written by the Apple app, that agent its only member,
+  every user message mentioning it), delivered like any room. In an agent's chat the model pill
+  changes only the model and effort of the session of that agent's seat, never the agent or provider:
+  the chat sends with `sendRoomMessage`, which never applies an armed agent switch. Each message is its own row
   `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?,
   replyTo? {seq}}`
   created with version -1 in the same atomic write that moves the room's `lastSeq` to its seq, so
@@ -181,7 +191,22 @@ prefixes:
   read marker (`readThroughSeq`) and the delivery in flight (`inFlight {localId, throughSeq, at,
   sent?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
   picker; "Que conteste" is the user's own message mentioning that member); the daemon of each
-  member's machine writes that member's seat; the member's thread posts its replies. A user's
+  member's machine writes that member's seat; the member's thread posts its replies. The app may
+  also withdraw or edit a user message its member hasn't got (seq above both `readThroughSeq` and
+  `inFlight.throughSeq`): one atomic `kvMutate` that deletes (null value) or rewrites the message at
+  its version and writes that member's seat back byte for byte at the version it read. That seat
+  write is only a version guard; seat content stays daemon-owned. The daemon reads seats before
+  messages and claims a delivery with a CAS on the seat version it read, so either the withdrawal
+  lands first and the claim fails (the next run reads the room without the message), or the app's
+  write conflicts and the returned seat shows the member already has it. Daemons skip missing
+  messages (pinned by `reconcileRoomDeliveries.test.ts`). A withdrawn message's seq stays a gap for
+  good: the relay keeps the deleted key as a tombstone (null value, higher version), appends only
+  take the seq after `lastSeq` (which the withdrawal leaves as it was), and an edit that finds the
+  message gone fails instead of writing it again, so nothing re-creates it. The app revises only in
+  an agent's own chat, and there `sala_leer` gives the member the user's messages only through what
+  its seat has (`readThroughSeq` or `inFlight.throughSeq`), its own replies all, reading the seat
+  before the messages as the daemon does, so the agent never reads a message that may still change
+  (pinned by `runAgentRoomTool.test.ts`). A user's
   message with `replyTo` answers that message: Reply (quoting any message) mentions its author when
   that is a member, plus whoever the user names, never the quoted message's own mentions; picking an
   agent's `<options>` option mentions only its author. A member's `dismissedMentionSeq` is app-only
@@ -201,7 +226,29 @@ prefixes:
   15 go in full, the 50 before as one line each (≤160 characters) and the rest only counted, with a
   pointer to `sala_leer` (`room.read`, a member reads its room by seq range). A message shown in full
   that answers another says which, quoting it in one line (≤160 characters; "your #N" when it is the
-  member's own); the daemon reads quoted messages outside the unread range for that. The other
+  member's own); the daemon reads quoted messages outside the unread range for that. A send that
+  finds the thread archived or gone (`session_archived`, `session_not_found`) opens a new thread. A
+  thread archived or deleted while its turn runs (the transcript reader returns `thread_gone`: the
+  session is not found, or it is archived and the turn hadn't finished; a turn that finished before
+  the archive still posts its reply) is cleared from the seat without moving the marker, and the
+  same run delivers again to a new thread with a new localId, so a late reply of the old thread
+  can't finish it. A new thread for a member that had read the room (`readThroughSeq > 0`) gets a
+  continuation delivery: the room through `throughSeq`, its own replies included, cut the same way
+  (the daemon reads only the newest 65 seqs; earlier ones are counted with the `sala_leer`
+  pointer), what the thread before had answered (through the marker, and its own replies) apart
+  from what is new, and that thread's session id for `mis_hilos`. A member's first thread ever gets
+  only the unread backlog. Every agent reply's `author.sessionId` names the seat thread that wrote
+  it, whether its runner or the daemon's reconcile posted it, so clients can tell a reply from a new
+  thread (the Apple app captions it "New thread", `AgentRoom.newThreadSeqs`). The delivery prompt
+  also teaches the member to put one of its sessions' id alone on a line as `<session>ID</session>`
+  (the ids are in its other-threads list and `mis_hilos`). The Apple app (`MarkdownSegments`)
+  takes a line that is only `<session>ID</session>`, spaces or tabs around it allowed, with ID
+  matching `[A-Za-z0-9_-]{1,128}` (it goes into the session's URL path); consecutive such lines,
+  blank lines between them allowed, form one stack of cards, and any other `<session>` line stays
+  text. Each card shows the session's title, what its thread says it is doing (its `now`) or else its
+  folder, and its live state, and a tap opens it with `openRelatedSession` (fetched when the device
+  doesn't list it). `apps/ui` doesn't parse them: a thread's transcript there shows the raw lines.
+  Push previews leave them out (`buildAssistantMessagePreview`). The other
   members are not woken by a reply that doesn't mention them; it stays in the room's history, so
   their next delivery (or `sala_leer`) includes it. A member mid-turn gets
   nothing new: what arrives meanwhile is delivered together once that turn ends. The user's messages
@@ -214,8 +261,26 @@ prefixes:
   (the app sets it, after the Consumer Terms 3.7 warning for Claude members; the CLI never decides
   by provider) and fewer than 6 agent messages came in a row since the user's last one (the brake);
   otherwise it waits for the user. `pausedAt` stops deliveries (running turns finish). The user gets
-  a push (the daemon's and runner's push channel, honoring `pushEnabled`) when a reply mentions them
-  and when a hand-off hits the brake. `room*` are not change families the relay knows, so writes mark
+  one push for every agent reply (`roomReplyNotices` decides; `completeRoomTurn` sends it on the
+  account's `expo_push` channel, from the runner or the daemon): titled with the agent's name and
+  emoji, its body the reply's plain preview without `<session>` lines or `<options>`, as a messaging
+  app does; in a group room the body starts with the room's title, and a reply that mentions the
+  user is titled "<agent> mentioned you" instead (one push either way). A hand-off that hits the
+  brake adds a "Room on hold" push. Room pushes carry `{type: 'room_mention' | 'room_brake', roomId,
+  seq}` and no `sessionId`. A reply's push stands for its thread's turn-finished (`ready`) push,
+  which the phone doesn't get for the turn that answered a room delivery, even with the account's
+  ready push on (`notifyRoomTurnReady` tells `sendReadyWithPushNotification`, from the delivery its
+  runner saw reach the provider last), so it follows that push's settings: no
+  room push without an enabled `expo_push` channel; the reply text becomes "New message" when that
+  channel's `readyIncludeMessageText` is off; every room push asks `suppressIfComputerFocused` when
+  `mutePhoneWhenComputerFocused` is on; a plain reply needs the channel's `ready` topic; and a thread
+  whose bell is off (`notificationsMutedV1`) gets no reply or mention push (the brake, the room's,
+  still goes). Only the runner sees its thread's bell: a turn the daemon finishes is pushed even
+  when muted. Webhook channels get no room push, so they still get the thread's `ready` event for
+  a room turn. The thread's ready push still goes to the phone for a turn the user starts in the
+  thread itself, and for a room turn whose runner posted no reply (not in the transcript yet, the
+  turn wrote no final text, or the post failed), even if the daemon later finishes that turn and
+  pushes its reply too. `room*` are not change families the relay knows, so writes mark
   the `self` KV family (the native app's catch-up re-reads what it shows).
 
 `GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing

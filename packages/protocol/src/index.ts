@@ -3914,10 +3914,12 @@ export {
   parseRoomDeliveryLocalId,
   resolveRoomReply,
   roomAgentStreak,
+  roomContinuationFromSeq,
   roomDeliveryLocalId,
   roomDeliveryQuotedSeqs,
   roomMemberPermissionMode,
   roomReplyNotices,
+  type RoomDeliveryContinuation,
   type RoomDeliveryDecision,
   type RoomReplyNotice,
 } from './rooms/agentRoomDelivery.js';

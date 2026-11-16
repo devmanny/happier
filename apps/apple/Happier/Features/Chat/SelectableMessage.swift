@@ -109,8 +109,8 @@ private struct SelectableMessageText: UIViewRepresentable {
         return CGSize(width: min(width, ceil(fitting.width)), height: ceil(fitting.height))
     }
 
-    /// Markdown to styled text: bold, italic, code and links inline; code blocks monospaced; quotes
-    /// and tables as plain lines.
+    /// Markdown to styled text: bold, italic, code and links inline; code blocks monospaced; quotes,
+    /// tables and the ids of session cards as plain lines.
     static func attributed(_ markdown: String, color: UIColor) -> NSAttributedString {
         let body = UIFont.preferredFont(forTextStyle: .body)
         let base: [NSAttributedString.Key: Any] = [.font: body, .foregroundColor: color]
@@ -155,6 +155,8 @@ private struct SelectableMessageText: UIViewRepresentable {
                 paragraph(NSAttributedString(string: lines.joined(separator: "\n"), attributes: base))
             case .options(let items):
                 paragraph(NSAttributedString(string: items.map { "• \($0)" }.joined(separator: "\n"), attributes: base))
+            case .sessions(let ids):
+                paragraph(NSAttributedString(string: ids.joined(separator: "\n"), attributes: base))
             }
         }
         return result

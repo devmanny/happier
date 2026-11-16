@@ -239,6 +239,58 @@ import Testing
         #expect(Self.room().appendingUserMessage("hola", now: 8)?.message.mentions == [])
     }
 
+    @Test func aMessageWrittenWhileTheAgentWorksWaitsForItsTurnToEnd() throws {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        let chat = AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: "Manny", now: 1)
+        let messages = [Self.message(1, by: Self.user), Self.message(2, by: Self.user), Self.message(3, by: Self.agent("a-mateo")),
+                        Self.message(4, by: Self.user)]
+        func seat(read: Int, through: Int? = nil) -> AgentRoomSeat {
+            AgentRoomSeat(roomId: chat.id, agentId: "a-mateo", readThroughSeq: read, inFlight: through.map { .init(throughSeq: $0, at: 5) })
+        }
+        // Mateo is working on #1: the user's #2 and #4 reach it when that turn ends; its own #3 never waits.
+        let working = try #require(chat.queued(seats: [seat(read: 0, through: 1)], messages: messages))
+        #expect(working.messages.map(\.seq) == [2, 4])
+        #expect(working.reason == .afterCurrentTurn)
+        #expect(working.revisable)
+        // The turn ended and its daemon hasn't delivered them yet.
+        let idle = try #require(chat.queued(seats: [seat(read: 1)], messages: messages))
+        #expect(idle.messages.map(\.seq) == [2, 4] && idle.reason == .notDeliveredYet)
+        // Delivered, or in the turn it's working: nothing waits.
+        #expect(chat.queued(seats: [seat(read: 4)], messages: messages) == nil)
+        #expect(chat.queued(seats: [seat(read: 1, through: 4)], messages: messages) == nil)
+        // Before its first delivery it has no seat to guard a change with: they wait, and can't be changed.
+        let first = try #require(chat.queued(seats: [], messages: messages))
+        #expect(first.messages.map(\.seq) == [1, 2, 4] && !first.revisable)
+        #expect(chat.settledThroughSeq(seats: [seat(read: 1, through: 2)]) == 2)
+        // A group room has no queue: nothing there is edited or canceled.
+        #expect(Self.room().queued(seats: [], messages: messages) == nil)
+        #expect(Self.room().settledThroughSeq(seats: []) == .max)
+    }
+
+    @Test func anAgentsReplyFromAnotherThreadThanItsLastOneStartsANewThread() {
+        func reply(_ seq: Int, _ agent: String, thread: String?) -> AgentRoomMessage {
+            var author: [String: JSONValue] = ["kind": "agent", "agentId": .string(agent)]
+            if let thread { author["sessionId"] = .string(thread) }
+            return Self.message(seq, by: .object(author))
+        }
+        let messages = [Self.message(1, by: Self.user),
+                        reply(2, "a-mateo", thread: "s1"),  // its first reply ever: nothing to compare with
+                        Self.message(3, by: Self.user),
+                        reply(4, "a-mateo", thread: "s1"),
+                        reply(5, "a-tomas", thread: "t1"),  // another agent's thread is not Mateo's
+                        reply(6, "a-mateo", thread: nil),   // no thread: never counts, and s1 stays its last
+                        Self.message(7, by: Self.user),
+                        reply(8, "a-mateo", thread: "s2"),  // its daemon opened a new thread
+                        reply(9, "a-tomas", thread: "t1"),
+                        reply(10, "a-mateo", thread: "s2"),
+                        reply(11, "a-leo", thread: nil),
+                        reply(12, "a-leo", thread: "l1")]   // its first reply from a known thread
+        #expect(AgentRoom.newThreadSeqs(in: messages) == [8])
+        // Read in seq order, however they arrive.
+        #expect(AgentRoom.newThreadSeqs(in: messages.reversed()) == [8])
+        #expect(AgentRoom.newThreadSeqs(in: []) == [])
+    }
+
     @Test func anAgentsChatWorksFromTheHomeOfTheMachineItLastWorkedOn() throws {
         func session(_ id: String, agent: String?, machine: String, path: String, at: Double) throws -> Session {
             var metadata: [String: JSONValue] = ["path": .string(path), "machineId": .string(machine)]

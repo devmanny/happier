@@ -6,7 +6,9 @@ import Foundation
 /// message, created with version -1 in the same write that moves `lastSeq`) and
 /// `roomseat/<id>/<agentId>` (a member's thread and read marker, written by its daemon). The daemon
 /// of each member's machine delivers what mentions it; this app writes the room and the user's
-/// messages. Keys this build doesn't know are kept on rewrite.
+/// messages, and may rewrite or delete one of them its agent doesn't have yet (`queued`), writing
+/// that agent's seat back unchanged in the same atomic write as a guard. Keys this build doesn't
+/// know are kept on rewrite.
 public struct AgentRoom: Identifiable, Sendable, Equatable {
     public struct Member: Identifiable, Sendable, Equatable {
         public let agentId: String
@@ -200,6 +202,9 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
     /// The sidebar's selection for this room, which opens like a session (never a session's id).
     public static func selection(id: String) -> String { selectionPrefix + id }
 
+    /// The sidebar's selection that shows this room: an agent's chat opens as its circle does.
+    public var selection: String { directAgentId.map(AgentProfile.selection(id:)) ?? Self.selection(id: id) }
+
     /// The room `selection` names; nil for a session, an agent or nothing.
     public static func id(inSelection selection: String?) -> String? {
         guard let selection, selection.hasPrefix(selectionPrefix) else { return nil }
@@ -348,6 +353,22 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
         messages.sorted { $0.seq < $1.seq }.last { $0.author.agentId != nil }?.author.agentId
     }
 
+    /// The agents' replies that came from another thread than the same agent's previous reply: its
+    /// daemon opened a new thread for it (the last one was archived or gone, `reconcileRoomDeliveries`),
+    /// which starts from a recap of the room. An agent's chat marks them "New thread". Read from the
+    /// thread each reply names (`author.sessionId`); an agent's first reply, and one that names no
+    /// thread, never count.
+    public static func newThreadSeqs(in messages: [AgentRoomMessage]) -> Set<Int> {
+        var lastThread: [String: String] = [:]
+        var starts: Set<Int> = []
+        for message in messages.sorted(by: { $0.seq < $1.seq }) {
+            guard case .agent(let agentId, _, _, let thread?) = message.author else { continue }
+            if let last = lastThread[agentId], last != thread { starts.insert(message.seq) }
+            lastThread[agentId] = thread
+        }
+        return starts
+    }
+
     /// At most this many agent turns in a row without the user (`AGENT_ROOM_MAX_AGENT_TURNS`).
     public static let maxAgentTurns = 6
 
@@ -397,6 +418,44 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
                 && ($0.author.agentId == member.agentId || ($0.author == .user && $0.mentions.contains(member.agentId))) }
             return answered ? nil : Wait(agentId: member.agentId, mentionSeq: mention.seq, mentionedBy: mention.author.agentId)
         }
+    }
+
+    // MARK: What waits for the agent
+
+    /// The user's messages in an agent's chat that the agent doesn't have yet, and why they wait.
+    public struct Queue: Equatable, Sendable {
+        public enum Reason: Equatable, Sendable {
+            /// Its turn is under way: they reach it together when that turn ends (`decideRoomDelivery`'s `busy`).
+            case afterCurrentTurn
+            /// Nothing holds them: its daemon hasn't delivered them yet.
+            case notDeliveredYet
+        }
+
+        /// Oldest first.
+        public let messages: [AgentRoomMessage]
+        public let reason: Reason
+        /// They can be edited or canceled: the agent has a seat to guard that write with
+        /// (`HappierStore.reviseQueuedRoomMessage`). Before its first delivery it has none.
+        public let revisable: Bool
+    }
+
+    /// The seq up to which this room's messages can't change any more. In an agent's chat, the
+    /// agent's messages and what it already has (`AgentRoomSeat.deliveredThroughSeq`); the user's
+    /// later messages may still be edited or canceled (`queued`). Nothing changes in a group room.
+    public func settledThroughSeq(seats: [AgentRoomSeat]) -> Int {
+        guard let agentId = directAgentId else { return .max }
+        return seats.first { $0.agentId == agentId }?.deliveredThroughSeq ?? 0
+    }
+
+    /// What waits for the agent in its chat: the user's messages past what it has, which its daemon
+    /// holds while its turn runs (`decideRoomDelivery`). Nil when nothing waits, and in a group room.
+    public func queued(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> Queue? {
+        guard let agentId = directAgentId else { return nil }
+        let settled = settledThroughSeq(seats: seats)
+        let waiting = messages.filter { $0.author == .user && $0.seq > settled }.sorted { $0.seq < $1.seq }
+        guard !waiting.isEmpty else { return nil }
+        let seat = seats.first { $0.agentId == agentId }
+        return Queue(messages: waiting, reason: seat?.inFlight != nil ? .afterCurrentTurn : .notDeliveredYet, revisable: seat != nil)
     }
 }
 
@@ -461,9 +520,24 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
     public let mentionsUser: Bool
     /// The message this one answers: one the user quoted (Reply), or picked an option on.
     public let replyTo: Int?
+    /// The UserKVStore version this copy was read at (-1 for one not stored yet).
+    public internal(set) var version = -1
     var extra: [String: JSONValue] = [:]
 
     public var id: Int { seq }
+
+    /// The user's message with `text` instead, at the same seq: its time, mentions, the message it
+    /// answers and the fields this build doesn't know are kept (`HappierStore.reviseQueuedRoomMessage`).
+    /// Nil for an empty text.
+    func editing(_ text: String) -> AgentRoomMessage? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        var edited = AgentRoomMessage(roomId: roomId, seq: seq, at: at, author: author, text: text, mentions: mentions,
+                                      mentionsUser: mentionsUser, replyTo: replyTo)
+        edited.version = version
+        edited.extra = extra
+        return edited
+    }
 
     init(roomId: String, seq: Int, at: Double, author: Author, text: String, mentions: [String], mentionsUser: Bool = false,
          replyTo: Int? = nil) {
@@ -519,7 +593,10 @@ public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
 }
 
 /// A member's thread in a room and its read marker (`roomseat/<roomId>/<agentId>`), written by the
-/// daemon of its machine; the app only reads it.
+/// daemon of its machine. The app never changes it: it only writes it back exactly as it read it
+/// (`sealed`, at `version`) as the guard of a change to a message the member doesn't have yet
+/// (`HappierStore.reviseQueuedRoomMessage`). It is never rebuilt from this model, which leaves out
+/// fields the daemon needs (the delivery's `localId` and `sent`).
 public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
     public struct InFlight: Sendable, Equatable {
         public let throughSeq: Int
@@ -532,8 +609,15 @@ public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
     public var readThroughSeq: Int
     /// The turn its thread is working for the room.
     public var inFlight: InFlight?
+    /// The UserKVStore version this copy was read at (-1 for one not read from the store).
+    public internal(set) var version = -1
+    /// The stored value exactly as it was read, the only thing ever written back.
+    var sealed: String?
 
     public var id: String { agentId }
+
+    /// Every message up to this seq is the member's: read, or in the turn its thread is working.
+    public var deliveredThroughSeq: Int { max(readThroughSeq, inFlight?.throughSeq ?? 0) }
 
     public init(roomId: String, agentId: String, sessionId: String? = nil, readThroughSeq: Int, inFlight: InFlight? = nil) {
         self.roomId = roomId
@@ -561,6 +645,8 @@ public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
     public static func kvKey(roomId: String, agentId: String) -> String { kvPrefix(roomId: roomId) + agentId }
 
     static func open(_ base64: String, machineKey: Data) -> AgentRoomSeat? {
-        AccountScopedBlob.open(base64, kind: .agentRoom, machineKey: machineKey).flatMap(AgentRoomSeat.init(json:))
+        var seat = AccountScopedBlob.open(base64, kind: .agentRoom, machineKey: machineKey).flatMap(AgentRoomSeat.init(json:))
+        seat?.sealed = base64
+        return seat
     }
 }

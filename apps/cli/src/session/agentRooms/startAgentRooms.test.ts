@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentRoomKvKey, sealAccountScopedBlobCiphertext, type AgentRoomV1 } from '@happier-dev/protocol';
 
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
+import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 
 import { notifyRoomTurnReady, resetAgentRoomsForTests, startAgentRooms } from './startAgentRooms';
 
@@ -22,13 +23,13 @@ const room: AgentRoomV1 = {
 
 afterEach(() => resetAgentRoomsForTests());
 
-async function setup(readTurnReply: (sessionId: string, localId: string) => Promise<{ finished: boolean; text: string | null } | null>) {
+async function setup(readTurnReply: (sessionId: string, localId: string) => Promise<TurnReply | 'thread_gone' | null>) {
   const kv = createInMemoryAccountKv();
   await kv.transport.mutate([{ key: agentRoomKvKey('r1'), version: -1,
     value: sealAccountScopedBlobCiphertext({ kind: 'agent_room', material, payload: room, randomBytes: (n) => new Uint8Array(n) }) }]);
   const push = { sendToAllDevicesAsync: vi.fn(async () => {}) };
   const session = Object.assign(new EventEmitter(), { sessionId: 's1' });
-  const rooms = startAgentRooms(session, credentials, { transport: kv.transport, env, readTurnReply, push, pushEnabled: () => true })!;
+  const rooms = startAgentRooms(session, credentials, { transport: kv.transport, env, readTurnReply, push })!;
   await rooms.store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo ¿cómo vas?', mentions: ['a-mateo'] });
   await rooms.store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.n1', throughSeq: 1 }, null);
   return { rooms, session, push };
@@ -40,7 +41,8 @@ describe('startAgentRooms', () => {
     const { rooms, session, push } = await setup(readTurnReply);
 
     session.emit('provider-input-delivered', { localId: 'room.r1.a-mateo.n1' });
-    await notifyRoomTurnReady('s1');
+    // The room took over the turn's notice.
+    expect(await notifyRoomTurnReady('s1')).toBe(true);
 
     expect(readTurnReply).toHaveBeenCalledWith('s1', 'room.r1.a-mateo.n1');
     const [reply] = await rooms.store.readMessages('r1', { fromSeq: 2, toSeq: 2 });
@@ -59,9 +61,37 @@ describe('startAgentRooms', () => {
     const { rooms, session } = await setup(readTurnReply);
 
     session.emit('provider-input-delivered', { localId: 'ui-typed-1' });
-    await notifyRoomTurnReady('s1');
+    expect(notifyRoomTurnReady('s1')).toBeNull();
 
     expect(readTurnReply).not.toHaveBeenCalled();
     expect((await rooms.store.getRoom('r1'))!.room.lastSeq).toBe(1);
+  });
+
+  it('leaves a turn whose thread is gone to the daemon, which delivers it again to a new thread', async () => {
+    const readTurnReply = vi.fn(async () => 'thread_gone' as const);
+    const { rooms, session, push } = await setup(readTurnReply);
+
+    session.emit('provider-input-delivered', { localId: 'room.r1.a-mateo.n1' });
+    await notifyRoomTurnReady('s1');
+
+    expect(readTurnReply).toHaveBeenCalledWith('s1', 'room.r1.a-mateo.n1');
+    expect((await rooms.store.getRoom('r1'))!.room.lastSeq).toBe(1);
+    expect((await rooms.store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat).toMatchObject({ readThroughSeq: 0, inFlight: { localId: 'room.r1.a-mateo.n1' } });
+    expect(push.sendToAllDevicesAsync).not.toHaveBeenCalled();
+  });
+
+  it('leaves the turn\'s own notice to the ready when the turn ends without a final text: the room posts nothing', async () => {
+    const readTurnReply = vi.fn(async () => ({ finished: true, text: null }));
+    const { rooms, session, push } = await setup(readTurnReply);
+
+    session.emit('provider-input-delivered', { localId: 'room.r1.a-mateo.n1' });
+    expect(await notifyRoomTurnReady('s1')).toBe(false);
+
+    // The turn is over in the room all the same.
+    expect((await rooms.store.getRoom('r1'))!.room.lastSeq).toBe(1);
+    const seat = (await rooms.store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat;
+    expect(seat).toMatchObject({ readThroughSeq: 1 });
+    expect(seat.inFlight).toBeUndefined();
+    expect(push.sendToAllDevicesAsync).not.toHaveBeenCalled();
   });
 });

@@ -120,7 +120,8 @@ struct MainView: View {
             .onChange(of: selection) { _, id in
                 // A new, unsent conversation or an agent's profile isn't one to reopen.
                 lastOpenSessionId = Self.sessionId(in: id) ?? ""
-                if let id { inbox.remove(sessionId: id) }
+                inbox.onScreen = id
+                if let id { inbox.remove(shownIn: id) }
                 if id != restoredSessionId { restoredSessionId = nil }
                 #if os(iOS)
                 // Opening a conversation from anywhere (a notification, a new session) shows it;

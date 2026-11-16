@@ -247,18 +247,11 @@ import Testing
                           "metadata": .string(String(decoding: try JSONValue.object(metadata).encoded(), as: UTF8.self))], keys: nil)
     }
 
-    @Test func agentThenTheFolderItself() throws {
-        let agent: JSONValue = ["v": 1, "id": "m", "name": "Mateo", "emoji": "🤖"]
-        #expect(try session(["path": "/Users/manny/Projects/manny-agenda", "agentIdentityV1": agent]).listDetail == "Mateo · manny-agenda")
-        #expect(try session(["path": "C:\\Users\\manny\\happier\\"]).listDetail == "happier")
-        #expect(try session(["host": "mac-mini"]).listDetail == "mac-mini")
-        #expect(try session([:]).listDetail == "")
-    }
-
     /// The row shows the agent on the right, by its model; the left keeps only where it works.
     @Test func theFolderAloneElseTheMachine() throws {
         let agent: JSONValue = ["v": 1, "id": "m", "name": "Mateo", "emoji": "🤖"]
         #expect(try session(["path": "/Users/manny/Projects/manny-agenda", "agentIdentityV1": agent]).listPlace == "manny-agenda")
+        #expect(try session(["path": "C:\\Users\\manny\\happier\\"]).listPlace == "happier")
         #expect(try session(["host": "mac-mini"]).listPlace == "mac-mini")
         #expect(try session([:]).listPlace == "")
     }

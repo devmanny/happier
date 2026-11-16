@@ -8,12 +8,18 @@ import SwiftUI
 /// suggested. Reply (the message's menu, a swipe to the left on iPhone and iPad, a button on hover on
 /// the Mac) quotes a message and reaches only its author, plus whoever you mention. An agent's
 /// `<options>` show as the session chat's buttons; picking one answers only that agent. Delivery is
-/// the members' daemons' (`decideRoomDelivery`).
+/// the members' daemons' (`decideRoomDelivery`). While it is on screen, its members' threads are
+/// read (`HappierStore.readRoomThreads`): their replies are read here, so the session list and the
+/// agents' circles stop counting them, on every device.
 ///
 /// An agent's own chat (`AgentRoom.isDirect`, opened by `AgentChatView`) reads like Messages: no
 /// names or avatars, bubbles with their tail on the last of a run, the time centered between runs,
-/// "Read" under your last message once the agent has it, its typing bubble while it works, and no @:
-/// everything you write reaches it. Its header and info are `AgentChatView`'s.
+/// "New thread" above its first reply from a new thread (its daemon replaced a thread that was
+/// archived or gone), "Read" under your last message once the agent has it, its typing bubble while
+/// it works, and no @: everything you write reaches it. What you write while it works waits for that turn to end: those
+/// messages sit dimmed below the typing bubble, with why they wait (`AgentRoom.queued`), and can be
+/// edited or canceled until the agent gets them (`HappierStore.reviseQueuedRoomMessage`); once it
+/// does, they take their place by seq. Its header and info are `AgentChatView`'s.
 struct RoomView: View {
     let roomId: String
     @Environment(HappierStore.self) private var store
@@ -36,6 +42,11 @@ struct RoomView: View {
     @State private var trashX: CGFloat?
     @State private var micX: CGFloat?
     @State private var choosingModel = false
+    /// The waiting message being edited, by seq, and its text in the editor.
+    @State private var editingQueued: Int?
+    @State private var queuedEditText = ""
+    /// An edit or cancel came too late: the agent already had the message.
+    @State private var tooLate = false
 
     private var room: AgentRoom? { store.room(id: roomId) }
     private var messages: [AgentRoomMessage] { store.roomMessages[roomId] ?? [] }
@@ -58,6 +69,21 @@ struct RoomView: View {
             replyingTo = nil
             if store.room(id: roomId) == nil { await store.refreshRooms() }
             await store.loadRoom(id: roomId)
+        }
+        .onChange(of: store.unreadRoomThreads(roomId: roomId), initial: true) { _, unread in
+            if !unread.isEmpty { store.readRoomThreads(roomId: roomId) }
+        }
+        .alert("Edit Message", isPresented: Binding(get: { editingQueued != nil }, set: { if !$0 { editingQueued = nil } })) {
+            TextField("Message", text: $queuedEditText, axis: .vertical)
+                .accessibilityIdentifier("room-queued-edit-field")
+            Button("Save") {
+                let text = queuedEditText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let seq = editingQueued, !text.isEmpty, text != messages.first(where: { $0.seq == seq })?.text else { return }
+                revise(seq, text: text)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("It hasn't reached \(room?.title ?? "") yet.")
         }
         .sheet(isPresented: $showMembers) {
             RoomMembersSheet(roomId: roomId)
@@ -85,15 +111,24 @@ struct RoomView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)
                     }
-                    let layout = room.isDirect ? DirectLayout(messages: messages, seats: seats) : nil
-                    ForEach(messages) { message in
-                        if let separator = layout?.separators[message.seq] {
-                            Text(verbatim: ChatDate.separatorLabel(separator))
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 10)
-                                .padding(.bottom, 2)
+                    // In an agent's chat, what it doesn't have yet waits at the bottom (`queuedRows`).
+                    let queue = room.queued(seats: seats, messages: messages)
+                    let waiting = Set(queue?.messages.map(\.seq) ?? [])
+                    let delivered = waiting.isEmpty ? messages : messages.filter { !waiting.contains($0.seq) }
+                    let layout = room.isDirect ? DirectLayout(messages: delivered, seats: seats) : nil
+                    ForEach(delivered) { message in
+                        let separator = layout?.separators[message.seq]
+                        let newThread = layout?.newThreads.contains(message.seq) == true
+                        if separator != nil || newThread {
+                            VStack(spacing: 2) {
+                                if let separator { Text(verbatim: ChatDate.separatorLabel(separator)) }
+                                if newThread { newThreadCaption(room) }
+                            }
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 10)
+                            .padding(.bottom, 2)
                         }
                         RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq,
                                        direct: room.isDirect, tail: layout?.tails.contains(message.seq) ?? true,
@@ -112,6 +147,7 @@ struct RoomView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .id("replying")
                         }
+                        queuedRows(room, queue, proxy: proxy)
                     } else {
                         ForEach(replying(room)) { member in
                             Label("\(member.name ?? member.agentId) is replying…", systemImage: "ellipsis.bubble")
@@ -164,6 +200,16 @@ struct RoomView: View {
             }
     }
 
+    /// "New thread", quiet like the time above a run: the agent's reply below it came from a new
+    /// thread (`AgentRoom.newThreadSeqs`).
+    private func newThreadCaption(_ room: AgentRoom) -> some View {
+        let why = String(localized: "\(room.title) continues in a new thread, starting from a recap of this chat.")
+        return Text("New thread")
+            .help(Text(verbatim: why))
+            .accessibilityHint(Text(verbatim: why))
+            .accessibilityIdentifier("room-new-thread")
+    }
+
     private func startReply(to message: AgentRoomMessage) {
         AppHaptics.light()
         withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { replyingTo = message.seq }
@@ -179,6 +225,61 @@ struct RoomView: View {
             try? await Task.sleep(for: .seconds(1.2))
             guard highlighted == seq else { return }
             withAnimation(.easeOut(duration: 0.5)) { highlighted = nil }
+        }
+    }
+
+    // MARK: What waits for the agent
+
+    /// Your messages the agent doesn't have yet, dimmed at the bottom of its chat with why they
+    /// wait: edit or cancel one from its menu (or a tap) until the agent gets it.
+    @ViewBuilder
+    private func queuedRows(_ room: AgentRoom, _ queue: AgentRoom.Queue?, proxy: ScrollViewProxy) -> some View {
+        let name = room.title
+        VStack(alignment: .trailing, spacing: 3) {
+            if let queue {
+                let status = queue.reason == .afterCurrentTurn
+                    ? String(localized: "Waiting · \(name) gets this after the current turn")
+                    : String(localized: "Waiting · Not delivered yet")
+                ForEach(queue.messages) { message in
+                    let waiting = RoomMessageRow.Waiting(status: status, revisable: queue.revisable,
+                                                         edit: { beginEdit(message) }, cancel: { revise(message.seq, text: nil) })
+                    RoomMessageRow(message: message, room: room, messages: messages, highlighted: highlighted == message.seq,
+                                   direct: true, tail: message.seq == queue.messages.last?.seq, waiting: waiting,
+                                   pick: { _ in }, reply: {}, showQuoted: { show($0, proxy: proxy) })
+                        .id(message.seq)
+                        .transition(.opacity)
+                }
+                Text(verbatim: status)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 4)
+                    .accessibilityIdentifier("room-queue-status")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: queue?.messages.map(\.seq))
+    }
+
+    private func beginEdit(_ message: AgentRoomMessage) {
+        queuedEditText = message.text
+        editingQueued = message.seq
+    }
+
+    /// Edits (`text`) or cancels the waiting message; when the agent got it first, says so.
+    private func revise(_ seq: Int, text: String?) {
+        Task {
+            switch await store.reviseQueuedRoomMessage(roomId: roomId, seq: seq, text: text) {
+            case .done:
+                AppHaptics.success()
+            case .alreadyDelivered:
+                AppHaptics.warning()
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { tooLate = true }
+                try? await Task.sleep(for: .seconds(4))
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { tooLate = false }
+            case .failed:
+                break
+            }
         }
     }
 
@@ -201,6 +302,14 @@ struct RoomView: View {
                 notice("\(AgentRoom.maxAgentTurns) agent turns in a row: write to let them go on.", systemImage: "hand.raised.fill", tint: .orange) {
                     EmptyView()
                 }
+            }
+            if tooLate {
+                notice("\(room.title) already has it, so it can't be changed now.", systemImage: "checkmark.circle.fill", tint: Color.userBubble) {
+                    Button("OK") { withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) { tooLate = false } }
+                        .accessibilityIdentifier("room-too-late-ok")
+                }
+                .transition(.opacity)
+                .accessibilityIdentifier("room-too-late")
             }
             let waits = room.waitingForUser(seats: seats, messages: messages).filter { !dismissing.contains(Self.key($0)) }
             if !waits.isEmpty {
@@ -377,7 +486,8 @@ struct RoomView: View {
     }
 
     /// The agent's model and effort, as the session composer's pill: changed here, they apply from
-    /// your next message. It always runs in YOLO.
+    /// your next message. It never offers another agent or provider: the chat sends through
+    /// `sendRoomMessage`, which never applies an armed switch. It always runs in YOLO.
     private func modelPill(_ controls: SessionControls, sessionId: String) -> some View {
         Button {
             AppHaptics.light()
@@ -400,11 +510,11 @@ struct RoomView: View {
         .accessibilityIdentifier("room-model")
         #if os(macOS)
         .popover(isPresented: $choosingModel, arrowEdge: .top) {
-            SessionModelPicker(sessionId: sessionId).frame(width: 340, height: 520)
+            SessionModelPicker(sessionId: sessionId, allowsAgentSwitch: false).frame(width: 340, height: 520)
         }
         #else
         .sheet(isPresented: $choosingModel) {
-            ModelPickerSheet { SessionModelPicker(sessionId: sessionId) }
+            ModelPickerSheet { SessionModelPicker(sessionId: sessionId, allowsAgentSwitch: false) }
                 .presentationDetents([.medium, .large])
         }
         #endif
@@ -543,12 +653,15 @@ struct RoomView: View {
 }
 
 /// How an agent's chat lays its messages out, as Messages does: the time centered before the first
-/// message and after each pause (`ChatDate.separatorGap`), the tail on the last bubble of each run
+/// message and after each pause (`ChatDate.separatorGap`), "New thread" centered above the agent's
+/// first reply from a new thread (`AgentRoom.newThreadSeqs`), the tail on the last bubble of each run
 /// of one author, and "Read" under your last message once the agent has it (its seat read through it,
 /// or its turn is reading it).
 private struct DirectLayout {
     /// The time shown above each message that starts after a pause, by seq.
     var separators: [Int: Date] = [:]
+    /// The agent's replies with "New thread" above them.
+    var newThreads: Set<Int> = []
     /// The messages that end a run.
     var tails: Set<Int> = []
     /// Your last message, once the agent has read it.
@@ -562,20 +675,35 @@ private struct DirectLayout {
                 separators[message.seq] = date(message)
             }
         }
+        newThreads = AgentRoom.newThreadSeqs(in: messages)
         for (index, message) in messages.enumerated() {
             let next = index + 1 < messages.count ? messages[index + 1] : nil
-            if next.map({ $0.author != message.author || separators[$0.seq] != nil }) ?? true { tails.insert(message.seq) }
+            if next.map({ $0.author != message.author || separators[$0.seq] != nil || newThreads.contains($0.seq) }) ?? true {
+                tails.insert(message.seq)
+            }
         }
-        let read = seats.map { max($0.readThroughSeq, $0.inFlight?.throughSeq ?? 0) }.max() ?? 0
+        let read = seats.map(\.deliveredThroughSeq).max() ?? 0
         if let last = messages.last(where: { $0.author == .user }), last.seq <= read { readSeq = last.seq }
     }
 }
 
 /// One message: yours on the right in your color; an agent's on the left under its emoji and name,
-/// Markdown like the session chat, with its `<options>` as the chat's buttons. Mentions are in bold;
+/// Markdown like the session chat, with its `<options>` as the chat's buttons and the sessions it
+/// names as cards between its bubbles (`SessionReferenceCard`). Mentions are in bold;
 /// the message it answers is quoted above it (tap it to go there). Reply is in its menu, a swipe to
-/// the left on iPhone and iPad, and a button on hover on the Mac.
+/// the left on iPhone and iPad, and a button on hover on the Mac. One of yours the agent doesn't
+/// have yet (`waiting`) is dimmed, and a tap or its menu edits, cancels or copies it instead.
 private struct RoomMessageRow: View {
+    /// Your message waiting for the agent (`AgentRoom.queued`), and what can be done with it.
+    struct Waiting {
+        /// Why it waits, for its actions' title.
+        let status: String
+        /// False before the agent's first delivery: it can only be copied.
+        let revisable: Bool
+        let edit: () -> Void
+        let cancel: () -> Void
+    }
+
     let message: AgentRoomMessage
     let room: AgentRoom
     let messages: [AgentRoomMessage]
@@ -585,6 +713,7 @@ private struct RoomMessageRow: View {
     var direct = false
     var tail = true
     var read = false
+    var waiting: Waiting?
     let pick: (String) -> Void
     let reply: () -> Void
     let showQuoted: (Int) -> Void
@@ -594,6 +723,8 @@ private struct RoomMessageRow: View {
     private var summaryId: String { "room-\(message.roomId)-\(message.seq)" }
     /// The TL;DR the bubble shows, if it shows one.
     private var shownSummary: String? { showsSummary ? MessageSummaries.shared.summaries[summaryId] : nil }
+    /// A waiting message's actions, after a tap.
+    @State private var showWaitingActions = false
     #if os(iOS)
     /// How far the message is dragged to the left to reply (≤ 0).
     @State private var swipe: CGFloat = 0
@@ -625,7 +756,7 @@ private struct RoomMessageRow: View {
         HStack(alignment: .bottom, spacing: 8) {
             if isUser { Spacer(minLength: direct ? 64 : 48) }
             #if os(macOS)
-            if isUser { hoverReply }
+            if isUser, waiting == nil { hoverReply }
             #endif
             if !isUser, !direct {
                 AgentAvatar(agentId: providerId, size: 28, emoji: emoji, photo: message.author.agentId.flatMap { store.agentPhotos[$0] })
@@ -677,20 +808,30 @@ private struct RoomMessageRow: View {
                 .accessibilityHidden(true)
         }
         .gesture(RoomReplySwipe { translation in
+            guard waiting == nil else { return }
             // Past the threshold it gives, with a tick, like Messages.
             let pulled = translation < -RoomReplySwipe.threshold ? -RoomReplySwipe.threshold + (translation + RoomReplySwipe.threshold) / 3 : translation
             if (pulled <= -RoomReplySwipe.threshold) != (swipe <= -RoomReplySwipe.threshold) { AppHaptics.selection() }
             swipe = pulled
         } onEnd: { translation in
-            if translation <= -RoomReplySwipe.threshold { reply() }
+            if waiting == nil, translation <= -RoomReplySwipe.threshold { reply() }
             withAnimation(.spring(duration: 0.3)) { swipe = 0 }
         })
         #else
         .onHover { hovering = $0 }
         #endif
         .accessibilityElement(children: .contain)
-        .accessibilityAction(named: Text("Reply"), reply)
-        .accessibilityIdentifier("room-message-\(message.seq)")
+        .accessibilityActions {
+            if let waiting {
+                if waiting.revisable {
+                    Button("Edit", action: waiting.edit)
+                    Button("Cancel Message", action: waiting.cancel)
+                }
+            } else {
+                Button("Reply", action: reply)
+            }
+        }
+        .accessibilityIdentifier(waiting == nil ? "room-message-\(message.seq)" : "room-queued-\(message.seq)")
     }
 
     #if os(macOS)
@@ -729,6 +870,16 @@ private struct RoomMessageRow: View {
         }
     }
 
+    /// A waiting message's actions: Edit and Cancel Message while the agent hasn't got it, and Copy.
+    @ViewBuilder
+    private func waitingActions(_ waiting: Waiting) -> some View {
+        if waiting.revisable {
+            Button("Edit", systemImage: "pencil") { AppHaptics.light(); waiting.edit() }
+            Button("Cancel Message", systemImage: "xmark.circle", role: .destructive) { AppHaptics.warning(); waiting.cancel() }
+        }
+        Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(message.text); AppHaptics.success() }
+    }
+
     /// "↩︎ Julián: …": the message this one answers, in a line; tapping it goes there.
     private func quote(_ answered: AgentRoomMessage) -> some View {
         Button {
@@ -758,40 +909,123 @@ private struct RoomMessageRow: View {
         return Text(text)
             .modifier(BubbleInsets(direct: direct, fromUser: true))
             .foregroundStyle(Color.white)
-            .background(Color.userBubble, in: shape)
+            // Waiting, it is dimmed like the session chat's queued messages.
+            .background(Color.userBubble.opacity(waiting == nil ? 1 : 0.55), in: shape)
+            #if os(iOS)
+            .contentShape(.contextMenuPreview, shape)
+            #endif
+            .contextMenu {
+                if let waiting { waitingActions(waiting) } else { actions }
+            }
+            .modifier(WaitingTap(waiting: waiting, text: message.text, showActions: $showWaitingActions) { waitingActions($0) })
+    }
+
+    /// The reply's blocks in order: each run of text is one bubble, and the sessions it names
+    /// (`MarkdownSegments.Segment.sessions`) are cards between them. Its `<options>` are left out
+    /// (they go below everything).
+    private enum Run {
+        case text([MarkdownSegments.Segment])
+        case sessions([String])
+    }
+
+    private func runs(_ segments: [MarkdownSegments.Segment]) -> [Run] {
+        var runs: [Run] = []
+        for segment in segments {
+            switch (segment, runs.last) {
+            case (.options, _):
+                continue
+            case (.sessions(let ids), .sessions(let before)?):
+                runs[runs.count - 1] = .sessions(before + ids)
+            case (.sessions(let ids), _):
+                runs.append(.sessions(ids))
+            case (_, .text(let before)?):
+                runs[runs.count - 1] = .text(before + [bolded(segment)])
+            case (_, _):
+                runs.append(.text([bolded(segment)]))
+            }
+        }
+        return runs
+    }
+
+    private func bolded(_ segment: MarkdownSegments.Segment) -> MarkdownSegments.Segment {
+        if case .prose(let text) = segment { return .prose(boldMentions(text)) }
+        return segment
+    }
+
+    /// Its bubbles and session cards, then its options. The whole row stays one message (one reply,
+    /// one swipe); its menu is on each bubble and its TL;DR on the first one, which shows the TL;DR
+    /// in place of the whole text while the cards stay. The tail goes on the last bubble only when
+    /// nothing follows it.
+    @ViewBuilder
+    private var agentBubble: some View {
+        let segments = MarkdownSegments.cached(message.text)
+        let runs = runs(segments)
+        let options = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
+        let summary = shownSummary
+        let firstText = runs.firstIndex { !Self.isSessions($0) }
+        // Everything, or while the TL;DR is shown, the first bubble (showing it) and the cards.
+        let shown = runs.indices.filter { summary == nil || $0 == firstText || Self.isSessions(runs[$0]) }
+        ForEach(shown, id: \.self) { index in
+            switch runs[index] {
+            case .text(let content):
+                let bubbleTail = tail && options.isEmpty && index == shown.last
+                if index == firstText {
+                    textBubble(summary.map { MarkdownSegments.cached($0) } ?? content, tail: bubbleTail)
+                        .tldr(id: summaryId, text: message.text, showsSummary: $showsSummary)
+                } else {
+                    textBubble(content, tail: bubbleTail)
+                }
+            case .sessions(let ids):
+                // Lined up with the bubbles' body, past the room their tails take.
+                SessionReferenceStack(ids: ids)
+                    .padding(.leading, direct ? BubbleShape.tailWidth : 0)
+            }
+        }
+        if !options.isEmpty {
+            ReplyOptions(options: options, chosen: AgentRoom.chosenOption(on: message, options: options, messages: messages), onSelect: pick)
+                .accessibilityIdentifier("room-options-\(message.seq)")
+        }
+    }
+
+    private static func isSessions(_ run: Run) -> Bool {
+        if case .sessions = run { true } else { false }
+    }
+
+    private func textBubble(_ content: [MarkdownSegments.Segment], tail: Bool) -> some View {
+        let shape = direct ? AnyShape(BubbleShape(fromUser: false, tail: tail))
+                           : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        return MarkdownText(segments: content)
+            .modifier(BubbleInsets(direct: direct, fromUser: false))
+            .background(Color.agentBubble, in: shape)
             #if os(iOS)
             .contentShape(.contextMenuPreview, shape)
             #endif
             .contextMenu { actions }
     }
+}
 
-    @ViewBuilder
-    private var agentBubble: some View {
-        let segments = MarkdownSegments.cached(message.text)
-        let content = segments.compactMap { segment -> MarkdownSegments.Segment? in
-            switch segment {
-            case .options: nil
-            case .prose(let text): .prose(boldMentions(text))
-            default: segment
-            }
-        }
-        let options = segments.flatMap { segment -> [String] in if case .options(let items) = segment { items } else { [] } }
-        if !content.isEmpty {
-            let shape = direct ? AnyShape(BubbleShape(fromUser: false, tail: tail && options.isEmpty))
-                               : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            let summary = shownSummary
-            MarkdownText(segments: summary.map { MarkdownSegments.cached($0) } ?? content)
-                .modifier(BubbleInsets(direct: direct, fromUser: false))
-                .background(Color.agentBubble, in: shape)
-                #if os(iOS)
-                .contentShape(.contextMenuPreview, shape)
-                #endif
-                .contextMenu { actions }
-                .tldr(id: summaryId, text: message.text, showsSummary: $showsSummary)
-        }
-        if !options.isEmpty {
-            ReplyOptions(options: options, chosen: AgentRoom.chosenOption(on: message, options: options, messages: messages), onSelect: pick)
-                .accessibilityIdentifier("room-options-\(message.seq)")
+/// A tap on a waiting message shows its actions (Edit, Cancel Message, Copy); other messages keep
+/// theirs in the menu only.
+private struct WaitingTap<Actions: View>: ViewModifier {
+    let waiting: RoomMessageRow.Waiting?
+    let text: String
+    @Binding var showActions: Bool
+    @ViewBuilder let actions: (RoomMessageRow.Waiting) -> Actions
+
+    func body(content: Content) -> some View {
+        if let waiting {
+            content
+                .onTapGesture { AppHaptics.light(); showActions = true }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(Text("Waiting for the agent. Shows actions for this message"))
+                .confirmationDialog(text, isPresented: $showActions, titleVisibility: .visible) {
+                    actions(waiting)
+                    Button("Close", role: .cancel) {}
+                } message: {
+                    Text(verbatim: waiting.status)
+                }
+        } else {
+            content
         }
     }
 }
@@ -905,7 +1139,7 @@ private extension AgentRoom {
 }
 
 private extension AgentRoomMessage {
-    /// Its prose in one line (no code or options), for a quote.
+    /// Its prose in one line (no code, options or session cards), for a quote.
     var quotePreview: String {
         MarkdownSegments.cached(text).compactMap { segment -> String? in
             if case .prose(let text) = segment { return text }

@@ -46,18 +46,24 @@ const TRANSCRIPT_PAGE_ROWS = 100;
 
 /**
  * The reply of the turn the message sent with `localId` started, read from the session's
- * transcript; null when that message isn't in the transcript (yet).
+ * transcript; null when that message isn't in the transcript (yet). `'thread_gone'` when the turn
+ * can never finish there: the session doesn't exist any more, or it is archived and the turn hadn't
+ * finished (a turn that finished before the archive still gives its reply).
  */
 export async function readTurnReplyAfterLocalId(params: Readonly<{
   credentials: Credentials;
   sessionId: string;
   localId: string;
-}>): Promise<TurnReply | null> {
+}>): Promise<TurnReply | 'thread_gone' | null> {
   const target = await resolveSessionTransportContext({ credentials: params.credentials, idOrPrefix: params.sessionId });
-  if (!target.ok) throw new Error(`session ${params.sessionId} is not readable (${target.code})`);
+  if (!target.ok) {
+    if (target.code === 'session_not_found') return 'thread_gone';
+    throw new Error(`session ${params.sessionId} is not readable (${target.code})`);
+  }
+  const archived = target.rawSession.archivedAt !== null && target.rawSession.archivedAt !== undefined;
   const token = params.credentials.token;
   const sent = await findTranscriptEncryptedMessageByLocalId({ token, sessionId: target.sessionId, localId: params.localId });
-  if (!sent) return null;
+  if (!sent) return archived ? 'thread_gone' : null;
   const rows: TranscriptRow[] = [];
   for (let afterSeq = sent.seq; ;) {
     const page = await fetchEncryptedTranscriptPageAfterSeq({ token, sessionId: target.sessionId, afterSeq, limit: TRANSCRIPT_PAGE_ROWS });
@@ -65,5 +71,6 @@ export async function readTurnReplyAfterLocalId(params: Readonly<{
     if (page.length < TRANSCRIPT_PAGE_ROWS) break;
     afterSeq = Math.max(...page.map((row) => row.seq));
   }
-  return readTurnReplyFromRows({ rows, ctx: target.ctx });
+  const reply = readTurnReplyFromRows({ rows, ctx: target.ctx });
+  return archived && !reply.finished ? 'thread_gone' : reply;
 }

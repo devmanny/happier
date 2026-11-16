@@ -7,7 +7,6 @@ import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persiste
 import type { SpawnSessionOptions, SpawnSessionResult } from '@/rpc/handlers/registerSessionHandlers';
 import { AgentRoomStore } from '@/session/agentRooms/agentRoomStore';
 import type { RoomPushSender } from '@/session/agentRooms/completeRoomTurn';
-import { pushEnabledInAccountSettings } from '@/session/agentRooms/startAgentRooms';
 import { awaitSpawnedSessionId, type SpawnSessionNonceResolver } from '@/session/services/awaitSpawnedSessionId';
 import { readTurnReplyAfterLocalId } from '@/session/services/readTurnReplyAfterLocalId';
 import { logger } from '@/ui/logger';
@@ -133,7 +132,6 @@ export function startAgentRoomWorker(params: Readonly<{
       sendToAgentThread({ credentials, sessionId, message, localId, permissionMode }),
     readTurnReply: (sessionId, localId) => readTurnReplyAfterLocalId({ credentials, sessionId, localId }),
     push: params.push,
-    pushEnabled: pushEnabledInAccountSettings,
   };
   const io = createUserScopedSocket({ token: credentials.token, capabilities: [UPDATES_LEAN_V1_CAPABILITY], reconnection: true });
   const socket: RoomUpdatesSocket = {

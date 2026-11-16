@@ -20,7 +20,13 @@ function readSeq(input: Record<string, unknown>, key: 'fromSeq' | 'toSeq'): numb
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-/** `sala_leer`, run in the calling session's runner: a member reads its room's messages. */
+/**
+ * `sala_leer`, run in the calling session's runner: a member reads its room's messages. In an agent's
+ * own chat it gets the user's messages only through what its seat has (`readThroughSeq`, or its
+ * in-flight `throughSeq`): the ones after it wait for the agent and the user may still edit or cancel
+ * them (the queue contract in `agentRoom.ts`). Its own replies all come. The seat is read before the
+ * messages, as the daemon does, so a message the seat covers can't change any more.
+ */
 export async function runAgentRoomTool(params: Readonly<{
   store: AgentRoomStore;
   caller: AgentRoomCaller;
@@ -37,9 +43,15 @@ export async function runAgentRoomTool(params: Readonly<{
     return { ok: false, error: `You are not a member of room ${roomId}.` };
   }
 
+  const seat = room.kind === 'direct' ? (await store.getSeats(roomId, [caller.agent.id])).get(caller.agent.id)?.seat ?? null : null;
+  const userMessagesThroughSeq = room.kind === 'direct'
+    ? Math.max(seat?.readThroughSeq ?? 0, seat?.inFlight?.throughSeq ?? 0)
+    : Number.POSITIVE_INFINITY;
+
   const toSeq = Math.min(readSeq(input, 'toSeq') ?? room.lastSeq, room.lastSeq);
   const fromSeq = Math.max(readSeq(input, 'fromSeq') ?? 1, toSeq - ROOM_READ_PAGE_MESSAGES + 1, 1);
-  const messages = toSeq >= fromSeq ? await store.readMessages(roomId, { fromSeq, toSeq }) : [];
+  const messages = (toSeq >= fromSeq ? await store.readMessages(roomId, { fromSeq, toSeq }) : [])
+    .filter((message) => message.author.kind !== 'user' || message.seq <= userMessagesThroughSeq);
   return {
     ok: true,
     roomId,

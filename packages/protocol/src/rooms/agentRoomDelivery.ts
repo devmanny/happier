@@ -15,7 +15,9 @@ import {
 /**
  * How a room's messages reach its members (the daemon of each member's machine delivers them):
  * a member mentioned with `@` gets everything it hasn't read, in one message to its thread in the
- * room; its turn's final text is posted back as its reply, and its marker moves to what it got.
+ * room; its turn's final text is posted back as its reply, and its marker moves to what it got. A
+ * new thread for a member that had read the room before (its thread was archived or deleted) also
+ * gets the room so far, its own replies included, so the chat goes on where it was.
  */
 
 /** At most this many agent turns in a row without the user: the brake. */
@@ -85,18 +87,41 @@ function oneLine(label: string, message: AgentRoomMessageV1): string {
   return line.length <= ROOM_DELIVERY_LINE_CHARS ? line : `${line.slice(0, ROOM_DELIVERY_LINE_CHARS - 1)}…`;
 }
 
+/** A delivery that opens a new thread for a member whose thread before it read up to `fromSeq - 1`. */
+export type RoomDeliveryContinuation = Readonly<{
+  /** The thread before it, which the member can read with `mis_hilos` while it exists. */
+  previousSessionId?: string;
+}>;
+
 type DeliveryRange = Readonly<{
   member: AgentRoomMember;
   messages: readonly AgentRoomMessageV1[];
   fromSeq: number;
   toSeq: number;
+  continuation?: RoomDeliveryContinuation;
 }>;
 
-/** Others' messages from `fromSeq` to `toSeq`, oldest first: what the member gets. */
-function unreadByOthers(params: DeliveryRange): AgentRoomMessageV1[] {
+/**
+ * The first seq a new thread's delivery (`continuation`) shows: the newest messages through `toSeq`
+ * that the cut shows in full or as one line each; the ones before are only counted.
+ */
+export function roomContinuationFromSeq(toSeq: number): number {
+  return Math.max(1, toSeq - ROOM_DELIVERY_FULL_MESSAGES - ROOM_DELIVERY_LINE_MESSAGES + 1);
+}
+
+function isOwnMessage(member: AgentRoomMember, message: AgentRoomMessageV1): boolean {
+  return message.author.kind === 'agent' && message.author.agentId === member.agentId;
+}
+
+/**
+ * What a delivery shows, oldest first: others' messages from `fromSeq` to `toSeq`; for a new thread,
+ * every message from `roomContinuationFromSeq(toSeq)` to `toSeq`, its own included.
+ */
+function shownMessages(params: DeliveryRange): AgentRoomMessageV1[] {
+  const fromSeq = params.continuation ? roomContinuationFromSeq(params.toSeq) : params.fromSeq;
   return [...new Map(params.messages
-    .filter((message) => message.seq >= params.fromSeq && message.seq <= params.toSeq)
-    .filter((message) => !(message.author.kind === 'agent' && message.author.agentId === params.member.agentId))
+    .filter((message) => message.seq >= fromSeq && message.seq <= params.toSeq)
+    .filter((message) => params.continuation !== undefined || !isOwnMessage(params.member, message))
     .map((message) => [message.seq, message])).values()]
     .sort((a, b) => a.seq - b.seq);
 }
@@ -107,7 +132,7 @@ function unreadByOthers(params: DeliveryRange): AgentRoomMessageV1[] {
  */
 export function roomDeliveryQuotedSeqs(params: DeliveryRange): number[] {
   const have = new Set(params.messages.map((message) => message.seq));
-  const quoted = unreadByOthers(params).slice(-ROOM_DELIVERY_FULL_MESSAGES)
+  const quoted = shownMessages(params).slice(-ROOM_DELIVERY_FULL_MESSAGES)
     .flatMap((message) => (message.replyTo && !have.has(message.replyTo.seq) ? [message.replyTo.seq] : []));
   return [...new Set(quoted)].sort((a, b) => a - b);
 }
@@ -117,34 +142,49 @@ export function roomDeliveryQuotedSeqs(params: DeliveryRange): number[] {
  * from `fromSeq` to `toSeq`, a long backlog cut down) and how its reply reaches the room. A message
  * shown in full that answers another says which, and quotes it in one line when `messages` holds
  * it (`roomDeliveryQuotedSeqs`).
+ *
+ * A new thread for a member that had read the room (`continuation`) gets the room so far instead,
+ * its own replies included and cut the same way, with what its thread before had already answered
+ * (through `fromSeq - 1`, and its own replies) apart from what is new. `messages` then needs only
+ * the seqs from `roomContinuationFromSeq(toSeq)`.
  */
 export function buildRoomDeliveryPrompt(params: Readonly<{ room: AgentRoomV1 }> & DeliveryRange): string {
-  const { room, member } = params;
+  const { room, member, continuation } = params;
   const userLabel = roomUserLabel(room);
-  const unread = unreadByOthers(params);
-  const full = unread.slice(-ROOM_DELIVERY_FULL_MESSAGES);
-  const lines = unread.slice(0, -ROOM_DELIVERY_FULL_MESSAGES).slice(-ROOM_DELIVERY_LINE_MESSAGES);
-  const counted = unread.slice(0, Math.max(0, unread.length - ROOM_DELIVERY_FULL_MESSAGES - ROOM_DELIVERY_LINE_MESSAGES));
+  const shown = shownMessages(params);
+  const full = shown.slice(-ROOM_DELIVERY_FULL_MESSAGES);
+  const lines = shown.slice(0, -ROOM_DELIVERY_FULL_MESSAGES).slice(-ROOM_DELIVERY_LINE_MESSAGES);
+  const cut = shown.slice(0, Math.max(0, shown.length - ROOM_DELIVERY_FULL_MESSAGES - ROOM_DELIVERY_LINE_MESSAGES));
+  const beforeShown = continuation ? roomContinuationFromSeq(params.toSeq) - 1 : 0;
+  const counted = beforeShown > 0
+    ? { count: beforeShown, first: 1, last: beforeShown }
+    : cut.length > 0 ? { count: cut.length, first: cut[0]!.seq, last: cut[cut.length - 1]!.seq } : null;
+  const isNew = (message: AgentRoomMessageV1) => message.seq >= params.fromSeq && !isOwnMessage(member, message);
   const others = room.members.filter((entry) => entry.agentId !== member.agentId).map((entry) => entry.name ?? entry.agentId);
 
   const parts = [
     `Room «${room.title}» (room ${room.id}). You are ${member.name ?? member.agentId}, here with ${[`${userLabel} (the user)`, ...others].join(', ')}.`,
   ];
-  if (counted.length > 0) {
-    const first = counted[0]!.seq;
-    const last = counted[counted.length - 1]!.seq;
-    parts.push(`${counted.length} earlier messages (#${first}–#${last}) are not shown; read them with sala_leer (roomId ${room.id}, toSeq ${last}).`);
+  if (continuation) {
+    const previous = continuation.previousSessionId ? ` (session ${continuation.previousSessionId}; mis_hilos reads it)` : '';
+    parts.push(`This is a new thread of yours in this room: the one before it${previous} answered everything through #${params.fromSeq - 1}. Below is the room so far, your own messages included.`);
+  }
+  if (counted) {
+    parts.push(`${counted.count} earlier messages (#${counted.first}–#${counted.last}) are not shown; read them with sala_leer (roomId ${room.id}, toSeq ${counted.last}).`);
   }
   if (lines.length > 0) {
     parts.push(`Earlier, one line each (full text with sala_leer):\n${lines
       .map((message) => oneLine(roomMessageAuthorLabel(message.author, userLabel), message)).join('\n')}`);
   }
   const quotes = { bySeq: new Map(params.messages.map((message) => [message.seq, message])), readerAgentId: member.agentId, maxChars: ROOM_DELIVERY_LINE_CHARS };
-  parts.push(`${lines.length > 0 ? 'Latest, in full' : 'New messages'}:\n\n${formatRoomMessages({ messages: full, userLabel, quotes })}`);
+  const answered = full.filter((message) => !isNew(message));
+  if (answered.length > 0) parts.push(`Already answered:\n\n${formatRoomMessages({ messages: answered, userLabel, quotes })}`);
+  parts.push(`${lines.some(isNew) ? 'Latest, in full' : 'New messages'}:\n\n${formatRoomMessages({ messages: full.filter(isNew), userLabel, quotes })}`);
   parts.push([
     'The final message of your turn is posted to the room as your reply.',
     `To hand the floor to someone, mention them (${others.length > 0 ? `@${others[0]}` : '@Name'}), or everyone with @todos; mention @${userLabel} to ask the user.`,
     'Use sala_leer to read more of the room.',
+    'To show the user one of your sessions (when they ask what you are doing, or you speak of work in another thread), put its id alone on a line as <session>ID</session>: the room shows it as a card with its live status. The ids are in your list of other threads and in mis_hilos.',
   ].join(' '));
   return parts.join('\n\n');
 }
@@ -181,15 +221,16 @@ export function resolveRoomReply(params: Readonly<{ room: AgentRoomV1; agentId: 
   };
 }
 
-export type RoomReplyNotice = 'mention' | 'brake';
+export type RoomReplyNotice = 'reply' | 'mention' | 'brake';
 
 /**
- * What the user is told about an agent's reply: that it mentions them, and that it handed the floor
- * on after `AGENT_ROOM_MAX_AGENT_TURNS` agent turns in a row, so the brake holds it.
+ * What the user is told about an agent's reply: every reply once, as a messaging app does (it stands
+ * for its thread's turn-finished notice, which a room turn doesn't send), as a mention when it
+ * mentions them outside the agent's own chat (`kind: 'direct'`). And that it handed the floor on
+ * after `AGENT_ROOM_MAX_AGENT_TURNS` agent turns in a row, so the brake holds it.
  */
-export function roomReplyNotices(params: Readonly<{ message: AgentRoomMessageV1; agentStreak: number }>): RoomReplyNotice[] {
-  const notices: RoomReplyNotice[] = [];
-  if (params.message.mentionsUser) notices.push('mention');
+export function roomReplyNotices(params: Readonly<{ room: AgentRoomV1; message: AgentRoomMessageV1; agentStreak: number }>): RoomReplyNotice[] {
+  const notices: RoomReplyNotice[] = [params.room.kind !== 'direct' && params.message.mentionsUser ? 'mention' : 'reply'];
   if (params.message.mentions.length > 0 && params.agentStreak >= AGENT_ROOM_MAX_AGENT_TURNS) notices.push('brake');
   return notices;
 }

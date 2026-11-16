@@ -9,14 +9,29 @@ public struct PushTap: Equatable, Sendable {
     }
 
     public let sessionId: String?
+    /// The room (`AgentRoom`) a room's notice is about (`completeRoomTurn`: a reply in an agent's
+    /// chat, a mention, the brake), which carries no session.
+    public let roomId: String?
     public let permission: Permission?
     /// Text typed into the notification's Reply field: sent to the session without opening it.
     public let reply: String?
 
-    public init(sessionId: String?, permission: Permission?, reply: String? = nil) {
+    public init(sessionId: String?, roomId: String? = nil, permission: Permission?, reply: String? = nil) {
         self.sessionId = sessionId
+        self.roomId = roomId
         self.permission = permission
         self.reply = reply
+    }
+
+    /// Whether the conversation the sidebar's `selection` shows is the one this is about (it then
+    /// comes without a banner): its session, its room, or, for an agent's chat, that agent's, opened
+    /// from its circle (`AgentProfile.selection`) or from a notification (`AgentRoom.selection`).
+    public func isShown(in selection: String?) -> Bool {
+        guard let selection else { return false }
+        if let sessionId, sessionId == selection { return true }
+        guard let roomId else { return false }
+        if let agentId = AgentProfile.id(inSelection: selection) { return AgentRoom.directId(agentId: agentId) == roomId }
+        return AgentRoom.id(inSelection: selection) == roomId
     }
 }
 
@@ -25,13 +40,15 @@ public struct DeliveredNotification: Identifiable, Equatable, Sendable {
     /// The notification request's identifier (what removes it from the device).
     public let id: String
     public let sessionId: String?
+    public let roomId: String?
     public let title: String
     public let body: String
     public let date: Date
 
-    public init(id: String, sessionId: String?, title: String, body: String, date: Date) {
+    public init(id: String, sessionId: String?, roomId: String? = nil, title: String, body: String, date: Date) {
         self.id = id
         self.sessionId = sessionId
+        self.roomId = roomId
         self.title = title
         self.body = body
         self.date = date
@@ -82,6 +99,7 @@ public enum PushNotifications {
     public static func tap(userInfo: JSONValue, action: String, replyText: String? = nil) -> PushTap? {
         let data = userInfo["body"]?.objectValue != nil ? userInfo["body"]! : userInfo
         let sessionId = nonEmpty(data["sessionId"]?.stringValue)
+        let roomId = nonEmpty(data["roomId"]?.stringValue)
         if action == Action.reply {
             guard let sessionId, let text = replyText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
             else { return nil }
@@ -99,17 +117,18 @@ public enum PushNotifications {
         if let allow, sessionId != nil, let requestId {
             permission = .init(allow: allow, requestId: requestId, tool: data["tool"]?.stringValue ?? "")
         }
-        return PushTap(sessionId: sessionId, permission: permission)
+        return PushTap(sessionId: sessionId, roomId: roomId, permission: permission)
     }
 
     /// Each session's newest notification, newest first (a newer one replaces the previous, as on
-    /// the device with `apns-collapse-id`), and the replaced ones to take off the device.
+    /// the device with `apns-collapse-id`), and the replaced ones to take off the device. A room's
+    /// notices (`PushTap.roomId`) carry no session: the newest of each room stays the same way.
     public static func latestPerSession(_ delivered: [DeliveredNotification]) -> (latest: [DeliveredNotification], stale: [String]) {
         var seen = Set<String>()
         var latest: [DeliveredNotification] = []
         var stale: [String] = []
         for notification in delivered.sorted(by: { $0.date > $1.date }) {
-            if let sessionId = notification.sessionId, !seen.insert(sessionId).inserted {
+            if let key = notification.sessionId ?? notification.roomId.map({ "room:" + $0 }), !seen.insert(key).inserted {
                 stale.append(notification.id)
             } else {
                 latest.append(notification)
