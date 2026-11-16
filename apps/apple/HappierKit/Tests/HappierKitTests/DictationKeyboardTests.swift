@@ -34,6 +34,17 @@ import Testing
         #expect(line == "Listo Gracias")
     }
 
+    @Test func anOpeningMarkStartsAWordWithASpace() {
+        var sync = KeyboardTextSync()
+        var field = "Te escribo"
+        apply(sync.edit(take: 1, text: "¿vienes?", before: field), to: &field)
+        #expect(field == "Te escribo ¿vienes?")
+        var other = KeyboardTextSync()
+        var exclaim = "Listo"
+        apply(other.edit(take: 2, text: "¡Qué bien!", before: exclaim), to: &exclaim)
+        #expect(exclaim == "Listo ¡Qué bien!")
+    }
+
     @Test func aNewTakeNeverDeletesThePreviousOne() {
         var sync = KeyboardTextSync()
         var field = ""

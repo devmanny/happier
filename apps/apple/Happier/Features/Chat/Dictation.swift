@@ -164,7 +164,9 @@ final class Dictation {
             levels = []
             heard = ""
             let separator = prefix.isEmpty || prefix.hasSuffix(" ") ? "" : " "
-            let deliver: @MainActor (String) -> Void = { text in onText(prefix + separator + text) }
+            // Written in the user's style (Settings › Dictation), fixed for the whole take.
+            let style = DictationStyle(defaults: .standard)
+            let deliver: @MainActor (String) -> Void = { text in onText(prefix + separator + style.apply(text)) }
             let takeLog = DictationTakeLog(engine: choice.engine, fallback: choice.fallback)
             let recognizer = try await DictationRecognizers.start(choice.engine, language: language, takeLog: takeLog) { [weak self] text, ended, failure in
                 Task { @MainActor in

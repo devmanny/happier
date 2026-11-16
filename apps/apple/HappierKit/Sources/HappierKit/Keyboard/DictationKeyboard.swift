@@ -242,7 +242,9 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
     static func needsSpace(before: String?, text: String) -> Bool {
         guard let last = before?.last, let first = text.first else { return false }
         if last.isWhitespace || last.isNewline { return false }
-        // "hola" + ", qué tal": punctuation sticks to the word before it.
+        // "hola" + ", qué tal": punctuation sticks to the word before it; "¿", "¡", "(" and
+        // quotes open the next one.
+        if "¿¡([{\"“«'‘".contains(first) { return true }
         if first.isPunctuation { return false }
         return true
     }

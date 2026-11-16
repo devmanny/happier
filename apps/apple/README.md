@@ -340,7 +340,10 @@ appearing about once a second and the rest when you stop (tap or release); silen
 noises (under 0.3 s) are not transcribed, and the phrases Whisper writes for silence ("Gracias.",
 "Gracias por ver el video.") are dropped from a pass with under half a second of speech. Each pass
 is decoded on its own, so a word Whisper capitalized only because a pass starts mid-sentence takes
-the lowercase it was written in elsewhere in the take; in Spanish a lone "C." is "Sí." Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
+the lowercase it was written in elsewhere in the take; in Spanish a lone "C." is "Sí." Settings ›
+Dictation › Writing Style (`DictationStyle`) sets how every take is written, in the composer and
+the keyboard: opening ¿ ¡, capital letters, and periods between sentences (off: commas, no closing
+period). By default text is written as dictated. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
 SFSpeechRecognizer. `Dictation` owns the take, on the app's shared microphone (see Oído); `DictationEngine.choose` picks
 the device's engine and `DictationEngine.forTake` the take's. A take never waits for Whisper to
 load: while the model isn't in memory (it is let go when the app leaves the screen and loads again
