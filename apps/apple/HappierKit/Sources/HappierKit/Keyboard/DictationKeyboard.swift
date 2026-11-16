@@ -200,8 +200,8 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
     /// The space put before the take's text, when it followed a word.
     private var separator: String?
     /// The text before the cursor stopped ending with what was typed (the cursor moved, or the
-    /// user edited): nothing typed is taken back any more, new words are only added.
-    public private(set) var appendOnly = false
+    /// user edited): the user is fixing the text, and nothing more of the take is typed.
+    public private(set) var stopped = false
 
     public init() {}
 
@@ -212,20 +212,14 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
             self.take = take
             typed = ""
             separator = nil
-            appendOnly = false
+            stopped = false
         }
         if separator == nil, !text.isEmpty {
             separator = Self.needsSpace(before: before, text: text) ? " " : ""
         }
         let target = (separator ?? "") + text
-        if !appendOnly, !Self.ends(before, with: typed) { appendOnly = true }
-        if appendOnly {
-            // Only what goes past what was typed already.
-            guard target.count > typed.count else { return Edit(delete: 0, insert: "") }
-            let added = String(target.dropFirst(typed.count))
-            typed = target
-            return Edit(delete: 0, insert: added)
-        }
+        if !stopped, !Self.ends(before, with: typed) { stopped = true }
+        if stopped { return Edit(delete: 0, insert: "") }
         let common = Self.commonPrefixCount(typed, target)
         let edit = Edit(delete: typed.count - common, insert: String(target.dropFirst(common)))
         typed = target
@@ -270,6 +264,8 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
     /// Takes up to this one are typed, or were over before the keyboard first looked.
     public private(set) var typedThrough: Int?
     public private(set) var sync = KeyboardTextSync()
+    /// The last take the user edited mid-way (it stopped typing; the keyboard ends it).
+    public private(set) var userTookOver: Int?
 
     public init() {}
 
@@ -281,6 +277,11 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
         }
         guard status.take > typedThrough else { return nil }
         let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(status.text), before: before)
+        if sync.stopped {
+            userTookOver = status.take
+            leave(take: status.take)
+            return nil
+        }
         if status.final {
             self.typedThrough = status.take
             sync.reset()

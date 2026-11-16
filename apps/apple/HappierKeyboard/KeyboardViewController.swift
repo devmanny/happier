@@ -253,7 +253,17 @@ final class KeyboardModel {
 
     private func typeTake(_ status: DictationKeyboard.Status) {
         guard let proxy else { return }
-        guard let edit = typing.edit(for: status, before: proxy.documentContextBeforeInput) else { return }
+        let tookOver = typing.userTookOver
+        let edit = typing.edit(for: status, before: proxy.documentContextBeforeInput)
+        if typing.userTookOver != tookOver {
+            // The user tapped into the text and edited it: the take stops, so it neither types into
+            // their fix nor hears on for a field it no longer writes to.
+            log.notice("field edited while listening: finishing the take")
+            saveTyping()
+            if listening { send(.finish) }
+            return
+        }
+        guard let edit else { return }
         if !edit.isEmpty {
             for _ in 0..<edit.delete { proxy.deleteBackward() }
             if !edit.insert.isEmpty { proxy.insertText(edit.insert) }

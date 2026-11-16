@@ -93,14 +93,30 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
     private var confirmed: [Segment] = []
     /// The text after `confirmedEnd`, as last decoded.
     private var pending: [String] = []
+    /// The take's language ("es"), when known.
+    private let language: String?
+    /// Words Whisper wrote in lowercase in this take: the same word capitalized at the start of a
+    /// pass, mid-sentence, is a pass decoded out of context, not a name.
+    private var lowercaseWords: Set<String> = []
 
-    public init() {}
+    public init(language: String? = nil) {
+        self.language = language
+    }
 
     public var text: String {
-        (confirmed.map(\.text) + pending)
+        let text = (confirmed.map(\.text) + pending)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+        return language?.hasPrefix("es") == true ? Self.yesNotC(text) : text
+    }
+
+    /// Whisper hears a lone Spanish "sí" as the letter "C." (3 of 4 voices tried); a take that is
+    /// only that letter is "Sí".
+    static func yesNotC(_ text: String) -> String {
+        let letters = text.filter { $0.isLetter }
+        guard letters == "C", text.count <= 4 else { return text }
+        return text.replacingOccurrences(of: "C", with: "Sí")
     }
 
     /// The next pass for a take whose speech ends `speechEnd` seconds in, or nil when nothing was
@@ -120,13 +136,19 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
     /// The segments of a pass that started at `confirmedEnd`, over audio with `speech` seconds of
     /// speech (`DictationSpeech.speechSeconds`).
     public mutating func update(_ segments: [Segment], final: Bool, speech: Float = .infinity) {
-        let segments = segments.filter {
+        let decoded = segments.filter {
             !$0.text.trimmingCharacters(in: .whitespaces).isEmpty
                 && !(speech < Self.silencePhraseSpeech && Self.isSilencePhrase($0.text))
         }
         // Nothing decoded (Whisper judged it silent): the words already shown stay, and on the
         // final pass they are the take's last words.
-        guard !segments.isEmpty else { return }
+        guard !decoded.isEmpty else { return }
+        for segment in decoded { lowercaseWords.formUnion(Self.lowercaseWords(in: segment.text)) }
+        var previous = confirmed.last?.text
+        let segments = decoded.map { segment in
+            defer { previous = segment.text }
+            return Segment(text: continuing(segment.text, after: previous), start: segment.start, end: segment.end)
+        }
         let settled = final ? segments.count : max(0, segments.count - Self.openSegments)
         let done = segments.prefix(settled)
         if let last = done.last, final || last.end > confirmedEnd {
@@ -134,6 +156,22 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
             confirmedEnd = max(confirmedEnd, last.end)
         }
         pending = segments.dropFirst(settled).map(\.text)
+    }
+
+    /// `text` going on from `previous` mid-sentence: a first word Whisper capitalized only because
+    /// a pass or segment starts there goes back to the lowercase it was written in elsewhere.
+    private func continuing(_ text: String, after previous: String?) -> String {
+        guard let previous = previous?.trimmingCharacters(in: .whitespaces), let last = previous.last,
+              !".?!…".contains(last) else { return text }
+        guard let range = text.range(of: #"\p{Lu}\p{Ll}*"#, options: .regularExpression),
+              text[..<range.lowerBound].allSatisfy(\.isWhitespace) else { return text }
+        let word = text[range].lowercased()
+        guard lowercaseWords.contains(word) else { return text }
+        return text.replacingCharacters(in: range, with: word)
+    }
+
+    private static func lowercaseWords(in text: String) -> [String] {
+        text.split { !$0.isLetter }.map(String.init).filter { $0.first?.isLowercase == true }
     }
 
     /// Less speech than this in a pass, and a phrase Whisper writes for silence is that, not words:

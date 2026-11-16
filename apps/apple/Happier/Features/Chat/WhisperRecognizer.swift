@@ -305,7 +305,7 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
     }
 
     private func run(folder: URL, language: String) async -> String {
-        var transcript = WhisperStreamTranscript()
+        var transcript = WhisperStreamTranscript(language: language)
         // The final pass is what gets sent: WhisperKit's fallback decodes it again at rising
         // temperatures when it isn't sure. A live pass is a draft the next one replaces: one decode,
         // stopped once it starts repeating itself (as WhisperKit's AudioStreamTranscriber does);

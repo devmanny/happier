@@ -77,7 +77,9 @@ The two sides talk through `HappierKit/Keyboard/DictationKeyboard.swift`: the ap
 `status.json` and the keyboard `command.json` in the App Group's `DictationKeyboard/` folder, each
 followed by a Darwin notification. `KeyboardTyping` decides which takes the keyboard types (each
 once, across keyboard reloads, without the period Whisper closes every take with) and
-`KeyboardTextSync` turns each revision into deletes and inserts.
+`KeyboardTextSync` turns each revision into deletes and inserts. Deleting, the trackpad, or any edit
+that leaves the field no longer ending with what the take typed ends the take: nothing more of it
+is typed into the user's fix.
 
 ## Passkeys in the iOS browser
 
@@ -334,8 +336,11 @@ can be kept: the one tapped (else the latest download, else the most accurate le
 While one is in use and the device can run it,
 dictation transcribes on the device in the dictation language (Settings › Dictation › Language;
 Automatic takes the device's first language it supports), never auto-detected, with text
-appearing about once a second and the rest when you stop (tap or release); silence is not
-transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
+appearing about once a second and the rest when you stop (tap or release); silence and short
+noises (under 0.3 s) are not transcribed, and the phrases Whisper writes for silence ("Gracias.",
+"Gracias por ver el video.") are dropped from a pass with under half a second of speech. Each pass
+is decoded on its own, so a word Whisper capitalized only because a pass starts mid-sentence takes
+the lowercase it was written in elsewhere in the take; in Spanish a lone "C." is "Sí." Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
 SFSpeechRecognizer. `Dictation` owns the take, on the app's shared microphone (see Oído); `DictationEngine.choose` picks
 the device's engine and `DictationEngine.forTake` the take's. A take never waits for Whisper to
 load: while the model isn't in memory (it is let go when the app leaves the screen and loads again

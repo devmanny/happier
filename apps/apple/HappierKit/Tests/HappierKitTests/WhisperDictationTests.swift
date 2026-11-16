@@ -74,6 +74,42 @@ struct WhisperDictationTests {
         #expect(short.text == "No.")
     }
 
+    @Test func aPassThatStartsMidSentenceKeepsTheSentencesCase() {
+        // Each pass is decoded on its own, so Whisper starts it as a sentence: "Lo que vas diciendo".
+        // The words at that point were decoded before in context ("lo que"), and keep that case.
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Porque te va dibujando", 0, 1.5), segment(" lo que vas diciendo", 1.5, 3),
+                           segment(" de ahí", 3, 4)], final: false)
+        transcript.update([segment(" Lo que vas diciendo,", 1.5, 3), segment(" de ahí en más", 3, 4.2),
+                           segment(" creo que", 4.2, 5)], final: false)
+        transcript.update([segment(" De ahí en más", 3, 4.2), segment(" Creo que Fireflies o las notas de Gemini son iguales.", 4.2, 7)], final: true)
+        #expect(transcript.text == "Porque te va dibujando lo que vas diciendo, de ahí en más creo que Fireflies o las notas de Gemini son iguales.")
+    }
+
+    @Test func aPassAfterASentenceOrANameKeepsItsCapital() {
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Ya llegué.", 0, 1), segment(" Gemini lo resume", 1, 2), segment(" bien", 2, 3)], final: false)
+        transcript.update([segment(" Gemini lo resume", 1, 2), segment(" bien.", 2, 3)], final: true)
+        #expect(transcript.text == "Ya llegué. Gemini lo resume bien.")
+    }
+
+    @Test func aSpanishYesIsNotTheLetterC() {
+        // Whisper hears a lone "sí" as the letter "C." (3 of 4 voices tried).
+        var transcript = WhisperStreamTranscript(language: "es")
+        transcript.update([segment(" C.", 0, 1)], final: true)
+        #expect(transcript.text == "Sí.")
+        var question = WhisperStreamTranscript(language: "es")
+        question.update([segment(" ¿C?", 0, 1)], final: true)
+        #expect(question.text == "¿Sí?")
+        // Not in English, and not a C inside other words.
+        var english = WhisperStreamTranscript(language: "en")
+        english.update([segment(" C.", 0, 1)], final: true)
+        #expect(english.text == "C.")
+        var vitamin = WhisperStreamTranscript(language: "es")
+        vitamin.update([segment(" Vitamina C.", 0, 1)], final: true)
+        #expect(vitamin.text == "Vitamina C.")
+    }
+
     @Test func confirmsAllButTheLastTwoSegments() {
         var transcript = WhisperStreamTranscript()
         transcript.update([segment(" Hola,", 0, 1), segment(" revisa la sesión", 1, 3)], final: false)

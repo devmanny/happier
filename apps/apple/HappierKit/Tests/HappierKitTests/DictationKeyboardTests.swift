@@ -42,16 +42,17 @@ import Testing
         #expect(field == "Primero. Segundo")
     }
 
-    @Test func afterTheUserEditsItOnlyAddsWords() {
+    @Test func afterTheUserEditsItTypesNothingMore() {
         var sync = KeyboardTextSync()
         var field = ""
         apply(sync.edit(take: 1, text: "Hola mundo", before: field), to: &field)
-        // The cursor moved: what's before it no longer ends with what was typed.
-        let edit = sync.edit(take: 1, text: "Hola mundo entero", before: "Hola")
-        #expect(edit == .init(delete: 0, insert: " entero"))
-        #expect(sync.appendOnly)
-        // A revision of words already typed can't be applied any more.
-        #expect(sync.edit(take: 1, text: "Hola mundo enteros", before: "Hola entero").delete == 0)
+        // The cursor moved or the user typed: what's before it no longer ends with what was typed.
+        // The user is fixing the text; anything typed now would land in the middle of it.
+        #expect(sync.edit(take: 1, text: "Hola mundo entero", before: "Hola A").isEmpty)
+        #expect(sync.stopped)
+        #expect(sync.edit(take: 1, text: "Hola mundo entero.", before: "Hola A mundo").isEmpty)
+        // The next take types again.
+        #expect(sync.edit(take: 2, text: "Sí", before: "Hola A mundo") == .init(delete: 0, insert: " Sí"))
     }
 
     @Test func aFieldThatShowsOnlyPartOfTheTextIsTrusted() {
@@ -60,7 +61,7 @@ import Testing
         // Some fields report only the last few characters before the cursor.
         let edit = sync.edit(take: 1, text: "una frase bastante largo", before: "larga")
         #expect(edit == .init(delete: 1, insert: "o"))
-        #expect(!sync.appendOnly)
+        #expect(!sync.stopped)
         // And some report nothing at all.
         #expect(sync.edit(take: 1, text: "una frase bastante largo.", before: nil) == .init(delete: 0, insert: "."))
     }
@@ -124,6 +125,18 @@ import Testing
         // Questions, exclamations, ellipses and inner periods stay.
         #expect(typing.edit(for: status(4, "Hola. ¿Vienes?", final: true), before: "") == .init(delete: 0, insert: "Hola. ¿Vienes?"))
         #expect(typing.edit(for: status(5, "Pues...", final: true), before: "") == .init(delete: 0, insert: "Pues..."))
+    }
+
+    @Test func aTakeTheUserEditedIsLeftForGood() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(1, "x", final: true), before: "")
+        #expect(typing.edit(for: status(2, "Busca una Mac"), before: "") == .init(delete: 0, insert: "Busca una Mac"))
+        #expect(typing.userTookOver == nil)
+        // The user tapped into a word and typed: the take stops typing, for good.
+        #expect(typing.edit(for: status(2, "Busca una Mac Studio"), before: "Busca una A") == nil)
+        #expect(typing.userTookOver == 2)
+        #expect(typing.edit(for: status(2, "Busca una Mac Studio.", final: true), before: "Busca una A") == nil)
+        #expect(typing.edit(for: status(3, "Sí."), before: "Busca una A") == .init(delete: 0, insert: " Sí"))
     }
 
     @Test func aTakeLeftWhenTheKeyboardClosedIsNotTypedOnReturn() {
