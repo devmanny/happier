@@ -175,7 +175,20 @@ final class KeyboardModel {
 
     func space() { proxy?.insertText(" ") }
     func newline() { proxy?.insertText("\n") }
-    func deleteBackward() { proxy?.deleteBackward() }
+    func deleteBackward() {
+        stopForEditing()
+        proxy?.deleteBackward()
+    }
+
+    /// Deleting or moving the cursor mid-take: you're fixing the text, so the take stops and types
+    /// nothing more (it would keep writing over what you're fixing).
+    private func stopForEditing() {
+        guard listening, let take = status?.take else { return }
+        log.notice("edited while listening: finishing the take")
+        send(.finish)
+        typing.leave(take: take)
+        saveTyping()
+    }
 
     var globeTarget: UIInputViewController? { controller }
 
@@ -186,6 +199,7 @@ final class KeyboardModel {
     @ObservationIgnored private lazy var tick = UISelectionFeedbackGenerator()
 
     func trackpadBegan() {
+        stopForEditing()
         trackpad = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         tick.prepare()
