@@ -26,6 +26,38 @@ describe('createClaudePromptSubmitVerificationPolicy', () => {
     expect(policy.isPromptStagedBeforeSubmit({ promptText, screenText: '❯ [Pasted text #1' })).toBe(false);
   });
 
+  it('remembers what the composer showed while staging, as a kind and never as text', () => {
+    const policy = createClaudePromptSubmitVerificationPolicy();
+    const promptText = 'authorized prompt';
+    const rule = '────────────────────────────────────────────────';
+    const rewindSelector = [
+      '   Rewind',
+      '',
+      '   Restore the code and/or conversation to the point before…',
+      '',
+      '     previous user message',
+      '',
+      '   ❯ (current)',
+      '',
+      '   Enter to continue · Esc to cancel',
+    ].join('\n');
+
+    expect(policy.stagingObservations.readLastKind()).toBeNull();
+    expect(policy.isPromptStagedBeforeSubmit({ promptText, screenText: rewindSelector })).toBe(false);
+    expect(policy.stagingObservations.readLastKind()).toBe('selection');
+    expect(policy.isPromptStagedBeforeSubmit({ promptText, screenText: [rule, '❯ ', rule].join('\n') })).toBe(false);
+    expect(policy.stagingObservations.readLastKind()).toBe('empty');
+    expect(policy.isPromptStagedBeforeSubmit({ promptText, screenText: [rule, `❯ ${promptText}`, rule].join('\n') })).toBe(true);
+    expect(policy.stagingObservations.readLastKind()).toBe('prompt_visible');
+
+    // After Enter the verifier only asks whether the prompt is still there; staging evidence stays.
+    expect(policy.isPromptStillPendingAfterSubmit({ promptText, screenText: rewindSelector })).toBe(false);
+    expect(policy.stagingObservations.readLastKind()).toBe('prompt_visible');
+
+    policy.stagingObservations.reset();
+    expect(policy.stagingObservations.readLastKind()).toBeNull();
+  });
+
   it('sees a prompt that starts with a list number staged in the rule-boxed composer', () => {
     const policy = createClaudePromptSubmitVerificationPolicy();
     const rule = '────────────────────────────────────────────────';

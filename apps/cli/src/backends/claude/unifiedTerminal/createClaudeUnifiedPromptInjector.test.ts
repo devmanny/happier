@@ -6,8 +6,12 @@ import {
   runTerminalPromptSubmission,
 } from '@/integrations/terminalHost/promptSubmitVerification';
 
+import { logger } from '@/ui/logger';
+
 import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
+import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
 
 describe('createClaudeUnifiedPromptInjector', () => {
   it('maps the internal goal-control origin onto the terminal RPC transport origin', async () => {
@@ -358,6 +362,45 @@ describe('createClaudeUnifiedPromptInjector', () => {
         name: 'unified.injection.draft_guard',
         properties: { status: 'foreign_draft', draftLength: 12, originKind: 'ui_pending' },
       });
+    });
+
+    it('writes the next prompt after clearing two own pastes that a stalled TUI painted together', async () => {
+      // Pending blocked incident (2026-11-16): an earlier own paste plus a Send Again copy of a
+      // second prompt sat together in the composer. Classified foreign, it deferred every later
+      // send as terminal_user_draft until the runner restarted.
+      const first = 'I signed in, but I do not see the Beta organizations.';
+      const urlPrompt = `https://example.test/dashboard ${first}`;
+      const ownTexts = createClaudeOwnComposerTextLog();
+      ownTexts.record(first);
+      ownTexts.record(urlPrompt);
+      const composerScreen = (draft: string) => [
+        '╭───────────────────────────────────────────────╮',
+        `│ > ${draft}`,
+        '╰───────────────────────────────────────────────╯',
+        '  ⏵⏵ accept edits on (shift+tab to cycle)',
+      ].join('\n');
+      const captures = [composerScreen(`${first}${urlPrompt}`), composerScreen('')];
+      const sendClearKey = vi.fn(async () => undefined);
+      const injectUserPrompt = vi.fn().mockResolvedValue({ status: 'injected', at: 1, bytesWritten: 11 });
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'tmux', injectUserPrompt },
+        composerDraftGuard: async () => {
+          const result = await clearOwnLeftoverComposerDraft({
+            captureInputState: async () => ({ currentInput: captures.shift() ?? composerScreen('') }),
+            sendClearKey,
+            ownComposerTexts: ownTexts,
+            wait: async () => undefined,
+          });
+          return { status: result.status };
+        },
+        createNonce: () => 'nonce-concatenated-own',
+      });
+
+      await expect(
+        injector.injectPrompt({ message: 'next prompt', origin: { kind: 'ui_pending', clientId: 'c1' } }),
+      ).resolves.toMatchObject({ status: 'injected' });
+      expect(sendClearKey).toHaveBeenCalledTimes(1);
+      expect(injectUserPrompt).toHaveBeenCalledWith(expect.objectContaining({ text: 'next prompt' }));
     });
 
     it('defers provider-unavailable guard states with the provider blocker instead of a composer-draft blocker', async () => {
@@ -723,8 +766,41 @@ describe('createClaudeUnifiedPromptInjector — delivery verification budget', (
         recoverable: true,
       };
     });
-    return { injectUserPrompt, sessionLifetime };
+    return { injectUserPrompt, sessionLifetime, policy };
   }
+
+  it('names what the verifier last saw in the stall-budget warning, never the prompt text', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const host = createNeverStagedHost(async () => 'success' as const);
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'tmux', injectUserPrompt: host.injectUserPrompt },
+        createNonce: () => 'nonce-budget-observation',
+        deliveryVerificationBudgetMs: 135_000,
+        stagingObservations: host.policy.stagingObservations,
+      });
+      const prompt = 'a prompt the screen never shows';
+      const delivery = injector.injectPrompt({
+        message: prompt,
+        origin: { kind: 'ui_pending' },
+        userMessageLocalIds: ['local-1'],
+      });
+
+      await vi.advanceTimersByTimeAsync(135_500);
+      await expect(delivery).resolves.toMatchObject({ status: 'failed', phase: 'after_write_before_enter' });
+
+      expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        phase: 'after_write_before_enter',
+        lastStagingObservation: 'empty',
+      }));
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(prompt);
+      host.sessionLifetime.abort();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it('ends an unobservable delivery as an ambiguous failure after the session stall budget, without pressing Enter', async () => {
     vi.useFakeTimers();

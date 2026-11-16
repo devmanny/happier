@@ -101,6 +101,12 @@ export type ClaudeScreenState = Readonly<{
    */
   feedbackDraftCardVisible: boolean;
   /**
+   * Claude Code 2.1.322 footer notice after a first Escape on a non-empty prompt. Claude clears
+   * only on a second press inside its 800 ms double-press window; the same pair on an EMPTY prompt
+   * opens Rewind instead. Proof that Claude processed the first Escape and kept the draft.
+   */
+  escapeAgainToClearHintVisible: boolean;
+  /**
    * Exact (trimmed) content of the BOTTOM composer line, `''` when the composer is empty and null
    * when no composer line is found. The control modules use it to (a) detect a leftover
    * slash-command draft that passes the safe-window check with the picker closed and (b) prove the
@@ -192,6 +198,7 @@ const FOCUSED_UNINDEXED_SELECTION_LINE = new RegExp(
 const SELECTION_CONFIRM_HINT = /enter to confirm[^\n]*esc to cancel/i;
 // Claude Code 2.1.280 live capture: the automatic wait is a footer, not a numbered chooser.
 const USAGE_LIMIT_WAIT_FOOTER = /(?:^|\n)[^\S\n]*continuing automatically[^\n]*\besc to cancel\b/i;
+const ESCAPE_AGAIN_TO_CLEAR_HINT = /\besc again to clear\b/i;
 // Rewind is a sparse message selector: `(current)` can be the only visible focused row.
 const REWIND_SELECTION = /(?:^|\n)[^\S\n]*rewind[^\S\n]*\n[\s\S]*\brestore the code and\/or conversation to the point before[\s\S]*(?:^|\n)[^\S\n]*[>›❯][^\S\n]+[^\n]+[\s\S]*\benter to continue[^\n]*\besc to cancel[^\n]*\s*$/iu;
 const EFFORT_CHANGE_DIALOG_TARGET = /switching to\s+([a-z]+)\s+means the full history/i;
@@ -877,6 +884,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     ? text.slice(lastComposerMatch.index + lastComposerMatch[0].length)
     : visibleTail;
   const usageLimitWaitVisible = USAGE_LIMIT_WAIT_FOOTER.test(currentFooter);
+  const escapeAgainToClearHintVisible = lastComposerMatch !== null && ESCAPE_AGAIN_TO_CLEAR_HINT.test(currentFooter);
 
   const switchModelDialogVisible = SWITCH_MODEL_DIALOG.test(text);
   const usageLimitDialogVisible = usageLimitSemanticMatch && visibleDialogSelection !== null;
@@ -977,6 +985,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     userDraftPresent,
     selectionListVisible: rewindSelectionVisible || SELECTION_CURSOR_ROW.test(text) || (SELECTION_LIST_HINT.test(text) && !hasComposer),
     feedbackDraftCardVisible,
+    escapeAgainToClearHintVisible,
     composerContent,
     shellComposerContent: anyDialog ? null : composerState.shellContent,
     composerCursorRelation: composerState.cursorRelation,

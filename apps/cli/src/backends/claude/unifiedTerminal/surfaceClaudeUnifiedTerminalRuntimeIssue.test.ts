@@ -6,7 +6,10 @@ import { ClaudeUnifiedTerminalManagedSettingsOptionError } from './buildClaudeUn
 import { ClaudeUnifiedTerminalHostDeadError } from './createClaudeUnifiedController';
 import { ClaudeUnifiedTerminalHookActivationError } from './claudeUnifiedHookActivation';
 import { ClaudeUnifiedTerminalReadinessTimeoutError } from './createClaudeUnifiedTerminalReadinessBridge';
-import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
+import {
+  ClaudeUnifiedTerminalInjectionFailureError,
+  isClaudeUnifiedTerminalAmbiguousInjectionFailureError,
+} from './terminalInjectionFailureError';
 
 const loggerMock = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -135,6 +138,34 @@ describe('surfaceClaudeUnifiedTerminalRuntimeIssue', () => {
         failureState: 'failed_ambiguous',
       }),
     )).toBe(true);
+  });
+
+  it('leaves an unverified submit with Pending-owned local ids to the ambiguous path instead of failing the turn', () => {
+    // Pending blocked incident (2026-11-16): Enter was pressed, the screen never confirmed it, and
+    // the rows were still in Pending custody. Surfacing it as a runtime issue allocated a failed
+    // turn ("Turn failed") although the prompt may well have reached Claude.
+    const verificationFailedAfterEnter = (userMessageLocalIds: string[]) => new ClaudeUnifiedTerminalInjectionFailureError({
+      batch: {
+        message: 'hello',
+        origin: { kind: 'ui_pending' },
+        userMessageLocalIds,
+      },
+      result: {
+        status: 'failed',
+        reason: 'verification_failed',
+        phase: 'after_enter_unknown',
+        duplicateRisk: 'possible',
+        recoverable: true,
+      },
+      failureState: 'failed_ambiguous',
+    });
+
+    const pendingOwned = verificationFailedAfterEnter(['pending-local-after-enter']);
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(pendingOwned)).toBe(false);
+    expect(isClaudeUnifiedTerminalAmbiguousInjectionFailureError(pendingOwned)).toBe(true);
+
+    // Without a Pending row there is nothing to mark uncertain; the turn failure stays the signal.
+    expect(isClaudeUnifiedTerminalRuntimeIssueError(verificationFailedAfterEnter([]))).toBe(true);
   });
 
   it('classifies provider-acceptance timeouts without pending local ids as terminal runtime issues', () => {
