@@ -1,21 +1,47 @@
 import Foundation
 
-/// Where a take's speech ends. Whisper writes words for silence ("Gracias.", "[MÚSICA]"): the
-/// quiet after the last words, or a take with no speech at all, is not given to it.
+/// Where a take's speech ends. Whisper writes words for silence and for any noise in it
+/// ("Gracias.", "Gracias por ver el video.", "[MÚSICA]"), confidently: the quiet after the last
+/// words, a take with no speech, and short noises (a tap, a rustle) are not given to it.
 public enum DictationSpeech {
     /// One loudness frame, in seconds.
     public static let frameSeconds = 0.1
     /// Kept after the last loud frame so the end of the last word isn't cut.
     private static let marginFrames = 4
+    /// Speech is sustained: even "sí" or "no" said softly is 0.3 s loud; a tap or a rustle on the
+    /// phone is 0.2 s at most (measured on synthetic voices and noise bursts over room noise).
+    private static let minimumSpeechFrames = 3
 
     /// How many of the take's frames (loudness in dBFS, `frameSeconds` each) to transcribe, or nil
     /// when nothing in it is speech. Speech is 12 dB above the take's own background (its quietest
-    /// tenth), so a soft voice in a quiet room counts and steady room noise does not.
+    /// tenth), so a soft voice in a quiet room counts and steady room noise does not, and lasts
+    /// `minimumSpeechFrames`, so a short noise doesn't.
     public static func speechEnd(frameLevels levels: [Float]) -> Int? {
-        guard let background = background(frameLevels: levels) else { return nil }
-        let threshold = max(background + 12, -55)
-        guard let last = levels.lastIndex(where: { $0 > threshold }) else { return nil }
+        guard let last = speechFrames(frameLevels: levels).last else { return nil }
         return min(levels.count, last + 1 + marginFrames)
+    }
+
+    /// Seconds of speech in the take from frame `from` on.
+    public static func speechSeconds(frameLevels levels: [Float], from: Int) -> Float {
+        Float(speechFrames(frameLevels: levels).count { $0 >= from }) / Float(1 / frameSeconds)
+    }
+
+    /// The frames that are speech: loud, in runs of at least `minimumSpeechFrames`.
+    private static func speechFrames(frameLevels levels: [Float]) -> [Int] {
+        guard let background = background(frameLevels: levels) else { return [] }
+        let threshold = max(background + 12, -55)
+        var frames: [Int] = []
+        var run: [Int] = []
+        for (index, level) in levels.enumerated() {
+            if level > threshold {
+                run.append(index)
+                continue
+            }
+            if run.count >= minimumSpeechFrames { frames += run }
+            run.removeAll()
+        }
+        if run.count >= minimumSpeechFrames { frames += run }
+        return frames
     }
 
     /// The take's background loudness: its quietest tenth.
@@ -91,9 +117,13 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
         return Pass(start: confirmedEnd, end: max(speechEnd, confirmedEnd + minimumLength + Float(DictationSpeech.frameSeconds)))
     }
 
-    /// The segments of a pass that started at `confirmedEnd`.
-    public mutating func update(_ segments: [Segment], final: Bool) {
-        let segments = segments.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// The segments of a pass that started at `confirmedEnd`, over audio with `speech` seconds of
+    /// speech (`DictationSpeech.speechSeconds`).
+    public mutating func update(_ segments: [Segment], final: Bool, speech: Float = .infinity) {
+        let segments = segments.filter {
+            !$0.text.trimmingCharacters(in: .whitespaces).isEmpty
+                && !(speech < Self.silencePhraseSpeech && Self.isSilencePhrase($0.text))
+        }
         // Nothing decoded (Whisper judged it silent): the words already shown stay, and on the
         // final pass they are the take's last words.
         guard !segments.isEmpty else { return }
@@ -104,5 +134,25 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
             confirmedEnd = max(confirmedEnd, last.end)
         }
         pending = segments.dropFirst(settled).map(\.text)
+    }
+
+    /// Less speech than this in a pass, and a phrase Whisper writes for silence is that, not words:
+    /// "gracias" said for real is half a second or more.
+    static let silencePhraseSpeech: Float = 0.5
+
+    /// What Whisper writes for silence or noise, in Spanish and English (it says them with full
+    /// confidence, `noSpeechProb` 0, so its own silence check doesn't catch them).
+    private static let silencePhrases: Set<String> = [
+        "gracias", "muchas gracias", "gracias por ver", "gracias por ver el video", "gracias por su atencion",
+        "gracias por vernos", "hasta la proxima", "suscribete", "suscribete al canal", "musica",
+        "subtitulos realizados por la comunidad de amara org", "subtitulado por la comunidad de amara org",
+        "subtitulos por la comunidad de amara org",
+        "thank you", "thanks for watching", "thank you for watching", "you", "bye",
+    ]
+
+    static func isSilencePhrase(_ text: String) -> Bool {
+        let folded = text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        let words = folded.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+        return silencePhrases.contains(String(words).split(separator: " ").joined(separator: " "))
     }
 }

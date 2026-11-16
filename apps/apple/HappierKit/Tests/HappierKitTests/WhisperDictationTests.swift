@@ -21,6 +21,27 @@ struct WhisperDictationTests {
         #expect(DictationSpeech.speechEnd(frameLevels: []) == nil)
     }
 
+    @Test func aShortNoiseIsNotSpeech() {
+        // A tap or a rustle (0.2 s) after the words: Whisper hears "Gracias." in it, so it isn't
+        // speech and the take's speech still ends with the words.
+        let take = frames([(-62, 10), (-30, 20), (-62, 20), (-30, 2), (-62, 20)])
+        #expect(DictationSpeech.speechEnd(frameLevels: take) == 34)
+        // Nothing but taps: no speech at all.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-62, 20), (-30, 2), (-62, 20), (-30, 1), (-62, 20)])) == nil)
+    }
+
+    @Test func aShortWordIsSpeech() {
+        // "Sí" or "no": 0.3 s.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-62, 10), (-30, 3), (-62, 10)])) == 17)
+    }
+
+    @Test func speechCountsOnlySustainedSound() {
+        let take = frames([(-62, 10), (-30, 6), (-62, 10), (-30, 2), (-62, 10)])
+        #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 0) == 0.6)
+        // After the words: only the tap, which isn't speech.
+        #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 16) == 0)
+    }
+
     @Test func quietSpeechStillCounts() {
         // A soft voice far from the microphone: loud only relative to the room.
         let take = frames([(-70, 10), (-50, 20), (-70, 10)])
@@ -29,6 +50,28 @@ struct WhisperDictationTests {
 
     private func segment(_ text: String, _ start: Float, _ end: Float) -> WhisperStreamTranscript.Segment {
         .init(text: text, start: start, end: end)
+    }
+
+    @Test func whispersWordsForSilenceAreDroppedWhenAlmostNothingWasSaid() {
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2)], final: false, speech: 2)
+        // A noise long enough to pass: what Whisper writes for silence isn't kept.
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2), segment(" Gracias.", 2, 3)], final: false, speech: 0.3)
+        #expect(transcript.text == "Busca una Mac Studio.")
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2), segment(" ¡Gracias por ver el video!", 2, 3)], final: true, speech: 0.3)
+        #expect(transcript.text == "Busca una Mac Studio.")
+        #expect(WhisperStreamTranscript.isSilencePhrase(" Subtítulos realizados por la comunidad de Amara.org"))
+    }
+
+    @Test func aRealThankYouIsKept() {
+        var transcript = WhisperStreamTranscript()
+        // "Gracias" said for real lasts half a second or more.
+        transcript.update([segment(" Muchas gracias.", 0, 1)], final: true, speech: 0.8)
+        #expect(transcript.text == "Muchas gracias.")
+        // Any other words are kept however short.
+        var short = WhisperStreamTranscript()
+        short.update([segment(" No.", 0, 1)], final: true, speech: 0.3)
+        #expect(short.text == "No.")
     }
 
     @Test func confirmsAllButTheLastTwoSegments() {
