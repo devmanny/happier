@@ -61,6 +61,15 @@ struct SettingsView: View {
                 Text("Whisper on this device, or Apple's speech recognition.")
             }
             ReadAloudVoices()
+            Section {
+                NavigationLink {
+                    OidoSettingsView()
+                } label: {
+                    Label("Oído", systemImage: "ear")
+                }
+            } footer: {
+                Text("Listen all day and have your Mac transcribe what's said.")
+            }
             BrowserSettingsSection()
             #if os(iOS)
             Section {

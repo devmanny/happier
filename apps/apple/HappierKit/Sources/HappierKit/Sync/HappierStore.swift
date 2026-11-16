@@ -2181,17 +2181,7 @@ public final class HappierStore {
             // Keep it: every machine RPC needs its key, and refetching made quick calls fragile.
             if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
         }
-        let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
-        let ack = try await emit("rpc-call", MachineRPCCall.payload(
-            machineId: machineId, method: method, params: params, encoded: encoded,
-            timeoutMs: Int(timeout.components.seconds * 1000)), timeout + .seconds(5))
-        guard let response = ack.first, response["ok"]?.boolValue == true else {
-            throw RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.", code: ack.first?["errorCode"]?.stringValue)
-        }
-        var result = response["result"] ?? .null
-        if case .array(let items) = result, items.count == 1 { result = items[0] }
-        if let cipher = machine.cipher, let ciphertext = result.stringValue { result = try cipher.decryptBase64(ciphertext) }
-        return result
+        return try await MachineRPCCall.call(machine, method: method, params: params, timeout: timeout, emit: emit)
     }
 
     // MARK: - Machines and new sessions

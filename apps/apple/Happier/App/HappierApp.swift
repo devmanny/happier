@@ -25,6 +25,7 @@ struct HappierApp: App {
                 .environment(store)
                 .environment(delegate.inbox)
                 .environment(delegate.browser)
+                .environment(delegate.oido)
                 .modifier(FollowsAppAppearance())
                 .task(id: store.phase == .ready) {
                     guard store.phase == .ready else { return }
@@ -37,6 +38,7 @@ struct HappierApp: App {
                         MessageSpeaker.shared.appMovedToBackground(false)
                         store.appDidBecomeActive()
                         delegate.browser.appBecameActive()
+                        delegate.oido.appBecameActive()
                         // Folder colors and other synced settings changed elsewhere show up here.
                         if store.phase == .ready { Task { await store.refreshAccountSettings() } }
                     case .background:
@@ -58,6 +60,7 @@ struct HappierApp: App {
                 .environment(store)
                 .environment(delegate.inbox)
                 .environment(delegate.browser)
+                .environment(delegate.oido)
                 .modifier(FollowsAppAppearance())
         }
         #if os(macOS)
@@ -84,7 +87,17 @@ struct HappierApp: App {
                 .environment(store)
                 .environment(delegate.inbox)
                 .environment(delegate.browser)
+                .environment(delegate.oido)
                 .modifier(FollowsAppAppearance())
+        }
+
+        // Oído from the menu bar, with every window closed.
+        MenuBarExtra(isInserted: Binding(get: { delegate.oido.showInMenuBar }, set: { delegate.oido.showInMenuBar = $0 })) {
+            OidoMenuBarContent()
+                .environment(delegate.oido)
+        } label: {
+            OidoMenuBarLabel()
+                .environment(delegate.oido)
         }
         #endif
     }

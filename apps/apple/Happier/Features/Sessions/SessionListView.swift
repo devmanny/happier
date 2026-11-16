@@ -776,6 +776,10 @@ extension SessionListView {
                 // As tall as New Session beside it.
                 .controlSize(.large)
                 .accessibilityLabel(Text("Settings"))
+                #if os(iOS)
+                // Oído at hand all day (the Mac has its menu bar item).
+                OidoQuickButton()
+                #endif
                 Spacer()
                 // A new, empty conversation where the composer starts the session.
                 Button {

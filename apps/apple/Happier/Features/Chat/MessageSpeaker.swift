@@ -319,8 +319,8 @@ final class MessageSpeaker: NSObject {
         synthesizer.stopSpeaking(at: .immediate)
         #if os(iOS)
         // Plays with the silent switch on and the app minimized, lowering other audio while it reads.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        // Through a recording session while Oído listens (`AppAudioSession`), so it keeps the mic.
+        try? AppAudioSession.begin(.reading(ducksOthers: true), by: self)
         #endif
         publishNowPlaying(markdown)
         sentences = parts
@@ -456,8 +456,8 @@ final class MessageSpeaker: NSObject {
         synthesizer.stopSpeaking(at: .immediate)
         let sample = language == "es" ? "Hola, así sueno cuando leo tus mensajes." : "Hi, this is how I sound reading your messages."
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        // Through a recording session while Oído listens (`AppAudioSession`), so it keeps the mic.
+        try? AppAudioSession.begin(.reading(ducksOthers: true), by: self)
         #endif
         let utterance = AVSpeechUtterance(string: sample)
         utterance.voice = voice
@@ -569,18 +569,18 @@ final class MessageSpeaker: NSObject {
     }
     #endif
 
+    /// Reading no longer holds the session. Safe while dictating or with Oído on: the session
+    /// stays as they need it and switches off only once nothing uses it.
     private func deactivateAudio() {
-        guard recordingOwners.isEmpty else { return }
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AppAudioSession.end(by: self)
         #endif
     }
 
     private func mixWithOthers() {
         guard recordingOwners.isEmpty else { return }
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
-        try? AVAudioSession.sharedInstance().setActive(true)
+        try? AppAudioSession.begin(.reading(ducksOthers: false), by: self)
         #endif
     }
 

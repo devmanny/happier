@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
         store.deviceBrowserHost = browser
         return browser
     }()
+    /// Always-on voice capture for the Mac mini's transcriber (Settings › Oído, the menu bar).
+    lazy var oido = OidoController(store: store)
     #if os(iOS)
     private var backgroundUploads: BackgroundUploads?
     #endif
@@ -168,6 +170,7 @@ extension AppDelegate: UIApplicationDelegate {
         metricKitReports = MetricKitReports(store: store)
         WatchBridge.shared.store = store
         WatchBridge.shared.activate()
+        oido.resume()
         return true
     }
 
@@ -185,6 +188,10 @@ extension AppDelegate: NSApplicationDelegate {
         Self.current = self
         UNUserNotificationCenter.current().delegate = self
         metricKitReports = MetricKitReports(store: store)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        oido.resume()
     }
 
     func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

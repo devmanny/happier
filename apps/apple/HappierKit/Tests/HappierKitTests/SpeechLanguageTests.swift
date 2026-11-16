@@ -33,6 +33,25 @@ import Testing
         #expect(SpeechLanguage.dictationLocale(preferred: ["eo"], region: nil, supported: supported) == nil)
     }
 
+    /// A phone set to English that's spoken to in Spanish: the language chosen in Settings ›
+    /// Dictation wins over the device's languages, in the user's region's variant.
+    @Test func theChosenDictationLanguageWinsOverTheDevicesLanguages() {
+        let supported = ["en-US", "en-GB", "es-ES", "es-MX", "es-US", "fr-FR"]
+        let english = ["en-US", "es-MX"]
+        #expect(SpeechLanguage.dictationLocale(chosen: nil, preferred: english, region: "MX", supported: supported) == "en-US")
+        #expect(SpeechLanguage.dictationLocale(chosen: "es", preferred: english, region: "MX", supported: supported) == "es-MX")
+        #expect(SpeechLanguage.dictationLocale(chosen: "es", preferred: english, region: "AR", supported: supported) == "es-ES")
+        #expect(SpeechLanguage.dictationLocale(chosen: "en", preferred: ["es-MX"], region: "US", supported: supported) == "en-US")
+        // A choice the recognizers don't (or no longer) support falls back to automatic.
+        #expect(SpeechLanguage.dictationLocale(chosen: "eo", preferred: english, region: "MX", supported: supported) == "en-US")
+    }
+
+    /// What Settings › Dictation offers: each supported language once, whatever its regions.
+    @Test func dictationChoicesAreTheSupportedLanguagesOnce() {
+        let supported = ["en-US", "en_GB", "es-ES", "es-MX", "fr-FR", "zh-CN", "zh-TW"]
+        #expect(SpeechLanguage.dictationLanguages(supported: supported) == ["en", "es", "fr", "zh"])
+    }
+
     /// Left alone, it reads with the system's own voice for the language unless a more natural
     /// (Enhanced or Premium) one is installed; never with the old Eloquence synthesizers.
     @Test func readsWithTheMostNaturalVoiceInstalledUnlessOneWasChosen() {

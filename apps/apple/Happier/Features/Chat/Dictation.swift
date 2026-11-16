@@ -18,7 +18,8 @@ final class Dictation {
     /// What's been heard in this take so far (push to talk shows it live).
     private(set) var heard = ""
 
-    @ObservationIgnored private var engine: AVAudioEngine?
+    /// This take's hold on the app's microphone (shared with Oído, which keeps listening).
+    @ObservationIgnored private var microphone: Microphone.Tap?
     @ObservationIgnored private var recognizer: (any DictationRecognizer)?
     /// Writes the take's text into the composer.
     @ObservationIgnored private var deliver: (@MainActor (String) -> Void)?
@@ -54,7 +55,7 @@ final class Dictation {
     init() {
         // Listing the supported languages is slow: done ahead, off the main thread, so the first
         // push to talk after launch listens at once.
-        Task.detached(priority: .utility) { _ = Dictation.language }
+        Task.detached(priority: .utility) { _ = Dictation.supportedLocales }
     }
     /// Waiting for the engine's last words after `finish()`.
     @ObservationIgnored private var finishing = false
@@ -93,8 +94,8 @@ final class Dictation {
             return
         }
         let current = take
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
+        // No more audio for this take; Oído, if it's on, goes on listening.
+        releaseMicrophone()
         finishing = true
         let text = await recognizer.finish()
         finishing = false
@@ -108,7 +109,6 @@ final class Dictation {
     }
 
     func stop() {
-        let usedMicrophone = isRecording || starting || engine != nil
         // An in-flight microphone startup releases ownership when it has actually unwound.
         defer { if !starting { releaseAudio() } }
         take += 1
@@ -116,18 +116,26 @@ final class Dictation {
             DictationDiagnostics.shared.save(takeLog.current)
             self.takeLog = nil
         }
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
+        releaseMicrophone()
         recognizer?.cancel()
-        engine = nil
         recognizer = nil
         deliver = nil
         isRecording = false
-        #if os(iOS)
-        if usedMicrophone {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
-        #endif
+    }
+
+    /// Gives the microphone back; the audio session switches off only when nothing else (Oído)
+    /// still uses it.
+    private func releaseMicrophone() {
+        guard let microphone else { return }
+        self.microphone = nil
+        Microphone.shared.detach(microphone)
+    }
+
+    /// A call, Siri or another app took the microphone mid-take: keep what was heard so far.
+    private func microphoneLost(take lost: Int) {
+        guard take == lost, isRecording, !finishing else { return }
+        Self.log.notice("dictation: the microphone was taken; finishing the take")
+        Task { await finish() }
     }
 
     private func start(prefix: String, onText: @escaping @MainActor (String) -> Void) async {
@@ -179,14 +187,16 @@ final class Dictation {
             }
             self.recognizer = recognizer
             self.deliver = deliver
-            let engine = try await Self.openMicrophone(feeding: recognizer) { [weak self] level in
+            let microphone = try await Self.openMicrophone(feeding: recognizer, level: { [weak self] level in
                 Task { @MainActor in
                     guard let self, self.isRecording else { return }
                     self.levels.append(level)
                     if self.levels.count > 40 { self.levels.removeFirst(self.levels.count - 40) }
                 }
-            }
-            self.engine = engine
+            }, lost: { [weak self] in
+                Task { @MainActor in self?.microphoneLost(take: current) }
+            })
+            self.microphone = microphone
             // Let go (or tapped again) while it was coming up.
             guard take == current else {
                 stop()
@@ -208,41 +218,47 @@ final class Dictation {
     // Speech and audio call these closures on their own background queues. They are built in
     // nonisolated helpers so Swift 6 does not attach (and trap on) a main-actor assumption.
 
-    /// The dictation language, worked out once (listing the supported locales is slow, and push
-    /// to talk should listen the moment it's held).
-    nonisolated private static let language: String? = SpeechLanguage.dictationLocale(
-        preferred: Locale.preferredLanguages, region: Locale.current.region?.identifier,
-        supported: SFSpeechRecognizer.supportedLocales().map(\.identifier))
+    /// Settings › Dictation's language, a language code (`es`); none is Automatic, by the user's
+    /// languages. Both engines, Whisper and Apple's, dictate in it.
+    static let languageKey = "happier.dictation.language"
 
+    /// The recognizers' languages, listed once (listing them is slow, and push to talk should
+    /// listen the moment it's held).
+    nonisolated private static let supportedLocales: [String] = SFSpeechRecognizer.supportedLocales().map(\.identifier)
+
+    /// The recognizer locale for a take: the language chosen in Settings, else the user's own.
     /// Off the main thread: the first time it lists every supported language.
-    nonisolated static func dictationLanguage() async -> String? { language }
+    nonisolated static func dictationLanguage() async -> String? {
+        await dictationLanguage(chosen: UserDefaults.standard.string(forKey: languageKey))
+    }
 
-    /// The audio session and the microphone. They block for a noticeable moment (longer while
-    /// something was playing), so they come up off the main thread: push to talk shows at once.
-    private nonisolated static func openMicrophone(feeding recognizer: any DictationRecognizer, level: @escaping @Sendable (Float) -> Void)
-        async throws -> sending AVAudioEngine {
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        // Play-and-record rather than record-only: switching to record-only left the speech
-        // synthesizer mute afterwards (reading aloud stopped working after the mic).
-        try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP])
-        // iOS otherwise mutes the ready tone while the microphone is active.
-        try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
-        #endif
-        var engine = AVAudioEngine()
-        // An input with no valid format (the audio route was still changing) would raise an
-        // Objective-C exception in `installTap`, which Swift can't catch: check it, give the route
-        // a moment once, then report a normal dictation error.
-        if !Self.hasUsableInput(engine.inputNode) {
-            try await Task.sleep(for: .milliseconds(250))
-            engine = AVAudioEngine()
-            guard Self.hasUsableInput(engine.inputNode) else { throw DictationError.microphoneUnavailable }
-        }
-        installTap(on: engine.inputNode, feeding: recognizer, level: level)
-        engine.prepare()
-        try engine.start()
-        return engine
+    /// The locale `chosen` (nil: Automatic) resolves to on this device.
+    nonisolated static func dictationLanguage(chosen: String?) async -> String? {
+        SpeechLanguage.dictationLocale(chosen: chosen, preferred: Locale.preferredLanguages,
+                                       region: Locale.current.region?.identifier, supported: supportedLocales)
+    }
+
+    /// The languages Settings › Dictation offers.
+    nonisolated static func languageChoices() async -> [String] {
+        SpeechLanguage.dictationLanguages(supported: supportedLocales)
+    }
+
+    /// The microphone (the app's one, shared with Oído). It comes up off the main thread: it blocks
+    /// for a noticeable moment (longer while something was playing), and push to talk shows at once.
+    private nonisolated static func openMicrophone(feeding recognizer: any DictationRecognizer, level: @escaping @Sendable (Float) -> Void,
+                                                   lost: @escaping @Sendable () -> Void) async throws -> Microphone.Tap {
+        try await Microphone.shared.attach(.dictating, onBuffer: { buffer in
+            recognizer.append(buffer)
+            // Loudness of this slice (RMS, as 0…1 over a −50…0 dB range) for the moving bars.
+            guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+            var sum: Float = 0
+            for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
+            let rms = (sum / Float(buffer.frameLength)).squareRoot()
+            let db = 20 * log10(max(rms, 0.000_01))
+            level(min(max((db + 50) / 50, 0), 1))
+        }, onPhase: { phase in
+            if phase == .interrupted || phase == .waiting { lost() }
+        })
     }
 
     private nonisolated static func authorize(speechRecognition: Bool) async -> Bool {
@@ -254,36 +270,15 @@ final class Dictation {
         }
         return await AVAudioApplication.requestRecordPermission()
     }
-
-    private nonisolated static func hasUsableInput(_ input: AVAudioInputNode) -> Bool {
-        let format = input.outputFormat(forBus: 0)
-        return format.sampleRate > 0 && format.channelCount > 0
-    }
-
-    private nonisolated static func installTap(on input: AVAudioInputNode, feeding recognizer: any DictationRecognizer,
-                                               level: @escaping @Sendable (Float) -> Void) {
-        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { buffer, _ in
-            recognizer.append(buffer)
-            // Loudness of this slice (RMS, as 0…1 over a −50…0 dB range) for the moving bars.
-            guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
-            var sum: Float = 0
-            for i in 0..<Int(buffer.frameLength) { sum += samples[i] * samples[i] }
-            let rms = (sum / Float(buffer.frameLength)).squareRoot()
-            let db = 20 * log10(max(rms, 0.000_01))
-            level(min(max((db + 50) / 50, 0), 1))
-        }
-    }
 }
 
 /// A dictation that couldn't start, shown like any other dictation error.
 enum DictationError: LocalizedError {
-    case microphoneUnavailable
     case recognizerUnavailable
     case modelMissing
 
     var errorDescription: String? {
         switch self {
-        case .microphoneUnavailable: String(localized: "The microphone isn't available right now. Try again.")
         case .recognizerUnavailable: String(localized: "Speech recognition isn't available right now.")
         case .modelMissing: String(localized: "The Whisper model is missing. Download it again in Settings › Dictation.")
         }

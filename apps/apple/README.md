@@ -24,6 +24,32 @@ open Happier.xcodeproj          # Run the "Happier" scheme on My Mac or an iPhon
 (cd HappierKit && HAPPIER_LIVE_SERVER=https://api.happier.dev swift test --filter LiveServerTests)
 ```
 
+## Oído
+
+Oído (Settings › Oído, and the menu bar on the Mac) listens all day, keeps only speech, and sends
+it in AAC chunks to the `oido` server on a chosen machine. The audio goes through the relay to that
+machine's daemon (`daemon.bulkTransfer.upload.*`), which writes `<startMs>_<id>.m4a` and then its
+`.json` manifest into `~/.local/share/oido/inbox/<device>/`; `oido` reads that folder with
+`[inbox] enabled = true`. Chunks wait in `Application Support/Oido/spool` until the daemon has them.
+`LiveOidoRelayTests` runs a recording through the capture pipeline and the real relay; its header
+lists the environment it needs.
+
+On iPhone and iPad the ear beside Settings, at the foot of the sessions list, turns Oído on or off
+with a tap; touch and hold for its state, what's waiting to send and its settings. It stays on until
+you turn it off, also across launches.
+
+Oído and dictation share one microphone (`Microphone`: one `AVAudioEngine` whose input feeds every
+listener), so dictating while Oído listens leaves Oído running and the dictated speech also lands in
+its chunks. `AppAudioSession` is the only code that configures or activates the iOS audio session:
+Oído, dictation and reading aloud say what they use it for (`AudioSessionUses`), and the session
+switches off only when the last of them is done. While Oído is on, other apps' audio keeps playing
+at full volume (no ducking for a take). A call, Siri, the keyboard's dictation or another app taking
+the microphone ends the current stream (what was heard is queued) and Oído shows it is paused;
+`MicrophoneRecovery` brings it back when the interruption ends (with or without `shouldResume`),
+retries after 1, 2, 4… up to 30 s while the microphone is still busy, and tries again on new
+hardware (AirPods) and whenever the app comes back to the front. The relay connection closes with
+the app in the background, so chunks recorded then wait in the spool and go when it reconnects.
+
 ## Passkeys in the iOS browser
 
 The integrated browser uses WebKit's WebAuthn implementation and the system credential picker.
@@ -276,10 +302,11 @@ only those WhisperKit's device table lists for the device. Each downloads once, 
 then compiles for the device; they are kept in Application Support and each is deletable. Several
 can be kept: the one tapped (else the latest download, else the most accurate left) is in use.
 While one is in use and the device can run it,
-dictation transcribes on the device in the dictation language, never auto-detected, with text
+dictation transcribes on the device in the dictation language (Settings › Dictation › Language;
+Automatic takes the device's first language it supports), never auto-detected, with text
 appearing about once a second and the rest when you stop (tap or release); silence is not
 transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
-SFSpeechRecognizer. `Dictation` owns the microphone and the take; `DictationEngine.choose` picks
+SFSpeechRecognizer. `Dictation` owns the take, on the app's shared microphone (see Oído); `DictationEngine.choose` picks
 the device's engine and `DictationEngine.forTake` the take's. A take never waits for Whisper to
 load: while the model isn't in memory (it is let go when the app leaves the screen and loads again
 when it's back, and on low memory until the next dictation), Apple's engine dictates that take.
