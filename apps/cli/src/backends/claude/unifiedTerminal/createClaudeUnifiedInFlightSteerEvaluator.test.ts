@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TerminalHostHandle, TerminalInputState } from '@/integrations/terminalHost/_types';
 
 import { createClaudeUnifiedInFlightSteerEvaluator } from './createClaudeUnifiedInFlightSteerEvaluator';
-import { createClaudeComposerClearKeyLedger, type ClaudeComposerClearKeyLedger } from './ownComposerDraftGuard';
+import { createClaudeComposerClearKeyLedger, type ClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import type { ClaudeUnifiedPromptBatch } from './_types';
 import type { EnhancedMode } from '../loop';
 
@@ -587,8 +587,27 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
 
     const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
 
-    expect(harness.clearOwnLeftoverDraft.mock.calls.length).toBeLessThanOrEqual(2);
+    // No "Esc again to clear" over the same draft: no evidence for a second Escape (Rewind hazard,
+    // repro e, 2026-11-16), so one key and the veto.
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({ steer: false, reason: 'user_draft' });
+  });
+
+  it('presses the second clear key only after the hint appears over the same own draft', async () => {
+    const rule = '────────────────────────────────────────────────';
+    const hinted = [rule, `❯ ${ownLeftoverText}`, rule, '  Esc again to clear'].join('\n');
+    const harness = starvationHarness({
+      initialScreen: [rule, `❯ ${ownLeftoverText}`, rule, '  ? for shortcuts'].join('\n'),
+      ownTexts: [ownLeftoverText],
+      onClear: () => harness.setScreen(
+        harness.clearOwnLeftoverDraft.mock.calls.length === 1 ? hinted : idleInteractiveScreen,
+      ),
+    });
+
+    const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
+
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(2);
+    expect(decision).toEqual({ steer: true, turnLikelyEnded: true });
   });
 
   it('keeps at most the clearing pair outstanding across evaluations of a frozen own leftover', async () => {

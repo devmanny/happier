@@ -6,62 +6,21 @@ import {
   type ClaudeOwnComposerDraftClassification,
 } from './ownComposerDraftClassification';
 import { resolveClaudeUnifiedDialogBlockedReason } from './tuiControls/dialogRegistry';
+import {
+  captureComposerClearKeyEffect,
+  createClaudeComposerClearKeyLedger,
+  isSecondComposerClearEscapeWarranted,
+  type ClaudeComposerClearKeyLedger,
+} from './tuiControls/composerClearKeys';
 
 const DEFAULT_DRAFT_CLEAR_SETTLE_MS = 250;
-// Same bounded semantics as the slash-control leftover clear (lane U): one clear key can leave the
-// draft text behind, so allow a second press before giving up.
+// Claude 2.1.322 takes two Escapes to clear composer text (the first arms "Esc again to clear"), so
+// at most two per pass, the second only on isSecondComposerClearEscapeWarranted evidence.
 export const MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS = 2;
 // Escape walks the feedback card's states (send confirmation -> card -> turn-off prompt -> gone).
 const MAX_FEEDBACK_DRAFT_CARD_DISMISS_ATTEMPTS = 3;
 // Claude 2.1.322 ignores Escape on the card for 600ms after a turn ends; space presses past that.
 const FEEDBACK_DRAFT_CARD_DISMISS_SETTLE_MS = 700;
-// Claude 2.1.322 absorbs two Escapes from each state the clearers press on: own text (the first
-// shows "Esc again to clear", the second clears) and the feedback card (the card, then its turn-off
-// prompt). A queued burst of at most two therefore never lands two on an empty composer, which
-// Claude reads as Rewind, and Rewind swallows the next paste (repro, 2026-11-16).
-const MAX_UNACKNOWLEDGED_CLEAR_KEYS = 2;
-
-/**
- * Session memory of the composer clear keys (Escape) whose effect the Claude screen has not shown.
- * A stalled Claude leaves its last frame in the pane and reads every queued key as one burst when
- * it resumes, so a fresh capture of an unchanged frame is no evidence that earlier keys landed.
- * Every own-leftover clearer of one pane shares one ledger, and across all their passes it keeps
- * at most {@link MAX_UNACKNOWLEDGED_CLEAR_KEYS} keys outstanding. A capture that differs from the
- * frame the keys were pressed on acknowledges them. Past the session stall budget they are presumed
- * absorbed or dropped: a hint that came and went between two captures must not block clearing
- * forever.
- */
-export type ClaudeComposerClearKeyLedger = Readonly<{
-  /** Feed every capture the clearer reads. */
-  observe: (frameText: string) => void;
-  /** Whether one more clear key may be pressed now. */
-  mayPress: () => boolean;
-  /** Record a clear key pressed onto this frame (before sending, so a failed send still counts). */
-  recordPress: (frameText: string) => void;
-}>;
-
-export function createClaudeComposerClearKeyLedger(opts: Readonly<{
-  /** The session stall budget: how long Claude may show no effect before the runner stops waiting. */
-  stallBudgetMs: number;
-  nowMs?: (() => number) | undefined;
-}>): ClaudeComposerClearKeyLedger {
-  const nowMs = opts.nowMs ?? Date.now;
-  let outstanding: Readonly<{ frameText: string; keys: number; firstPressedAtMs: number }> | null = null;
-  return {
-    observe(frameText) {
-      if (outstanding && outstanding.frameText !== frameText) outstanding = null;
-    },
-    mayPress() {
-      if (outstanding && nowMs() - outstanding.firstPressedAtMs >= opts.stallBudgetMs) outstanding = null;
-      return (outstanding?.keys ?? 0) < MAX_UNACKNOWLEDGED_CLEAR_KEYS;
-    },
-    recordPress(frameText) {
-      outstanding = outstanding?.frameText === frameText
-        ? { ...outstanding, keys: outstanding.keys + 1 }
-        : { frameText, keys: 1, firstPressedAtMs: nowMs() };
-    },
-  };
-}
 
 export type OwnComposerDraftGuardResult =
   | Readonly<{ status: 'no_draft'; screen: ClaudeScreenState }>
@@ -121,8 +80,9 @@ type OwnComposerDraftGuardOptions = Readonly<{
   /** Sends ONE composer-clear keypress (Escape). Only invoked for exact-match own leftovers. */
   sendClearKey: () => Promise<void>;
   /**
-   * The pane's session-scoped clear-key ledger, shared with every other own-leftover clearer.
-   * Without it the outstanding-key bound holds only within this call.
+   * The pane's session-scoped clear-key ledger, shared with the steer evaluator's own-leftover
+   * clear and the user-authorized clear. Without it the outstanding-key bound holds only within
+   * this call.
    */
   clearKeys?: ClaudeComposerClearKeyLedger | undefined;
   ownComposerTexts: Readonly<{ matches: (draft: string) => boolean }>;
@@ -276,14 +236,20 @@ async function runOwnComposerDraftGuard(
   if (initialResult) return initialResult;
   if (initial === 'empty') return settleEmptyComposer(screen, 0);
 
-  for (let attempt = 1; attempt <= MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; ; attempt += 1) {
+    const pressedOn = screen;
     try {
-      if (!(await pressClearKey(screen))) return { status: 'clear_failed', screen };
+      if (!(await pressClearKey(pressedOn))) return { status: 'clear_failed', screen };
     } catch {
       return { status: 'clear_failed', screen };
     }
-    await wait(settleMs);
-    const recaptured = await capture();
+    const recaptured = await captureComposerClearKeyEffect({
+      pressedFrameText: pressedOn.text,
+      capture,
+      frameTextOf: (result) => result?.screen.text ?? null,
+      wait,
+      settleMs,
+    });
     if (!recaptured) return { status: 'capture_failed' };
     captured = recaptured;
     screen = recaptured.screen;
@@ -292,6 +258,11 @@ async function runOwnComposerDraftGuard(
     const settled = settledResult(classification, screen);
     if (settled) return settled;
     if (classification === 'empty') return settleEmptyComposer(screen, attempt);
+    if (
+      attempt >= MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS
+      || !isSecondComposerClearEscapeWarranted(pressedOn, screen)
+    ) {
+      return { status: 'clear_failed', screen };
+    }
   }
-  return { status: 'clear_failed', screen };
 }

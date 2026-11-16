@@ -148,6 +148,26 @@ unavailable adapters does not periodically materialize the queue. Reconnect does
 not bypass settings convergence, admission, or the Pending row's blocked state;
 an explicitly blocked message still requires its existing Retry action.
 
+A `terminal_composer_draft` block is the exception: the Claude Unified runner
+keeps custody of the held batch at the head of its queue, and the block is
+reversible. The user-authorized `session.terminalComposer.clear` RPC (Happier
+app **Clear composer**, native Apple app **Clear Terminal Draft**) empties
+Claude's composer with Escape only. On `cleared` or `already_empty` the runner
+wakes its input arbiter, which re-drives the held batch at once; Claude's
+acceptance of that batch settles the blocked row. A clear therefore never
+requeues or retries anything itself, and clients do not Retry as part of it.
+Retry stays the action for a row that is still blocked after the runner has
+re-driven its batch (the native app's "already empty" message points there).
+Every composer text clearer of the pane (this clear, the idle own-leftover
+draft guard and the in-flight steer evaluator) presses the second Escape only
+on screen evidence that Claude took the first one: its "Esc again to clear" hint
+over the same text, read from a capture that differs from the frame the key was
+pressed on (recaptured for up to about 750 ms). They also share the pane's
+clear-key ledger, so their Escapes stay within what Claude absorbs without
+opening Rewind. A draft that changes mid-clear, earlier Escapes the screen has
+not shown yet, a usage-limit wait, or no input box report `not_safe`; a draft
+Claude did not visibly take reports `clear_failed`.
+
 If the session socket stays connected after a transient server-feature probe
 failure, a later pending materialization attempt reuses the session client's
 connection-readiness convergence. It re-probes that same connection and, for

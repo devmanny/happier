@@ -56,7 +56,8 @@ import {
   createClaudePromptSubmitVerificationPolicy,
   type ClaudePromptSubmitVerificationPolicy,
 } from './claudePromptSubmitVerification';
-import { clearOwnLeftoverComposerDraft, createClaudeComposerClearKeyLedger } from './ownComposerDraftGuard';
+import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import {
   createClaudeUnifiedInFlightSteerEvaluator,
   type ClaudeUnifiedSteerAvailabilitySnapshot,
@@ -933,6 +934,8 @@ function mapClaudeComposerClearRefusalToProtocolStatus(
       return 'generating';
     case 'no_interactive_composer':
     case 'usage_limit_wait':
+    case 'draft_changed':
+    case 'unacknowledged_clear_keys':
       return 'not_safe';
     case 'permission_prompt':
     case 'permission_editor':
@@ -956,7 +959,7 @@ function mapClaudeComposerClearFailureReasonToProtocolStatus(
   return 'clear_failed';
 }
 
-function mapClaudeComposerClearResultToProtocolResult(
+export function mapClaudeComposerClearResultToProtocolResult(
   result: ClaudeUserAuthorizedComposerClearResult,
   sessionId: string,
 ): SessionTerminalComposerClearResultV1 {
@@ -1604,6 +1607,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     explicitStopHostDisposal = guardedAttempt;
     return guardedAttempt;
   };
+  // Every composer clearer of this pane (the two own-leftover clearers and the user-authorized
+  // clear) presses Escape through one ledger, so the keys a stalled Claude has not shown yet stay
+  // bounded across all their passes and senders (Rewind hazard, 2026-11-16).
+  const composerClearKeys = createClaudeComposerClearKeyLedger({
+    stallBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
+  });
   try {
     if (opts.registerTerminalComposerClearRuntimeControl || opts.registerConnectedServiceExactApplicationHandler) {
       const terminalSessionControlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
@@ -1611,6 +1620,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         const unregister = opts.registerTerminalComposerClearRuntimeControl(async (request) => {
           const result = await clearUserAuthorizedClaudeComposerDraft({
             port: terminalSessionControlPort,
+            clearKeys: composerClearKeys,
           });
           const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
           if (protocolResult.ok) {
@@ -2051,11 +2061,6 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       // NON-generating screen only). Separate from the runtime-control controller's port — the
       // evaluator never routes through controller state. Shared with the pre-injection guard below.
       const steerDraftClearPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
-      // Both own-leftover clearers of this pane press Escape through one ledger, so the keys a stalled
-      // Claude has not shown yet stay bounded across all their passes (Rewind hazard, 2026-11-16).
-      const composerClearKeys = createClaudeComposerClearKeyLedger({
-        stallBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
-      });
       const startupDialogControlPort = opts.createStartupDialogResolver
         ? (hostResolution.adapter.createControlPort?.(activeHandle) ?? null)
         : null;

@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { logger } from '@/ui/logger';
 
 import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
-import { clearOwnLeftoverComposerDraft, createClaudeComposerClearKeyLedger } from './ownComposerDraftGuard';
+import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 import { isClaudeScreenReadyForInput } from './tuiControls/screenState';
 
@@ -143,7 +144,7 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     }
   });
 
-  it('retries the bounded second clear when the first key leaves the draft behind', async () => {
+  it('waits for a lagging repaint instead of pressing a second clear key on the unchanged frame', async () => {
     const captures = [idleScreen(OWN_TEXT), idleScreen(OWN_TEXT), idleScreen('')];
     let clears = 0;
     const attempts: number[] = [];
@@ -156,9 +157,9 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
       onClearAttempt: (info) => attempts.push(info.attempt),
     });
-    expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
-    expect(clears).toBe(2);
-    expect(attempts).toEqual([1, 2]);
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(clears).toBe(1);
+    expect(attempts).toEqual([1]);
   });
 
   it('sends the second clear key when Claude shows "Esc again to clear" with the leftover still in place', async () => {
@@ -181,7 +182,9 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(sendClearKey).toHaveBeenCalledTimes(2);
   });
 
-  it('gives up after the bounded attempts and reports clear_failed', async () => {
+  // Rewind hazard (repro e, 2026-11-16): a second clear key needs the same evidence as the
+  // user-authorized clear, "Esc again to clear" appearing over the same text after the first.
+  it('presses one clear key and reports clear_failed when the frame never shows the hint', async () => {
     let clears = 0;
     const result = await clearOwnLeftoverComposerDraft({
       captureInputState: async () => ({ currentInput: idleScreen(OWN_TEXT) }),
@@ -192,7 +195,25 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
     });
     expect(result.status).toBe('clear_failed');
-    expect(clears).toBe(2);
+    expect(clears).toBe(1);
+  });
+
+  it('never presses a second clear key when the hint was already armed before the first', async () => {
+    const hinted = [
+      '────────────────────────────────────────────────',
+      `❯ ${OWN_TEXT}`,
+      '────────────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n');
+    const sendClearKey = vi.fn(async () => undefined);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: hinted }),
+      sendClearKey,
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('clear_failed');
+    expect(sendClearKey).toHaveBeenCalledTimes(1);
   });
 
   it('NEVER touches a genuine user draft (no recorded match) and reports foreign_draft', async () => {
@@ -616,6 +637,8 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       const clearKeys = createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => now });
       const sendClearKey = vi.fn(async () => undefined);
 
+      // A frozen frame shows no hint, so each pass presses one key and the pair spans two passes.
+      await guardPass({ screens: [], clearKeys, sendClearKey });
       await guardPass({ screens: [], clearKeys, sendClearKey });
       expect(sendClearKey).toHaveBeenCalledTimes(2);
       const repainted = await guardPass({ screens: [hinted, idleScreen('')], clearKeys, sendClearKey });
@@ -623,13 +646,14 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       expect(sendClearKey).toHaveBeenCalledTimes(3);
 
       await guardPass({ screens: [], clearKeys, sendClearKey });
+      await guardPass({ screens: [], clearKeys, sendClearKey });
       expect(sendClearKey).toHaveBeenCalledTimes(5);
       now = 134_999;
       await guardPass({ screens: [], clearKeys, sendClearKey });
       expect(sendClearKey).toHaveBeenCalledTimes(5);
       now = 135_000;
       await guardPass({ screens: [], clearKeys, sendClearKey });
-      expect(sendClearKey).toHaveBeenCalledTimes(7);
+      expect(sendClearKey).toHaveBeenCalledTimes(6);
     });
   });
 
