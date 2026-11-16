@@ -1,29 +1,42 @@
 import HappierKit
 import SwiftUI
 
-/// An agent's whole profile, opened from the sidebar's Agents like a session (in the detail on Mac
-/// and iPad, full screen on the iPhone): who it is, its engine, account and weekly usage, its
-/// backlog by status with "Start Now" on each task, its open sessions with what each one says it's
-/// doing, its recent memory and Edit. It sits straight in the detail column, as a conversation does
-/// (its title and Edit are the column's); a task opens where tasks open (`HappierStore.tasksRequest`:
-/// the Tasks panel on iPad and Mac, the Tasks sheet on the iPhone) and the memory in a sheet.
+/// An agent's card, like a contact's, opened from its chat's header (`AgentChatView`): beside the chat
+/// on iPad and Mac, a sheet on the iPhone, with its own Close and Edit on top (nothing goes into the
+/// chat's bar). Its photo, name, engine and account; three round buttons: a new session with it, its
+/// tasks (the one Tasks list, filtered to it) and its memory, each in a sheet; then two tabs. Sessions:
+/// its open sessions, each with what its thread says it's doing, and its account's weekly usage.
+/// Can Do: what the user says it can do (`AgentProfile.canDo`) and who it is. A task dropped anywhere
+/// on the card is assigned to it; nothing starts.
 struct AgentProfileView: View {
     let agentId: String
+    /// Puts the card away: the panel beside the chat, or the iPhone's sheet.
+    let close: () -> Void
     @Environment(HappierStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The round buttons grow with the text size.
+    @ScaledMetric(relativeTo: .title3) private var roundButtonSize: CGFloat = 36
+    @State private var tab = Tab.sessions
     @State private var newSession = false
-    @State private var newTask = false
-    @State private var editing: AgentProfile?
+    @State private var showTasks = false
     @State private var showMemory = false
+    @State private var editing: AgentProfile?
     @State private var descriptionExpanded = false
-    @State private var showDone = false
-    /// "Start Now" pressed on a task: `taskStart` starts it.
-    @State private var startRequest: String?
-    @State private var starting = false
-    /// A task from the Tasks panel is being dragged over the profile: its empty space, or how many
+    /// A task from the Tasks panel is being dragged over the card: its empty space, or how many
     /// of its rows (moving from one row to the next is briefly over both).
     @State private var dropTargeted = false
     @State private var rowsTargeted = 0
+
+    private enum Tab: String, CaseIterable {
+        case sessions, canDo
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .sessions: "Sessions"
+            case .canDo: "Can Do"
+            }
+        }
+    }
 
     private var profile: AgentProfile? { store.agentProfile(id: agentId) }
     private var memory: AgentMemory? { store.agentMemories[agentId] }
@@ -34,24 +47,27 @@ struct AgentProfileView: View {
                 content(profile)
             } else if store.agentProfiles.isEmpty {
                 HappierSpinner(size: HappierSpinner.hero)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView("Agent Not Found", systemImage: "person.crop.circle.badge.questionmark",
                                        description: Text("It may have been deleted on another device."))
             }
         }
+        .safeAreaBar(edge: .top) { topBar }
+        // Its tasks decide which sessions need you; its memory says what each one is doing.
         .task(id: agentId) {
             async let tasks: Void = store.refreshTasks()
             await store.refreshAgentMemory(agentId: agentId)
             await tasks
         }
-        .taskStart($startRequest, working: $starting) { sessionId in
-            await store.openRelatedSession(sessionId)
-        }
         .sheet(isPresented: $newSession) {
             NewSessionSheet(preselectedAgentId: agentId)
         }
-        .sheet(isPresented: $newTask) {
-            if let profile { NewTaskSheet(assignee: .agent(profile)) }
+        .sheet(isPresented: $showTasks) {
+            TasksView(assignee: .agent(agentId))
+                #if os(macOS)
+                .frame(minWidth: 520, minHeight: 560)
+                #endif
         }
         .sheet(isPresented: $showMemory) {
             if let profile {
@@ -72,6 +88,35 @@ struct AgentProfileView: View {
         }
     }
 
+    /// Close on the left, Edit on the right, over the card as it scrolls.
+    private var topBar: some View {
+        HStack {
+            Button {
+                AppHaptics.light()
+                close()
+            } label: {
+                Label("Close", systemImage: "xmark")
+                    .labelStyle(.iconOnly)
+                    .fontWeight(.semibold)
+            }
+            .buttonBorderShape(.circle)
+            .help(Text("Close"))
+            .accessibilityIdentifier("agent-profile-close")
+            Spacer()
+            if let profile {
+                Button("Edit") {
+                    AppHaptics.light()
+                    editing = profile
+                }
+                .accessibilityIdentifier("agent-profile-edit")
+            }
+        }
+        .buttonStyle(.glass)
+        .controlSize(.large)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
     private func content(_ profile: AgentProfile) -> some View {
         // "Working" fades after two minutes without news, as in the sidebar's rows.
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -80,41 +125,31 @@ struct AgentProfileView: View {
             let summary = AgentRoster.summary(of: profile, sessions: store.sessionList, context: filterContext, now: now,
                                               usage: { store.usage(for: $0.id) })
             Form {
-                header(profile, summary: summary)
-                tasksSections(profile)
-                sessionsSection(summary, context: filterContext, now: now)
-                memorySection
-                if let description = profile.description, !description.isEmpty { descriptionSection(description) }
+                header(profile)
+                switch tab {
+                case .sessions:
+                    sessionsSection(summary, context: filterContext, now: now)
+                    usageSection(summary.weekly)
+                case .canDo:
+                    canDoSections(profile)
+                }
             }
             .formStyle(.grouped)
         }
-        // A task dropped anywhere on the profile is assigned to the agent (nothing starts). On iOS
-        // the list's rows take drops, not the list around them: each row is a target too (`droppable`).
+        // A task dropped anywhere on the card is assigned to the agent (nothing starts). On iOS the
+        // list's rows take drops, not the list around them: each row is a target too (`droppable`).
         .overlay {
             if dropTargeted || rowsTargeted > 0 { dropHighlight(profile) }
         }
         .taskDrop(onto: profile, targeted: $dropTargeted)
-        .navigationTitle(Text(verbatim: profile.name))
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Edit") {
-                    AppHaptics.light()
-                    editing = profile
-                }
-                .accessibilityIdentifier("agent-profile-edit")
-            }
-        }
     }
 
-    /// One of the profile's rows as a place to drop a task (lighting the whole profile).
+    /// One of the card's rows as a place to drop a task (lighting the whole card).
     private func droppable(_ row: some View) -> some View {
         row.modifier(ProfileRowDrop(agentId: agentId, targetedRows: $rowsTargeted))
     }
 
-    /// The profile lit as the drop target, saying what dropping does.
+    /// The card lit as the drop target, saying what dropping does.
     private func dropHighlight(_ profile: AgentProfile) -> some View {
         RoundedRectangle(cornerRadius: 22, style: .continuous)
             .strokeBorder(Color.userBubble, lineWidth: 3)
@@ -134,163 +169,94 @@ struct AgentProfileView: View {
 
     // MARK: Header
 
-    /// The emoji on its engine's disc, the name, engine and account, the account's weekly usage,
-    /// and a new session with it.
-    private func header(_ profile: AgentProfile, summary: AgentSummary) -> some View {
+    /// Its photo, name, engine and account, the round buttons and the tabs, centered.
+    private func header(_ profile: AgentProfile) -> some View {
         Section {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 14) {
-                    AgentProfileAvatar(profile: profile, size: 64)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 8) {
-                            Text(verbatim: profile.name)
-                                .font(.title.weight(.bold))
-                                .lineLimit(1)
-                                .accessibilityAddTraits(.isHeader)
-                            ProviderLogo(providerId: profile.providerId, size: 18)
-                        }
-                        Text(AgentProfileText.engine(profile, sessions: store.sessionList))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Text(AgentProfileText.account(profile))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                }
-                usage(summary.weekly)
-                Button {
-                    AppHaptics.light()
-                    newSession = true
-                } label: {
-                    Label("New Session with \(profile.name)", systemImage: "plus")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .controlSize(.large)
-                .accessibilityIdentifier("agent-new-session")
+            VStack(spacing: 3) {
+                AgentProfileAvatar(profile: profile, size: 100)
+                Text(verbatim: profile.name)
+                    .font(.title.weight(.bold))
+                    .lineLimit(2)
+                    .padding(.top, 6)
+                    .accessibilityAddTraits(.isHeader)
+                Text(AgentProfileText.engine(profile, sessions: store.sessionList))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(AgentProfileText.account(profile))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                actions(profile)
+                    .padding(.top, 14)
+                tabs
+                    .padding(.top, 12)
             }
-            .padding(.vertical, 4)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
             .modifier(ProfileRowDrop(agentId: agentId, targetedRows: $rowsTargeted))
         }
         .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 8, trailing: 4))
+        .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
     }
 
-    private func usage(_ weekly: ProviderUsage.Meter?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Weekly Usage").font(.subheadline.weight(.medium))
-                Spacer()
-                if let weekly {
-                    Text("\(Int(weekly.usedPercent.rounded()))% used")
-                        .font(.subheadline.weight(.semibold))
-                        .monospacedDigit()
-                }
-            }
-            ProgressView(value: (weekly?.usedPercent ?? 0) / 100).tint(weekly?.isNearLimit == true ? .red : .primary)
-            Group {
-                if let reset = weekly?.resetsAt {
-                    Text("Resets \(reset.formatted(.dateTime.weekday(.wide))) at \(reset.formatted(date: .omitted, time: .shortened))")
-                } else if weekly == nil {
-                    Text("Weekly usage is not available yet.")
-                }
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    // MARK: Tasks
-
-    /// Its backlog by status (`AgentCard.backlog`), Done folded away; assigning never starts a task,
-    /// "Start Now" on a row does.
-    @ViewBuilder
-    private func tasksSections(_ profile: AgentProfile) -> some View {
-        let backlog = AgentCard.backlog(store.tasks, agentId: agentId)
-        let open = backlog.filter { $0.status != .done }
-        Section {
-            if backlog.isEmpty {
-                droppable(Text("No tasks for \(profile.name) yet.").foregroundStyle(.secondary))
-            }
-            droppable(Button("New Task for \(profile.name)", systemImage: "plus") {
-                AppHaptics.light()
-                newTask = true
-            })
-        } header: {
-            Text("Tasks · \(open.reduce(0) { $0 + $1.tasks.count }) open")
-        }
-        ForEach(open) { group in
-            Section {
-                ForEach(group.tasks) { droppable(taskRow($0)) }
-            } header: {
-                Text("\(group.status.label) · \(group.tasks.count)")
-            }
-        }
-        if let done = backlog.first(where: { $0.status == .done }) {
-            Section {
-                DisclosureGroup(isExpanded: $showDone.animation(reduceMotion ? nil : .smooth(duration: 0.25))) {
-                    ForEach(done.tasks) { droppable(taskRow($0)) }
-                } label: {
-                    Text("\(AgentTask.Status.done.label) · \(done.tasks.count)")
-                }
-            }
+    /// New session, its tasks, its memory.
+    private func actions(_ profile: AgentProfile) -> some View {
+        HStack(spacing: 16) {
+            roundButton("New Session", systemImage: "square.and.pencil", hint: "Starts a session with \(profile.name)",
+                        id: "agent-new-session") { newSession = true }
+            roundButton("Tasks", systemImage: "checklist", hint: "Shows \(profile.name)'s tasks",
+                        id: "agent-profile-tasks") { showTasks = true }
+            roundButton("Memory", systemImage: "brain", hint: "Shows \(profile.name)'s memory",
+                        id: "agent-profile-memory") { showMemory = true }
         }
     }
 
-    private func taskRow(_ task: AgentTask) -> some View {
-        let actions = task.availableActions(from: .list)
-        return HStack(alignment: .center, spacing: 8) {
-            Button {
-                AppHaptics.selection()
-                store.tasksRequest = .task(task.id)
-            } label: {
-                HStack(spacing: 8) {
-                    TaskRow(task: task, openSession: { sessionId in Task { await store.openRelatedSession(sessionId) } })
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.forward")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityHidden(true)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.pressable)
-            .accessibilityIdentifier("agent-task-\(task.id)")
-            if actions.offersStartNow {
+    private func roundButton(_ title: LocalizedStringKey, systemImage: String, hint: LocalizedStringKey, id: String,
+                             action: @escaping () -> Void) -> some View {
+        Button {
+            AppHaptics.light()
+            action()
+        } label: {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.iconOnly)
+                .font(.title3)
+                .frame(width: roundButtonSize, height: roundButtonSize)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.circle)
+        .help(Text(title))
+        .accessibilityHint(Text(hint))
+        .accessibilityIdentifier(id)
+    }
+
+    /// Pills, the chosen one filled.
+    private var tabs: some View {
+        HStack(spacing: 2) {
+            ForEach(Tab.allCases, id: \.self) { item in
+                let selected = tab == item
                 Button {
-                    AppHaptics.light()
-                    startRequest = task.id
+                    AppHaptics.selection()
+                    tab = item
                 } label: {
-                    Label("Start Now", systemImage: "play.fill")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 30, height: 30)
+                    Text(item.title)
+                        .font(.callout.weight(selected ? .semibold : .regular))
+                        .foregroundStyle(selected ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
+                        .padding(.horizontal, 13)
+                        .frame(minHeight: 34)
+                        .background(selected ? Color.primary.opacity(0.12) : Color.clear, in: Capsule())
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .disabled(starting)
-                .help(Text("Start Now"))
-                .accessibilityIdentifier("agent-task-start-\(task.id)")
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .accessibilityIdentifier("agent-profile-tab-\(item.rawValue)")
             }
-        }
-        .contextMenu {
-            if actions.offersStartNow {
-                Button("Start Now", systemImage: "play.fill") { startRequest = task.id }
-            }
-            Button("Open", systemImage: "arrow.up.forward.square") { store.tasksRequest = .task(task.id) }
         }
     }
 
-    // MARK: Sessions and now
+    // MARK: Sessions
 
-    /// Its open sessions, each with what its thread last said it is doing (the memory's `now`).
-    @ViewBuilder
+    /// Its open sessions, each with what its thread last said it is doing (the memory's `now`), else
+    /// its folder, by the one rule a session card in a chat follows too (`AgentRoster.line`).
     private func sessionsSection(_ summary: AgentSummary, context: SessionListFilter.Context, now: Date) -> some View {
         Section {
             if summary.sessions.isEmpty {
@@ -301,7 +267,7 @@ struct AgentProfileView: View {
                     AppHaptics.selection()
                     Task { await store.openRelatedSession(session.id) }
                 } label: {
-                    sessionRow(session, state: AgentRoster.state(of: session, context: context, now: now))
+                    sessionRow(AgentRoster.line(of: session, memory: memory, context: context, now: now))
                 }
                 .buttonStyle(.pressable)
                 .accessibilityIdentifier("agent-session-\(session.id)"))
@@ -311,11 +277,10 @@ struct AgentProfileView: View {
         }
     }
 
-    private func sessionRow(_ session: Session, state: AgentSummary.SessionState) -> some View {
-        let doing = memory?.now.first { $0.sessionId == session.id }?.text
-        return HStack(spacing: 10) {
+    private func sessionRow(_ line: AgentRoster.SessionLine) -> some View {
+        HStack(spacing: 10) {
             Group {
-                switch state {
+                switch line.state {
                 case .working: HappierSpinner(size: HappierSpinner.mini, color: .userBubble)
                 case .needsYou: Circle().fill(Color.orange).frame(width: 8, height: 8)
                 case .idle: Circle().fill(Color.secondary.opacity(0.6)).frame(width: 8, height: 8)
@@ -323,19 +288,19 @@ struct AgentProfileView: View {
             }
             .frame(width: 14)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(doing.flatMap { $0.isEmpty ? nil : $0 } ?? session.listDetail)
+                Text(verbatim: line.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Text(verbatim: line.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .truncationMode(doing == nil ? .head : .tail)
+                    .truncationMode(line.doing ? .tail : .head)
             }
             Spacer(minLength: 8)
             Group {
-                switch state {
+                switch line.state {
                 case .working: Text("Working").foregroundStyle(Color.userBubble)
                 case .needsYou: Text("Needs you").foregroundStyle(Color.orange)
-                case .idle: Text(session.sortDate, format: .relative(presentation: .named)).foregroundStyle(.secondary)
+                case .idle: Text(line.lastActivity, format: .relative(presentation: .named)).foregroundStyle(.secondary)
                 }
             }
             .font(.caption)
@@ -349,45 +314,81 @@ struct AgentProfileView: View {
         .contentShape(Rectangle())
     }
 
-    // MARK: Memory and description
-
-    private var memorySection: some View {
+    /// The weekly usage of the account it runs on, below its sessions.
+    private func usageSection(_ weekly: ProviderUsage.Meter?) -> some View {
         Section {
-            let entries = AgentCard.recentMemory(memory)
-            if entries.isEmpty {
-                droppable(Text(memory == nil ? "Loading…" : "Nothing in its journal yet.").foregroundStyle(.secondary))
-            }
-            ForEach(entries) { entry in
-                droppable(VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.text).lineLimit(3)
-                    Text(Date(timeIntervalSince1970: entry.at / 1000), format: .relative(presentation: .named))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine))
-            }
-            Button {
-                showMemory = true
-            } label: {
+            droppable(VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("See Memory")
+                    Text("Weekly Usage")
                     Spacer()
-                    Image(systemName: "chevron.forward")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityHidden(true)
+                    if let weekly {
+                        Text("\(Int(weekly.usedPercent.rounded()))% used")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
-                .contentShape(Rectangle())
+                ProgressView(value: (weekly?.usedPercent ?? 0) / 100).tint(weekly?.isNearLimit == true ? .red : Color.userBubble)
+                Group {
+                    if let reset = weekly?.resetsAt {
+                        Text("Resets \(reset.formatted(.dateTime.weekday(.wide))) at \(reset.formatted(date: .omitted, time: .shortened))")
+                    } else if weekly == nil {
+                        Text("Weekly usage is not available yet.")
+                    }
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.pressable)
-        } header: {
-            Text("Recent Memory")
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .combine))
+        }
+    }
+
+    // MARK: Can Do
+
+    /// What it can do, as chips, then who it is; with neither, a way to add them.
+    @ViewBuilder
+    private func canDoSections(_ profile: AgentProfile) -> some View {
+        let description = profile.description.flatMap { $0.isEmpty ? nil : $0 }
+        if profile.canDo.isEmpty, description == nil {
+            Section {
+                droppable(VStack(spacing: 10) {
+                    Text("Add what \(profile.name) can do and who it is.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Edit") {
+                        AppHaptics.light()
+                        editing = profile
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("agent-profile-can-do-edit")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8))
+            }
+        } else {
+            if !profile.canDo.isEmpty {
+                Section {
+                    droppable(ChipsLayout(spacing: 8) {
+                        ForEach(Array(profile.canDo.enumerated()), id: \.offset) { _, item in
+                            Text(item)
+                                .font(.subheadline)
+                                .lineLimit(2)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                        }
+                    }
+                    .padding(.vertical, 4))
+                }
+            }
+            if let description { descriptionSection(description) }
         }
     }
 
     private func descriptionSection(_ description: String) -> some View {
         Section {
-            VStack(alignment: .leading, spacing: 6) {
+            droppable(VStack(alignment: .leading, spacing: 6) {
                 Text(description)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -397,14 +398,53 @@ struct AgentProfileView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.subheadline)
-            }
+            })
         } header: {
-            Text("Who It Is")
+            Text("About")
         }
     }
 }
 
-/// A row of the profile that takes a dropped task for the agent, counting itself in `targetedRows`
+/// The Can Do chips in rows, wrapping to the next row when one doesn't fit; a chip wider than the
+/// row gets the row's width (its text wraps, then truncates).
+private struct ChipsLayout: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(width: proposal.width ?? .infinity, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = arrange(width: bounds.width, subviews: subviews).frames
+        for (subview, frame) in zip(subviews, frames) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> (frames: [CGRect], size: CGSize) {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0, widest: CGFloat = 0
+        for subview in subviews {
+            var size = subview.sizeThatFits(.unspecified)
+            if size.width > width {
+                size = subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+                size.width = min(size.width, width)
+            }
+            if x > 0, x + size.width > width {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return (frames, CGSize(width: widest, height: frames.isEmpty ? 0 : y + rowHeight))
+    }
+}
+
+/// A row of the card that takes a dropped task for the agent, counting itself in `targetedRows`
 /// while one is over it.
 private struct ProfileRowDrop: ViewModifier {
     let agentId: String

@@ -17,6 +17,8 @@ public struct MarkdownTable: Equatable, Sendable {
 
 /// Splits agent text into prose, fenced code, GFM tables, `>` quotes and `<options>` reply
 /// suggestions, following `parseMarkdownBlock.ts`. Tapping an option sends its text as a user message.
+/// Lines that are only `<session>ID</session>` are the Apple app's own block: in a room an agent's
+/// reply names its sessions that way (the delivery prompt teaches it) and the room shows them as cards.
 public enum MarkdownSegments {
     public indirect enum Segment: Equatable, Sendable {
         case prose(String)
@@ -26,6 +28,11 @@ public enum MarkdownSegments {
         case options([String])
         /// A `>` block; its content is Markdown of its own (another quote included).
         case quote([Segment])
+        /// Sessions a reply names, one per line that is only `<session>ID</session>`; lines in a row
+        /// (blank lines between them too) are one stack. The id is only letters, digits, `_` and `-`
+        /// (at most 128): it goes into the session's URL path when its card is opened. Any other
+        /// `<session>` line stays prose.
+        case sessions([String])
     }
 
     /// `parse`, remembered per text: a message's views are built again on every redraw.
@@ -82,6 +89,17 @@ public enum MarkdownSegments {
                 flushProse()
                 segments.append(.table(table))
                 index = next
+                continue
+            }
+
+            if let id = sessionId(in: trimmed) {
+                if case .sessions(let ids)? = segments.last, prose.allSatisfy({ $0.allSatisfy(\.isWhitespace) }) {
+                    segments[segments.count - 1] = .sessions(ids + [id])
+                    prose = []
+                } else {
+                    flushProse()
+                    segments.append(.sessions([id]))
+                }
                 continue
             }
 
@@ -167,6 +185,15 @@ public enum MarkdownSegments {
         if cells.first == "" { cells.removeFirst() }
         if cells.last == "" { cells.removeLast() }
         return cells
+    }
+
+    /// The id of a `<session>ID</session>` line, when it is a plain one (`Segment.sessions`).
+    private static func sessionId(in trimmed: String) -> String? {
+        guard trimmed.hasPrefix("<session>"), trimmed.hasSuffix("</session>") else { return nil }
+        let id = trimmed.dropFirst(9).dropLast(10)
+        guard (1...128).contains(id.count),
+              id.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) else { return nil }
+        return String(id)
     }
 
     private static func option(in line: Substring) -> String? {

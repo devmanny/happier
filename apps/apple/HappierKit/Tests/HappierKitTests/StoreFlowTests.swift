@@ -34,6 +34,28 @@ import Testing
         #expect(callerOpens.log.values == ["spawn", "sessions", "send", "task", "title"])
     }
 
+    // MARK: Notification taps
+
+    @Test func tappingARoomNoticeOpensTheRoomAndAnAgentsChatAsItsCircleDoes() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 2)]
+        await store.refreshSessions()
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: ""))
+        store.rooms = [AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: nil, now: 1)]
+
+        #expect(await store.handle(PushTap(sessionId: nil, roomId: AgentRoom.directId(agentId: "a-mateo"), permission: nil)))
+        #expect(store.openRequest == AgentProfile.selection(id: "a-mateo"))
+        // A group room, or one not read yet on a cold start: the room, whose view shows an agent's chat once it is read.
+        store.openRequest = nil
+        #expect(await store.handle(PushTap(sessionId: nil, roomId: "r2", permission: nil)))
+        #expect(store.openRequest == AgentRoom.selection(id: "r2"))
+        // A session's notice still opens the session.
+        store.openRequest = nil
+        #expect(await store.handle(PushTap(sessionId: "s1", permission: nil)))
+        #expect(store.openRequest == "s1")
+    }
+
     // MARK: Message search
 
     @Test func messageSearchMergesEveryOnlineMachineWithSearchOn() async throws {
@@ -420,12 +442,40 @@ import Testing
 
         await store.sendPendingAgain("p1", in: "s1")
         await store.removePending("p2", in: "s1")
-        try await until { store.pendingQueues["s1"]?.map(\.localId) == ["send-as-new-p1", "p2"] }
+        let copy = PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: "p1")
+        try await until { store.pendingQueues["s1"]?.map(\.localId) == [copy, "p2"] }
 
         #expect(store.lastError == nil)
         #expect(relay.log.values.filter { $0.hasPrefix("pending ") } == ["pending send-as-new p1", "pending dismiss p2"])
         // The copy waits in line as a new message; the original is hidden and the removed one kept as discarded.
         #expect(store.pendingQueues["s1"]?.map(\.state) == [.queued, .discarded])
+    }
+
+    /// A message sent from here that the relay sends again as new (from a tap here or elsewhere, or
+    /// the runner's own recovery) or that is removed from the line leaves no "Queued" bubble behind.
+    @Test func aMessageSentFromHereThatIsReplacedOrRemovedLeavesNoBubbleBehind() async throws {
+        let (relay, store) = try await openSession()
+        let ownBubbles = {
+            store.transcripts["s1"]?.items.compactMap { item -> String? in
+                if case .userText(let user) = item, user.isPending { user.localId } else { nil }
+            } ?? []
+        }
+        #expect(await store.send("hola", to: "s1"))
+        #expect(await store.send("sigue", to: "s1"))
+        let sent = ownBubbles()
+        try #require(sent.count == 2)
+        relay.pendingRows = [Relay.uncertainPendingRow(sent[0]), Relay.queuedPendingRow(sent[1])]
+        store.refreshPending("s1")
+        try await until { store.pendingQueues["s1"]?.count == 2 }
+
+        await store.sendPendingAgain(sent[0], in: "s1")
+        await store.removePending(sent[1], in: "s1")
+        let copy = PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: sent[0])
+        try await until { store.pendingQueues["s1"]?.map(\.localId) == [copy] }
+
+        #expect(store.lastError == nil)
+        // Only the copy is left, in line; neither original keeps a bubble of its own.
+        #expect(ownBubbles() == [])
     }
 
     @MainActor private func openSession(pending: [JSONValue] = []) async throws -> (Relay, HappierStore) {
@@ -708,6 +758,12 @@ private final class Relay: @unchecked Sendable {
 
     // MARK: Pending queue
 
+    static func queuedPendingRow(_ localId: String) -> JSONValue {
+        let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string("mensaje \(localId)")]]
+        return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": 2,
+                "createdAt": 1, "updatedAt": 1, "deliveryStatus": ["status": "queued"]]
+    }
+
     static func uncertainPendingRow(_ localId: String) -> JSONValue {
         let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string("mensaje \(localId)")]]
         return ["localId": .string(localId), "content": ["t": "plain", "v": record], "status": "queued", "position": 1,
@@ -739,7 +795,7 @@ private final class Relay: @unchecked Sendable {
         case ("POST", ["delivery", "send-as-new"]) where mayHaveArrived:
             log.add("pending send-as-new \(localId)")
             var copy = row.objectValue ?? [:]
-            copy["localId"] = .string("send-as-new-\(localId)")
+            copy["localId"] = .string(PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: localId))
             copy["position"] = 9
             copy["deliveryState"] = .null
             copy["deliveryBlockedReason"] = .null
@@ -756,6 +812,10 @@ private final class Relay: @unchecked Sendable {
         case ("DELETE", []) where mayHaveArrived:
             log.add("pending delete \(localId)")
             return (409, ["error": "delivery-settlement-conflict"])
+        case ("DELETE", []):
+            log.add("pending delete \(localId)")
+            pendingRows.remove(at: index)
+            return (200, ["ok": true])
         case ("PATCH", ["action"]) where mayHaveArrived:
             log.add("pending action \(localId)")
             return (409, ["error": "action-conflict"])

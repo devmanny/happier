@@ -19,7 +19,29 @@ import { SESSION_PERMISSION_INTENT_INPUTS } from '../sessionMetadata/sessionPerm
  *
  * An agent's own chat with the user is a room too, written by the Apple app: id
  * `direct-<agentId>` (one per agent, whichever device makes it), `kind: 'direct'`, that agent as
- * its only member, and every user message mentioning it. Daemons deliver it like any room.
+ * its only member, and every user message mentioning it. Daemons deliver it like any room. Every
+ * agent reply, in any room, is pushed to the user once (`roomReplyNotices`).
+ *
+ * A member's thread may go away (archived or deleted). Found at send time, or while its turn runs
+ * (that turn can never finish: the delivery is dropped without moving the marker and goes again,
+ * in the same run, with a new localId), a new thread is opened; when the member had read the room
+ * before, its first delivery carries the room so far, its own replies included and cut like any
+ * backlog, plus the old thread's id (`buildRoomDeliveryPrompt` with a continuation).
+ *
+ * A reply's line that is only `<session>ID</session>` names one of the member's sessions: the
+ * delivery prompt teaches it, the Apple app shows it as a session card with live status, and push
+ * previews leave it out.
+ *
+ * Seats are written by daemons (and a member's runner when its turn ends), with one exception: the
+ * app may withdraw (delete) or edit a user message its member hasn't got, above both its marker and
+ * its in-flight `throughSeq`, in one atomic write that also writes that member's seat back byte for
+ * byte at the version it read. That seat write is only a version guard; its content stays the
+ * daemons'. A daemon reads seats before messages and claims a delivery by CAS on the seat version
+ * it read, so either the withdrawal lands first and the claim fails, or the app's write conflicts
+ * and the seat it gets back shows the member already has the message. Readers skip missing messages.
+ * The app revises only in an agent's own chat, and there `sala_leer` gives the member the user's
+ * messages only through what its seat has, reading the seat before the messages too, so the agent
+ * never reads a message that may still change.
  */
 export const AGENT_ROOM_KV_PREFIX = 'room/';
 export const AGENT_ROOM_MESSAGE_KV_PREFIX = 'roommsg/';
@@ -85,6 +107,8 @@ export const AgentRoomV1Schema = z.object({
   v: z.literal(1),
   id: z.string().min(1),
   title: z.string().trim().min(1),
+  /** `'direct'` for an agent's own chat with the user (see above); absent for a group room. */
+  kind: z.string().optional(),
   /** How the members call the user (and mention them: `@<userName>`); "User" when absent. */
   userName: z.string().optional(),
   members: z.array(AgentRoomMemberSchema),

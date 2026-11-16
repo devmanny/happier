@@ -2,6 +2,8 @@ import Testing
 @testable import HappierKit
 
 /// Mirrors `apps/ui/sources/components/markdown/parseMarkdownBlock.ts` (options + fenced code).
+/// The `<session>` block is the Apple app's own: only it renders rooms, where an agent's reply
+/// names one of its sessions that way (`buildRoomDeliveryPrompt` teaches it).
 @Suite struct MarkdownSegmentsTests {
     @Test func extractsWrappedOptionsBlock() {
         let text = """
@@ -81,6 +83,36 @@ import Testing
 
     @Test func pipesWithoutASeparatorStayProse() {
         #expect(MarkdownSegments.parse("a | b\nc | d") == [.prose("a | b\nc | d")])
+    }
+
+    @Test func sessionLinesBecomeACardStackBetweenProse() {
+        let text = "I'm in two sessions:\n<session>cmabc1</session>\n  <session>cm_abc-2</session>  \nAnd Julián checked the login."
+        #expect(MarkdownSegments.parse(text) == [
+            .prose("I'm in two sessions:"),
+            .sessions(["cmabc1", "cm_abc-2"]),
+            .prose("And Julián checked the login."),
+        ])
+    }
+
+    @Test func blankLinesBetweenSessionLinesKeepOneStack() {
+        let text = "Working on:\n\n<session>one</session>\n\n<session>two</session>\n\nThat's all."
+        #expect(MarkdownSegments.parse(text) == [.prose("Working on:"), .sessions(["one", "two"]), .prose("That's all.")])
+    }
+
+    @Test func sessionTagsInsideCodeFencesStayCode() {
+        #expect(MarkdownSegments.parse("```\n<session>cmabc1</session>\n```") == [.code("<session>cmabc1</session>")])
+    }
+
+    /// The id goes into the session's URL path (`HappierAPI.session(id:)`) when the card is opened:
+    /// anything but a plain id stays text.
+    @Test func aSessionTagThatIsNotASafeIdStaysProse() {
+        for line in ["<session>Fixing login</session>", "<session>../machines</session>", "<session>a/b</session>",
+                     "<session>a?b=c</session>", "<session></session>", "<session>\(String(repeating: "a", count: 129))</session>",
+                     "See <session>cmabc1</session>", "<session>cmabc1</session> and more"] {
+            #expect(MarkdownSegments.parse(line) == [.prose(line)])
+        }
+        let longest = String(repeating: "a", count: 128)
+        #expect(MarkdownSegments.parse("<session>\(longest)</session>") == [.sessions([longest])])
     }
 }
 

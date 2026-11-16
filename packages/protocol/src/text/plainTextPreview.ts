@@ -91,6 +91,12 @@ function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * A line that is only `<session>ID</session>`: a room reply shows that session as a card
+ * (`buildRoomDeliveryPrompt` teaches it; the Apple app renders ids of these characters only).
+ */
+const SESSION_CARD_LINE = /^[ \t]*<session>[A-Za-z0-9_-]{1,128}<\/session>[ \t]*$/gm;
+
 export type AssistantMessagePreview = Readonly<{
   /** Plain one-paragraph text; empty when nothing but options/signature remains. */
   text: string;
@@ -100,8 +106,9 @@ export type AssistantMessagePreview = Readonly<{
 
 /**
  * Plain preview of a raw agent reply: options block removed (also an unterminated one left by a
- * truncated reply) and returned separately, markdown stripped, closing signature and loose
- * emojis dropped, whitespace collapsed, and cut at a word boundary when `maxChars` is given.
+ * truncated reply) and returned separately, session card lines removed, markdown stripped, closing
+ * signature and loose emojis dropped, whitespace collapsed, and cut at a word boundary when
+ * `maxChars` is given.
  */
 export function buildAssistantMessagePreview(
   raw: string,
@@ -110,7 +117,8 @@ export function buildAssistantMessagePreview(
   const parsed = parseOptionsFromText(raw);
   const withoutOptions = parsed.text
     .replace(/<options>[\s\S]*$/i, '')
-    .replace(/<\/?options?>/gi, ' ');
+    .replace(/<\/?options?>/gi, ' ')
+    .replace(SESSION_CARD_LINE, '');
   const agentName = typeof params.agentName === 'string' ? collapseWhitespace(params.agentName) : '';
   const plain = collapseWhitespace(stripTrailingSignature(stripMarkdown(withoutOptions), agentName || null));
   const text = params.maxChars === undefined ? plain : truncatePlainTextAtWordBoundary(plain, params.maxChars);

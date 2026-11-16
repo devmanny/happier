@@ -555,6 +555,13 @@ public struct AgentTask: Identifiable, Sendable, Equatable {
         case all, me
         case agent(String)
         case session(String)
+
+        /// Who "New Task" is for under this filter: the agent the list is filtered to, when this device
+        /// has its profile; otherwise you.
+        public func newTaskAssignee(profiles: [AgentProfile]) -> Assignee {
+            guard case .agent(let id) = self, let profile = profiles.first(where: { $0.id == id }) else { return .user }
+            return .agent(profile)
+        }
     }
 
     public enum StatusFilter: Hashable, Sendable {

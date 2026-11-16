@@ -137,6 +137,60 @@ describe('buildRoomDeliveryPrompt', () => {
     expect(prompt).toContain(`[#70] Manny: m70 ${long}\nsegunda línea`);
     expect(prompt).not.toContain('[#1] ');
   });
+
+  it('tells the member how to show the user one of its sessions as a card', () => {
+    const prompt = buildRoomDeliveryPrompt({ room: room({ lastSeq: 1 }), member: mateo, messages: log([user, '@Mateo ¿qué haces?', ['a-mateo']]), fromSeq: 1, toSeq: 1 });
+    expect(prompt).toContain('<session>');
+    expect(prompt).toContain('mis_hilos');
+  });
+});
+
+describe('buildRoomDeliveryPrompt for a new thread of a member that had read the room', () => {
+  it('shows the room so far, its own replies included, says what the thread before answered, and lists the rest as new', () => {
+    // Mateo's thread before got #1 and answered it with #2 (its marker stays at what it got: #1).
+    const messages = log(
+      [user, '@Mateo ¿cómo va el login?', ['a-mateo']],
+      [agent(mateo), 'Va bien, falta el registro'],
+      [agent(tomas), 'Yo reviso la app'],
+      [user, '@Mateo ¿y el registro?', ['a-mateo']],
+    );
+    const prompt = buildRoomDeliveryPrompt({
+      room: room({ lastSeq: 4 }), member: mateo, messages, fromSeq: 2, toSeq: 4, continuation: { previousSessionId: 's-old' },
+    });
+
+    expect(prompt).toContain('s-old');
+    expect(prompt).toMatch(/through #1\b/);
+    expect(prompt).toContain('[#1] Manny: @Mateo ¿cómo va el login?\n\n[#2] Mateo: Va bien, falta el registro');
+    expect(prompt).toContain('New messages:\n\n[#3] Tomás: Yo reviso la app\n\n[#4] Manny: @Mateo ¿y el registro?');
+    expect(prompt.indexOf('[#2] Mateo')).toBeLessThan(prompt.indexOf('New messages:'));
+  });
+
+  it('cuts a long room the same way: the last 15 in full, one line each for the 50 before, the rest only counted', () => {
+    const long = 'x'.repeat(400);
+    const messages = log(...Array.from({ length: 100 }, (_, index): [AgentRoomMessageV1['author'], string] => (index % 2
+      ? [agent(mateo), `r${index + 1} ${long}`]
+      : [user, `m${index + 1} ${long}`])));
+    const prompt = buildRoomDeliveryPrompt({ room: room({ lastSeq: 100 }), member: mateo, messages, fromSeq: 99, toSeq: 100, continuation: {} });
+
+    expect(prompt).toContain('35 earlier messages (#1–#35)');
+    expect(prompt).toContain('toSeq 35');
+    const seqOf = (line: string) => Number(line.match(/^\[#(\d+)\]/)![1]);
+    const oneLine = prompt.split('\n').filter((line) => /^\[#(\d+)\] /.test(line) && seqOf(line) <= 85);
+    expect(oneLine.map(seqOf)).toEqual(Array.from({ length: 50 }, (_, index) => index + 36));
+    expect(oneLine.every((line) => line.length <= 160 && line.endsWith('…'))).toBe(true);
+    // Its own replies are in the cut like anyone's.
+    expect(prompt).toContain(`[#86] Mateo: r86 ${long}`);
+    expect(prompt).toContain(`[#100] Mateo: r100 ${long}`);
+    expect(prompt).not.toContain('[#35] ');
+  });
+
+  it('asks for the messages the ones it shows in full answer, already answered ones included', () => {
+    // #2 (already answered) quotes #1, which the daemon didn't read.
+    const messages = log([agent(mateo), '¿Registro o recuperación?'], [user, 'Registro', ['a-mateo']], [user, '@Mateo ¿ya?', ['a-mateo']]);
+    const answered = { ...messages[1]!, replyTo: { seq: 1 } };
+    expect(roomDeliveryQuotedSeqs({ member: mateo, messages: [answered, messages[2]!], fromSeq: 3, toSeq: 3, continuation: {} })).toEqual([1]);
+    expect(roomDeliveryQuotedSeqs({ member: mateo, messages: [answered, messages[2]!], fromSeq: 3, toSeq: 3 })).toEqual([]);
+  });
 });
 
 describe('room delivery local ids', () => {
@@ -167,11 +221,18 @@ describe('roomReplyNotices', () => {
     v: 1, roomId: 'r1', seq: 9, at: 0, author: agent(mateo), text: 'x', mentions, ...(mentionsUser ? { mentionsUser } : {}),
   });
 
-  it('tells the user when an agent mentions them, and when a hand-off hits the brake', () => {
-    expect(roomReplyNotices({ message: reply([], true), agentStreak: 1 })).toEqual(['mention']);
-    expect(roomReplyNotices({ message: reply(['a-tomas']), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS })).toEqual(['brake']);
-    expect(roomReplyNotices({ message: reply(['a-tomas']), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS - 1 })).toEqual([]);
-    expect(roomReplyNotices({ message: reply([]), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS })).toEqual([]);
+  it('tells the user about every reply in a room once, as a mention when it mentions them, and when a hand-off hits the brake', () => {
+    expect(roomReplyNotices({ room: room(), message: reply([], true), agentStreak: 1 })).toEqual(['mention']);
+    expect(roomReplyNotices({ room: room(), message: reply([]), agentStreak: 1 })).toEqual(['reply']);
+    expect(roomReplyNotices({ room: room(), message: reply(['a-tomas']), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS })).toEqual(['reply', 'brake']);
+    expect(roomReplyNotices({ room: room(), message: reply(['a-tomas']), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS - 1 })).toEqual(['reply']);
+    expect(roomReplyNotices({ room: room(), message: reply([]), agentStreak: AGENT_ROOM_MAX_AGENT_TURNS })).toEqual(['reply']);
+  });
+
+  it('tells the user about every reply in an agent\'s own chat, once even when it mentions them', () => {
+    const direct = room({ id: 'direct-a-mateo', kind: 'direct', members: [mateo] });
+    expect(roomReplyNotices({ room: direct, message: reply([]), agentStreak: 1 })).toEqual(['reply']);
+    expect(roomReplyNotices({ room: direct, message: reply([], true), agentStreak: 1 })).toEqual(['reply']);
   });
 });
 

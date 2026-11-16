@@ -59,6 +59,27 @@ describe('runAgentRoomTool (sala_leer)', () => {
     expect(result).toMatchObject({ fromSeq: 31, toSeq: 130, earlier: { toSeq: 30 } });
   });
 
+  it('in an agent\'s own chat, gives it the user\'s messages only through what its seat has, and all its own replies', async () => {
+    const direct: AgentRoomV1 = { ...room, id: 'direct-a-mateo', kind: 'direct', title: 'Mateo', members: [room.members[0]!] };
+    const kv = createInMemoryAccountKv();
+    await kv.transport.mutate([{ key: agentRoomKvKey(direct.id), version: -1,
+      value: sealAccountScopedBlobCiphertext({ kind: 'agent_room', material, payload: direct, randomBytes: (n) => new Uint8Array(n) }) }]);
+    const store = new AgentRoomStore({ transport: kv.transport, material });
+    const read = async () => ((await runAgentRoomTool({ store, caller: mateo, operation: 'read', input: { roomId: direct.id } })) as any)
+      .messages.map((message: { seq: number; from: string }) => [message.seq, message.from]);
+
+    await store.appendMessage(direct.id, { author: { kind: 'user' }, text: '¿Qué haces?', mentions: ['a-mateo'] });
+    await store.startDelivery(direct.id, 'a-mateo', { localId: 'room.direct-a-mateo.a-mateo.n1', throughSeq: 1 }, null);
+    // Sent while that turn runs: it waits, and the user may still edit or cancel it.
+    await store.appendMessage(direct.id, { author: { kind: 'user' }, text: 'Y luego el registro', mentions: ['a-mateo'] });
+    await store.finishTurn({ roomId: direct.id, agentId: 'a-mateo', localId: 'room.direct-a-mateo.a-mateo.n1', author: { kind: 'agent', agentId: 'a-mateo', name: 'Mateo' }, text: 'Reviso el login.' });
+    expect(await read()).toEqual([[1, 'user'], [3, 'Mateo']]);
+
+    await store.startDelivery(direct.id, 'a-mateo', { localId: 'room.direct-a-mateo.a-mateo.n2', throughSeq: 3 }, (await store.getSeats(direct.id, ['a-mateo'])).get('a-mateo')!);
+    await store.appendMessage(direct.id, { author: { kind: 'user' }, text: 'Olvídalo.', mentions: ['a-mateo'] });
+    expect(await read()).toEqual([[1, 'user'], [2, 'user'], [3, 'Mateo']]);
+  });
+
   it('only lets the room\'s members read it', async () => {
     const { store } = await setup(1);
     const leo = { agent: { id: 'a-leo', name: 'Leo' }, sessionId: 's9' };

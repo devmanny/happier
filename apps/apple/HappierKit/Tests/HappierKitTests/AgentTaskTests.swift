@@ -176,6 +176,16 @@ import Testing
         #expect(AgentTask.filter(tasks, assignee: .all, status: .only(.done)).map(\.id) == ["done"])
     }
 
+    @Test func aNewTaskInAListFilteredToAnAgentIsForThatAgent() {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", emoji: "🤖", providerId: "codex", account: .init(label: ""))
+        let profiles = [mateo, AgentProfile(id: "a-leo", name: "Leo", providerId: "claude", account: .init(label: ""))]
+        #expect(AgentTask.AssigneeFilter.agent("a-mateo").newTaskAssignee(profiles: profiles) == .agent(mateo))
+        // Unfiltered, "Me", or an agent this device doesn't have (deleted, not loaded yet): you.
+        #expect(AgentTask.AssigneeFilter.all.newTaskAssignee(profiles: profiles) == .user)
+        #expect(AgentTask.AssigneeFilter.me.newTaskAssignee(profiles: profiles) == .user)
+        #expect(AgentTask.AssigneeFilter.agent("a-gone").newTaskAssignee(profiles: profiles) == .user)
+    }
+
     @Test func tasksDueAndCreatedAtTheSameTimeKeepOneOrderWhateverTheStoreOrder() {
         // The store moves a task to its end on every write; equal dates mustn't follow that.
         let tasks = ["c", "a", "d", "b"].map { Self.task(["id": .string($0), "createdAt": 5]) }

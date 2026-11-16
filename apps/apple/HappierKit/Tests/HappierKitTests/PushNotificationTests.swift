@@ -62,15 +62,56 @@ import Testing
         #expect(PushNotifications.tap(userInfo: ["body": [:]], action: PushNotifications.Action.reply, replyText: "hola") == nil)
     }
 
+    /// A room's notices (`completeRoomTurn`: every reply in an agent's chat, a mention, the brake)
+    /// name the room, not a session: a tap opens the room.
+    @Test func roomNoticeTapOpensTheRoom() {
+        let reply: JSONValue = ["aps": ["alert": ["title": "Mateo", "body": "Listo"]],
+                                "body": ["type": "room_mention", "roomId": "direct-a-mateo", "seq": 2]]
+        #expect(PushNotifications.tap(userInfo: reply, action: PushNotifications.defaultAction)
+            == PushTap(sessionId: nil, roomId: "direct-a-mateo", permission: nil))
+        let brake: JSONValue = ["body": ["type": "room_brake", "roomId": "r1", "seq": 9]]
+        #expect(PushNotifications.tap(userInfo: brake, action: PushNotifications.defaultAction)
+            == PushTap(sessionId: nil, roomId: "r1", permission: nil))
+        // A session's notice names no room.
+        #expect(PushNotifications.tap(userInfo: ["body": ["sessionId": "s1"]], action: PushNotifications.defaultAction)?.roomId == nil)
+    }
+
+    /// No banner for the conversation on screen: its session, its room, or the agent's chat a room
+    /// is, whether that chat was opened from the agent's circle or from a notification.
+    @Test func noBannerForTheConversationOnScreen() {
+        let session = PushTap(sessionId: "s1", permission: nil)
+        #expect(session.isShown(in: "s1"))
+        #expect(!session.isShown(in: "s2"))
+        #expect(!session.isShown(in: nil))
+        #expect(!session.isShown(in: AgentRoom.selection(id: "s1")))
+
+        let room = PushTap(sessionId: nil, roomId: "r1", permission: nil)
+        #expect(room.isShown(in: AgentRoom.selection(id: "r1")))
+        #expect(!room.isShown(in: AgentRoom.selection(id: "r2")))
+        #expect(!room.isShown(in: "r1"))
+        #expect(!room.isShown(in: nil))
+
+        let chat = PushTap(sessionId: nil, roomId: AgentRoom.directId(agentId: "a-mateo"), permission: nil)
+        #expect(chat.isShown(in: AgentProfile.selection(id: "a-mateo")))
+        #expect(chat.isShown(in: AgentRoom.selection(id: AgentRoom.directId(agentId: "a-mateo"))))
+        #expect(!chat.isShown(in: AgentProfile.selection(id: "a-leo")))
+        #expect(!room.isShown(in: AgentProfile.selection(id: "a-mateo")))
+    }
+
     /// The in-app notification center keeps a session's newest notification only, like the
-    /// device does with `apns-collapse-id`; the older ones are taken off the device too.
+    /// device does with `apns-collapse-id`; the older ones are taken off the device too. A room's
+    /// notices (every reply in an agent's chat) carry no session: the newest of each room stays.
     @Test func keepsTheNewestNotificationOfEachSession() {
-        func note(_ id: String, _ session: String?, _ at: Double) -> DeliveredNotification {
-            DeliveredNotification(id: id, sessionId: session, title: id, body: "", date: Date(timeIntervalSince1970: at))
+        func note(_ id: String, _ session: String?, room: String? = nil, _ at: Double) -> DeliveredNotification {
+            DeliveredNotification(id: id, sessionId: session, roomId: room, title: id, body: "", date: Date(timeIntervalSince1970: at))
         }
-        let delivered = [note("a1", "A", 1), note("b1", "B", 2), note("a2", "A", 3), note("x", nil, 4), note("y", nil, 0)]
+        let delivered = [note("a1", "A", 1), note("b1", "B", 2), note("a2", "A", 3), note("x", nil, 4), note("y", nil, 0),
+                         note("m1", nil, room: "direct-a-mateo", 5), note("m2", nil, room: "direct-a-mateo", 6),
+                         note("r1", nil, room: "r1", 1.5),
+                         // A room id that is also a session id stays apart from that session.
+                         note("bb", nil, room: "B", 2.5)]
         let feed = PushNotifications.latestPerSession(delivered)
-        #expect(feed.latest.map(\.id) == ["x", "a2", "b1", "y"])
-        #expect(feed.stale == ["a1"])
+        #expect(feed.latest.map(\.id) == ["m2", "x", "a2", "bb", "b1", "r1", "y"])
+        #expect(feed.stale == ["m1", "a1"])
     }
 }

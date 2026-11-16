@@ -2,9 +2,10 @@ import HappierKit
 import SwiftUI
 
 /// An agent's own chat, opened by its circle in the sidebar, like a conversation in Messages: its
-/// photo and name on top (tap them for its info: beside the chat on iPad and Mac, a sheet on the
-/// iPhone), and the chat itself (`RoomView` of its `AgentRoom.isDirect` room), made the first time
-/// where the agent last worked (`AgentRoom.directPlacement`). Everything written there reaches it.
+/// photo and name on top (tap them for its card, `AgentProfileView`: beside the chat on iPad and Mac,
+/// a sheet on the iPhone; the card draws its own Close and Edit), and the chat itself (`RoomView` of
+/// its `AgentRoom.isDirect` room), made the first time where the agent last worked
+/// (`AgentRoom.directPlacement`). Everything written there reaches it.
 struct AgentChatView: View {
     let agentId: String
     @Environment(HappierStore.self) private var store
@@ -34,7 +35,7 @@ struct AgentChatView: View {
                 .frame(maxWidth: .infinity)
             if infoBeside, showInfo {
                 Divider()
-                AgentProfileView(agentId: agentId)
+                AgentProfileView(agentId: agentId, close: hideInfo)
                     .frame(width: 360)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
@@ -45,12 +46,16 @@ struct AgentChatView: View {
             }
         }
         .task(id: "\(agentId)|\(profile != nil)") { await open() }
+        // What each of its threads says it is doing, for the session cards in its replies.
+        .task(id: agentId) { await store.refreshAgentMemory(agentId: agentId) }
         .sheet(isPresented: Binding(get: { showInfo && !infoBeside }, set: { if !$0 { showInfo = false } })) {
-            NavigationStack {
-                AgentProfileView(agentId: agentId)
-                    .sheetCloseButton()
-            }
+            AgentProfileView(agentId: agentId, close: hideInfo)
         }
+    }
+
+    /// The card's Close: the panel slides away (at once with Reduce Motion), the sheet goes down.
+    private func hideInfo() {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { showInfo = false }
     }
 
     @ViewBuilder

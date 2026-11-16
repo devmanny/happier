@@ -12,6 +12,11 @@ import Testing
         }
     }
 
+    @Test func sessionLinesAreListedByTheirIds() {
+        let html = MarkdownFilePreview.html(markdown: "Sessions:\n<session>cmabc1</session>\n<session>cmabc2</session>", title: "Report")
+        #expect(html.contains("<ul><li><code>cmabc1</code></li><li><code>cmabc2</code></li></ul>"))
+    }
+
     @Test func rendersDocumentBlocksAndInlineFormattingThroughFoundation() {
         let source = """
         # Heading one

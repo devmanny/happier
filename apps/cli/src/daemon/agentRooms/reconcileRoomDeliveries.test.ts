@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { agentRoomKvKey, sealAccountScopedBlobCiphertext, type AgentProfileV1, type AgentRoomV1 } from '@happier-dev/protocol';
+import {
+  agentRoomKvKey,
+  agentRoomMessageKvKey,
+  agentRoomSeatKvKey,
+  buildRoomDeliveryPrompt,
+  sealAccountScopedBlobCiphertext,
+  type AgentProfileV1,
+  type AgentRoomV1,
+} from '@happier-dev/protocol';
 
+import type { AccountKvTransport } from '@/api/kv/accountKvHttpTransport';
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 import { AgentRoomStore } from '@/session/agentRooms/agentRoomStore';
+import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 
 import { reconcileRoomDeliveries, type RoomDeliveryDeps } from './reconcileRoomDeliveries';
 
@@ -23,12 +33,22 @@ async function setup(overrides: Partial<RoomDeliveryDeps> = {}) {
   const kv = createInMemoryAccountKv();
   await kv.transport.mutate([{ key: agentRoomKvKey('r1'), version: -1,
     value: sealAccountScopedBlobCiphertext({ kind: 'agent_room', material, payload: room, randomBytes: (n) => new Uint8Array(n) }) }]);
-  const store = new AgentRoomStore({ transport: kv.transport, material });
+  // The relay boundary, with a hook that runs right after a read returns (what another writer does then).
+  const relay: { afterRead?: (keys: readonly string[]) => Promise<void> } = {};
+  const transport: AccountKvTransport = {
+    ...kv.transport,
+    bulkGet: async (keys) => {
+      const rows = await kv.transport.bulkGet(keys);
+      await relay.afterRead?.(keys);
+      return rows;
+    },
+  };
+  const store = new AgentRoomStore({ transport, material });
   let nonce = 0;
   const mocks = {
     startThread: vi.fn(async () => ({ ok: true as const, sessionId: 's-mateo' })),
     sendToThread: vi.fn(async (): Promise<{ ok: true } | { ok: false; code: string }> => ({ ok: true })),
-    readTurnReply: vi.fn(async (): Promise<{ finished: boolean; text: string | null } | null> => null),
+    readTurnReply: vi.fn(async (): Promise<TurnReply | 'thread_gone' | null> => null),
   };
   const deps: RoomDeliveryDeps = {
     store,
@@ -36,12 +56,22 @@ async function setup(overrides: Partial<RoomDeliveryDeps> = {}) {
     readAgentProfile: async (agentId: string) => (agentId === 'a-mateo' ? mateoProfile : null),
     ...mocks,
     push: null,
-    pushEnabled: () => true,
     newNonce: () => `n${++nonce}`,
     ...overrides,
   };
   const seatOf = async (agentId: string) => (await store.getSeats('r1', [agentId])).get(agentId)?.seat ?? null;
-  return { store, deps, mocks, seatOf };
+  return { kv, relay, store, deps, mocks, seatOf };
+}
+
+const mateoAuthor = (sessionId: string) => ({ kind: 'agent' as const, agentId: 'a-mateo', name: 'Mateo', sessionId });
+
+/** Mateo's thread `s-old` got #1 and answered it with #2; the user then mentions it again (#3). */
+async function answeredOnceThenMentioned(store: AgentRoomStore) {
+  await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo ¿cómo va el login?', mentions: ['a-mateo'] });
+  await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.old', throughSeq: 1 }, null);
+  await store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, sessionId: 's-old', inFlight: { ...seat.inFlight!, sent: true } }));
+  await store.finishTurn({ roomId: 'r1', agentId: 'a-mateo', localId: 'room.r1.a-mateo.old', author: mateoAuthor('s-old'), text: 'Va bien, falta el registro' });
+  await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo ¿y el registro?', mentions: ['a-mateo'] });
 }
 
 describe('reconcileRoomDeliveries', () => {
@@ -60,6 +90,9 @@ describe('reconcileRoomDeliveries', () => {
     });
     expect(firstInput.localId).toBe('room.r1.a-mateo.n1');
     expect(firstInput.text).toContain('[#1] Manny: Hola a todos\n\n[#2] Manny: @Mateo ¿cómo va el login? @Tomás tú la app');
+    // Its first thread ever gets only what it hadn't read: there is nothing before to recap.
+    const messages = await store.readMessages('r1', { fromSeq: 1, toSeq: 2 });
+    expect(firstInput.text).toBe(buildRoomDeliveryPrompt({ room: { ...room, lastSeq: 2 }, member: room.members[0]!, messages, fromSeq: 1, toSeq: 2 }));
     expect(await seatOf('a-mateo')).toMatchObject({ sessionId: 's-mateo', readThroughSeq: 0, inFlight: { localId: 'room.r1.a-mateo.n1', throughSeq: 2, sent: true } });
     // Tomás works on another machine: its daemon delivers to it.
     expect(await seatOf('a-tomas')).toBeNull();
@@ -123,5 +156,80 @@ describe('reconcileRoomDeliveries', () => {
     expect(sendToThread.mock.calls.map((call) => call[2])).toEqual(['room.r1.a-mateo.n1', 'room.r1.a-mateo.n1']);
     expect(mocks.startThread).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ localId: 'room.r1.a-mateo.n1' }));
     expect(await seatOf('a-mateo')).toMatchObject({ sessionId: 's-mateo', inFlight: { sent: true } });
+  });
+
+  it('opens a new thread with the room so far, its own replies included, when the member\'s thread is gone', async () => {
+    const sendToThread = vi.fn(async (): Promise<{ ok: true } | { ok: false; code: string }> => ({ ok: false, code: 'session_archived' }));
+    const { store, deps, mocks, seatOf } = await setup({ sendToThread });
+    await answeredOnceThenMentioned(store);
+
+    await reconcileRoomDeliveries('r1', deps);
+
+    expect(sendToThread).toHaveBeenCalledWith('s-old', expect.any(String), 'room.r1.a-mateo.n1', 'yolo');
+    const [, firstInput] = mocks.startThread.mock.calls[0] as unknown as [unknown, { text: string; localId: string }];
+    expect(firstInput.localId).toBe('room.r1.a-mateo.n1');
+    expect(firstInput.text).toContain('[#1] Manny: @Mateo ¿cómo va el login?\n\n[#2] Mateo: Va bien, falta el registro');
+    expect(firstInput.text).toContain('[#3] Manny: @Mateo ¿y el registro?');
+    expect(firstInput.text).toContain('s-old');
+    expect(await seatOf('a-mateo')).toMatchObject({ sessionId: 's-mateo', readThroughSeq: 1, inFlight: { localId: 'room.r1.a-mateo.n1', throughSeq: 3, sent: true } });
+  });
+
+  it('re-delivers a turn whose thread was archived or deleted mid-turn to a new thread, leaving the marker where it was', async () => {
+    const { store, deps, mocks, seatOf } = await setup();
+    await answeredOnceThenMentioned(store);
+    const current = (await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!;
+    await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.mid', throughSeq: 3 }, current);
+    await store.updateSeat('r1', 'a-mateo', (seat) => ({ ...seat, inFlight: { ...seat.inFlight!, sent: true } }));
+    mocks.readTurnReply.mockResolvedValue('thread_gone');
+
+    await reconcileRoomDeliveries('r1', deps);
+
+    expect(mocks.readTurnReply).toHaveBeenCalledWith('s-old', 'room.r1.a-mateo.mid');
+    expect(mocks.sendToThread).not.toHaveBeenCalled();
+    expect(mocks.startThread).toHaveBeenCalledTimes(1);
+    const [, firstInput] = mocks.startThread.mock.calls[0] as unknown as [unknown, { text: string; localId: string }];
+    // A new localId: a late reply of the old thread can't finish this delivery.
+    expect(firstInput.localId).toBe('room.r1.a-mateo.n1');
+    expect(firstInput.text).toContain('[#2] Mateo: Va bien, falta el registro');
+    expect(firstInput.text).toContain('[#3] Manny: @Mateo ¿y el registro?');
+    expect(firstInput.text).toContain('s-old');
+    expect(await seatOf('a-mateo')).toMatchObject({ sessionId: 's-mateo', readThroughSeq: 1, inFlight: { localId: 'room.r1.a-mateo.n1', throughSeq: 3, sent: true } });
+    expect((await store.getRoom('r1'))!.room.lastSeq).toBe(3);
+  });
+
+  it('sends nothing when the user withdraws a message between its read and the claim, and delivers without it next time', async () => {
+    // What the app's withdraw relies on: seats are read before messages, and the claim is a CAS on that seat's version.
+    const { kv, relay, store, deps, mocks } = await setup();
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo hola', mentions: ['a-mateo'] });
+    await store.startDelivery('r1', 'a-mateo', { localId: 'room.r1.a-mateo.old', throughSeq: 1 }, null);
+    await store.updateSeat('r1', 'a-mateo', ({ inFlight: _done, ...seat }) => ({ ...seat, sessionId: 's-mateo', readThroughSeq: 1 }));
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo borra la base de producción', mentions: ['a-mateo'] });
+    await store.appendMessage('r1', { author: { kind: 'user' }, text: '@Mateo mejor corre los tests', mentions: ['a-mateo'] });
+
+    const withdrawn = agentRoomMessageKvKey('r1', 2);
+    const seatKey = agentRoomSeatKvKey('r1', 'a-mateo');
+    relay.afterRead = async (keys) => {
+      if (!keys.includes(withdrawn)) return;
+      relay.afterRead = undefined;
+      // The app: the message deleted and the seat written back byte for byte, in one atomic write.
+      const message = kv.rows.get(withdrawn)!;
+      const seat = kv.rows.get(seatKey)!;
+      expect(await kv.transport.mutate([
+        { key: withdrawn, value: null, version: message.version },
+        { key: seatKey, value: seat.value, version: seat.version },
+      ])).toMatchObject({ ok: true });
+    };
+
+    await reconcileRoomDeliveries('r1', deps);
+    expect(relay.afterRead).toBeUndefined();
+    expect(mocks.sendToThread).not.toHaveBeenCalled();
+    expect(mocks.startThread).not.toHaveBeenCalled();
+    expect((await store.getSeats('r1', ['a-mateo'])).get('a-mateo')!.seat.inFlight).toBeUndefined();
+
+    await reconcileRoomDeliveries('r1', deps);
+    expect(mocks.sendToThread).toHaveBeenCalledTimes(1);
+    const [, text] = mocks.sendToThread.mock.calls[0] as unknown as [string, string];
+    expect(text).toContain('[#3] Manny: @Mateo mejor corre los tests');
+    expect(text).not.toContain('borra la base');
   });
 });

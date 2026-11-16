@@ -143,6 +143,9 @@ struct AgentEditor: View {
     @State private var newPhoto: Data?
     @State private var pickedPhoto: PhotosPickerItem?
     @State private var photoError: String?
+    /// The "Can Do" text as typed, one item per line; nil until edited. Turned into the list on Save,
+    /// so the line being typed isn't trimmed away.
+    @State private var canDoText: String?
 
     /// What the agent will look like once saved.
     private var shownPhoto: Data? {
@@ -218,6 +221,17 @@ struct AgentEditor: View {
             } footer: {
                 Text("The agent receives this at the start of every session, with its name.")
             }
+            Section {
+                TextField("What you can ask it to do", text: Binding(get: { canDoText ?? profile.canDo.joined(separator: "\n") },
+                                                                     set: { canDoText = $0 }),
+                          axis: .vertical)
+                    .lineLimit(3...10)
+                    .accessibilityIdentifier("agent-can-do")
+            } header: {
+                Text("Can Do")
+            } footer: {
+                Text("One per line. Shown on its profile.")
+            }
             Section("Engine") {
                 Picker("Agent", selection: Binding(get: { profile.providerId }, set: { provider in
                     profile.providerId = provider
@@ -284,6 +298,7 @@ struct AgentEditor: View {
                     saving = true
                     var trimmed = profile
                     trimmed.name = trimmed.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let canDoText { trimmed.canDo = AgentProfile.canDo(fromLines: canDoText) }
                     Task {
                         var saved = await store.saveAgentProfile(trimmed)
                         if saved, let newPhoto {
@@ -796,12 +811,12 @@ struct TasksView: View {
                             Button("New Task for This Session", systemImage: "plus") { create(for: thisSession) }
                             Button("Assign Existing Task Here…", systemImage: "arrow.down.to.line") { assigningExisting = true }
                             Divider()
-                            Button("New Task", systemImage: "checklist") { create(for: .user) }
+                            Button("New Task", systemImage: "checklist") { create(for: newTaskAssignee) }
                         } label: {
                             Label("New Task", systemImage: "plus")
                         }
                     } else {
-                        Button("New Task", systemImage: "plus") { create(for: .user) }
+                        Button("New Task", systemImage: "plus") { create(for: newTaskAssignee) }
                     }
                 }
             }
@@ -832,6 +847,11 @@ struct TasksView: View {
     private func create(for assignee: AgentTask.Assignee) {
         AppHaptics.light()
         creating = assignee
+    }
+
+    /// "New Task" is for the agent the list is filtered to (an agent's card opens its own), else you.
+    private var newTaskAssignee: AgentTask.Assignee {
+        assignee.newTaskAssignee(profiles: store.agentProfiles)
     }
 
     /// "Linked to this session", then "All tasks" grouped by who each task is for.

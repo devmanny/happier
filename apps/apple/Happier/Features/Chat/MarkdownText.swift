@@ -2,8 +2,9 @@ import HappierKit
 import SwiftUI
 
 /// Lightweight Markdown for chat bubbles: inline styling via `AttributedString`, fenced code
-/// blocks rendered as monospaced panels, GFM tables, and `#` headings as bold lines. Block
-/// splitting is owned by `MarkdownSegments`.
+/// blocks rendered as monospaced panels, GFM tables, `#` headings as bold lines, and the sessions a
+/// room reply names as cards (`SessionReferenceCard`; a room thread's own transcript shows them
+/// too). Block splitting is owned by `MarkdownSegments`.
 struct MarkdownText: View {
     let segments: [MarkdownSegments.Segment]
     /// Off unless the message's "Select Text" is on (the Mac selected by default, unasked).
@@ -39,6 +40,8 @@ struct MarkdownText: View {
                         }
                 case .options(let items):
                     ForEach(items, id: \.self) { Text("• \($0)") }
+                case .sessions(let ids):
+                    SessionReferenceStack(ids: ids, inBubble: true)
                 }
             }
         }

@@ -31,6 +31,39 @@ import Testing
         #expect(AgentProfile.open(sealed, machineKey: Data(repeating: 9, count: 32)) == nil)
     }
 
+    // MARK: Can Do
+
+    @Test func canDoIsReadTrimmedWithoutBlanksAndRoundTripsThroughTheSealedValue() throws {
+        var object = try #require(Self.julian().json.objectValue)
+        object["canDo"] = [" Code ", "", "Spreadsheets"]
+        let profile = try #require(AgentProfile(json: .object(object)))
+        #expect(profile.canDo == ["Code", "Spreadsheets"])
+        let reopened = try #require(AgentProfile.open(try profile.sealed(machineKey: Self.machineKey), machineKey: Self.machineKey))
+        #expect(reopened == profile)
+        #expect(reopened.canDo == ["Code", "Spreadsheets"])
+    }
+
+    @Test func clearingCanDoRemovesItsKeySoNoStaleListComesBack() throws {
+        var object = try #require(Self.julian().json.objectValue)
+        object["canDo"] = ["Code"]
+        var profile = try #require(AgentProfile(json: .object(object)))
+        profile.canDo = []
+        #expect(profile.json["canDo"] == nil)
+        #expect(AgentProfile(json: profile.json)?.canDo == [])
+    }
+
+    @Test func aProfileWithoutCanDoReadsEmptyAndWritesNoKey() throws {
+        let profile = Self.julian()
+        #expect(profile.canDo == [])
+        #expect(profile.json["canDo"] == nil)
+        #expect(AgentProfile(json: profile.json)?.canDo == [])
+    }
+
+    @Test func theEditorsTextBecomesOneCanDoItemPerLine() {
+        #expect(AgentProfile.canDo(fromLines: "Code\n\n  Spreadsheets  \n") == ["Code", "Spreadsheets"])
+        #expect(AgentProfile.canDo(fromLines: " \n") == [])
+    }
+
     @Test func keysAreOpaqueAndOnlyProfileKeysAreProfiles() {
         // Profiles have their own prefix, so an agent's memory can't crowd them out of a listing.
         #expect(AgentProfile.kvKey(id: "0F1E") == "agentprofile/0f1e")

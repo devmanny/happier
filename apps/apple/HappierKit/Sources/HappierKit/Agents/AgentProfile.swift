@@ -26,6 +26,10 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
     public var effort: String?
     public var account: Account
     public var updatedAt: Double
+    /// What the user says it can do, shown on its card ("Can Do"): short items, trimmed, none blank.
+    /// Only this app reads and writes it; the CLI daemon keeps it untouched (its schema passes unknown
+    /// keys through) and nothing tells it to the agent or other agents yet.
+    public var canDo: [String] = []
     /// Keys other clients wrote that this one doesn't know; kept on rewrite.
     var extra: [String: JSONValue] = [:]
 
@@ -63,6 +67,15 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
     public var claudeConfigDir: String? {
         guard providerId == "claude", let dir = account.configDir?.trimmingCharacters(in: .whitespaces), !dir.isEmpty else { return nil }
         return dir
+    }
+
+    /// The editor's "Can Do" text, one item per line: each trimmed, blank lines dropped.
+    public static func canDo(fromLines text: String) -> [String] {
+        canDoItems(text.components(separatedBy: .newlines))
+    }
+
+    private static func canDoItems(_ items: some Sequence<String>) -> [String] {
+        items.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     // MARK: Storage
@@ -126,6 +139,8 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
         if let dir = self.account.configDir, !dir.isEmpty { account["configDir"] = .string(dir) }
         object["account"] = .object(account)
         object["updatedAt"] = .number(updatedAt)
+        // Left out when empty, so clearing the list removes the key.
+        object["canDo"] = canDo.isEmpty ? nil : .array(canDo.map(JSONValue.string))
         return .object(object.filter { !$0.value.isNull })
     }
 
@@ -139,7 +154,9 @@ public struct AgentProfile: Identifiable, Sendable, Equatable {
                   account: Account(label: object["account"]?["label"]?.stringValue ?? "",
                                    configDir: object["account"]?["configDir"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }),
                   updatedAt: object["updatedAt"]?.doubleValue ?? 0)
-        let known: Set<String> = ["v", "id", "name", "emoji", "description", "providerId", "modelId", "effort", "account", "updatedAt"]
+        canDo = Self.canDoItems((object["canDo"]?.arrayValue ?? []).compactMap(\.stringValue))
+        // `canDo` is known even when unreadable, so a cleared or malformed list never comes back from `extra`.
+        let known: Set<String> = ["v", "id", "name", "emoji", "description", "providerId", "modelId", "effort", "account", "updatedAt", "canDo"]
         extra = object.filter { !known.contains($0.key) }
     }
 

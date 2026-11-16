@@ -2,7 +2,7 @@ import HappierKit
 import SwiftUI
 
 extension View {
-    /// "Start Now" wherever a task shows (its detail, its agent's profile): setting `request` to a
+    /// "Start Now" wherever a task shows (its detail): setting `request` to a
     /// task id starts it with `HappierStore.startTask`, asks before creating a missing folder, and
     /// says why when it couldn't start. `started` gets the session the task now runs in.
     func taskStart(_ request: Binding<String?>, working: Binding<Bool>,

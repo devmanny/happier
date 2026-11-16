@@ -36,6 +36,15 @@ import Testing
         #expect(SendDecision.action(for: "start", session: try session(seq: 0, capabilities: ["inFlightSteerSupported": true])) == .sendNow)
     }
 
+    /// The relay's own id for the copy (`derivePendingSendAsNewLocalId`, `pendingMessageService.ts`).
+    /// The second pair is from a real session: the relay hid `fdbcca5b…` and delivered its copy.
+    @Test func theCopyOfAMessageSentAgainAsNewCarriesTheRelaysId() {
+        #expect(PendingMessage.sentAsNewLocalId(sessionId: "s1", localId: "p1")
+            == "send-as-new-6c577788585c1178c259df139f627803076130ae679d69ac8256a15b7cf1453f")
+        #expect(PendingMessage.sentAsNewLocalId(sessionId: "cmwgor3vx70rpqh01uo7raxiy", localId: "fdbcca5b-17c3-4207-ba09-d6f0ae390e73")
+            == "send-as-new-580dfb8cf93a91858ce32834bfd1f345ceb84c62f13df849026cdf1757923ffd")
+    }
+
     @Test func parsesQueuedAndDiscardedRowsInDisplayOrder() throws {
         let s = try session()
         let record: JSONValue = ["role": "user", "content": ["type": "text", "text": "raw"], "meta": ["displayText": "shown"]]

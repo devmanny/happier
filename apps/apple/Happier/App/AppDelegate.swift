@@ -90,9 +90,8 @@ final class AppDelegate: NSObject, @preconcurrency UNUserNotificationCenterDeleg
     /// Foreground banners, except for the conversation already on screen.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let tap = PushNotifications.tap(userInfo: Self.json(notification.request.content.userInfo), action: PushNotifications.defaultAction)
-        let onScreen = UserDefaults.standard.string(forKey: "happier.lastOpenSessionId")
-        if let sessionId = tap?.sessionId, sessionId == onScreen { return [] }
-        // Once it's in Notification Center, it replaces the session's previous one in the app's list.
+        if tap?.isShown(in: inbox.onScreen) == true { return [] }
+        // Once it's in Notification Center, it replaces its session's (or room's) previous one in the app's list.
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
             await inbox.refresh()

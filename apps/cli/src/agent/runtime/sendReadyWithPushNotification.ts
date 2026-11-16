@@ -74,63 +74,74 @@ export function sendReadyWithPushNotification(opts: {
     },
   })
 
-  // A room turn (a delivery from one of the user's rooms) posts its final text to the room.
-  void notifyRoomTurnReady(opts.session.sessionId)
+  // A room turn (a delivery from one of the user's rooms) posts its final text to the room, whose
+  // own push is that reply's only one on the phone: the turn-finished push is left out here, unless
+  // the room could not take it over (its reply wasn't posted). Other channels (webhooks) get no
+  // room push, so they still get the turn-finished notification.
+  const roomTurn = notifyRoomTurnReady(opts.session.sessionId)
 
   if (!opts.pushSender) return
+  if (roomTurn) {
+    void roomTurn.then((roomNotified) => sendReadyPush({ phone: !roomNotified }))
+    return
+  }
+  sendReadyPush({ phone: true })
 
-  try {
-    const agentName = readSessionAgentName(opts.session)
-    const currentSettingsContext = resolveReadyNotificationSettingsContext({
-      accountSettings: opts.accountSettings,
-      settingsSecretsReadKeys: opts.settingsSecretsReadKeys,
-    })
-    if (currentSettingsContext.settings) {
-      const loggerDebug = opts.loggerDebug ?? logger.debug.bind(logger)
-      const expoPushSender = opts.pushSender?.sendToAllDevicesAsync
-        ? {
-          sendToAllDevicesAsync: opts.pushSender.sendToAllDevicesAsync.bind(opts.pushSender),
-        }
-        : opts.pushSender?.sendToAllDevices
-          ? {
-            sendToAllDevicesAsync: async (title: string, body: string, data: Record<string, unknown>, delivery?: ExpoPushActivityNotificationOptions) => {
-              const sessionId = typeof data.sessionId === 'string' ? data.sessionId : opts.session.sessionId
-              opts.pushSender?.sendToAllDevices?.(title, body, { ...data, sessionId }, delivery)
-            },
-          }
-          : null
-      void dispatchActivityNotificationAsync({
-        settings: currentSettingsContext.settings,
-        settingsSecretsReadKeys: currentSettingsContext.settingsSecretsReadKeys,
-        expoPushSender,
-        event: {
-          topic: 'ready',
-          sessionId: opts.session.sessionId,
-          sessionTitle: opts.sessionTitle,
-          waitingForCommandLabel: opts.waitingForCommandLabel,
-          assistantPreviewText: opts.assistantPreviewText,
-          agentName,
-        },
-      }).catch((pushError) => {
-        loggerDebug(`${opts.logPrefix} Failed to send ready push`, serializeAxiosErrorForLog(pushError))
+  function sendReadyPush(target: Readonly<{ phone: boolean }>): void {
+    try {
+      const agentName = readSessionAgentName(opts.session)
+      const currentSettingsContext = resolveReadyNotificationSettingsContext({
+        accountSettings: opts.accountSettings,
+        settingsSecretsReadKeys: opts.settingsSecretsReadKeys,
       })
-      return
+      if (currentSettingsContext.settings) {
+        const loggerDebug = opts.loggerDebug ?? logger.debug.bind(logger)
+        const expoPushSender = opts.pushSender?.sendToAllDevicesAsync
+          ? {
+            sendToAllDevicesAsync: opts.pushSender.sendToAllDevicesAsync.bind(opts.pushSender),
+          }
+          : opts.pushSender?.sendToAllDevices
+            ? {
+              sendToAllDevicesAsync: async (title: string, body: string, data: Record<string, unknown>, delivery?: ExpoPushActivityNotificationOptions) => {
+                const sessionId = typeof data.sessionId === 'string' ? data.sessionId : opts.session.sessionId
+                opts.pushSender?.sendToAllDevices?.(title, body, { ...data, sessionId }, delivery)
+              },
+            }
+            : null
+        void dispatchActivityNotificationAsync({
+          settings: currentSettingsContext.settings,
+          settingsSecretsReadKeys: currentSettingsContext.settingsSecretsReadKeys,
+          expoPushSender: target.phone ? expoPushSender : null,
+          event: {
+            topic: 'ready',
+            sessionId: opts.session.sessionId,
+            sessionTitle: opts.sessionTitle,
+            waitingForCommandLabel: opts.waitingForCommandLabel,
+            assistantPreviewText: opts.assistantPreviewText,
+            agentName,
+          },
+        }).catch((pushError) => {
+          loggerDebug(`${opts.logPrefix} Failed to send ready push`, serializeAxiosErrorForLog(pushError))
+        })
+        return
+      }
+      if (!target.phone) return
+      const shouldSend = opts.shouldSendPush ?? (() => true)
+      if (shouldSend() !== true) return
+      if (isSessionNotificationMuted(opts.session.sessionId)) return
+      if (!opts.pushSender?.sendToAllDevices) return
+      const content = buildActivityNotificationContent({
+        topic: 'ready',
+        sessionId: opts.session.sessionId,
+        sessionTitle: opts.sessionTitle,
+        waitingForCommandLabel: opts.waitingForCommandLabel,
+        assistantPreviewText: opts.assistantPreviewText,
+        agentName,
+      }, { readyIncludeMessageText: opts.includeAssistantPreviewText !== false })
+      opts.pushSender.sendToAllDevices(content.title, content.body, content.data)
+    } catch (pushError) {
+      const loggerDebug = opts.loggerDebug ?? logger.debug.bind(logger)
+      loggerDebug(`${opts.logPrefix} Failed to send ready push`, serializeAxiosErrorForLog(pushError))
     }
-    const shouldSend = opts.shouldSendPush ?? (() => true)
-    if (shouldSend() !== true) return
-    if (isSessionNotificationMuted(opts.session.sessionId)) return
-    if (!opts.pushSender?.sendToAllDevices) return
-    const content = buildActivityNotificationContent({
-      topic: 'ready',
-      sessionId: opts.session.sessionId,
-      sessionTitle: opts.sessionTitle,
-      waitingForCommandLabel: opts.waitingForCommandLabel,
-      assistantPreviewText: opts.assistantPreviewText,
-      agentName,
-    }, { readyIncludeMessageText: opts.includeAssistantPreviewText !== false })
-    opts.pushSender.sendToAllDevices(content.title, content.body, content.data)
-  } catch (pushError) {
-    const loggerDebug = opts.loggerDebug ?? logger.debug.bind(logger)
-    loggerDebug(`${opts.logPrefix} Failed to send ready push`, serializeAxiosErrorForLog(pushError))
   }
 }

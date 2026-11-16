@@ -3,32 +3,51 @@ import Testing
 @testable import HappierKit
 
 /// HTTP is the mocked boundary: an in-memory UserKVStore with versions, atomic mutations and bulk
-/// reads (`kvRoutes.ts`); the store's room logic, sealing and request building stay real.
+/// reads (`kvRoutes.ts`), plus sessions' read state (`registerSessionReadStateRoutes.ts`); the
+/// store's room logic, sealing and request building stay real.
 private final class RoomKVServer: @unchecked Sendable {
     private let lock = NSLock()
     private var rows: [String: (value: String, version: Int)] = [:]
     private(set) var mutateCalls = 0
-    /// Listings of this prefix wait (a slow network) until `release()`, or 2 s at most.
+    /// The sessions marked read (`POST /v2/sessions/:id/read-state`), in order.
+    private var reads: [String] = []
+    var readSessions: [String] { lock.withLock { reads } }
+    /// Listings of this prefix (and bulk reads, once `holdBulkReads()`) are answered, then their
+    /// answer waits (a slow network) until `release()`, or 2 s at most.
     private var heldPrefix: String?
+    private var holdsBulkReads = false
     private let held = DispatchSemaphore(value: 0)
-    /// What happened, in order: the test's own marks and "held"/"released" for each held listing.
+    /// What happened, in order: the test's own marks and "held"/"released" for each held answer.
     private var log: [String] = []
 
     func hold(prefix: String) { lock.withLock { heldPrefix = prefix } }
+    func holdBulkReads() { lock.withLock { holdsBulkReads = true } }
     func release() { held.signal() }
     func mark(_ event: String) { lock.withLock { log.append(event) } }
     var events: [String] { lock.withLock { log } }
 
-    /// Called off the lock before answering: a held listing waits here.
-    func waitIfHeld(_ request: URLRequest) {
+    /// Whether the answer to `request` is held (`hold(prefix:)`, `holdBulkReads()`).
+    func holds(_ request: URLRequest) -> Bool {
         let prefix = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "prefix" }?.value
-        guard request.httpMethod == "GET", let prefix, let heldPrefix = lock.withLock({ heldPrefix }), prefix.hasPrefix(heldPrefix) else { return }
+        return lock.withLock {
+            if request.httpMethod == "POST", request.url?.path == "/v1/kv/bulk" { return holdsBulkReads }
+            guard request.httpMethod == "GET", let prefix, let heldPrefix else { return false }
+            return prefix.hasPrefix(heldPrefix)
+        }
+    }
+
+    /// A held answer waits here, after it was answered and before it arrives.
+    func waitHeld() {
         mark("held")
         _ = held.wait(timeout: .now() + 2)
         mark("released")
     }
 
     func put(_ key: String, _ value: String, version: Int) { lock.withLock { rows[key] = (value, version) } }
+    func remove(_ key: String) { lock.withLock { rows[key] = nil } }
+    /// The keys of each bulk read (`POST /v1/kv/bulk`), in order.
+    private var bulk: [[String]] = []
+    var bulkReads: [[String]] { lock.withLock { bulk } }
     func row(_ key: String) -> (value: String, version: Int)? { lock.withLock { rows[key] } }
 
     func respond(_ request: URLRequest, _ body: Data) -> (Int, JSONValue) {
@@ -41,8 +60,15 @@ private final class RoomKVServer: @unchecked Sendable {
                 return (200, ["items": .array(items)])
             }
             guard let json = try? JSONValue.parse(body) else { return (400, [:]) }
+            if request.httpMethod == "POST", path.hasPrefix("/v2/sessions/"), path.hasSuffix("/read-state") {
+                guard json["state"]?.stringValue == "read" else { return (400, [:]) }
+                reads.append(String(path.dropFirst("/v2/sessions/".count).dropLast("/read-state".count)))
+                return (200, ["success": true])
+            }
             if path == "/v1/kv/bulk" {
-                let values = (json["keys"]?.arrayValue ?? []).compactMap(\.stringValue).compactMap { key -> JSONValue? in
+                let keys = (json["keys"]?.arrayValue ?? []).compactMap(\.stringValue)
+                bulk.append(keys)
+                let values = keys.compactMap { key -> JSONValue? in
                     rows[key].map { ["key": .string(key), "value": .string($0.value), "version": .number(Double($0.version))] }
                 }
                 return (200, ["values": .array(values)])
@@ -87,12 +113,20 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
                 body.append(contentsOf: bytes.prefix(count))
             }
         }
-        Self.server?.waitIfHeld(request)
-        let (status, json) = Self.server?.respond(request, body) ?? (500, [:])
-        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: (try? json.encoded()) ?? Data())
-        client?.urlProtocolDidFinishLoading(self)
+        let server = Self.server
+        let (status, json) = server?.respond(request, body) ?? (500, [:])
+        let arrive = { [self] in
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: (try? json.encoded()) ?? Data())
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        // A held answer arrives later (a slow network), without holding up the requests made meanwhile.
+        if let server, server.holds(request) {
+            DispatchQueue.global().async { server.waitHeld(); arrive() }
+        } else {
+            arrive()
+        }
     }
 
     override func stopLoading() {}
@@ -121,6 +155,25 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
             server.put(AgentRoomMessage.kvKey(roomId: "r1", seq: seq),
                        try AgentRoomTests.message(seq, by: author, text: "m\(seq)").sealed(machineKey: machineKey), version: 0)
         }
+    }
+
+    /// A member's seat as its daemon writes it: its thread and, while a turn runs, `inFlight`.
+    private func seat(_ roomId: String, _ agentId: String, thread: String?, inFlight: Bool = false) throws -> String {
+        var json: [String: JSONValue] = ["v": 1, "roomId": .string(roomId), "agentId": .string(agentId), "readThroughSeq": 1]
+        if let thread { json["sessionId"] = .string(thread) }
+        if inFlight { json["inFlight"] = ["throughSeq": 2, "at": 1] }
+        return try AccountScopedBlob.seal(.object(json), kind: .agentRoom, machineKey: machineKey)
+    }
+
+    private func putSeat(_ server: RoomKVServer, _ roomId: String, _ agentId: String, thread: String?, inFlight: Bool = false) throws {
+        server.put(AgentRoomSeat.kvKey(roomId: roomId, agentId: agentId), try seat(roomId, agentId, thread: thread, inFlight: inFlight), version: 0)
+    }
+
+    private func thread(_ id: String, unread: Bool) throws -> Session {
+        var row: [String: JSONValue] = ["id": .string(id), "encryptionMode": "plain", "metadataVersion": 1, "active": true, "updatedAt": 10,
+                                        "metadata": .string(#"{"path":"/p","flavor":"claude"}"#)]
+        if unread { row["unreadSince"] = 7 }
+        return try Session(row: .object(row), keys: nil)
     }
 
     @Test func theUsersMessageTakesTheNextSeqEvenWhenAnAgentWroteFirst() async throws {
@@ -271,5 +324,313 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         let room = try #require(server.row(AgentRoom.kvKey(id: "r1")).flatMap { AgentRoom.open($0.value, machineKey: machineKey) })
         #expect(room.isPaused)
         #expect(room.lastSeq == 3)
+    }
+
+    @Test func everyRoomsThreadsAreKnownWithoutOpeningTheRoom() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        let chat = AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: "Manny", now: 1)
+        server.put(AgentRoom.kvKey(id: chat.id), try chat.sealed(machineKey: machineKey), version: 0)
+        let archived = AgentRoomTests.room(["id": "r-old", "archivedAt": 3])
+        server.put(AgentRoom.kvKey(id: "r-old"), try archived.sealed(machineKey: machineKey), version: 0)
+        try putSeat(server, "r1", "a-tomas", thread: "g1")
+        // Mentioned but not started yet: no thread.
+        try putSeat(server, "r1", "a-mateo", thread: nil)
+        try putSeat(server, chat.id, "a-mateo", thread: "d1", inFlight: true)
+        try putSeat(server, "r-old", "a-tomas", thread: "old1")
+        let store = store(server)
+        await store.refreshRooms()
+        // No room was opened: the seats come with the rooms.
+        #expect(store.roomMessages.isEmpty)
+        #expect(store.roomSeats["r1"]?.count == 2)
+        #expect(store.roomThreads == [
+            "g1": AgentRoomThread(selection: AgentRoom.selection(id: "r1"), inFlight: false),
+            "d1": AgentRoomThread(selection: AgentProfile.selection(id: "a-mateo"), inFlight: true),
+        ])
+        // Its daemon starts the chat again on a new thread: the change alone tells.
+        _ = store.applyRoomChange(.init(key: AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"),
+                                        value: try seat(chat.id, "a-mateo", thread: "d2"), version: 1), machineKey: machineKey)
+        #expect(store.roomThreads["d1"] == nil)
+        #expect(store.roomThreads["d2"] == AgentRoomThread(selection: AgentProfile.selection(id: "a-mateo"), inFlight: false))
+        // A room made on another device after the listing takes its first seat from the changes too.
+        let made = AgentRoomTests.room(["id": "r3"])
+        _ = store.applyRoomChange(.init(key: AgentRoom.kvKey(id: "r3"), value: try made.sealed(machineKey: machineKey), version: 0),
+                                  machineKey: machineKey)
+        _ = store.applyRoomChange(.init(key: AgentRoomSeat.kvKey(roomId: "r3", agentId: "a-tomas"),
+                                        value: try seat("r3", "a-tomas", thread: "g3"), version: 0), machineKey: machineKey)
+        #expect(store.roomThreads["g3"] == AgentRoomThread(selection: AgentRoom.selection(id: "r3"), inFlight: false))
+    }
+
+    @Test func readingARoomReadsItsUnreadThreads() async throws {
+        let server = RoomKVServer()
+        try seed(server, lastSeq: 2, version: 5)
+        try putSeat(server, "r1", "a-tomas", thread: "t1")
+        try putSeat(server, "r1", "a-mateo", thread: "t2")
+        let store = store(server)
+        await store.refreshRooms()
+        store.sessions["t1"] = try thread("t1", unread: true)
+        store.sessions["t2"] = try thread("t2", unread: false)
+        #expect(store.unreadRoomThreads(roomId: "r1") == ["t1"])
+        store.readRoomThreads(roomId: "r1")
+        #expect(store.sessions["t1"]?.unreadSince == nil)
+        #expect(store.unreadRoomThreads(roomId: "r1").isEmpty)
+        for _ in 0..<100 where server.readSessions.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(server.readSessions == ["t1"])
+        // Read already: nothing more is written.
+        store.readRoomThreads(roomId: "r1")
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(server.readSessions == ["t1"])
+    }
+
+    // MARK: What waits for the agent in its chat
+
+    /// Mateo's seat in his chat as his daemon writes it, with what this build doesn't read (the
+    /// delivery's `localId` and `sent`, `updatedAt`, a newer build's field).
+    private func chatSeat(_ chatId: String, read: Int, inFlight: [String: JSONValue]?) throws -> String {
+        var json: [String: JSONValue] = ["v": 1, "roomId": .string(chatId), "agentId": "a-mateo", "sessionId": "d1",
+                                         "readThroughSeq": .number(Double(read)), "updatedAt": 9, "futureField": ["x": 1]]
+        if let inFlight { json["inFlight"] = .object(inFlight) }
+        return try AccountScopedBlob.seal(.object(json), kind: .agentRoom, machineKey: machineKey)
+    }
+
+    /// The user's message in Mateo's chat, as stored; #2 answers #1 and has a newer build's field.
+    private func chatMessage(_ chatId: String, _ seq: Int, text: String) throws -> String {
+        var json: [String: JSONValue] = ["v": 1, "roomId": .string(chatId), "seq": .number(Double(seq)), "at": .number(Double(seq * 10)),
+                                         "author": AgentRoomTests.user, "text": .string(text), "mentions": ["a-mateo"]]
+        if seq == 2 {
+            json["replyTo"] = ["seq": 1]
+            json["futureField"] = "kept"
+        }
+        return try AccountScopedBlob.seal(.object(json), kind: .agentRoom, machineKey: machineKey)
+    }
+
+    /// Mateo's chat with the user's #1, #2 (answering #1, with a newer build's field) and #3; his
+    /// daemon took #1 for the turn he's working (not sent yet), so #2 and #3 wait. The seat is at version 4.
+    private func seedChat(_ server: RoomKVServer) throws -> (chat: AgentRoom, seat: String) {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        var chat = AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: "Manny", now: 1)
+        chat.lastSeq = 3
+        server.put(AgentRoom.kvKey(id: chat.id), try chat.sealed(machineKey: machineKey), version: 3)
+        for seq in 1...3 {
+            server.put(AgentRoomMessage.kvKey(roomId: chat.id, seq: seq), try chatMessage(chat.id, seq, text: "m\(seq)"), version: 0)
+        }
+        let seat = try chatSeat(chat.id, read: 0, inFlight: ["localId": "room.c.a-mateo.n1", "throughSeq": 1, "at": 5])
+        server.put(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"), seat, version: 4)
+        return (chat, seat)
+    }
+
+    private func openChat(_ server: RoomKVServer, _ chat: AgentRoom) async -> HappierStore {
+        let store = store(server)
+        await store.refreshRooms()
+        await store.loadRoom(id: chat.id)
+        return store
+    }
+
+    @Test func withdrawingAQueuedMessageDeletesItAndWritesTheSeatBackUnchanged() async throws {
+        let server = RoomKVServer()
+        let (chat, seat) = try seedChat(server)
+        let store = await openChat(server, chat)
+        let queue = try #require(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []))
+        #expect(queue.messages.map(\.seq) == [2, 3] && queue.reason == .afterCurrentTurn && queue.revisable)
+
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)) == nil)
+        // The seat is only the guard: written back byte for byte (never resealed from the model), one version on.
+        let written = try #require(server.row(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")))
+        #expect(written.value == seat)
+        #expect(written.version == 5)
+        #expect(server.mutateCalls == 1)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)) != nil)
+    }
+
+    @Test func aMessageTheAgentAlreadyGotIsNotWithdrawn() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        // Meanwhile Mateo's turn ended and his daemon took #2 and #3 for the next one.
+        let taken = try chatSeat(chat.id, read: 1, inFlight: ["localId": "room.c.a-mateo.n2", "throughSeq": 3, "at": 6])
+        server.put(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"), taken, version: 6)
+        let before = try #require(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)))
+
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .alreadyDelivered)
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2))?.value == before.value)
+        #expect(server.row(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"))?.version == 6)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 2, 3])
+        // What the agent has now is shown: nothing waits any more.
+        #expect(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []) == nil)
+    }
+
+    @Test func withdrawingGoesAgainWhenTheSeatChangedWithoutReadingTheMessage() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        let seatKey = AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")
+        // The turn's delivery was sent: the seat moved, but #2 still waits.
+        let sent = try chatSeat(chat.id, read: 0, inFlight: ["localId": "room.c.a-mateo.n1", "throughSeq": 1, "at": 5, "sent": true])
+        server.put(seatKey, sent, version: 5)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)) == nil)
+        #expect(server.row(seatKey)?.value == sent && server.row(seatKey)?.version == 6)
+        #expect(server.mutateCalls == 2)
+        // The turn ended, its marker at #1: #3 still waits.
+        let ended = try chatSeat(chat.id, read: 1, inFlight: nil)
+        server.put(seatKey, ended, version: 9)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, text: nil) == .done)
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)) == nil)
+        #expect(server.row(seatKey)?.value == ended && server.row(seatKey)?.version == 10)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1])
+    }
+
+    @Test func editingAQueuedMessageRewritesItAtItsSeq() async throws {
+        let server = RoomKVServer()
+        let (chat, seat) = try seedChat(server)
+        let store = await openChat(server, chat)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: "  mejor esto  ") == .done)
+        let row = try #require(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)))
+        #expect(row.version == 1)
+        let edited = try #require(AgentRoomMessage.open(row.value, machineKey: machineKey))
+        #expect(edited.text == "mejor esto")
+        #expect(edited.seq == 2 && edited.at == 20 && edited.author == .user)
+        #expect(edited.mentions == ["a-mateo"] && edited.replyTo == 1)
+        #expect(edited.json["futureField"] == "kept")
+        let written = try #require(server.row(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")))
+        #expect(written.value == seat && written.version == 5)
+        #expect(store.roomMessages[chat.id]?.first { $0.seq == 2 }?.text == "mejor esto")
+        // Edited again from what was saved.
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: "y esto") == .done)
+        #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2))?.version == 2)
+        #expect(server.mutateCalls == 2)
+    }
+
+    @Test func aMessageWithdrawnOnAnotherDeviceLeavesTheChat() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        let key = AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)
+        // An edit made there arrives; an older copy arriving late doesn't undo it.
+        _ = store.applyRoomChange(.init(key: key, value: try chatMessage(chat.id, 2, text: "otra cosa"), version: 1), machineKey: machineKey)
+        let older = try #require(server.row(key))
+        _ = store.applyRoomChange(.init(key: key, value: older.value, version: 0), machineKey: machineKey)
+        #expect(store.roomMessages[chat.id]?.first { $0.seq == 2 }?.text == "otra cosa")
+        // Withdrawn there.
+        _ = store.applyRoomChange(.init(key: key, value: nil, version: 2), machineKey: machineKey)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+    }
+
+    @Test func loadRoomDropsAQueuedMessageWithdrawnWhileThisDeviceWasAway() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        // Away: another device withdraws #2 and edits #3, then #3 reaches Mateo and his turn ends.
+        server.put(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"), try chatSeat(chat.id, read: 3, inFlight: nil), version: 8)
+        server.put(AgentRoomMessage.kvKey(roomId: chat.id, seq: 3), try chatMessage(chat.id, 3, text: "m3 bis"), version: 1)
+        server.remove(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2))
+        // Back: the catch-up reads the rooms (and their seats), then the open room.
+        await store.refreshRooms()
+        await store.loadRoom(id: chat.id)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+        #expect(store.roomMessages[chat.id]?.last?.text == "m3 bis")
+        // Mateo has everything now: what this device holds is final, so only the withdrawn #2 (still
+        // missing from the window) is asked for again.
+        await store.loadRoom(id: chat.id)
+        #expect(server.bulkReads.last == [AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)])
+    }
+
+    private func waitForHeld(_ server: RoomKVServer, count: Int) async throws {
+        for _ in 0..<100 where server.events.filter({ $0 == "held" }).count < count { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(server.events.filter { $0 == "held" }.count == count)
+    }
+
+    /// The seats are listed before the messages are read: a seat written meanwhile (the daemon taking
+    /// the message just sent) arrives as a change and is newer than the listing, so it stays; so does
+    /// a seat the listing predates. The same for every room's seats, read with the rooms.
+    @Test func aSeatWrittenWhileTheSeatsAreReadStays() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        // A group room where nobody was mentioned yet: no seats.
+        try seed(server, lastSeq: 2, version: 5)
+        let store = await openChat(server, chat)
+        let seatKey = AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")
+
+        // The chat is read again (behind a send): its seat (version 4) was listed when Mateo's daemon
+        // takes #2 and #3 for his next turn.
+        server.hold(prefix: AgentRoomSeat.kvPrefix(roomId: chat.id))
+        let load = Task { await store.loadRoom(id: chat.id) }
+        try await waitForHeld(server, count: 1)
+        let taken = try chatSeat(chat.id, read: 1, inFlight: ["localId": "room.c.a-mateo.n2", "throughSeq": 3, "at": 6])
+        _ = store.applyRoomChange(.init(key: seatKey, value: taken, version: 6), machineKey: machineKey)
+        server.release()
+        await load.value
+        #expect(store.roomSeats[chat.id]?.map(\.version) == [6])
+        // Mateo has them: nothing shows as waiting.
+        #expect(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []) == nil)
+
+        // The rooms are read again: Mateo's turn is sent and Tomás takes his first mention in r1 after
+        // every room's seats were listed.
+        server.hold(prefix: AgentRoomSeat.kvPrefix)
+        let refresh = Task { await store.refreshRooms() }
+        try await waitForHeld(server, count: 2)
+        let sent = try chatSeat(chat.id, read: 1, inFlight: ["localId": "room.c.a-mateo.n2", "throughSeq": 3, "at": 6, "sent": true])
+        _ = store.applyRoomChange(.init(key: seatKey, value: sent, version: 7), machineKey: machineKey)
+        _ = store.applyRoomChange(.init(key: AgentRoomSeat.kvKey(roomId: "r1", agentId: "a-tomas"),
+                                        value: try seat("r1", "a-tomas", thread: "g1"), version: 0), machineKey: machineKey)
+        server.release()
+        await refresh.value
+        #expect(store.roomSeats[chat.id]?.map(\.version) == [7])
+        #expect(store.roomThreads["d1"] == AgentRoomThread(selection: AgentProfile.selection(id: "a-mateo"), inFlight: true))
+        #expect(store.roomThreads["g1"] == AgentRoomThread(selection: AgentRoom.selection(id: "r1"), inFlight: false))
+    }
+
+    /// A message withdrawn while the chat is read again doesn't come back with a read answered before
+    /// it went: a seq is never used again, so one removed here stays removed. Whether it was withdrawn
+    /// here, or on another device before this one had it.
+    @Test func aMessageWithdrawnWhileTheChatIsReadDoesNotComeBack() async throws {
+        let server = RoomKVServer()
+        var (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        // The chat is read again (behind a send): #2 and #3 still wait, so they are read again too.
+        server.holdBulkReads()
+        let load = Task { await store.loadRoom(id: chat.id) }
+        try await waitForHeld(server, count: 1)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+        server.release()
+        await load.value
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+
+        // The user sends #4 from another device, which withdraws it while this one reads it.
+        chat.lastSeq = 4
+        server.put(AgentRoom.kvKey(id: chat.id), try chat.sealed(machineKey: machineKey), version: 4)
+        let fourth = AgentRoomMessage.kvKey(roomId: chat.id, seq: 4)
+        server.put(fourth, try chatMessage(chat.id, 4, text: "m4"), version: 0)
+        await store.refreshRooms()
+        let again = Task { await store.loadRoom(id: chat.id) }
+        try await waitForHeld(server, count: 2)
+        #expect(server.bulkReads.last?.contains(fourth) == true)
+        server.remove(fourth)
+        _ = store.applyRoomChange(.init(key: fourth, value: nil, version: 1), machineKey: machineKey)
+        server.release()
+        await again.value
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
+    }
+
+    /// The same on the chat's first read, before this device holds any of its messages.
+    @Test func aMessageWithdrawnWhileTheChatIsFirstReadDoesNotComeBack() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = store(server)
+        await store.refreshRooms()
+        #expect(store.roomMessages[chat.id] == nil)
+        server.holdBulkReads()
+        let load = Task { await store.loadRoom(id: chat.id) }
+        try await waitForHeld(server, count: 1)
+        let third = AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)
+        server.remove(third)
+        _ = store.applyRoomChange(.init(key: third, value: nil, version: 1), machineKey: machineKey)
+        server.release()
+        await load.value
+        #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 2])
     }
 }

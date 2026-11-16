@@ -11,10 +11,10 @@ import Testing
         AgentProfile(id: id, name: name, providerId: provider, account: .init(label: name, configDir: configDir), updatedAt: 0)
     }
 
-    private enum Activity { case idle, working, permission, unread }
+    private enum Activity { case idle, working, permission, question, failed, unread }
 
     private func session(_ id: String, agent: String?, flavor: String = "claude", active: Bool = true, archived: Bool = false,
-                         activity: Activity = .idle, lastActiveMs: Double = 1_000) throws -> Session {
+                         activity: Activity = .idle, unread: Bool = false, lastActiveMs: Double = 1_000) throws -> Session {
         var metadata: [String: JSONValue] = ["path": "/Users/manny/Projects/app", "name": .string(id), "flavor": .string(flavor)]
         if let agent { metadata["agentIdentityV1"] = ["v": 1, "id": .string(agent), "name": .string(agent.capitalized)] }
         var row: [String: JSONValue] = [
@@ -29,8 +29,11 @@ import Testing
             row["latestTurnStatus"] = "in_progress"
             row["latestTurnStatusObservedAt"] = .number(now.timeIntervalSince1970 * 1000 - 5_000)
         case .permission: row["pendingPermissionRequestCount"] = 1
+        case .question: row["pendingUserActionRequestCount"] = 1
+        case .failed: row["latestTurnStatus"] = "failed"
         case .unread: row["unreadSince"] = 7
         }
+        if unread { row["unreadSince"] = 7 }
         return try Session(row: .object(row), keys: nil)
     }
 
@@ -184,5 +187,152 @@ import Testing
         let summaries = AgentRoster.summaries(profiles: profiles, order: ["t"], sessions: [], context: .init(tasks: []), now: now) { _ in nil }
         #expect(summaries.map(\.id) == ["t", "j"])
         #expect(summaries.allSatisfy { $0.open == 0 && $0.weekly == nil })
+    }
+
+    // MARK: What it waits on you for
+
+    private func summary(of agent: AgentProfile, _ sessions: [Session], at date: Date? = nil,
+                         threads: [String: AgentRoomThread] = [:]) -> AgentSummary {
+        AgentRoster.summary(of: agent, sessions: sessions, context: SessionListFilter.Context(tasks: []), now: date ?? now,
+                            usage: { _ in nil }, threads: threads)
+    }
+
+    @Test func whatAnAgentWaitsOnYouForIsAnApprovalFirstThenAReply() throws {
+        let tomas = profile("tomas", "Tomás")
+        // A permission request: Approve, where its card is (the session).
+        let asks = summary(of: tomas, [try session("asks", agent: "tomas", activity: .permission)])
+        #expect(asks.ask == AgentSummary.Ask(action: .approve, selection: "asks"))
+        // A question (AskUserQuestion, a plan to accept): Reply, on that session.
+        let question = summary(of: tomas, [try session("question", agent: "tomas", activity: .question)])
+        #expect(question.ask == AgentSummary.Ask(action: .reply, selection: "question"))
+        // Its newest unread reply: Reply, on that session.
+        let unread = summary(of: tomas, [
+            try session("older", agent: "tomas", activity: .unread, lastActiveMs: 1_000),
+            try session("newer", agent: "tomas", activity: .unread, lastActiveMs: 2_000),
+        ])
+        #expect(unread.ask == AgentSummary.Ask(action: .reply, selection: "newer"))
+        // Unread while it still works: nothing to answer yet.
+        let busy = summary(of: tomas, [try session("busy", agent: "tomas", activity: .working, unread: true)])
+        #expect(busy.ask == nil)
+        #expect(busy.state == .working)
+        // A request beats a newer unread reply.
+        let both = summary(of: tomas, [
+            try session("asks", agent: "tomas", activity: .permission, lastActiveMs: 1_000),
+            try session("unread", agent: "tomas", activity: .unread, lastActiveMs: 2_000),
+        ])
+        #expect(both.ask == AgentSummary.Ask(action: .approve, selection: "asks"))
+        // An open task alone counts on the badge but asks nothing, and the agent doesn't rise.
+        let task = AgentTask(json: ["v": 1, "id": "t", "title": "t", "status": "todo", "assignee": ["kind": "user"],
+                                    "threads": ["tasked"], "log": [], "createdAt": 0, "updatedAt": 0])!
+        let tasked = AgentRoster.summary(of: tomas, sessions: [try session("tasked", agent: "tomas")],
+                                         context: SessionListFilter.Context(tasks: [task]), now: now, usage: { _ in nil })
+        #expect(tasked.needsYou == 1)
+        #expect(tasked.ask == nil)
+        #expect(tasked.state != .needsYou)
+    }
+
+    @Test func anUnreadReplyInItsChatOpensTheChatNotTheThread() throws {
+        let tomas = profile("tomas", "Tomás")
+        let chat = AgentProfile.selection(id: "tomas")
+        let threads = ["t1": AgentRoomThread(selection: chat, inFlight: false)]
+        // Its chat's thread is newer or older than a plain unread session: the chat answers first.
+        let unread = summary(of: tomas, [
+            try session("plain", agent: "tomas", activity: .unread, lastActiveMs: 3_000),
+            try session("t1", agent: "tomas", activity: .unread, lastActiveMs: 2_000),
+        ], threads: threads)
+        #expect(unread.ask == AgentSummary.Ask(action: .reply, selection: chat))
+        // Put to rest but not archived, the chat's reply still waits for you.
+        let resting = summary(of: tomas, [try session("t1", agent: "tomas", active: false, activity: .unread)], threads: threads)
+        #expect(resting.ask == AgentSummary.Ask(action: .reply, selection: chat))
+        #expect(resting.state == .needsYou)
+        let archived = summary(of: tomas, [try session("t1", agent: "tomas", active: false, archived: true, activity: .unread)],
+                               threads: threads)
+        #expect(archived.ask == nil)
+        // A group room's thread opens the room.
+        let room = AgentRoom.selection(id: "r1")
+        let group = summary(of: tomas, [try session("g1", agent: "tomas", activity: .unread)],
+                            threads: ["g1": AgentRoomThread(selection: room, inFlight: false)])
+        #expect(group.ask == AgentSummary.Ask(action: .reply, selection: room))
+        // While its daemon delivers the next message (the seat's turn is under way) the thread is
+        // working, not waiting: no Reply flashes, and a thread never asks to be opened itself.
+        let delivering = summary(of: tomas, [try session("t1", agent: "tomas", activity: .unread)],
+                                 threads: ["t1": AgentRoomThread(selection: chat, inFlight: true)])
+        #expect(delivering.ask == nil)
+        #expect(delivering.state == .working)
+        let working = summary(of: tomas, [try session("t1", agent: "tomas", activity: .working, unread: true)], threads: threads)
+        #expect(working.ask == nil)
+        #expect(working.state == .working)
+    }
+
+    @Test func agentsThatNeedYouComeFirstAndTheRestKeepTheSavedOrder() throws {
+        let profiles = [profile("a", "Ana"), profile("b", "Beto"), profile("c", "Ceci"), profile("d", "Dani")]
+        let sessions = [
+            try session("b1", agent: "b", activity: .permission),
+            try session("c1", agent: "c", activity: .working),
+            try session("d1", agent: "d", activity: .unread),
+        ]
+        let order = ["a", "b", "c", "d"]
+        let summaries = AgentRoster.summaries(profiles: profiles, order: order, sessions: sessions, context: .init(tasks: []),
+                                              now: now, usage: { _ in nil })
+        #expect(AgentRoster.needingYouFirst(summaries).map(\.id) == ["b", "d", "a", "c"])
+        // The saved order itself is the user's: it never moves.
+        #expect(AgentRoster.ordered(profiles, by: order).map(\.id) == order)
+        #expect(summaries.map(\.id) == order)
+    }
+
+    /// One rule for a session's line, in the agent's card and in a chat's session card alike.
+    @Test func aSessionsLineReadsItsThreadsNowElseItsFolder() throws {
+        let context = SessionListFilter.Context(tasks: [])
+        let memory = AgentMemory(now: [
+            .init(sessionId: "busy", text: "  Fixing the login\n", updatedAt: 1),
+            .init(sessionId: "asks", text: " ", updatedAt: 1),
+        ])
+        let busy = AgentRoster.line(of: try session("busy", agent: "tomas", activity: .working, lastActiveMs: 3_000),
+                                    memory: memory, context: context, now: now)
+        #expect(busy.title == "busy")
+        #expect(busy.detail == "Fixing the login")
+        #expect(busy.doing)
+        #expect(busy.state == .working)
+        #expect(busy.lastActivity == Date(timeIntervalSince1970: 3))
+        // Without word from its thread (or a blank one): where it works, never the agent's name again.
+        let asks = AgentRoster.line(of: try session("asks", agent: "tomas", activity: .question), memory: memory, context: context, now: now)
+        #expect(asks.detail == "app")
+        #expect(!asks.doing)
+        #expect(asks.state == .needsYou)
+        let quiet = AgentRoster.line(of: try session("quiet", agent: "tomas"), memory: nil, context: context, now: now)
+        #expect(quiet.detail == "app")
+        #expect(quiet.state == .idle)
+        #expect(quiet.lastActivity == Date(timeIntervalSince1970: 1))
+        let unread = AgentRoster.line(of: try session("unread", agent: "tomas", activity: .unread), memory: nil, context: context, now: now)
+        #expect(unread.state == .needsYou)
+    }
+
+    @Test func itsCircleShowsNeedsYouThenWorkingThenFailedThenAsleep() throws {
+        let tomas = profile("tomas", "Tomás")
+        let needsYou = summary(of: tomas, [
+            try session("asks", agent: "tomas", activity: .permission),
+            try session("busy", agent: "tomas", activity: .working),
+        ])
+        #expect(needsYou.state == .needsYou)
+        let working = summary(of: tomas, [
+            try session("busy", agent: "tomas", activity: .working, lastActiveMs: 1_000),
+            try session("broke", agent: "tomas", activity: .failed, lastActiveMs: 2_000),
+        ])
+        #expect(working.state == .working)
+        // Its newest session's turn failed.
+        #expect(summary(of: tomas, [try session("broke", agent: "tomas", activity: .failed)]).state == .failed)
+        let recovered = summary(of: tomas, [
+            try session("broke", agent: "tomas", activity: .failed, lastActiveMs: 1_000),
+            try session("fine", agent: "tomas", lastActiveMs: 2_000),
+        ])
+        #expect(recovered.state == .idle)
+        // Asleep: nothing open, or a day without news.
+        #expect(summary(of: tomas, []).state == .asleep)
+        let quiet = [try session("quiet", agent: "tomas", lastActiveMs: 1_000)]
+        #expect(summary(of: tomas, quiet, at: Date(timeIntervalSince1970: 1 + 23 * 3600)).state == .idle)
+        #expect(summary(of: tomas, quiet, at: Date(timeIntervalSince1970: 1 + 25 * 3600)).state == .asleep)
+        // Something waiting on you is never asleep, however old.
+        let waiting = [try session("old", agent: "tomas", activity: .unread, lastActiveMs: 1_000)]
+        #expect(summary(of: tomas, waiting, at: Date(timeIntervalSince1970: 1 + 25 * 3600)).state == .needsYou)
     }
 }
