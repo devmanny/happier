@@ -72,6 +72,8 @@ struct AgentAvatar: View {
     var folderTint: Color? = nil
     /// An agent's own emoji, drawn on the disc in place of the logo (the disc keeps the brand's hint).
     var emoji: String? = nil
+    /// An agent's photo (JPEG), filling the disc in place of the emoji or the logo.
+    var photo: Data? = nil
 
     /// Brand colours, muted: the disc is mostly the neutral glass with a hint of the brand, the
     /// logo in the brand colour itself.
@@ -90,7 +92,13 @@ struct AgentAvatar: View {
                 .fill(folderTint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.clear))
                 .frame(width: size * 0.82, height: size * 0.82)
                 .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
-            if let emoji, !emoji.isEmpty {
+            if let photo = photo.flatMap(AgentPhotoImage.image) {
+                photo
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size * 0.82, height: size * 0.82)
+                    .clipShape(Circle())
+            } else if let emoji, !emoji.isEmpty {
                 Text(emoji).font(.system(size: size * 0.5))
             } else if let agentId {
                 Image("Agents/\(agentId)")
@@ -107,6 +115,39 @@ struct AgentAvatar: View {
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
+    }
+}
+
+/// One of the user's agents as `AgentAvatar` draws it: its photo when it has one, else its emoji.
+struct AgentProfileAvatar: View {
+    let profile: AgentProfile
+    var size: CGFloat = 26
+    /// Optional, as in `SessionAvatar`: previews draw outside the app's environment.
+    @Environment(HappierStore.self) private var store: HappierStore?
+
+    var body: some View {
+        AgentAvatar(agentId: profile.providerId, size: size, emoji: profile.emoji, photo: store?.agentPhotos[profile.id])
+    }
+}
+
+/// Agent photos decoded once: the list redraws often, and each photo is drawn in several places.
+@MainActor
+enum AgentPhotoImage {
+    private static var decoded: [Data: Image] = [:]
+
+    static func image(_ jpeg: Data) -> Image? {
+        if let image = decoded[jpeg] { return image }
+        #if os(iOS)
+        guard let platform = UIImage(data: jpeg) else { return nil }
+        let image = Image(uiImage: platform)
+        #else
+        guard let platform = NSImage(data: jpeg) else { return nil }
+        let image = Image(nsImage: platform)
+        #endif
+        // A handful of agents: forget them all on the rare overflow (photos replaced many times).
+        if decoded.count >= 32 { decoded.removeAll() }
+        decoded[jpeg] = image
+        return image
     }
 }
 

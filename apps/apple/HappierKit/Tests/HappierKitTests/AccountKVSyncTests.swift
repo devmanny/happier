@@ -77,4 +77,17 @@ import Testing
         store.applyKVChanges([.init(key: "agent/a1/note/n1", value: nil, version: 1)], machineKey: AgentMemoryTests.machineKey)
         #expect(store.agentMemories["a1"]?.notes.isEmpty == true)
     }
+
+    @MainActor @Test func appliesAgentPhotoChangesInPlace() throws {
+        let store = HappierStore(server: URL(string: "http://127.0.0.1:1")!)
+        let photo = try AgentPhoto(id: "a1", jpeg: Data([0xFF, 0xD8, 7]), updatedAt: 1).sealed(machineKey: Self.machineKey)
+        store.applyKVChanges([.init(key: "agentphoto/a1", value: photo, version: 2)], machineKey: Self.machineKey)
+        #expect(store.agentPhotos["a1"] == Data([0xFF, 0xD8, 7]))
+
+        // An older echo doesn't bring a photo back; a removal clears it.
+        store.applyKVChanges([.init(key: "agentphoto/a1", value: nil, version: 3)], machineKey: Self.machineKey)
+        #expect(store.agentPhotos["a1"] == nil)
+        store.applyKVChanges([.init(key: "agentphoto/a1", value: photo, version: 2)], machineKey: Self.machineKey)
+        #expect(store.agentPhotos["a1"] == nil)
+    }
 }

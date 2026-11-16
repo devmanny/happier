@@ -10,6 +10,7 @@ import {
   buildAgentIdentityPromptTextV1,
   parseAgentIdentityV1,
 } from './agentIdentity.js';
+import { agentPhotoKvKey, parseAgentPhotoV1 } from './agentPhoto.js';
 import {
   AGENT_PRESENCE_STALE_AFTER_MS,
   agentPresenceKvKey,
@@ -105,5 +106,17 @@ describe('presence conflicts', () => {
   it('parses only well-formed presence records', () => {
     expect(parseAgentPresenceV1(presence())).toEqual(presence());
     expect(parseAgentPresenceV1({ v: 1, sessionId: 'x' })).toBeNull();
+  });
+});
+
+describe('agent photos', () => {
+  it('seals a photo for the account under its own kind and key, apart from the profile', () => {
+    const photo = { v: 1, id: 'a-tomas', mime: 'image/jpeg', data: '/9j/4AAQ', updatedAt: 5 };
+    const ciphertext = sealAccountScopedBlobCiphertext({ kind: 'agent_photo', material, payload: photo, randomBytes: (n) => new Uint8Array(n) });
+    expect(Buffer.from(ciphertext, 'base64').subarray(0, 2)).toEqual(Buffer.from([0xa1, 17]));
+    expect(openAccountScopedBlobCiphertext({ kind: 'agent_profile', material, ciphertext })).toBeNull();
+    expect(parseAgentPhotoV1(openAccountScopedBlobCiphertext({ kind: 'agent_photo', material, ciphertext })?.value)).toEqual(photo);
+    expect(parseAgentPhotoV1({ ...photo, data: '' })).toBeNull();
+    expect(agentPhotoKvKey('a-tomas')).toBe('agentphoto/a-tomas');
   });
 });

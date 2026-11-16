@@ -382,6 +382,53 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Agent photos (sealed JPEGs in the account's UserKVStore, `agentphoto/<id>`)
+
+    /// Each agent's photo (JPEG) by agent id; empty until loaded, and for agents with none.
+    public private(set) var agentPhotos: [String: Data] = [:]
+    @ObservationIgnored private var agentPhotoVersions: [String: Int] = [:]
+
+    public func refreshAgentPhotos() async {
+        guard let api, let machineKey = keys?.content.secretKey else { return }
+        do {
+            let records = AgentPhoto.records(fromList: try await api.kvList(prefix: AgentPhoto.kvPrefix), machineKey: machineKey)
+            agentPhotoVersions = Dictionary(records.map { ($0.photo.id, $0.version) }, uniquingKeysWith: { $1 })
+            let photos = Dictionary(records.map { ($0.photo.id, $0.photo.jpeg) }, uniquingKeysWith: { $1 })
+            if photos != agentPhotos { agentPhotos = photos }
+        } catch {
+            logBackground(error, "agent photos")
+        }
+    }
+
+    /// Sets the agent's photo (a small square JPEG), or removes it with nil. Another device's write in
+    /// between only moves the version: this one is written again on top of it.
+    @discardableResult
+    public func saveAgentPhoto(agentId: String, jpeg: Data?) async -> Bool {
+        guard let api, let machineKey = keys?.content.secretKey else {
+            report(RPCError(message: String(localized: "Agents need an end-to-end encrypted account."), code: nil))
+            return false
+        }
+        let id = agentId.lowercased()
+        do {
+            let value = try jpeg.map { try AgentPhoto(id: id, jpeg: $0).sealed(machineKey: machineKey) }
+            var version = agentPhotoVersions[id] ?? -1
+            for _ in 0..<3 {
+                switch try await api.kvWrite(key: AgentPhoto.kvKey(id: id), value: value, version: version) {
+                case .saved(let saved):
+                    agentPhotoVersions[id] = jpeg == nil ? nil : saved
+                    agentPhotos[id] = jpeg
+                    return true
+                case .conflict(let current, _):
+                    version = current
+                }
+            }
+            throw RPCError(message: String(localized: "This agent changed on another device at the same time. Try again."), code: "version-mismatch")
+        } catch {
+            report(error)
+            return false
+        }
+    }
+
     // MARK: - Agent memory (`agent/<id>/now|journal|note/…`, sealed `agent_memory`)
 
     /// Each agent's memory once loaded, by agent id.
@@ -529,7 +576,7 @@ public final class HappierStore {
         }
     }
 
-    /// Applies changed keys to what is loaded: tasks, agent profiles, and agent memories already open.
+    /// Applies changed keys to what is loaded: tasks, agent profiles and photos, and agent memories already open.
     /// A change older than what is shown (an echo of an earlier write) is ignored.
     func applyKVChanges(_ changes: [AccountKVSync.Change], machineKey: Data) {
         var tasks = self.tasks
@@ -563,6 +610,11 @@ public final class HappierStore {
                 } else if !legacy {
                     agentProfileVersions[id] = nil
                 }
+            } else if change.key.hasPrefix(AgentPhoto.kvPrefix) {
+                let id = String(change.key.dropFirst(AgentPhoto.kvPrefix.count))
+                if let known = agentPhotoVersions[id], known >= change.version { continue }
+                agentPhotoVersions[id] = change.version
+                agentPhotos[id] = change.value.flatMap { AgentPhoto.open($0, machineKey: machineKey) }.flatMap { $0.id == id ? $0.jpeg : nil }
             } else if applyRoomChange(change, machineKey: machineKey) {
                 continue
             } else if change.key.hasPrefix("agent/") {
@@ -636,7 +688,11 @@ public final class HappierStore {
             kvCursor = after
             // Only the families that changed (presence alone reads nothing again).
             if refresh.tasks { await refreshTasks() }
-            if refresh.profiles { await refreshAgentProfiles() }
+            if refresh.profiles {
+                await refreshAgentProfiles()
+                // The relay files photo writes under no family it names: they come with the profiles.
+                await refreshAgentPhotos()
+            }
             if refresh.memory { for agentId in agentMemories.keys { await refreshAgentMemory(agentId: agentId) } }
             if refresh.rooms {
                 await refreshRooms()

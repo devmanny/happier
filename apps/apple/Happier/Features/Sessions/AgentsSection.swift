@@ -148,7 +148,7 @@ private struct AgentBubble: View {
             VStack(spacing: 2) {
                 ZStack {
                     // The disc is 82 % of the avatar; the ring sits just outside it.
-                    AgentAvatar(agentId: profile.providerId, size: Self.size, emoji: profile.emoji)
+                    AgentProfileAvatar(profile: profile, size: Self.size)
                     AgentUsageRing(meter: summary.weekly, diameter: Self.size - 4, lineWidth: 3.5, tint: .userBubble)
                 }
                 .frame(width: Self.size, height: Self.size)
@@ -270,7 +270,7 @@ private struct AgentRow: View {
     private func label(_ summary: AgentSummary) -> some View {
         HStack(spacing: 8) {
             // The session rows' avatar: the emoji on the provider's glass disc, at their size.
-            AgentAvatar(agentId: profile.providerId, size: SessionListView.drawerAvatar, emoji: profile.emoji)
+            AgentProfileAvatar(profile: profile, size: SessionListView.drawerAvatar)
                 .padding(.trailing, SessionListView.avatarGap - 8)
             VStack(alignment: .leading, spacing: 1) {
                 // The provider's logo right after the name, on its line.

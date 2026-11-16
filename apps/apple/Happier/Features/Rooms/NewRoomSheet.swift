@@ -89,7 +89,7 @@ struct NewRoomSheet: View {
             Label {
                 Text(agent.name)
             } icon: {
-                AgentAvatar(agentId: agent.providerId, size: 26, emoji: agent.emoji)
+                AgentProfileAvatar(profile: agent, size: 26)
             }
         }
         .accessibilityIdentifier("room-invite-\(agent.id)")

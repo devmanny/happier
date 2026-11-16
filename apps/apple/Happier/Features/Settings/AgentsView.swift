@@ -1,5 +1,6 @@
 import HappierKit
 import SwiftUI
+import PhotosUI
 import UniformTypeIdentifiers
 
 /// Settings → Agents: the user's agents (name, description, engine and fixed account), synced
@@ -57,8 +58,14 @@ struct AgentsView: View {
                 .disabled(store.agentProfilesError != nil && store.agentProfiles.isEmpty)
             }
         }
-        .refreshable { await store.refreshAgentProfiles() }
-        .task { await store.refreshAgentProfiles() }
+        .refreshable {
+            await store.refreshAgentProfiles()
+            await store.refreshAgentPhotos()
+        }
+        .task {
+            await store.refreshAgentProfiles()
+            await store.refreshAgentPhotos()
+        }
         .sheet(item: $editing) { profile in
             NavigationStack {
                 AgentEditor(profile: profile, isNew: !store.agentProfiles.contains { $0.id == profile.id })
@@ -132,6 +139,16 @@ struct AgentEditor: View {
     @State var profile: AgentProfile
     let isNew: Bool
     @State private var saving = false
+    /// The photo picked here, saved with the agent: nil leaves the current one, an empty value removes it.
+    @State private var newPhoto: Data?
+    @State private var pickedPhoto: PhotosPickerItem?
+    @State private var photoError: String?
+
+    /// What the agent will look like once saved.
+    private var shownPhoto: Data? {
+        guard let newPhoto else { return store.agentPhotos[profile.id] }
+        return newPhoto.isEmpty ? nil : newPhoto
+    }
 
     private var models: [ModelChoice] {
         SessionControls.newSessionModels(agentId: profile.providerId, sessions: Array(store.sessions.values))
@@ -156,6 +173,38 @@ struct AgentEditor: View {
 
     var body: some View {
         Form {
+            Section {
+                HStack(spacing: 14) {
+                    AgentAvatar(agentId: profile.providerId, size: 64, photo: shownPhoto)
+                    VStack(alignment: .leading, spacing: 8) {
+                        PhotosPicker(selection: $pickedPhoto, matching: .images) {
+                            Text(shownPhoto == nil ? "Choose Photo" : "Change Photo")
+                        }
+                        .accessibilityIdentifier("agent-photo-pick")
+                        if shownPhoto != nil {
+                            Button("Remove Photo", role: .destructive) { newPhoto = Data() }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            } header: {
+                Text("Photo")
+            } footer: {
+                if let photoError { Text(photoError).foregroundStyle(.red) }
+            }
+            .onChange(of: pickedPhoto) { _, item in
+                guard let item else { return }
+                Task {
+                    let data = try? await item.loadTransferable(type: Data.self)
+                    if let jpeg = data.flatMap({ AgentPhoto.squareJPEG(from: $0) }) {
+                        newPhoto = jpeg
+                        photoError = nil
+                    } else {
+                        photoError = String(localized: "That photo couldn't be read. Try another.")
+                    }
+                    pickedPhoto = nil
+                }
+            }
             // The emoji an agent may carry stays in its identity, unedited and never drawn here.
             Section("Name") {
                 TextField("Name", text: $profile.name)
@@ -236,7 +285,10 @@ struct AgentEditor: View {
                     var trimmed = profile
                     trimmed.name = trimmed.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     Task {
-                        let saved = await store.saveAgentProfile(trimmed)
+                        var saved = await store.saveAgentProfile(trimmed)
+                        if saved, let newPhoto {
+                            saved = await store.saveAgentPhoto(agentId: trimmed.id, jpeg: newPhoto.isEmpty ? nil : newPhoto)
+                        }
                         saving = false
                         if saved {
                             AppHaptics.success()
@@ -1007,7 +1059,7 @@ private struct AgentDropTarget: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            AgentAvatar(agentId: agent.providerId, size: 44, emoji: agent.emoji)
+            AgentProfileAvatar(profile: agent, size: 44)
                 .overlay {
                     Circle().strokeBorder(Color.userBubble, lineWidth: targeted ? 3 : 0)
                 }

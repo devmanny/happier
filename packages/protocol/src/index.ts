@@ -3778,6 +3778,13 @@ export {
   type AgentIdentityV1,
 } from './agentProfiles/agentIdentity.js';
 export {
+  AGENT_PHOTO_KV_PREFIX,
+  AgentPhotoV1Schema,
+  agentPhotoKvKey,
+  parseAgentPhotoV1,
+  type AgentPhotoV1,
+} from './agentProfiles/agentPhoto.js';
+export {
   AGENT_PRESENCE_HEARTBEAT_MS,
   AGENT_PRESENCE_KV_PREFIX,
   AGENT_PRESENCE_STALE_AFTER_MS,

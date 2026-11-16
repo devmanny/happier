@@ -140,7 +140,7 @@ struct AgentProfileView: View {
         Section {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
-                    AgentAvatar(agentId: profile.providerId, size: 64, emoji: profile.emoji)
+                    AgentProfileAvatar(profile: profile, size: 64)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
                             Text(verbatim: profile.name)

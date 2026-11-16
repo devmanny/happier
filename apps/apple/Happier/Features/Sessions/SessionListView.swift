@@ -958,8 +958,12 @@ extension SessionListView {
                 #endif
         }
         .task { await inbox.refresh() }
-        // The agents atop the list are read when it shows; later changes come with the account's KV catch-up.
-        .task { await store.refreshAgentProfiles() }
+        // The agents atop the list (and their photos) are read when it shows; later changes come with
+        // the account's KV catch-up.
+        .task {
+            await store.refreshAgentProfiles()
+            await store.refreshAgentPhotos()
+        }
         .task { await listed.follow(store) }
         .onChange(of: selection) { closed, now in
             guard now == nil, let closed, closed != NewChat.id else { return }

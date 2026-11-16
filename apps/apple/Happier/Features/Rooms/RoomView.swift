@@ -437,7 +437,7 @@ private struct RoomMessageRow: View {
             if isUser { hoverReply }
             #endif
             if !isUser {
-                AgentAvatar(agentId: providerId, size: 28, emoji: emoji)
+                AgentAvatar(agentId: providerId, size: 28, emoji: emoji, photo: message.author.agentId.flatMap { store.agentPhotos[$0] })
             }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 if !isUser {
