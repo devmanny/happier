@@ -28,10 +28,20 @@ struct RoomView: View {
     /// "Let It Answer" notices dismissed here whose write is under way: hidden at once.
     @State private var dismissing: Set<String> = []
     @FocusState private var composing: Bool
+    /// The mic, as in the session's composer: a tap dictates into the field; held, push to talk.
+    @State private var dictation = Dictation()
+    @State private var talking = false
+    @State private var talkCancelArmed = false
+    @State private var textBeforeTalking = ""
+    @State private var trashX: CGFloat?
+    @State private var micX: CGFloat?
+    @State private var choosingModel = false
 
     private var room: AgentRoom? { store.room(id: roomId) }
     private var messages: [AgentRoomMessage] { store.roomMessages[roomId] ?? [] }
     private var seats: [AgentRoomSeat] { store.roomSeats[roomId] ?? [] }
+    /// In an agent's chat, the agent's own session: its model, effort and voice are that session's.
+    private var directSession: String? { store.room(id: roomId)?.isDirect == true ? seats.first?.sessionId : nil }
 
     var body: some View {
         Group {
@@ -289,6 +299,11 @@ struct RoomView: View {
         let mentioned = quoted.map { room.replyRecipients(to: $0, text: draft) } ?? AgentRoom.mentions(in: draft, members: room.members)
         let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         VStack(alignment: .leading, spacing: 6) {
+            if MessageSpeaker.shared.speakingText != nil {
+                // What's being read aloud, with its controls, as above the session's composer.
+                SpeechControls()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if let quoted {
                 replyBar(room, quoted: quoted, recipients: mentioned)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -309,6 +324,17 @@ struct RoomView: View {
                 }
                 .accessibilityIdentifier("room-suggest-mention")
             }
+            if room.isDirect, let sessionId = directSession, let controls = store.controls(for: sessionId) {
+                modelPill(controls, sessionId: sessionId)
+            }
+            if talking {
+                TalkPanel(levels: dictation.levels, cancelArmed: talkCancelArmed)
+                    .frame(height: 36)
+                    .padding(.horizontal, 8)
+                    .glassEffect(.regular, in: Capsule())
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minX + 8 + TalkPanel.trashCenter } action: { trashX = $0 }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(room.isDirect ? LocalizedStringKey("Message \(room.title)")
                                         : LocalizedStringKey("Message the room · @ to mention, @todos for everyone"),
@@ -320,17 +346,103 @@ struct RoomView: View {
                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .onSubmit(send)
                     .accessibilityIdentifier("room-composer")
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 36, height: 36)
+                if typed.isEmpty || dictation.isRecording || talking {
+                    // Tap: dictate into the field. Hold: push to talk, sent when released.
+                    PushToTalkButton(recording: dictation.isRecording, talking: talking, cancelArmed: $talkCancelArmed,
+                                     trashOffset: trashX.flatMap { trash in micX.map { trash - $0 } }) {
+                        AppHaptics.light()
+                        if dictation.isRecording { Task { await dictation.finish() } } else { dictation.toggle(prefix: draft) { draft = $0 } }
+                    } onHoldStart: {
+                        startTalking()
+                    } onHoldEnd: { cancelled in
+                        stopTalking(cancelled: cancelled)
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midX } action: { micX = $0 }
+                } else {
+                    Button(action: send) {
+                        Image(systemName: "arrow.up")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .buttonBorderShape(.circle)
+                    .disabled(sending)
+                    .accessibilityLabel(Text("Send"))
+                    .accessibilityIdentifier("room-send")
                 }
-                .buttonStyle(.glassProminent)
-                .buttonBorderShape(.circle)
-                .disabled(typed.isEmpty || sending)
-                .accessibilityLabel(Text("Send"))
-                .accessibilityIdentifier("room-send")
             }
+        }
+        .animation(.smooth(duration: 0.2), value: talking)
+        .onDisappear { if dictation.isRecording { dictation.stop() } }
+    }
+
+    /// The agent's model and effort, as the session composer's pill: changed here, they apply from
+    /// your next message. It always runs in YOLO.
+    private func modelPill(_ controls: SessionControls, sessionId: String) -> some View {
+        Button {
+            AppHaptics.light()
+            choosingModel = true
+        } label: {
+            HStack(spacing: 5) {
+                Text(controls.displayModelName).lineLimit(1)
+                if let effort = controls.displayEffort,
+                   let bars = EffortBars(level: effort, levels: controls.effortModel?.effortLevels ?? [], ultracode: controls.ultracode == true) {
+                    EffortBarsMark(bars: bars)
+                        .accessibilityLabel(Text(controls.ultracode == true ? "Effort Ultracode" : "Effort \(EffortSlider.name(effort))"))
+                }
+                Text(verbatim: "· YOLO").foregroundStyle(.secondary)
+            }
+            .font(.footnote.weight(.medium))
+        }
+        .buttonStyle(.glass)
+        .controlSize(.small)
+        .accessibilityLabel(Text("Model"))
+        .accessibilityIdentifier("room-model")
+        #if os(macOS)
+        .popover(isPresented: $choosingModel, arrowEdge: .top) {
+            SessionModelPicker(sessionId: sessionId).frame(width: 340, height: 520)
+        }
+        #else
+        .sheet(isPresented: $choosingModel) {
+            ModelPickerSheet { SessionModelPicker(sessionId: sessionId) }
+                .presentationDetents([.medium, .large])
+        }
+        #endif
+    }
+
+    /// Push to talk, as in the session's composer; in an agent's chat its answers are read aloud
+    /// from then on.
+    private func startTalking() {
+        guard !talking else { return }
+        textBeforeTalking = draft
+        talkCancelArmed = false
+        talking = true
+        dictation.claimAudio()
+        if let sessionId = directSession, MessageSpeaker.shared.autoReadSessionId != sessionId {
+            MessageSpeaker.shared.toggleAutoRead(sessionId, store: store)
+        }
+        Task {
+            guard talking else { return }
+            await dictation.begin(prefix: draft) { draft = $0 }
+        }
+    }
+
+    /// Released: the last words come in, then it's sent; slid onto the trash, nothing is sent.
+    private func stopTalking(cancelled: Bool) {
+        if cancelled {
+            dictation.stop()
+            draft = textBeforeTalking
+            talking = false
+            talkCancelArmed = false
+            AppHaptics.listening(false, cancelled: true)
+            return
+        }
+        AppHaptics.listening(false)
+        Task {
+            await dictation.finish()
+            guard talking else { return }
+            talking = false
+            send()
         }
     }
 
@@ -415,6 +527,7 @@ struct RoomView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sending else { return }
+        if dictation.isRecording { dictation.stop() }
         sending = true
         let quoted = quoted
         Task {
@@ -478,6 +591,9 @@ private struct RoomMessageRow: View {
     @Environment(HappierStore.self) private var store
     /// Its TL;DR is shown instead of it (`TLDRButton`).
     @State private var showsSummary = false
+    private var summaryId: String { "room-\(message.roomId)-\(message.seq)" }
+    /// The TL;DR the bubble shows, if it shows one.
+    private var shownSummary: String? { showsSummary ? MessageSummaries.shared.summaries[summaryId] : nil }
     #if os(iOS)
     /// How far the message is dragged to the left to reply (≤ 0).
     @State private var swipe: CGFloat = 0
@@ -596,11 +712,21 @@ private struct RoomMessageRow: View {
     }
     #endif
 
-    /// Reply and Copy, on the bubble.
+    /// Reply, Copy and Speak under its date and time, as in the session chat.
     @ViewBuilder
     private var actions: some View {
-        Button("Reply", systemImage: "arrowshape.turn.up.left", action: reply)
-        Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(message.text); AppHaptics.success() }
+        Section(Date(timeIntervalSince1970: message.at / 1000).formatted(date: .abbreviated, time: .shortened)) {
+            Button("Reply", systemImage: "arrowshape.turn.up.left", action: reply)
+            Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(message.text); AppHaptics.success() }
+            // What the bubble shows is what's read: its TL;DR while that's shown.
+            let spoken = shownSummary ?? message.text
+            let speaking = MessageSpeaker.shared.isSpeaking(spoken)
+            Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
+                AppHaptics.light()
+                MessageSpeaker.shared.toggle(spoken,
+                                             sessionId: room.isDirect ? store.roomSeats[room.id]?.first?.sessionId : nil)
+            }
+        }
     }
 
     /// "↩︎ Julián: …": the message this one answers, in a line; tapping it goes there.
@@ -653,8 +779,7 @@ private struct RoomMessageRow: View {
         if !content.isEmpty {
             let shape = direct ? AnyShape(BubbleShape(fromUser: false, tail: tail && options.isEmpty))
                                : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            let summaryId = "room-\(message.roomId)-\(message.seq)"
-            let summary = showsSummary ? MessageSummaries.shared.summaries[summaryId] : nil
+            let summary = shownSummary
             MarkdownText(segments: summary.map { MarkdownSegments.cached($0) } ?? content)
                 .modifier(BubbleInsets(direct: direct, fromUser: false))
                 .background(Color.agentBubble, in: shape)

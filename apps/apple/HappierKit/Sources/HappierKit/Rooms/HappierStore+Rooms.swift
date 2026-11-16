@@ -23,9 +23,16 @@ extension HappierStore {
     /// the user goes by in their rooms). Another device may have made it: the rooms are read again
     /// before making one, and a write that finds it already there reads it instead.
     public func openDirectRoom(with agent: AgentProfile, machineId: String, directory: String) async -> AgentRoom? {
-        if let room = directRoom(agentId: agent.id) { return room }
-        await refreshRooms()
-        if let room = directRoom(agentId: agent.id) { return room }
+        if directRoom(agentId: agent.id) == nil { await refreshRooms() }
+        if let room = directRoom(agentId: agent.id) {
+            // Nothing written yet, so no thread of the agent's lives where it was made: it moves.
+            guard room.lastSeq == 0, let member = room.members.first, member.machineId != machineId || member.directory != directory else { return room }
+            return await updateRoom(id: room.id) { room in
+                guard room.lastSeq == 0, !room.members.isEmpty else { return }
+                room.members[0].machineId = machineId
+                room.members[0].directory = directory
+            } ?? room
+        }
         let userName = rooms.filter { $0.archivedAt == nil }.max { $0.updatedAt < $1.updatedAt }?.userName
         if let made = await createRoom(AgentRoom.direct(with: agent, machineId: machineId, directory: directory, userName: userName)) {
             return made

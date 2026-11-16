@@ -185,15 +185,22 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(chat.userName == "Manny")
         #expect(server.row(AgentRoom.kvKey(id: chat.id)) != nil)
         // Opened again, it is the same chat.
-        let again = await store.openDirectRoom(with: mateo, machineId: "m9", directory: "/elsewhere")
-        #expect(again?.id == chat.id && again?.members.first?.machineId == "m1")
+        let again = await store.openDirectRoom(with: mateo, machineId: "m1", directory: "/p")
+        #expect(again?.id == chat.id)
         #expect(server.mutateCalls == 1)
         #expect(store.directRoom(agentId: "a-mateo")?.id == chat.id)
         #expect(store.activeRooms.map(\.id) == ["r1"])
         // Another device that hasn't read it yet finds it instead of making a second one.
         let other = self.store(server)
-        #expect(await other.openDirectRoom(with: mateo, machineId: "m9", directory: "/elsewhere")?.id == chat.id)
+        #expect(await other.openDirectRoom(with: mateo, machineId: "m1", directory: "/p")?.id == chat.id)
         #expect(server.mutateCalls == 1)
+        // Still empty, it moves to where it should work now; once written to, its agent's thread
+        // lives there and it stays.
+        let moved = await store.openDirectRoom(with: mateo, machineId: "m9", directory: "/home")
+        #expect(moved?.id == chat.id && moved?.members.first?.machineId == "m9" && moved?.members.first?.directory == "/home")
+        #expect(await store.sendRoomMessage(roomId: chat.id, text: "hola", replyingTo: nil))
+        let kept = await store.openDirectRoom(with: mateo, machineId: "m1", directory: "/p")
+        #expect(kept?.members.first?.machineId == "m9" && kept?.members.first?.directory == "/home")
     }
 
     @Test func aMembersAnswersOtherAgentsChangesInARoomAlreadyMade() async throws {

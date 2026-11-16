@@ -239,7 +239,7 @@ import Testing
         #expect(Self.room().appendingUserMessage("hola", now: 8)?.message.mentions == [])
     }
 
-    @Test func anAgentsChatWorksWhereTheAgentLastWorkedElseAtAMachinesHome() throws {
+    @Test func anAgentsChatWorksFromTheHomeOfTheMachineItLastWorkedOn() throws {
         func session(_ id: String, agent: String?, machine: String, path: String, at: Double) throws -> Session {
             var metadata: [String: JSONValue] = ["path": .string(path), "machineId": .string(machine)]
             if let agent { metadata["agentIdentityV1"] = ["v": 1, "id": .string(agent), "name": "x"] }
@@ -260,8 +260,11 @@ import Testing
         let machines = [try machine("m0", active: true, home: "/old", revoked: true),
                         try machine("m1", active: false, home: "/Users/a"),
                         try machine("m2", active: true, home: "/Users/b")]
+        // Its chat is with it, not about a project: the home of the machine it last worked on.
         let mateo = try #require(AgentRoom.directPlacement(agentId: "a-mateo", sessions: sessions, machines: machines))
-        #expect(mateo.machineId == "m2" && mateo.directory == "/p/radar")
+        #expect(mateo.machineId == "m2" && mateo.directory == "/Users/b")
+        let tomas = try #require(AgentRoom.directPlacement(agentId: "a-tomas", sessions: sessions, machines: machines))
+        #expect(tomas.machineId == "m1" && tomas.directory == "/Users/a")
         // An agent with no session yet starts at the home of a machine that's on (never a revoked one).
         let leo = try #require(AgentRoom.directPlacement(agentId: "a-leo", sessions: sessions, machines: machines))
         #expect(leo.machineId == "m2" && leo.directory == "/Users/b")

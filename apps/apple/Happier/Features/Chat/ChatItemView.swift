@@ -148,7 +148,7 @@ private struct AgentBubble: View {
                     MarkdownText(segments: summary.map { MarkdownSegments.cached($0) } ?? content)
                         .bubblePadding(fromUser: false)
                         .background(Color.agentBubble, in: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
-                        .messageActions(text: text, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty), selectionId: itemId,
+                        .messageActions(text: text, spoken: summary, date: date, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty), selectionId: itemId,
                                         target: seq.map { MessageTarget(sessionId: sessionId, seq: $0, role: .assistant) })
                         .selectableMessage(id: itemId, markdown: text, fromUser: false, shape: BubbleShape(fromUser: false, tail: tail && options.isEmpty))
                         .tldr(id: itemId, text: text, showsSummary: $showsSummary)
@@ -320,6 +320,8 @@ struct MessageTarget {
 
 private struct MessageActionsModifier: ViewModifier {
     let text: String
+    /// What Speak reads: what the bubble shows (its TL;DR while that's shown).
+    let spoken: String
     let date: Date
     let shape: BubbleShape
     let selectionId: String?
@@ -347,10 +349,10 @@ private struct MessageActionsModifier: ViewModifier {
             .contextMenu {
                 Section(date.formatted(date: .abbreviated, time: .shortened)) {
                     Button("Copy", systemImage: "doc.on.doc") { MessageClipboard.copy(text); AppHaptics.success() }
-                    let speaking = MessageSpeaker.shared.isSpeaking(text)
+                    let speaking = MessageSpeaker.shared.isSpeaking(spoken)
                     Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
                         AppHaptics.light()
-                        MessageSpeaker.shared.toggle(text, sessionId: target?.sessionId)
+                        MessageSpeaker.shared.toggle(spoken, sessionId: target?.sessionId)
                     }
                     if let selectionId, let rowActions {
                         Button("Select Text", systemImage: "text.cursor") { rowActions.beginTextSelection(selectionId) }
@@ -385,8 +387,9 @@ private struct MessageActionsModifier: ViewModifier {
 
 extension View {
     /// Long-press "pop" with the message's date/time and its actions.
-    func messageActions(text: String, date: Date, shape: BubbleShape, selectionId: String? = nil, target: MessageTarget? = nil) -> some View {
-        modifier(MessageActionsModifier(text: text, date: date, shape: shape, selectionId: selectionId, target: target))
+    /// `spoken`: what Speak reads when the bubble shows something else than `text` (its TL;DR).
+    func messageActions(text: String, spoken: String? = nil, date: Date, shape: BubbleShape, selectionId: String? = nil, target: MessageTarget? = nil) -> some View {
+        modifier(MessageActionsModifier(text: text, spoken: spoken ?? text, date: date, shape: shape, selectionId: selectionId, target: target))
     }
 }
 

@@ -126,10 +126,11 @@ public struct AgentRoom: Identifiable, Sendable, Equatable {
     /// a machine that's on (else any machine still linked); nil without a linked machine.
     public static func directPlacement(agentId: String, sessions: [Session], machines: [Machine]) -> (machineId: String, directory: String)? {
         let linked = machines.filter { $0.revokedAt == nil && $0.replacedByMachineId == nil }
-        if let latest = sessions.filter({ $0.agentIdentity?.id == agentId && $0.path?.isEmpty == false && $0.machineId != nil })
-            .max(by: { $0.sortDate < $1.sortDate }),
-           let machineId = latest.machineId, let path = latest.path, linked.contains(where: { $0.id == machineId }) {
-            return (machineId, path)
+        // The chat is with the agent, not about a project: it works from the home of the machine
+        // it last worked on (and goes into any project from there).
+        if let latest = sessions.filter({ $0.agentIdentity?.id == agentId && $0.machineId != nil }).max(by: { $0.sortDate < $1.sortDate }),
+           let machine = linked.first(where: { $0.id == latest.machineId }), let home = machine.homeDir, !home.isEmpty {
+            return (machine.id, home)
         }
         guard let machine = linked.first(where: \.active) ?? linked.first, let home = machine.homeDir, !home.isEmpty else { return nil }
         return (machine.id, home)
