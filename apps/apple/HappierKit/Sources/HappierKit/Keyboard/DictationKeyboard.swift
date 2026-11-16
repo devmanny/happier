@@ -280,11 +280,54 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
             return status.final ? nil : edit(for: status, before: before)
         }
         guard status.take > typedThrough else { return nil }
-        let edit = sync.edit(take: status.take, text: status.text, before: before)
+        let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(status.text), before: before)
         if status.final {
             self.typedThrough = status.take
             sync.reset()
         }
         return edit
+    }
+
+    /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
+    /// dictate the rest; in a text field that period is almost always one to delete. Question and
+    /// exclamation marks, ellipses and the periods between sentences stay.
+    static func withoutClosingPeriod(_ text: String) -> String {
+        guard text.hasSuffix("."), !text.hasSuffix("..") else { return text }
+        return String(text.dropLast())
+    }
+}
+
+/// Moves the cursor a line up or down for the keyboard's trackpad (hold space and drag). A keyboard
+/// only sees the text around the cursor, not how the field lays it out, so a line is a hard line
+/// (between newlines) cut into wrapped lines of `lineLength` characters, an estimate from the
+/// field's width. Long paragraphs land near, not exactly on, the column above or below.
+public enum KeyboardCursor {
+    public enum Direction: Sendable { case up, down }
+
+    /// The character offset that moves the cursor one line `direction`, from the text `before`
+    /// and `after` it; to the start or end when there's no line that way.
+    public static func lineOffset(_ direction: Direction, before: String, after: String, lineLength: Int) -> Int {
+        let width = max(lineLength, 1)
+        let lineBefore = before.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? before
+        let column = lineBefore.count
+        switch direction {
+        case .up:
+            if column >= width { return -width }
+            let lines = before.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 2 else { return -column }
+            let above = lines[lines.count - 2].count
+            let lastWrapStart = above == 0 ? 0 : ((above - 1) / width) * width
+            let target = min(lastWrapStart + column, above)
+            return -(column + 1 + (above - target))
+        case .down:
+            let parts = after.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            let rest = parts.first?.count ?? 0
+            let length = column + rest
+            let wrapStart = (column / width) * width
+            if wrapStart + width < length { return min(column + width, length) - column }
+            guard parts.count == 2 else { return rest }
+            let below = parts[1].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first?.count ?? 0
+            return rest + 1 + min(column % width, below)
+        }
     }
 }

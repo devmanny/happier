@@ -21,7 +21,7 @@ final class KeyboardViewController: UIInputViewController {
         // The keyboard's height: required-but-one, so the system's own constraints win while it
         // animates in, and the view sizes itself rather than taking the system keyboard's height.
         (view as? UIInputView)?.allowsSelfSizing = true
-        let height = view.heightAnchor.constraint(equalToConstant: 236)
+        let height = view.heightAnchor.constraint(equalToConstant: 216)
         height.priority = UILayoutPriority(999)
         NSLayoutConstraint.activate([
             host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -73,12 +73,18 @@ final class KeyboardViewController: UIInputViewController {
 final class KeyboardModel {
     private(set) var status: DictationKeyboard.Status?
     private(set) var hasFullAccess = false
+    /// No system globe below the keyboard (Home-button iPhones, some iPads): the keyboard shows one.
+    private(set) var needsGlobe = false
     /// The field's return key, as the app asked for it.
     private(set) var returnTitle = String(localized: "return")
     /// Waiting for the app to answer a command (or to come up after being opened).
     private(set) var waiting = false
+    /// The space bar is held: the keyboard is a trackpad for the cursor.
+    private(set) var trackpad = false
 
-    @ObservationIgnored private unowned let controller: KeyboardViewController
+    /// Weak: the SwiftUI view keeps the model, and a status notification can still arrive after
+    /// the system let go of the keyboard; there's no field to type in then.
+    @ObservationIgnored private weak var controller: KeyboardViewController?
     @ObservationIgnored private var channel: DictationKeyboard.Channel?
     @ObservationIgnored private var observer: DictationKeyboard.Observer?
     @ObservationIgnored private var typing = KeyboardTyping()
@@ -93,7 +99,9 @@ final class KeyboardModel {
     var microphoneOn: Bool { status?.microphoneOn() ?? false }
 
     func appeared() {
+        guard let controller else { return }
         hasFullAccess = controller.hasFullAccess
+        needsGlobe = controller.needsInputModeSwitchKey
         fieldChanged()
         guard hasFullAccess else { return }
         if channel == nil { channel = DictationKeyboard.Channel() }
@@ -114,7 +122,8 @@ final class KeyboardModel {
     }
 
     func fieldChanged() {
-        let title: String = switch controller.textDocumentProxy.returnKeyType {
+        guard let proxy else { return }
+        let title: String = switch proxy.returnKeyType {
         case .go: String(localized: "go")
         case .search, .google, .yahoo: String(localized: "search")
         case .send: String(localized: "send")
@@ -156,18 +165,56 @@ final class KeyboardModel {
         send(.endStandby)
     }
 
-    func space() { controller.textDocumentProxy.insertText(" ") }
-    func newline() { controller.textDocumentProxy.insertText("\n") }
-    func deleteBackward() { controller.textDocumentProxy.deleteBackward() }
-    func nextKeyboard() { controller.advanceToNextInputMode() }
+    func space() { proxy?.insertText(" ") }
+    func newline() { proxy?.insertText("\n") }
+    func deleteBackward() { proxy?.deleteBackward() }
 
-    var globeTarget: UIInputViewController { controller }
+    var globeTarget: UIInputViewController? { controller }
+
+    private var proxy: (any UITextDocumentProxy)? { controller?.textDocumentProxy }
+
+    // MARK: Trackpad
+
+    @ObservationIgnored private lazy var tick = UISelectionFeedbackGenerator()
+
+    func trackpadBegan() {
+        trackpad = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        tick.prepare()
+    }
+
+    func trackpadEnded() { trackpad = false }
+
+    func moveCursor(by characters: Int) {
+        proxy?.adjustTextPosition(byCharacterOffset: characters)
+        tick.selectionChanged()
+    }
+
+    func moveLine(_ direction: KeyboardCursor.Direction) {
+        guard let proxy else { return }
+        let offset = KeyboardCursor.lineOffset(
+            direction,
+            before: proxy.documentContextBeforeInput ?? "",
+            after: proxy.documentContextAfterInput ?? "",
+            lineLength: lineLength
+        )
+        guard offset != 0 else { return }
+        proxy.adjustTextPosition(byCharacterOffset: offset)
+        tick.selectionChanged()
+    }
+
+    /// About how many characters fit on a line of the field: the keyboard can't see the field's
+    /// layout, so this assumes it spans the screen, less its margins, in the 17-point system font.
+    private var lineLength: Int {
+        let width = (controller?.view.bounds.width ?? 390) - 40
+        return max(Int(width / 8.4), 12)
+    }
 
     // MARK: The app
 
     private func open() {
         waiting = true
-        controller.openApp(DictationKeyboard.openURL)
+        controller?.openApp(DictationKeyboard.openURL)
     }
 
     private func send(_ action: DictationKeyboard.Command.Action) {
@@ -183,7 +230,7 @@ final class KeyboardModel {
     }
 
     private func typeTake(_ status: DictationKeyboard.Status) {
-        let proxy = controller.textDocumentProxy
+        guard let proxy else { return }
         guard let edit = typing.edit(for: status, before: proxy.documentContextBeforeInput) else { return }
         if !edit.isEmpty {
             for _ in 0..<edit.delete { proxy.deleteBackward() }

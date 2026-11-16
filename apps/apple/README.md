@@ -53,14 +53,18 @@ the app in the background, so chunks recorded then wait in the spool and go when
 ## Dictation keyboard (iPhone, iPad)
 
 `HappierKeyboard` is a keyboard extension with a microphone button: the words appear in any app's
-text field as Whisper hears them, with the globe, space, delete and return keys. Add it in
+text field as Whisper hears them. Delete and return sit to the right of the microphone, space below
+it; holding space turns the keyboard into a trackpad that moves the cursor sideways and up or down
+(`KeyboardCursor`; a keyboard can't see the field's layout, so lines in a long paragraph are
+estimated from the screen width). The globe shows only where the system doesn't draw one. Add it in
 Settings › General › Keyboard › Keyboards and turn on **Allow Full Access** (the App Group, where
 the app leaves what it hears, needs it).
 
 A keyboard can't use the microphone or hold a Whisper model, so the app does the listening. The
-first tap opens Happier (`happier-native://keyboard-dictation`), which turns the microphone on
-(`AudioUse.standby`, mixing like Oído) and starts a take; you go back with the system's ◀. The
-microphone then stays on in the background for 5 minutes after the last take
+first tap opens Happier (`happier-native://keyboard-dictation`), which only turns the microphone on
+(`AudioUse.standby`, mixing like Oído) and explains how to go back with the system's ◀, which returns
+to the exact app you came from; the next tap in the keyboard starts the take. The microphone then
+stays on in the background for 5 minutes after the last take
 (`DictationKeyboardService.standbyDuration`), and Whisper stays loaded meanwhile
 (`WhisperRuntime.keepLoadedInBackground`), so later taps start takes without leaving the app in
 use. iOS doesn't let an app start recording from the background: when the standby ran out, a call
@@ -69,7 +73,8 @@ took the microphone or the app was killed, the next tap opens Happier again.
 The two sides talk through `HappierKit/Keyboard/DictationKeyboard.swift`: the app writes
 `status.json` and the keyboard `command.json` in the App Group's `DictationKeyboard/` folder, each
 followed by a Darwin notification. `KeyboardTyping` decides which takes the keyboard types (each
-once, across keyboard reloads) and `KeyboardTextSync` turns each revision into deletes and inserts.
+once, across keyboard reloads, without the period Whisper closes every take with) and
+`KeyboardTextSync` turns each revision into deletes and inserts.
 
 ## Passkeys in the iOS browser
 

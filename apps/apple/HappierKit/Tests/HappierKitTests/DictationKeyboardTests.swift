@@ -114,6 +114,18 @@ import Testing
         #expect(typing.edit(for: status(7, "ya llevo esto"), before: "") == .init(delete: 0, insert: "ya llevo esto"))
     }
 
+    @Test func aTakeDoesNotEndWithThePeriodWhisperAdds() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(2, "x", final: true), before: "")
+        // Stopping mid-sentence: Whisper closes it with a period, which the keyboard leaves out.
+        #expect(typing.edit(for: status(3, "Estoy escribiendo una frase."), before: "") == .init(delete: 0, insert: "Estoy escribiendo una frase"))
+        #expect(typing.edit(for: status(3, "Estoy escribiendo una frase y luego.", final: true), before: "Estoy escribiendo una frase")
+            == .init(delete: 0, insert: " y luego"))
+        // Questions, exclamations, ellipses and inner periods stay.
+        #expect(typing.edit(for: status(4, "Hola. ¿Vienes?", final: true), before: "") == .init(delete: 0, insert: "Hola. ¿Vienes?"))
+        #expect(typing.edit(for: status(5, "Pues...", final: true), before: "") == .init(delete: 0, insert: "Pues..."))
+    }
+
     @Test func eachTakeIsTypedOnceAcrossKeyboardReloads() throws {
         var typing = KeyboardTyping()
         _ = typing.edit(for: status(1, "hola"), before: "")

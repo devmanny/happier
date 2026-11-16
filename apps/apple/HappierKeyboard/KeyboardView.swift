@@ -6,59 +6,74 @@ struct KeyboardView: View {
     let model: KeyboardModel
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 6) {
             caption
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .center)
+                .frame(maxWidth: .infinity, minHeight: 30, alignment: .center)
                 .padding(.horizontal, 12)
 
-            if model.hasFullAccess {
-                MicButton(listening: model.listening, waiting: model.waiting, action: model.micTapped)
-            } else {
-                Text("Turn on Allow Full Access in Settings › General › Keyboard › Keyboards › Happier, so the keyboard can type what the app hears.")
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 20)
-                    .frame(maxHeight: .infinity)
-            }
+            // The mic in the middle; delete over return on the right, centered on the mic; space
+            // under the mic.
+            Grid(horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    VStack(spacing: 8) {
+                        if model.needsGlobe, let controller = model.globeTarget {
+                            GlobeKey(controller: controller).frame(height: 44)
+                        }
+                        if model.microphoneOn, !model.listening {
+                            Key(systemImage: "mic.slash", accessibility: "Turn off microphone", action: model.turnMicrophoneOff)
+                                .frame(height: 44)
+                        }
+                    }
+                    .frame(width: Self.sideWidth)
 
-            HStack(spacing: 6) {
-                GlobeKey(controller: model.globeTarget)
-                    .frame(width: 44)
-                if model.microphoneOn, !model.listening {
-                    Key(systemImage: "mic.slash", accessibility: "Turn off microphone", action: model.turnMicrophoneOff)
-                        .frame(width: 44)
+                    if model.hasFullAccess {
+                        MicButton(listening: model.listening, waiting: model.waiting, action: model.micTapped)
+                    } else {
+                        Text("Turn on Allow Full Access in Settings › General › Keyboard › Keyboards › Happier, so the keyboard can type what the app hears.")
+                            .font(.footnote)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: 240)
+                    }
+
+                    VStack(spacing: 8) {
+                        RepeatingKey(systemImage: "delete.left", accessibility: "Delete", action: model.deleteBackward)
+                            .frame(height: 44)
+                        Key(title: model.returnTitle, action: model.newline)
+                            .frame(height: 44)
+                    }
+                    .frame(width: Self.sideWidth)
                 }
-                Key(title: String(localized: "space"), action: model.space)
-                RepeatingKey(systemImage: "delete.left", accessibility: "Delete", action: model.deleteBackward)
-                    .frame(width: 56)
-                Key(title: model.returnTitle, action: model.newline)
-                    .frame(width: 84)
+                GridRow {
+                    Color.clear.frame(width: Self.sideWidth, height: 1)
+                    SpaceKey(model: model)
+                        .frame(width: 190, height: 44)
+                    Color.clear.frame(width: Self.sideWidth, height: 1)
+                }
             }
-            .frame(height: 44)
-            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity)
+            .opacity(model.trackpad ? 0.25 : 1)
+            .animation(.easeOut(duration: 0.15), value: model.trackpad)
         }
-        .padding(.top, 6)
-        .padding(.bottom, 4)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
     }
 
+    private static let sideWidth: CGFloat = 84
+
+    /// Only what needs saying: why the microphone can't start, or what the first tap does. The
+    /// words being heard go straight into the text field (shown here too, they piled up and
+    /// didn't follow deletes).
     @ViewBuilder private var caption: some View {
         let status = model.status
         if let error = status?.error, !(status?.isListening ?? false) {
             Text(error).font(.footnote).foregroundStyle(.red).lineLimit(2)
-        } else if let status, status.isListening {
-            Text(status.text.isEmpty ? String(localized: "Listening…") : status.text)
-                .font(.callout)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .foregroundStyle(status.text.isEmpty ? .secondary : .primary)
-        } else if model.microphoneOn {
-            Text("Tap to talk").font(.footnote).foregroundStyle(.secondary)
-        } else {
-            Text("Tap to talk: Happier opens to turn on the microphone, then go back with ◀")
+        } else if model.hasFullAccess, !model.microphoneOn, !model.listening {
+            Text("The first time, Happier opens to turn on the microphone. Come back with ◀ and tap again.")
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
     }
 }
@@ -87,7 +102,6 @@ private struct MicButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(listening ? Text("Stop dictating") : Text("Dictate"))
-        .frame(maxHeight: .infinity)
     }
 }
 
@@ -140,6 +154,69 @@ private struct RepeatingKey: View {
             .accessibilityLabel(Text(accessibility))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { action() }
+    }
+}
+
+/// Space: a tap types a space; held, the keyboard becomes a trackpad and dragging moves the cursor,
+/// sideways a character at a time and up or down a line at a time.
+private struct SpaceKey: View {
+    let model: KeyboardModel
+    @State private var hold: Task<Void, Never>?
+    @State private var touching = false
+    /// Where the finger is, and where the cursor last moved from (in trackpad mode).
+    @State private var finger: CGPoint = .zero
+    @State private var anchor: CGPoint?
+
+    private static let holdDelay: Duration = .milliseconds(350)
+    private static let characterStep: CGFloat = 9
+    private static let lineStep: CGFloat = 22
+
+    var body: some View {
+        KeyFace { Text("space").font(.system(size: 16)) }
+            .opacity(model.trackpad ? 0 : 1)
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    finger = value.location
+                    if !touching {
+                        touching = true
+                        hold = Task { @MainActor in
+                            try? await Task.sleep(for: Self.holdDelay)
+                            guard !Task.isCancelled else { return }
+                            anchor = finger
+                            model.trackpadBegan()
+                        }
+                    }
+                    if model.trackpad { follow() }
+                }
+                .onEnded { _ in
+                    hold?.cancel()
+                    hold = nil
+                    if model.trackpad { model.trackpadEnded() } else { model.space() }
+                    touching = false
+                    anchor = nil
+                })
+            .accessibilityLabel(Text("space"))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { model.space() }
+    }
+
+    private func follow() {
+        guard var anchor else { return }
+        let characters = Int((finger.x - anchor.x) / Self.characterStep)
+        if characters != 0 {
+            model.moveCursor(by: characters)
+            anchor.x += CGFloat(characters) * Self.characterStep
+        }
+        // One line per event: the text around the cursor only catches up after each move.
+        let lines = (finger.y - anchor.y) / Self.lineStep
+        if lines <= -1 {
+            model.moveLine(.up)
+            anchor.y -= Self.lineStep
+        } else if lines >= 1 {
+            model.moveLine(.down)
+            anchor.y += Self.lineStep
+        }
+        self.anchor = anchor
     }
 }
 
