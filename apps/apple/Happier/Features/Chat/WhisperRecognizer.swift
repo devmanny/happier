@@ -305,7 +305,7 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
     }
 
     private func run(folder: URL, language: String) async -> String {
-        var transcript = WhisperStreamTranscript()
+        var transcript = WhisperStreamTranscript(language: language)
         // The final pass is what gets sent: WhisperKit's fallback decodes it again at rising
         // temperatures when it isn't sure. A live pass is a draft the next one replaces: one decode,
         // stopped once it starts repeating itself (as WhisperKit's AudioStreamTranscriber does);
@@ -351,7 +351,9 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
                 try Task.checkCancellation()
                 let took = started.duration(to: .now)
                 takeLog.pass(seconds: took.seconds)
-                transcript.update(segments, final: ended)
+                // How much of what this pass read is speech: little, and Whisper's silence phrases go.
+                let speech = DictationSpeech.speechSeconds(frameLevels: levels, from: Int(Double(pass.start) / DictationSpeech.frameSeconds))
+                transcript.update(segments, final: ended, speech: speech)
                 Self.log.debug("whisper pass \(audio.count / Self.frameSamples) frames in \(took, privacy: .public)")
                 if ended { break }
                 shown = shown || !transcript.text.isEmpty

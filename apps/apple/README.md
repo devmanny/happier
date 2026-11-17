@@ -53,23 +53,35 @@ the app in the background, so chunks recorded then wait in the spool and go when
 ## Dictation keyboard (iPhone, iPad)
 
 `HappierKeyboard` is a keyboard extension with a microphone button: the words appear in any app's
-text field as Whisper hears them, with the globe, space, delete and return keys. Add it in
+text field as Whisper hears them. Delete and return sit to the right of the microphone, space below
+it; holding space turns the keyboard into a trackpad that moves the cursor sideways and up or down
+(`KeyboardCursor`; a keyboard can't see the field's layout, so lines in a long paragraph are
+estimated from the screen width). The globe shows only where the system doesn't draw one. Add it in
 Settings › General › Keyboard › Keyboards and turn on **Allow Full Access** (the App Group, where
 the app leaves what it hears, needs it).
 
 A keyboard can't use the microphone or hold a Whisper model, so the app does the listening. The
-first tap opens Happier (`happier-native://keyboard-dictation`), which turns the microphone on
-(`AudioUse.standby`, mixing like Oído) and starts a take; you go back with the system's ◀. The
-microphone then stays on in the background for 5 minutes after the last take
+first tap opens Happier (`happier-native://keyboard-dictation`), which only turns the microphone on
+(`AudioUse.standby`, mixing like Oído) and explains how to go back with the system's ◀, which returns
+to the exact app you came from; back there, the keyboard starts the take by itself once the
+microphone is on (`KeyboardAutoStart`, within 2 minutes of the tap). The microphone then
+stays on in the background for 5 minutes after the last take
 (`DictationKeyboardService.standbyDuration`), and Whisper stays loaded meanwhile
 (`WhisperRuntime.keepLoadedInBackground`), so later taps start takes without leaving the app in
 use. iOS doesn't let an app start recording from the background: when the standby ran out, a call
-took the microphone or the app was killed, the next tap opens Happier again.
+took the microphone or the app was killed, the next tap opens Happier again. A take ends when the
+keyboard closes (another keyboard, another app) or Happier comes to the front; what was heard after
+the keyboard closed isn't typed. A take left recording would keep Whisper working and hold the
+audio, so reading a message aloud wouldn't start.
 
 The two sides talk through `HappierKit/Keyboard/DictationKeyboard.swift`: the app writes
 `status.json` and the keyboard `command.json` in the App Group's `DictationKeyboard/` folder, each
 followed by a Darwin notification. `KeyboardTyping` decides which takes the keyboard types (each
-once, across keyboard reloads) and `KeyboardTextSync` turns each revision into deletes and inserts.
+once, across keyboard reloads, without the period Whisper closes every take with) and
+`KeyboardTextSync` turns each revision into deletes and inserts. Deleting, the trackpad, or any edit
+that leaves the field no longer ending with what the take typed ends the take: nothing more of it
+is typed into the user's fix. A field that empties under the typed words was sent: the take goes
+on, and only what is said after them is typed into the next message.
 
 ## Passkeys in the iOS browser
 
@@ -326,8 +338,15 @@ can be kept: the one tapped (else the latest download, else the most accurate le
 While one is in use and the device can run it,
 dictation transcribes on the device in the dictation language (Settings › Dictation › Language;
 Automatic takes the device's first language it supports), never auto-detected, with text
-appearing about once a second and the rest when you stop (tap or release); silence is not
-transcribed. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
+appearing about once a second and the rest when you stop (tap or release); silence and short
+noises (under 0.3 s) are not transcribed, and the phrases Whisper writes for silence ("Gracias.",
+"Gracias por ver el video.") are dropped from a pass with under half a second of speech. Each pass
+is decoded on its own, so a word Whisper capitalized only because a pass starts mid-sentence takes
+the lowercase it was written in elsewhere in the take; a segment with no word in it ("." for a
+breath) is dropped; in Spanish a lone "C." is "Sí." Settings ›
+Dictation › Writing Style (`DictationStyle`) sets how every take is written, in the composer and
+the keyboard: opening ¿ ¡, capital letters, and periods between sentences (off: commas, no closing
+period). By default text is written as dictated. Without a model it uses Apple's SpeechAnalyzer when the language is installed, else
 SFSpeechRecognizer. `Dictation` owns the take, on the app's shared microphone (see Oído); `DictationEngine.choose` picks
 the device's engine and `DictationEngine.forTake` the take's. A take never waits for Whisper to
 load: while the model isn't in memory (it is let go when the app leaves the screen and loads again

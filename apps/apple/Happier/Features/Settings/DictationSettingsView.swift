@@ -12,6 +12,9 @@ struct DictationSettingsView: View {
     @State private var automatic: String?
     @State private var choices: [String] = []
     @AppStorage(Dictation.languageKey) private var chosenLanguage: String?
+    @AppStorage(DictationStyle.openingMarksKey) private var openingMarks = true
+    @AppStorage(DictationStyle.lowercaseKey) private var lowercase = false
+    @AppStorage(DictationStyle.periodsKey) private var periods = true
     @State private var deleting: WhisperModel?
     private let library = WhisperModels.library
 
@@ -27,6 +30,15 @@ struct DictationSettingsView: View {
                 }
             } footer: {
                 Text("Whisper runs on this device: your voice never leaves it. Until a Whisper model is downloaded, dictation uses Apple's speech recognition. Automatic dictates in your device's first language; choose one if you speak another.")
+            }
+            Section {
+                Toggle("Opening ¿ and ¡", isOn: $openingMarks)
+                Toggle("Capital Letters", isOn: Binding(get: { !lowercase }, set: { lowercase = !$0 }))
+                Toggle("Periods Between Sentences", isOn: $periods)
+            } header: {
+                Text("Writing Style")
+            } footer: {
+                Text("How dictation writes, in Happier and on the Happier keyboard. Off: questions end with only “?”, everything is lowercase (names too), and sentences run on with commas, with no closing period. Parentheses and quotes always open.")
             }
             Section {
                 ForEach(WhisperModel.allCases) { model in

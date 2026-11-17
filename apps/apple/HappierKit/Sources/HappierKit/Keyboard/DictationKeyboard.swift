@@ -200,8 +200,13 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
     /// The space put before the take's text, when it followed a word.
     private var separator: String?
     /// The text before the cursor stopped ending with what was typed (the cursor moved, or the
-    /// user edited): nothing typed is taken back any more, new words are only added.
-    public private(set) var appendOnly = false
+    /// user edited): the user is fixing the text, and nothing more of the take is typed.
+    public private(set) var stopped = false
+    /// Characters of the take's text that went out with a message: the field emptied (sent) while
+    /// the take went on. Only what comes after them is typed.
+    private var sentLength = 0
+    /// Where in the take's text what was typed begins.
+    private var typedFrom = 0
 
     public init() {}
 
@@ -212,24 +217,42 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
             self.take = take
             typed = ""
             separator = nil
-            appendOnly = false
+            stopped = false
+            sentLength = 0
+            typedFrom = 0
         }
+        // The field emptied under typed words: the message was sent. They went with it, even if
+        // Whisper revises them now.
+        if let before, before.isEmpty, !typed.isEmpty, !stopped {
+            sentLength = typedFrom + typed.count - (separator ?? "").count
+            typed = ""
+            separator = nil
+        }
+        let text = sentLength == 0 ? text : Self.after(sentLength, in: text, from: &typedFrom)
         if separator == nil, !text.isEmpty {
             separator = Self.needsSpace(before: before, text: text) ? " " : ""
         }
         let target = (separator ?? "") + text
-        if !appendOnly, !Self.ends(before, with: typed) { appendOnly = true }
-        if appendOnly {
-            // Only what goes past what was typed already.
-            guard target.count > typed.count else { return Edit(delete: 0, insert: "") }
-            let added = String(target.dropFirst(typed.count))
-            typed = target
-            return Edit(delete: 0, insert: added)
-        }
+        if !stopped, !Self.ends(before, with: typed) { stopped = true }
+        if stopped { return Edit(delete: 0, insert: "") }
         let common = Self.commonPrefixCount(typed, target)
         let edit = Edit(delete: typed.count - common, insert: String(target.dropFirst(common)))
         typed = target
         return edit
+    }
+
+    /// The take's text after its first `sent` characters, for the next message: not the rest of a
+    /// word cut there ("turno" sent, now "turnos"), nor the space or punctuation that closed the
+    /// sent words. `from` is where it begins.
+    static func after(_ sent: Int, in text: String, from: inout Int) -> String {
+        let chars = Array(text)
+        var index = min(sent, chars.count)
+        if index > 0, index < chars.count, chars[index - 1].isLetter || chars[index - 1].isNumber {
+            while index < chars.count, chars[index].isLetter || chars[index].isNumber { index += 1 }
+        }
+        while index < chars.count, chars[index].isWhitespace || ".,;:".contains(chars[index]) { index += 1 }
+        from = index
+        return String(chars[index...])
     }
 
     /// The take is over: the next update belongs to a new one.
@@ -248,7 +271,9 @@ public struct KeyboardTextSync: Codable, Equatable, Sendable {
     static func needsSpace(before: String?, text: String) -> Bool {
         guard let last = before?.last, let first = text.first else { return false }
         if last.isWhitespace || last.isNewline { return false }
-        // "hola" + ", qué tal": punctuation sticks to the word before it.
+        // "hola" + ", qué tal": punctuation sticks to the word before it; "¿", "¡", "(" and
+        // quotes open the next one.
+        if "¿¡([{\"“«'‘".contains(first) { return true }
         if first.isPunctuation { return false }
         return true
     }
@@ -270,6 +295,8 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
     /// Takes up to this one are typed, or were over before the keyboard first looked.
     public private(set) var typedThrough: Int?
     public private(set) var sync = KeyboardTextSync()
+    /// The last take the user edited mid-way (it stopped typing; the keyboard ends it).
+    public private(set) var userTookOver: Int?
 
     public init() {}
 
@@ -280,11 +307,95 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
             return status.final ? nil : edit(for: status, before: before)
         }
         guard status.take > typedThrough else { return nil }
-        let edit = sync.edit(take: status.take, text: status.text, before: before)
+        let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(status.text), before: before)
+        if sync.stopped {
+            userTookOver = status.take
+            leave(take: status.take)
+            return nil
+        }
         if status.final {
             self.typedThrough = status.take
             sync.reset()
         }
         return edit
+    }
+
+    /// The keyboard closed during `take` (another keyboard, another field): nothing more of it is
+    /// typed, even if it's still being transcribed when the keyboard comes back.
+    public mutating func leave(take: Int) {
+        typedThrough = max(typedThrough ?? take, take)
+        sync.reset()
+    }
+
+    /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
+    /// dictate the rest; in a text field that period is almost always one to delete. Question and
+    /// exclamation marks, ellipses and the periods between sentences stay.
+    static func withoutClosingPeriod(_ text: String) -> String {
+        guard text.hasSuffix("."), !text.hasSuffix("..") else { return text }
+        return String(text.dropLast())
+    }
+}
+
+/// Moves the cursor a line up or down for the keyboard's trackpad (hold space and drag). A keyboard
+/// only sees the text around the cursor, not how the field lays it out, so a line is a hard line
+/// (between newlines) cut into wrapped lines of `lineLength` characters, an estimate from the
+/// field's width. Long paragraphs land near, not exactly on, the column above or below.
+public enum KeyboardCursor {
+    public enum Direction: Sendable { case up, down }
+
+    /// The character offset that moves the cursor one line `direction`, from the text `before`
+    /// and `after` it; to the start or end when there's no line that way.
+    public static func lineOffset(_ direction: Direction, before: String, after: String, lineLength: Int) -> Int {
+        let width = max(lineLength, 1)
+        let lineBefore = before.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? before
+        let column = lineBefore.count
+        switch direction {
+        case .up:
+            if column >= width { return -width }
+            let lines = before.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 2 else { return -column }
+            let above = lines[lines.count - 2].count
+            let lastWrapStart = above == 0 ? 0 : ((above - 1) / width) * width
+            let target = min(lastWrapStart + column, above)
+            return -(column + 1 + (above - target))
+        case .down:
+            let parts = after.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            let rest = parts.first?.count ?? 0
+            let length = column + rest
+            let wrapStart = (column / width) * width
+            if wrapStart + width < length { return min(column + width, length) - column }
+            guard parts.count == 2 else { return rest }
+            let below = parts[1].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first?.count ?? 0
+            return rest + 1 + min(column % width, below)
+        }
+    }
+}
+
+/// The microphone tap that opened Happier to turn the microphone on. A keyboard can't listen by
+/// itself, so that tap leaves for the app; back in the app being typed in, the take starts as soon
+/// as the microphone is on, without a second tap. Saved: the system often reloads the keyboard
+/// while another app is in front.
+public struct KeyboardAutoStart: Codable, Equatable, Sendable {
+    /// Longer than this to come back and the tap is stale: the keyboard waits for a new one.
+    public static let window: TimeInterval = 120
+
+    public private(set) var requested: Date?
+
+    public init() {}
+
+    public mutating func opened(at date: Date = .now) { requested = date }
+
+    public mutating func cancel() { requested = nil }
+
+    /// Whether to start a take now; true once per tap.
+    public mutating func shouldStart(at date: Date = .now, microphoneOn: Bool, listening: Bool) -> Bool {
+        guard let requested else { return false }
+        if listening || date.timeIntervalSince(requested) > Self.window {
+            self.requested = nil
+            return false
+        }
+        guard microphoneOn else { return false }
+        self.requested = nil
+        return true
     }
 }

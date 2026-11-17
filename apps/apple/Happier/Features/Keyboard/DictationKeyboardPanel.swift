@@ -2,70 +2,63 @@
 import HappierKit
 import SwiftUI
 
-/// Shown when the dictation keyboard opened the app: it's listening, what it hears, and how to go
-/// back to the app you were typing in (the system's ◀ in the top-left corner).
+/// Shown when the dictation keyboard opened the app. The app only opens to turn the microphone on
+/// (a keyboard can't), so this says that and how to go back: the system's "◀ App" in the top-left
+/// corner, which returns to the exact app you came from. Nothing here takes typing or dictation.
 struct DictationKeyboardPanel: View {
     @Environment(DictationKeyboardService.self) private var keyboard
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                Image(systemName: keyboard.dictation.isRecording ? "waveform" : "mic.fill")
-                    .font(.system(size: 44, weight: .medium))
-                    .foregroundStyle(keyboard.microphoneOn ? Color.accentColor : .secondary)
-                    .symbolEffect(.variableColor.iterative, isActive: keyboard.dictation.isRecording)
-                    .frame(height: 56)
+            ScrollView {
+                VStack(spacing: 20) {
+                    Image(systemName: keyboard.microphoneOn ? "checkmark.circle.fill" : "mic.circle")
+                        .font(.system(size: 52, weight: .regular))
+                        .foregroundStyle(keyboard.microphoneOn ? Color.green : .secondary)
+                        .contentTransition(.symbolEffect(.replace))
+                        .frame(height: 60)
 
-                Text(headline)
-                    .font(.title2.weight(.semibold))
-                    .multilineTextAlignment(.center)
-
-                ScrollView {
-                    Text(keyboard.status.text.isEmpty ? String(localized: "Start talking…") : keyboard.status.text)
-                        .font(.body)
-                        .foregroundStyle(keyboard.status.text.isEmpty ? .secondary : .primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 180)
-                .padding(16)
-                .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
-
-                if let error = keyboard.status.error {
-                    Text(error)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                    Text(headline)
+                        .font(.title2.weight(.semibold))
                         .multilineTextAlignment(.center)
-                }
 
-                Text("Go back to your app with ◀ in the top-left corner. The text appears where you were typing, and the microphone stays on for 5 minutes so you can keep dictating from the keyboard.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-
-                Spacer(minLength: 0)
-
-                if keyboard.dictation.isRecording {
-                    Button {
-                        Task { await keyboard.finishTake() }
-                    } label: {
-                        Label("Stop listening", systemImage: "stop.fill").frame(maxWidth: .infinity)
+                    if let error = keyboard.status.error {
+                        Text(error)
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    } else {
+                        Text("Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now go back to the app you were typing in: the keyboard starts listening as soon as you’re back.")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
-                if keyboard.microphoneOn {
-                    Button(role: .destructive) {
-                        keyboard.turnOff()
-                        dismiss()
-                    } label: {
-                        Text("Turn Off Microphone").frame(maxWidth: .infinity)
+
+                    BackHint()
+
+                    Text("The microphone stays on for 5 minutes after your last dictation, so you can keep dictating without coming back here.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if keyboard.microphoneOn {
+                        Button(role: .destructive) {
+                            keyboard.turnOff()
+                            dismiss()
+                        } label: {
+                            Text("Turn Off Microphone")
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.footnote)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
                 }
+                .padding(24)
+                .frame(maxWidth: 480)
+                .frame(maxWidth: .infinity)
             }
-            .padding(24)
             .navigationTitle("Dictation Keyboard")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -77,12 +70,58 @@ struct DictationKeyboardPanel: View {
     }
 
     private var headline: String {
-        switch keyboard.status.phase {
-        case .off: String(localized: "Microphone off")
-        case .ready: String(localized: "Microphone on")
-        case .starting: String(localized: "Starting…")
-        case .recording: String(localized: "Listening")
-        case .finishing: String(localized: "Writing the last words…")
+        if keyboard.status.error != nil { return String(localized: "The microphone couldn't turn on") }
+        return keyboard.microphoneOn
+            ? String(localized: "The keyboard can listen now")
+            : String(localized: "Turning on the microphone…")
+    }
+}
+
+/// A sketch of the screen's top-left corner, pointing at the system's back button. It names no app:
+/// the button shows whichever app you came from.
+private struct BackHint: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                UnevenRoundedRectangle(topLeadingRadius: 34, style: .continuous)
+                    .strokeBorder(.secondary.opacity(0.5), lineWidth: 2)
+                    .background(
+                        UnevenRoundedRectangle(topLeadingRadius: 34, style: .continuous)
+                            .fill(.quaternary.opacity(0.35))
+                    )
+
+                HStack(spacing: 2) {
+                    Image(systemName: "arrowtriangle.left.fill").font(.system(size: 11))
+                    Text("App name").font(.system(size: 15, weight: .semibold))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background {
+                    Capsule()
+                        .stroke(Color.accentColor, lineWidth: 2)
+                        .scaleEffect(pulsing ? 1.12 : 0.96)
+                        .opacity(pulsing ? 0.15 : 0.9)
+                }
+                .padding(.top, 16)
+                .padding(.leading, 22)
+
+                Image(systemName: "hand.point.up.left.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.primary.opacity(0.75))
+                    .offset(x: 92, y: 44)
+            }
+            .frame(width: 240, height: 110)
+            .clipped()
+            .accessibilityHidden(true)
+
+            Text("Tap ◀ in the top-left corner")
+                .font(.callout.weight(.medium))
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) { pulsing = true }
         }
     }
 }
@@ -98,7 +137,7 @@ struct DictationKeyboardSheet: ViewModifier {
         content.sheet(isPresented: $keyboard.showsPanel) {
             DictationKeyboardPanel()
                 .environment(keyboard)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
         }
     }
 }

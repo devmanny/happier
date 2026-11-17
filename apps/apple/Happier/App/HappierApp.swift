@@ -42,6 +42,9 @@ struct HappierApp: App {
                         store.appDidBecomeActive()
                         delegate.browser.appBecameActive()
                         delegate.oido.appBecameActive()
+                        #if os(iOS)
+                        delegate.keyboard.appBecameActive()
+                        #endif
                         // Folder colors and other synced settings changed elsewhere show up here.
                         if store.phase == .ready { Task { await store.refreshAccountSettings() } }
                     case .background:

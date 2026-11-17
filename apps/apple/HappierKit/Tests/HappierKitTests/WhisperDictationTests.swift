@@ -21,6 +21,27 @@ struct WhisperDictationTests {
         #expect(DictationSpeech.speechEnd(frameLevels: []) == nil)
     }
 
+    @Test func aShortNoiseIsNotSpeech() {
+        // A tap or a rustle (0.2 s) after the words: Whisper hears "Gracias." in it, so it isn't
+        // speech and the take's speech still ends with the words.
+        let take = frames([(-62, 10), (-30, 20), (-62, 20), (-30, 2), (-62, 20)])
+        #expect(DictationSpeech.speechEnd(frameLevels: take) == 34)
+        // Nothing but taps: no speech at all.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-62, 20), (-30, 2), (-62, 20), (-30, 1), (-62, 20)])) == nil)
+    }
+
+    @Test func aShortWordIsSpeech() {
+        // "Sí" or "no": 0.3 s.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-62, 10), (-30, 3), (-62, 10)])) == 17)
+    }
+
+    @Test func speechCountsOnlySustainedSound() {
+        let take = frames([(-62, 10), (-30, 6), (-62, 10), (-30, 2), (-62, 10)])
+        #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 0) == 0.6)
+        // After the words: only the tap, which isn't speech.
+        #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 16) == 0)
+    }
+
     @Test func quietSpeechStillCounts() {
         // A soft voice far from the microphone: loud only relative to the room.
         let take = frames([(-70, 10), (-50, 20), (-70, 10)])
@@ -29,6 +50,79 @@ struct WhisperDictationTests {
 
     private func segment(_ text: String, _ start: Float, _ end: Float) -> WhisperStreamTranscript.Segment {
         .init(text: text, start: start, end: end)
+    }
+
+    @Test func whispersWordsForSilenceAreDroppedWhenAlmostNothingWasSaid() {
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2)], final: false, speech: 2)
+        // A noise long enough to pass: what Whisper writes for silence isn't kept.
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2), segment(" Gracias.", 2, 3)], final: false, speech: 0.3)
+        #expect(transcript.text == "Busca una Mac Studio.")
+        transcript.update([segment(" Busca una Mac Studio.", 0, 2), segment(" ¡Gracias por ver el video!", 2, 3)], final: true, speech: 0.3)
+        #expect(transcript.text == "Busca una Mac Studio.")
+        #expect(WhisperStreamTranscript.isSilencePhrase(" Subtítulos realizados por la comunidad de Amara.org"))
+    }
+
+    @Test func aSegmentWithoutWordsIsDropped() {
+        // A breath or a noise before speaking: Whisper writes "." or "..." for it, and the take
+        // started with ". pero pues acá hay…".
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" .", 0, 0.8), segment(" Pero pues acá hay marcas de lujo", 0.8, 3), segment(" y restaurantes caros.", 3, 4.5)], final: true)
+        #expect(transcript.text == "Pero pues acá hay marcas de lujo y restaurantes caros.")
+        var dots = WhisperStreamTranscript()
+        dots.update([segment(" ...", 0, 1), segment(" -", 1, 2)], final: true)
+        #expect(dots.text == "")
+        // Numbers are words.
+        var number = WhisperStreamTranscript()
+        number.update([segment(" 25.", 0, 1)], final: true)
+        #expect(number.text == "25.")
+    }
+
+    @Test func aRealThankYouIsKept() {
+        var transcript = WhisperStreamTranscript()
+        // "Gracias" said for real lasts half a second or more.
+        transcript.update([segment(" Muchas gracias.", 0, 1)], final: true, speech: 0.8)
+        #expect(transcript.text == "Muchas gracias.")
+        // Any other words are kept however short.
+        var short = WhisperStreamTranscript()
+        short.update([segment(" No.", 0, 1)], final: true, speech: 0.3)
+        #expect(short.text == "No.")
+    }
+
+    @Test func aPassThatStartsMidSentenceKeepsTheSentencesCase() {
+        // Each pass is decoded on its own, so Whisper starts it as a sentence: "Lo que vas diciendo".
+        // The words at that point were decoded before in context ("lo que"), and keep that case.
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Porque te va dibujando", 0, 1.5), segment(" lo que vas diciendo", 1.5, 3),
+                           segment(" de ahí", 3, 4)], final: false)
+        transcript.update([segment(" Lo que vas diciendo,", 1.5, 3), segment(" de ahí en más", 3, 4.2),
+                           segment(" creo que", 4.2, 5)], final: false)
+        transcript.update([segment(" De ahí en más", 3, 4.2), segment(" Creo que Fireflies o las notas de Gemini son iguales.", 4.2, 7)], final: true)
+        #expect(transcript.text == "Porque te va dibujando lo que vas diciendo, de ahí en más creo que Fireflies o las notas de Gemini son iguales.")
+    }
+
+    @Test func aPassAfterASentenceOrANameKeepsItsCapital() {
+        var transcript = WhisperStreamTranscript()
+        transcript.update([segment(" Ya llegué.", 0, 1), segment(" Gemini lo resume", 1, 2), segment(" bien", 2, 3)], final: false)
+        transcript.update([segment(" Gemini lo resume", 1, 2), segment(" bien.", 2, 3)], final: true)
+        #expect(transcript.text == "Ya llegué. Gemini lo resume bien.")
+    }
+
+    @Test func aSpanishYesIsNotTheLetterC() {
+        // Whisper hears a lone "sí" as the letter "C." (3 of 4 voices tried).
+        var transcript = WhisperStreamTranscript(language: "es")
+        transcript.update([segment(" C.", 0, 1)], final: true)
+        #expect(transcript.text == "Sí.")
+        var question = WhisperStreamTranscript(language: "es")
+        question.update([segment(" ¿C?", 0, 1)], final: true)
+        #expect(question.text == "¿Sí?")
+        // Not in English, and not a C inside other words.
+        var english = WhisperStreamTranscript(language: "en")
+        english.update([segment(" C.", 0, 1)], final: true)
+        #expect(english.text == "C.")
+        var vitamin = WhisperStreamTranscript(language: "es")
+        vitamin.update([segment(" Vitamina C.", 0, 1)], final: true)
+        #expect(vitamin.text == "Vitamina C.")
     }
 
     @Test func confirmsAllButTheLastTwoSegments() {

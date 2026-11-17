@@ -5,8 +5,8 @@ import os
 import SwiftUI
 
 /// The app's side of the dictation keyboard. A keyboard can't use the microphone, so the keyboard
-/// opens the app (`happier-native://keyboard-dictation`), which turns the microphone on, starts a
-/// take and keeps listening in the background for `standbyDuration`. Meanwhile the keyboard starts
+/// opens the app (`happier-native://keyboard-dictation`), which turns the microphone on and keeps it
+/// on in the background for `standbyDuration`. Meanwhile the keyboard starts
 /// and stops takes by command, without leaving the app in use, and types the text published here.
 /// Takes are ordinary `Dictation` takes (Whisper, else Apple's engine), on the app's one microphone.
 @MainActor
@@ -45,13 +45,11 @@ final class DictationKeyboardService {
 
     var microphoneOn: Bool { standby != nil }
 
-    /// Opened from the keyboard: the microphone on, and a take at once (the mic was tapped to talk).
+    /// Opened from the keyboard: the microphone on, nothing more. The panel sends you back, and the
+    /// keyboard's next tap starts the take where you're typing.
     func openedFromKeyboard() {
         showsPanel = true
-        Task {
-            guard await turnOnMicrophone() else { return }
-            await startTake()
-        }
+        Task { _ = await turnOnMicrophone() }
     }
 
     /// Ends the take, typing its last words.
@@ -61,6 +59,15 @@ final class DictationKeyboardService {
         publish()
         await dictation.finish()
         takeEnded()
+    }
+
+    /// Back in Happier: a keyboard take still recording was left behind in the app you were typing
+    /// in (no stop tapped). It ends here, typing its last words there; left running it would keep
+    /// Whisper working and hold the audio, so reading a message aloud wouldn't start.
+    func appBecameActive() {
+        guard dictation.isRecording else { return }
+        Self.log.notice("keyboard dictation: back in the app with a take still recording; finishing it")
+        Task { await finishTake() }
     }
 
     /// The microphone off now (the panel's button, or the keyboard's).
