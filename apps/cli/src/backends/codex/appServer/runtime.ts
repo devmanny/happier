@@ -3495,6 +3495,19 @@ export function createCodexAppServerRuntime(params: Readonly<{
                     },
                 });
             }
+            // The turn's end in its transcript (`task_complete`, as an ACP turn commits it). A message
+            // queued while it ran is drained as the next turn with no session `ready` between them (a
+            // ready means idle), so this row is how a transcript reader (`isSessionTurnEnd`) tells
+            // where the turn ended. Committed before the turn settles, it precedes that message.
+            try {
+                await (params.transcriptSession ?? params.session).sendAgentMessageCommitted?.(
+                    'codex',
+                    { type: 'task_complete', id: completedProviderTurnId ?? randomUUID() },
+                    { localId: randomUUID() },
+                );
+            } catch (error) {
+                logger.warnFile('[codex-app-server] Failed to commit the turn end; a message drained next reads as part of this turn', error);
+            }
         } else {
             turnChangeCollector.beginTurn();
         }

@@ -2844,6 +2844,56 @@ describe('createCodexAppServerRuntime', () => {
         expect(turnStart?.params).not.toHaveProperty('approvalPolicy');
     });
 
+    // A queued message drained as the next turn follows this one with no `ready` between them (the
+    // session never went idle), so the turn's own end in the transcript is what tells where it ended.
+    it('commits a completed turn\'s end to the transcript before a queued message is drained as the next turn', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-turn-end-before-drain-');
+        // The relay's transcript, in the order it acknowledges rows.
+        const transcript: string[] = [];
+        const sendAgentMessageCommitted = vi.fn(async (_provider: string, body: ACPMessageData) => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            transcript.push(`agent:${body.type}`);
+        });
+        const inputConsumer = createSessionProviderInputConsumer({
+            messageQueue: new MessageQueue2<{ id: string }>(() => 'hash'),
+            session: {
+                materializeNextPendingMessageSafely: async () => {
+                    transcript.push('user');
+                    return { type: 'materialized' as const, localId: 'queued-next-turn', seq: 99, content: null };
+                },
+                waitForPendingEligibilityUpdate: async () => false,
+            },
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                sendAgentMessage: vi.fn(),
+                sendAgentMessageCommitted,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('hello-world');
+        // What the Codex finalizer (`runCodex`) does once the turn settled: flush it, then drain.
+        await runtime.flushTurn();
+        expect(await inputConsumer.drainPending({ reason: 'codex-finalizer', logPrefix: '[codex]' }))
+            .toMatchObject({ materialized: 1 });
+
+        expect(sendAgentMessageCommitted).toHaveBeenCalledWith(
+            'codex',
+            { type: 'task_complete', id: 'turn-hello-world' },
+            expect.objectContaining({ localId: expect.any(String) }),
+        );
+        expect(transcript.filter((entry) => entry === 'agent:task_complete' || entry === 'user'))
+            .toEqual(['agent:task_complete', 'user']);
+    });
+
     it.each([
         ['turn-ledger', true],
         ['legacy', false],

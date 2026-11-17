@@ -1178,7 +1178,21 @@ export function createAcpRuntime(params: {
   const completeCapturedTurn = async (turn: TerminalTurnSnapshot): Promise<void> => {
     await beginCapturedLifecycleTurn(turn);
     if (!turn.providerTurnId) return;
-    params.session.sendAgentMessage(params.provider, { type: 'task_complete', id: turn.providerTurnId });
+    // The turn's end in its transcript, committed before the turn ends in the session-turn ledger:
+    // that end wakes the pending queue, and a message drained then as the next turn (no session
+    // `ready` between them) must come after this row for a transcript reader to tell where this turn
+    // ended (`isSessionTurnEndMarker`). Through the ledger adapter (`sendAgentMessage`) it would be a
+    // best-effort row, which waits for earlier rows' ACKs and can land after that message.
+    const taskComplete = {
+      type: 'task_complete',
+      id: params.session.sessionTurnLifecycle?.getActiveTurnId?.() ?? turn.providerTurnId,
+    } as const;
+    try {
+      await params.session.sendAgentMessageCommitted(params.provider, taskComplete, { localId: randomUUID() });
+    } catch (error) {
+      logger.infoFile(`[${params.provider}] Failed to commit the turn end; sending it best-effort`, error);
+      params.session.sendAgentMessage(params.provider, { type: 'task_complete', id: turn.providerTurnId });
+    }
     await recordSessionTurnCompleted({
       session: params.session,
       provider: params.provider,

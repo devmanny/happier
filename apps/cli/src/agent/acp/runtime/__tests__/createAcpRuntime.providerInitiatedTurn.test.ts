@@ -351,6 +351,10 @@ describe('createAcpRuntime (provider-initiated turns)', () => {
             void observed.pendingWrite;
             published.push(body.type);
           },
+          // The turn's end (`task_complete`) is committed.
+          sendAgentMessageCommitted: async (_provider, body) => {
+            published.push(body.type);
+          },
           sendUserTextMessageCommitted: async () => {
             await userCommit.promise;
             published.push('user');
@@ -620,6 +624,10 @@ describe('createAcpRuntime (provider-initiated turns)', () => {
       sendAgentMessage: (_provider, body) => {
         sent.push(body);
       },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
+        sent.push(body);
+      },
       keepAlive: (thinking, mode) => {
         keepAliveCalls.push([thinking, mode]);
       },
@@ -661,6 +669,10 @@ describe('createAcpRuntime (provider-initiated turns)', () => {
       sendAgentMessage: (_provider, body) => {
         sent.push(body);
       },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
+        sent.push(body);
+      },
     });
 
     const runtime = createAcpRuntime({
@@ -690,6 +702,10 @@ describe('createAcpRuntime (provider-initiated turns)', () => {
 
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessage: (_provider, body) => {
+        sent.push(body);
+      },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
         sent.push(body);
       },
     });
@@ -841,6 +857,10 @@ describe('createAcpRuntime (provider-initiated turns)', () => {
     const sent: ACPMessageData[] = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessage: (_provider, body) => {
+        sent.push(body);
+      },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
         sent.push(body);
       },
     });

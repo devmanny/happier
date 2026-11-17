@@ -4,7 +4,7 @@ import { AGENT_ROOM_MAX_AGENT_TURNS, accountSettingsParse, agentRoomKvKey, sealA
 
 import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
 import { resetSessionNotificationMuteForTests, trackSessionNotificationMute } from '@/session/notifications/sessionNotificationMute';
-import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
+import { readTurnReplyFromRows, type TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 import { resetActiveAccountSettingsSnapshotForTests, setActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
 
 import { AgentRoomStore } from './agentRoomStore';
@@ -226,6 +226,54 @@ describe('settleRoomTurn', () => {
     expect(await waiting.settle(true)).toEqual({ turn: 'not_started', replied: true });
     expect(await waiting.posted()).toEqual(['A parcial']);
     expect((await waiting.seat()).seat).toMatchObject({ readThroughSeq: 1, inFlight: { localId: n2, sent: true } });
+  });
+
+  // Mateo's thread s1 as Codex app-server commits it, read the way the runner reads it. A Steer Now
+  // that missed the turn ran as the next turn, after that turn's end; one that joined the turn has
+  // no end before it. Both read the same at that ready (no ready between the two turns).
+  it('posts both replies when the Steer Now ran as the next turn, and only the second when it joined the turn', async () => {
+    const ctx = { encryptionKey: new Uint8Array([1]), encryptionVariant: 'legacy' as const };
+    let seq = 0;
+    const row = (v: unknown) => ({ seq: ++seq, createdAt: seq, content: { t: 'plain' as const, v } });
+    const agent = (content: unknown) => row({ role: 'agent', content, meta: { sentFrom: 'cli', source: 'cli' } });
+    const message = (text: string) => agent({ type: 'acp', provider: 'codex', data: { type: 'message', message: text } });
+    const tool = () => agent({ type: 'codex', data: { type: 'tool-call', callId: `call-${seq}`, id: `item-${seq}`, name: 'exec', input: {} } });
+    const turnEnd = () => agent({ type: 'acp', provider: 'codex', data: { type: 'task_complete', id: `turn-${seq}` } });
+    const user = (localId: string) => ({ ...row({ role: 'user', content: { type: 'text', text: localId }, meta: {} }), localId });
+    const ready = () => row({ role: 'agent', content: { id: `ready-${seq}`, type: 'event', data: { type: 'ready' } } });
+    /** What `readTurnReplyAfterLocalId` reads: the rows after that user message. */
+    const replies = (rows: ReadonlyArray<ReturnType<typeof row> & { localId?: string }>) => Object.fromEntries([n1, n2].map((localId) => {
+      const at = rows.findIndex((entry) => entry.localId === localId);
+      return [localId, at < 0 ? null : readTurnReplyFromRows({ rows: rows.slice(at + 1), ctx })];
+    }));
+
+    const drained = await chain(replies([user(n1), message('Reviso el login.'), tool(), message('Login listo.'), turnEnd(), user(n2), message('Registro listo.'), turnEnd(), ready()]));
+    expect(await drained.settle(true)).toEqual({ turn: 'finished', replied: true });
+    expect(await drained.posted()).toEqual(['Login listo.', 'Registro listo.']);
+    expect((await drained.seat()).seat.inFlight).toBeUndefined();
+
+    const merged = await chain(replies([user(n1), message('Reviso el login.'), tool(), user(n2), message('Login y registro listos.'), turnEnd(), ready()]));
+    expect(await merged.settle(true)).toEqual({ turn: 'finished', replied: true });
+    expect(await merged.posted()).toEqual(['Login y registro listos.']);
+    expect((await merged.seat()).seat.inFlight).toBeUndefined();
+  });
+
+  // A goal continuation Codex starts itself after the room's turn ended writes no user message: a
+  // room post while it runs must not take its commentary for the room turn's reply.
+  it('posts the reply of the turn that ended, not what a turn the agent started itself after it writes', async () => {
+    const ctx = { encryptionKey: new Uint8Array([1]), encryptionVariant: 'legacy' as const };
+    let seq = 0;
+    const row = (v: unknown) => ({ seq: ++seq, createdAt: seq, content: { t: 'plain' as const, v } });
+    const agent = (content: unknown) => row({ role: 'agent', content, meta: { sentFrom: 'cli', source: 'cli' } });
+    const message = (text: string) => agent({ type: 'acp', provider: 'codex', data: { type: 'message', message: text } });
+    const tool = () => agent({ type: 'codex', data: { type: 'tool-call', callId: `call-${seq}`, id: `item-${seq}`, name: 'exec', input: {} } });
+    const turnEnd = () => agent({ type: 'acp', provider: 'codex', data: { type: 'task_complete', id: `turn-${seq}` } });
+    const rows = [message('Reviso.'), tool(), message('Listo turno 1.'), turnEnd(), message('Sigo con la meta: reviso el registro.'), tool()];
+
+    const single = await chain({ [n1]: readTurnReplyFromRows({ rows, ctx }) }, false);
+    expect(await single.settle(false)).toEqual({ turn: 'finished', replied: true });
+    expect(await single.posted()).toEqual(['Listo turno 1.']);
+    expect((await single.seat()).seat.inFlight).toBeUndefined();
   });
 
   it('changes nothing while both turns run', async () => {
