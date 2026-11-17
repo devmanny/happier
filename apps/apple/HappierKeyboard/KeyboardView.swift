@@ -6,14 +6,23 @@ struct KeyboardView: View {
     let model: KeyboardModel
 
     var body: some View {
-        VStack(spacing: 6) {
+        GeometryReader { proxy in
+            keys(width: proxy.size.width)
+        }
+    }
+
+    /// The layout for a keyboard `width` points wide: the iPad's floating keyboard is about 320,
+    /// narrower than a phone's, so the space bar and the side keys shrink to fit.
+    private func keys(width: CGFloat) -> some View {
+        let layout = Self.layout(width: width)
+        return VStack(spacing: 6) {
             caption
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .center)
                 .padding(.horizontal, 12)
 
             // The mic in the middle; delete over return on the right, centered on the mic; space
             // under the mic.
-            Grid(horizontalSpacing: 14, verticalSpacing: 10) {
+            Grid(horizontalSpacing: Self.spacing, verticalSpacing: 10) {
                 GridRow {
                     VStack(spacing: 8) {
                         if model.needsGlobe, let controller = model.globeTarget {
@@ -24,7 +33,7 @@ struct KeyboardView: View {
                                 .frame(height: 44)
                         }
                     }
-                    .frame(width: Self.sideWidth)
+                    .frame(width: layout.side)
 
                     if model.hasFullAccess {
                         MicButton(listening: model.listening, waiting: model.waiting, action: model.micTapped)
@@ -42,13 +51,13 @@ struct KeyboardView: View {
                         Key(title: model.returnTitle, action: model.newline)
                             .frame(height: 44)
                     }
-                    .frame(width: Self.sideWidth)
+                    .frame(width: layout.side)
                 }
                 GridRow {
-                    Color.clear.frame(width: Self.sideWidth, height: 1)
+                    Color.clear.frame(width: layout.side, height: 1)
                     SpaceKey(model: model)
-                        .frame(width: 190, height: 44)
-                    Color.clear.frame(width: Self.sideWidth, height: 1)
+                        .frame(width: layout.space, height: 44)
+                    Color.clear.frame(width: layout.side, height: 1)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -59,7 +68,17 @@ struct KeyboardView: View {
         .padding(.bottom, 8)
     }
 
-    private static let sideWidth: CGFloat = 84
+    private static let spacing: CGFloat = 14
+    private static let micWidth: CGFloat = 84
+
+    /// The side columns (84 at most, never under 56) and the space bar (190 at most, at least as
+    /// wide as the mic) for a keyboard `width` points wide, margins included.
+    static func layout(width: CGFloat) -> (side: CGFloat, space: CGFloat) {
+        let available = max(width - 16, 0) - 2 * spacing
+        let side = min(84, max(56, (available - micWidth) / 2))
+        let space = min(190, max(micWidth, available - 2 * side))
+        return (side, space)
+    }
 
     /// Only what needs saying: why the microphone can't start, or what the first tap does. The
     /// words being heard go straight into the text field (shown here too, they piled up and
@@ -73,7 +92,8 @@ struct KeyboardView: View {
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(3)
+                .minimumScaleFactor(0.8)
         }
     }
 }

@@ -9,6 +9,9 @@ struct DictationKeyboardPanel: View {
     @Environment(DictationKeyboardService.self) private var keyboard
     @Environment(\.dismiss) private var dismiss
 
+    /// On an iPad, Happier opens beside the app being typed in (or over it).
+    private static var onPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -29,14 +32,17 @@ struct DictationKeyboardPanel: View {
                             .foregroundStyle(.red)
                             .multilineTextAlignment(.center)
                     } else {
-                        Text("Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now go back to the app you were typing in: the keyboard starts listening as soon as you’re back.")
+                        Text(Self.onPad
+                             ? "Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now tap the window you were typing in (or ◀ in the top-left corner, if Happier covers the screen): the keyboard starts listening as soon as you’re back."
+                             : "Happier opens this one time to turn on the microphone, because a keyboard can't do it by itself. Now go back to the app you were typing in: the keyboard starts listening as soon as you’re back.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    BackHint()
+                    // An iPad shows the other app's window beside Happier: there's no single way back to draw.
+                    if !Self.onPad { BackHint() }
 
                     Text("The microphone stays on for 5 minutes after your last dictation, so you can keep dictating without coming back here.")
                         .font(.footnote)
