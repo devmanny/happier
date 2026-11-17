@@ -6,9 +6,9 @@ struct KeyboardView: View {
     let model: KeyboardModel
 
     var body: some View {
-        GeometryReader { proxy in
-            keys(width: proxy.size.width)
-        }
+        // The width comes from UIKit's layout: a GeometryReader has no size of its own, and the
+        // floating keyboard, which sizes itself, collapsed to it.
+        keys(width: model.width)
     }
 
     /// The layout for a keyboard `width` points wide: the iPad's floating keyboard is about 320,
@@ -85,7 +85,7 @@ struct KeyboardView: View {
     /// didn't follow deletes).
     @ViewBuilder private var caption: some View {
         let status = model.status
-        if let error = status?.error, !(status?.isListening ?? false) {
+        if let error = status?.error, !(status?.isListening() ?? false) {
             Text(error).font(.footnote).foregroundStyle(.red).lineLimit(2)
         } else if model.hasFullAccess, !model.microphoneOn, !model.listening {
             Text("The first time, Happier opens to turn on the microphone. Come back with ◀ and it starts listening.")

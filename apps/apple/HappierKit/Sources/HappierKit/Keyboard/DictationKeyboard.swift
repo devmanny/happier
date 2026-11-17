@@ -69,7 +69,12 @@ public enum DictationKeyboard {
             return now.timeIntervalSince(heartbeat) < Self.heartbeatLifetime
         }
 
-        public var isListening: Bool { phase == .starting || phase == .recording || phase == .finishing }
+        /// Whether a take is under way in a live app. A status left recording by an app iOS killed
+        /// doesn't count: the keyboard would show a take that hears nothing.
+        public func isListening(at now: Date = .now) -> Bool {
+            guard phase == .starting || phase == .recording || phase == .finishing else { return false }
+            return now.timeIntervalSince(heartbeat) < Self.heartbeatLifetime
+        }
     }
 
     /// What the keyboard asks.
@@ -327,6 +332,13 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
         sync.reset()
     }
 
+    /// Whether `take` is one the keyboard has stopped typing (left, edited, or over): still
+    /// recording, it listens for nothing.
+    public func hasLeft(take: Int) -> Bool {
+        guard let typedThrough else { return false }
+        return take <= typedThrough
+    }
+
     /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
     /// dictate the rest; in a text field that period is almost always one to delete. Question and
     /// exclamation marks, ellipses and the periods between sentences stay.
@@ -380,22 +392,35 @@ public struct KeyboardAutoStart: Codable, Equatable, Sendable {
     public static let window: TimeInterval = 120
 
     public private(set) var requested: Date?
+    /// A take left recording that has to end first; another take listening settles the request.
+    public private(set) var waitingOut: Int?
 
     public init() {}
 
-    public mutating func opened(at date: Date = .now) { requested = date }
+    public mutating func opened(at date: Date = .now, waitingOut take: Int? = nil) {
+        requested = date
+        waitingOut = take
+    }
 
-    public mutating func cancel() { requested = nil }
+    public mutating func cancel() {
+        requested = nil
+        waitingOut = nil
+    }
 
-    /// Whether to start a take now; true once per tap.
-    public mutating func shouldStart(at date: Date = .now, microphoneOn: Bool, listening: Bool) -> Bool {
+    /// Whether to start a take now; true once per tap. `take` is the app's current take.
+    public mutating func shouldStart(at date: Date = .now, microphoneOn: Bool, listening: Bool, take: Int? = nil) -> Bool {
         guard let requested else { return false }
-        if listening || date.timeIntervalSince(requested) > Self.window {
-            self.requested = nil
+        if date.timeIntervalSince(requested) > Self.window {
+            cancel()
+            return false
+        }
+        if listening {
+            if let waitingOut, take == waitingOut { return false }
+            cancel()
             return false
         }
         guard microphoneOn else { return false }
-        self.requested = nil
+        cancel()
         return true
     }
 }
