@@ -14,7 +14,10 @@ import {
     projectSessionMetadataForWire,
     readPendingLocalId,
     redactBugReportSensitiveText,
+    type BackendTargetRefV1,
 } from '@happier-dev/protocol';
+import { resolveSessionRuntimeBackendConflict } from '@/daemon/spawn/existingSessionBackendTargetAdmission';
+import { requestRunnerTermination } from '@/agent/runtime/runnerTerminationRequest';
 import { inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
 import { configuration } from '@/configuration';
 import type { RawJSONLines } from '@/backends/claude/types';
@@ -709,6 +712,8 @@ export class ApiSessionClient extends EventEmitter {
     private closed = false;
     private readonly metadataWaitAbortController = new AbortController();
     private runtimeTerminationStarted = false;
+    /** The Agent this client's runtime runs (`bindSessionClientToRuntimeAgent`); null for a non-runner client. */
+    private runtimeBackendTarget: BackendTargetRefV1 | null = null;
     private snapshotSyncInFlight: Promise<boolean> | null = null;
     private readonly toolCallCanonicalNameByProviderAndId = new Map<string, { rawToolName: string; canonicalToolName: string }>();
     private readonly permissionToolCallRawInputByProviderAndId = new Map<string, unknown>();
@@ -978,6 +983,7 @@ export class ApiSessionClient extends EventEmitter {
             };
 	        this.metadata = normalizeSessionMetadataForRead(session.metadata);
 	        this.metadataVersion = session.metadataVersion;
+            this.on('metadata-updated', () => this.exitIfSessionNamesAnotherAgent());
             this.sessionSocketMachineId = resolveSessionSocketMachineIdForBootstrap(session.metadata);
             this.agentState = session.agentState;
 	        this.agentStateVersion = session.agentStateVersion;
@@ -6240,6 +6246,36 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('local-closed');
     }
 
+    /**
+     * Binds this client to the Agent its runtime runs. From then on the runtime serves the Session
+     * only while the Session's persisted current view names that Agent
+     * (`resolveSessionRuntimeBackendConflict`): on every metadata update and before every Pending
+     * materialization a Session that names another Agent (an Agent switch whose cutover committed
+     * after this runtime attached) stops the runtime before it takes the new Agent's input.
+     */
+    bindRuntimeBackendTarget(backendTarget: BackendTargetRefV1): void {
+        this.runtimeBackendTarget = backendTarget;
+        this.exitIfSessionNamesAnotherAgent();
+    }
+
+    private exitIfSessionNamesAnotherAgent(): void {
+        if (this.closed || this.runtimeTerminationStarted) return;
+        const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+            sessionMetadata: this.metadata,
+            backendTarget: this.runtimeBackendTarget,
+        });
+        if (!sessionBackendTarget) return;
+        logger.warn('[API] Stopping a runtime whose Session now names another Agent', {
+            sessionId: this.sessionId,
+            runtimeBackendTarget: this.runtimeBackendTarget,
+            sessionBackendTarget,
+        });
+        this.beginRuntimeTermination();
+        // The runner's own graceful stop path; honored at registration if the cutover reached this
+        // runtime before the runner registered its termination handlers.
+        requestRunnerTermination({ kind: 'sessionAgentConflict' });
+    }
+
     beginRuntimeTermination(): void {
         if (this.runtimeTerminationStarted) return;
         this.runtimeTerminationStarted = true;
@@ -6532,6 +6568,7 @@ export class ApiSessionClient extends EventEmitter {
         didMaterialize: boolean;
         result: MaterializeNextPendingResult;
     }> {
+        this.exitIfSessionNamesAnotherAgent();
         if (this.closed || this.runtimeTerminationStarted) {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
         }

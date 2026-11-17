@@ -139,6 +139,23 @@ describe('computeDaemonSpawnRequestKey', () => {
     });
   });
 
+  it('never lets an existing-session request for one Agent share the in-flight result of another', () => {
+    const claude = computeDaemonSpawnRequestKey({
+      directory: '/tmp',
+      existingSessionId: 'sess_1',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+    } satisfies SpawnSessionOptions);
+    const codex = computeDaemonSpawnRequestKey({
+      directory: '/tmp',
+      existingSessionId: 'sess_1',
+      backendTarget: { kind: 'builtInAgent', agentId: 'codex' },
+    } satisfies SpawnSessionOptions);
+
+    expect(claude.key).not.toBe(codex.key);
+    if (claude.kind !== 'existing' || codex.kind !== 'existing') throw new Error('Expected existing-session keys');
+    expect(claude.serializationKey).toBe(codex.serializationKey);
+  });
+
   it('distinguishes exact requests while keeping one serialization lane per existing session', () => {
     const first = computeDaemonSpawnRequestKey({
       directory: '/tmp',

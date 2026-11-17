@@ -9,6 +9,7 @@ import {
   AGENT_IDS,
   resolveAgentIdFromSessionMetadata,
   resolveAgentNativeSpawnDefinitiveRejection,
+  resolveProviderSessionIdForBackendTarget,
 } from '@happier-dev/agents';
 
 import { ApiClient, isMachineContentPublicKeyMismatchError } from '@/api/api';
@@ -120,6 +121,12 @@ import {
 } from './sessions/pendingSessionActivationRecovery';
 import { resolveExistingRunnerAcceptance } from './spawn/resolveRunnerAcceptance';
 import {
+  buildExistingSessionPlacementSpawnError,
+  buildSessionRuntimeBackendConflictSpawnError,
+  resolveExistingSessionLaunchOptions,
+  resolveSessionRuntimeBackendConflict,
+} from './spawn/existingSessionBackendTargetAdmission';
+import {
   createDirectPeerTransferRegistry,
   requestDirectPeerTransferToFile,
   startDirectPeerTransferServer,
@@ -138,6 +145,7 @@ import { adoptReportedHappySessionId, adoptReportedSessionRunnerIdentity, correl
 import { applyTrackedSessionTurnLifecycle } from './sessions/applyTrackedSessionTurnLifecycle';
 import { connectedServiceTurnLifecycleContinue } from './connectedServices/connectedServiceTurnLifecycleContract';
 import { resolveSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveSessionRuntimeSnapshot';
+import { resolveSessionPersistedRuntimeIdentity } from './sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 import { resolveRespawnSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveRespawnSessionRuntimeSnapshot';
 import { buildInactiveUsageLimitResumeSpawnOptions } from './sessions/runtimeSnapshot/buildInactiveUsageLimitResumeSpawnOptions';
 import { buildHandoffSessionMetadataFromTrackedSession } from './sessions/buildHandoffSessionMetadataFromTrackedSession';
@@ -446,7 +454,7 @@ import { startConnectedServiceQuotasLoop, type ConnectedServiceQuotasLoopHandle 
 import { readConnectedServiceRuntimeIdentityForQuotaFanout } from './connectedServices/quotas/identity/readConnectedServiceRuntimeIdentityForQuotaFanout';
 import type { RuntimeAccountIdentitySelectionInput } from './connectedServices/quotas/identity/runtimeAccountIdentityTypes';
 import { decodeJwtPayload } from '@/cloud/decodeJwtPayload';
-import { parseBooleanEnv, resolveConnectedServicesProviderStateSharingPolicyV1, type AccountSettings, type BackendTargetRefV1, type ConnectedServiceId } from '@happier-dev/protocol';
+import { buildBackendTargetKey, parseBooleanEnv, resolveConnectedServicesProviderStateSharingPolicyV1, type AccountSettings, type BackendTargetRefV1, type ConnectedServiceId } from '@happier-dev/protocol';
 import type { CatalogAgentId, ConnectedServiceSwitchEffectiveBinding } from '@/backends/types';
 import {
   createTerminalAttachmentId,
@@ -1343,27 +1351,38 @@ function resolveCliSubcommandFromBackendTarget(target: BackendTargetRefV1 | unde
   return resolveAgentCliSubcommand(readBuiltInCatalogAgentIdFromBackendTarget(target));
 }
 
+async function resolveTrackedSessionAttachContext(params: Readonly<{
+  sessionId: string;
+  backendTarget: BackendTargetRefV1 | undefined;
+  credentials: Credentials;
+}>): ReturnType<typeof resolveExistingSessionAttachContext> {
+  const storedCredentials = await readCredentials().catch(() => null);
+  const effectiveCredentials = storedCredentials ?? params.credentials;
+  return await resolveExistingSessionAttachContext({
+    token: effectiveCredentials?.token ?? '',
+    sessionId: params.sessionId,
+    backendTarget: params.backendTarget ?? { kind: 'builtInAgent', agentId: resolveCatalogAgentId(null) },
+    credentials: effectiveCredentials,
+  });
+}
+
 async function refreshTrackedSessionsRuntimeSnapshot(params: Readonly<{
   sessionId: string;
   incomingOptions: SpawnSessionOptions;
   trackedSessions: ReadonlyArray<TrackedSession>;
   credentials: Credentials;
+  /** The Session read the caller already made for this decision, reused instead of a second fetch. */
+  attachContext?: Awaited<ReturnType<typeof resolveExistingSessionAttachContext>>;
 }>): Promise<void> {
   const trackedSessions = params.trackedSessions
     .filter((tracked) => tracked.happySessionId === params.sessionId);
 
   if (trackedSessions.length < 1) return;
 
-  const storedCredentials = await readCredentials().catch(() => null);
-  const effectiveCredentials = storedCredentials ?? params.credentials;
-  const tokenForFetch = effectiveCredentials?.token ?? '';
-
-  const attachContext = await resolveExistingSessionAttachContext({
-    token: tokenForFetch,
+  const attachContext = params.attachContext ?? await resolveTrackedSessionAttachContext({
     sessionId: params.sessionId,
-    backendTarget: params.incomingOptions.backendTarget
-      ?? { kind: 'builtInAgent', agentId: resolveCatalogAgentId(null) },
-    credentials: effectiveCredentials,
+    backendTarget: params.incomingOptions.backendTarget,
+    credentials: params.credentials,
   });
 
   if (!attachContext.ok) {
@@ -1374,11 +1393,41 @@ async function refreshTrackedSessionsRuntimeSnapshot(params: Readonly<{
     return;
   }
 
+  // A stale request (a view from before an Agent switch) contributes the Session's own Agent and
+  // controls, retargeted like a launch; never its own Agent, which would contradict the Session.
+  const launch = resolveExistingSessionLaunchOptions({
+    sessionId: params.sessionId,
+    options: params.incomingOptions,
+    sessionMetadata: attachContext.metadata,
+  });
+  // The attach context resolved the vendor resume id for the request's Agent.
+  const persistedVendorResumeId = launch.type === 'launch' && launch.options !== params.incomingOptions
+    && launch.options.backendTarget
+    ? resolveProviderSessionIdForBackendTarget(launch.options.backendTarget, attachContext.metadata ?? null)
+    : attachContext.vendorResumeId;
+  if (launch.type !== 'launch') return;
+  const incomingOptions = launch.options;
+  const sessionNamesAgent = Boolean(attachContext.metadata && resolveSessionPersistedRuntimeIdentity(attachContext.metadata));
   for (const trackedSession of trackedSessions) {
+    // A live runner's Agent is a fact of its process. A runner of another Agent than the Session
+    // names (the one rule) keeps its own controls.
+    const runnerBackendTarget = trackedSession.spawnOptions?.backendTarget;
+    if (resolveSessionRuntimeBackendConflict({
+      sessionMetadata: attachContext.metadata,
+      backendTarget: runnerBackendTarget,
+    })) {
+      continue;
+    }
+    // A Session that names no Agent was not retargeted: the unverified request may not record its
+    // own Agent on a runner of another.
+    if (!sessionNamesAgent && runnerBackendTarget && incomingOptions.backendTarget
+      && buildBackendTargetKey(runnerBackendTarget) !== buildBackendTargetKey(incomingOptions.backendTarget)) {
+      continue;
+    }
     const runtimeSnapshot = resolveSessionRuntimeSnapshot({
-      incomingOptions: params.incomingOptions,
+      incomingOptions,
       persistedMetadata: attachContext.metadata,
-      persistedVendorResumeId: attachContext.vendorResumeId,
+      persistedVendorResumeId,
       trackedSpawnOptions: trackedSession.spawnOptions ?? null,
       trackedVendorResumeId: trackedSession.vendorResumeId ?? null,
     });
@@ -2114,13 +2163,46 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           const matchesSession = (tracked: TrackedSession): boolean =>
             tracked.happySessionId?.trim() === sessionId
             || tracked.spawnOptions?.existingSessionId?.trim() === sessionId;
-          const resolveTrackedStartup = async (): Promise<SpawnSessionResult | null> => {
+          // Read only when a pending child for this Session exists; `null` is an unknown identity.
+          const readSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
+            const attachContext = await resolveExistingSessionAttachContext({
+              token: credentials.token,
+              credentials,
+              sessionId,
+              backendTarget,
+            });
+            return attachContext.ok ? attachContext.metadata ?? null : null;
+          };
+          const resolveTrackedStartup = async (
+            knownSessionMetadata?: Record<string, unknown> | null,
+          ): Promise<SpawnSessionResult | null> => {
+            let sessionMetadata = knownSessionMetadata;
             for (const tracked of pidToTrackedSession.values()) {
               if (!isPendingDaemonChild(tracked) || !matchesSession(tracked) || tracked.stopRequestedAtMs !== undefined) continue;
               const presence = await classifyTrackedSessionRunnerPresence({ tracked });
               // OS reads can overlap webhook completion, retirement or wrapper promotion.
               if (presence !== 'present' || !isPendingDaemonChild(tracked) || !matchesSession(tracked)
                 || tracked.stopRequestedAtMs !== undefined) continue;
+              // The pending launch must be the Agent the Session NOW names, whatever the request
+              // says (incident 2026-11-17: a Codex switch rejoined a stale Claude launch).
+              const launchBackendTarget = tracked.spawnOptions?.backendTarget;
+              if (sessionMetadata === undefined) sessionMetadata = await readSessionMetadata();
+              const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+                sessionMetadata,
+                backendTarget: launchBackendTarget,
+              });
+              if (sessionBackendTarget && launchBackendTarget) {
+                logger.warn('[DAEMON RUN] Refusing to rejoin an existing-session launch for an Agent the session no longer names', {
+                  sessionId,
+                  pid: tracked.pid,
+                  launchBackendTarget,
+                  sessionBackendTarget,
+                });
+                return buildSessionRuntimeBackendConflictSpawnError({
+                  sessionBackendTarget,
+                  backendTarget: launchBackendTarget,
+                });
+              }
               return {
                 type: 'success',
                 sessionId,
@@ -2187,7 +2269,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           // Identity is learned here; readiness, marker promotion and acceptance completion
           // still belong to the webhook. Unknown/stopped owners go through normal fencing.
           adoptReportedHappySessionId(tracked, sessionId);
-          return await resolveTrackedStartup();
+          return await resolveTrackedStartup(metadata);
         };
 
         const spawnRecentSuccessTtlMs = resolvePositiveIntEnv(
@@ -3234,6 +3316,33 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   };
                 }
                 if (resumeDecisionAfterWait.action === 'adopt') {
+                  // The live runner must be the Agent the Session NOW names. A stale request for
+                  // another Agent still reaches the right runner; a runner the Session no longer
+                  // names is never reported as this Session's runtime.
+                  const adoptAttachContext = await resolveTrackedSessionAttachContext({
+                    sessionId: normalizedExistingSessionId,
+                    backendTarget: normalizedOptions.backendTarget,
+                    credentials,
+                  });
+                  for (const tracked of pidToTrackedSession.values()) {
+                    if (tracked.happySessionId !== normalizedExistingSessionId || tracked.stopRequestedAtMs !== undefined) continue;
+                    const runnerBackendTarget = tracked.spawnOptions?.backendTarget;
+                    const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+                      sessionMetadata: adoptAttachContext.ok ? adoptAttachContext.metadata : null,
+                      backendTarget: runnerBackendTarget,
+                    });
+                    if (!sessionBackendTarget || !runnerBackendTarget) continue;
+                    logger.warn('[DAEMON RUN] Refusing to adopt a live runner for an Agent the session no longer names', {
+                      sessionId: normalizedExistingSessionId,
+                      pid: tracked.pid,
+                      runnerBackendTarget,
+                      sessionBackendTarget,
+                    });
+                    return buildSessionRuntimeBackendConflictSpawnError({
+                      sessionBackendTarget,
+                      backendTarget: runnerBackendTarget,
+                    });
+                  }
                   const runnerAcceptance = resolveExistingRunnerAcceptance({
                     requestedSpawnNonce: normalizedOptions.spawnNonce,
                     trackedSpawnNonces: Array.from(pidToTrackedSession.values())
@@ -3246,6 +3355,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     incomingOptions: normalizedOptions,
                     trackedSessions: Array.from(pidToTrackedSession.values()),
                     credentials,
+                    attachContext: adoptAttachContext,
                   });
                   pendingSessionMachineAccessBindingIds.add(normalizedExistingSessionId);
                   await reconcileSessionMachineAccessBindings();
@@ -3306,7 +3416,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             }
 
             return await spawnConcurrencyGate.run(async () => {
-              const resolvedDirectory = normalizedOptions.directory;
+              // Reassigned only by the existing-session retarget below, which runs the Session where it lives.
+              let resolvedDirectory = normalizedOptions.directory;
               let {
                 directory,
                 sessionId,
@@ -3331,7 +3442,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               } = normalizedOptions;
               const normalizedResume = typeof resume === 'string' ? resume.trim() : '';
               const normalizedExistingSessionId = typeof existingSessionId === 'string' ? existingSessionId.trim() : '';
-              const canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
+              let canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
                 codexBackendMode,
                 experimentalCodexAcp,
                 agentRuntimeDescriptorV1,
@@ -3339,7 +3450,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
               // NOTE: existing-session idempotency is handled before entering the spawn concurrency gate.
               let effectiveResume = normalizedResume;
-              const catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
+              let catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
 
               let sessionAttachPayload: import('@/agent/runtime/sessionAttachPayload').SessionAttachFilePayload | null = null;
               let existingSessionPersistedMetadata: Record<string, unknown> | null = null;
@@ -3362,10 +3473,53 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     return mapExistingSessionAttachFailureToSpawnError(attachContext.reason);
                   }
 
+                  // A caller's view can predate an Agent switch that has since committed (incident
+                  // 2026-11-17: a `session send` resume launched Claude after the Session moved to
+                  // Codex; automations store the Agent they were authored for). The launch runs the
+                  // Agent the Session names; a stale request is retargeted to it.
+                  let attachVendorResumeId = attachContext.vendorResumeId;
+                  const attachBackendTarget: BackendTargetRefV1 = backendTarget ?? { kind: 'builtInAgent', agentId: catalogAgentId };
+                  const launch = resolveExistingSessionLaunchOptions({
+                    sessionId: normalizedExistingSessionId,
+                    options: normalizedOptions,
+                    sessionMetadata: attachContext.metadata,
+                  });
+                  if (launch.type === 'placement_mismatch') {
+                    logger.warn('[DAEMON RUN] Refusing a stale resume that runs where the session does not live', {
+                      sessionId: normalizedExistingSessionId,
+                      backendTarget: launch.backendTarget,
+                      sessionBackendTarget: launch.sessionBackendTarget,
+                    });
+                    return buildExistingSessionPlacementSpawnError({ sessionBackendTarget: launch.sessionBackendTarget });
+                  }
+                  if (launch.options !== normalizedOptions) {
+                    if (launch.retargetedFrom) {
+                      logger.warn('[DAEMON RUN] Retargeting a stale resume to the Agent the session names', {
+                        sessionId: normalizedExistingSessionId,
+                        requestedBackendTarget: launch.retargetedFrom,
+                        sessionBackendTarget: launch.options.backendTarget,
+                      });
+                      effectiveResume = typeof launch.options.resume === 'string' ? launch.options.resume.trim() : '';
+                      resolvedDirectory = launch.options.directory;
+                      directory = launch.options.directory;
+                    }
+                    normalizedOptions = launch.options;
+                    ({ backendTarget, agentRuntimeDescriptorV1, codexBackendMode, experimentalCodexAcp } = normalizedOptions);
+                    catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
+                    canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
+                      codexBackendMode,
+                      experimentalCodexAcp,
+                      agentRuntimeDescriptorV1,
+                    });
+                    if (backendTarget && buildBackendTargetKey(backendTarget) !== buildBackendTargetKey(attachBackendTarget)) {
+                      attachVendorResumeId = resolveProviderSessionIdForBackendTarget(backendTarget, attachContext.metadata ?? null);
+                    }
+                  }
+
                   sessionAttachPayload = attachContext.attachPayload;
                   existingSessionPersistedMetadata = attachContext.metadata;
                   if (!effectiveResume) {
-                    const derivedResume = typeof attachContext.vendorResumeId === 'string' ? attachContext.vendorResumeId.trim() : '';
+                    const derivedResume = typeof attachVendorResumeId === 'string' ? attachVendorResumeId.trim() : '';
                     if (derivedResume) {
                       effectiveResume = derivedResume;
                     }

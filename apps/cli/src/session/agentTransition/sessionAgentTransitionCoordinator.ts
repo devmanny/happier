@@ -13,6 +13,7 @@ import {
   readSessionAgentTransitionDividerFromStoredRecordV1,
   rejectUndispatchedSessionAgentTransition,
   sanitizeSessionUserMessageSendMeta,
+  SPAWN_SESSION_ERROR_CODES,
   type SessionAgentTransitionCurrentViewCommitted,
   type SessionAgentTransitionRequestV1,
   type SessionAgentTransitionResultV1,
@@ -347,27 +348,36 @@ async function admitInputAndActivateTarget(params: Readonly<{
   });
   if (!committedSession) return committed.committed('target_start_failed');
 
-  // Activation is for an INACTIVE target only. The first pass always reaches
-  // here inactive, because the cutover refuses an active Session — but the
-  // reconcile path does not: its likeliest cause is a retry after an invocation
-  // that fully succeeded and lost only its answer, so the target is already
-  // running. `requestInactiveSessionResume` carries no active guard of its own
-  // and goes straight to the machine SPAWN RPC, so calling it there would issue
-  // a lifecycle action against a live runtime and, if the daemon refuses, would
-  // report a completed transition as `target_start_failed`.
-  if (committedSession.active !== true) {
-    const resumed = await requestInactiveSessionResume({
-      credentials: params.credentials,
-      sessionId: request.sessionId,
-      localId,
-      rawSession: committedSession,
-      metadata: params.targetMetadata,
-      // The chosen identity becomes the runner's identity env; the provider
-      // environment travels in the committed metadata.
-      ...(request.selection.agentIdentityV1 ? { agentIdentity: request.selection.agentIdentityV1 } : {}),
+  // Activation goes through the machine's spawn owner whether or not the row is
+  // `active`. The first pass always reaches here inactive (the cutover refuses an
+  // active Session). The reconcile path usually finds the target already running
+  // after an invocation that lost only its answer, but `active` does not say WHICH
+  // Agent runs it (incident 2026-11-17: a stale Claude runner served the Session
+  // the switch had moved to Codex). The spawn owner adopts a running runtime of the
+  // Agent the Session names without a new launch, and refuses one for another Agent
+  // with its own code. On an active row only that refusal is a target that did not
+  // come up: a daemon that could not check (fence, restart, transport) says nothing
+  // about which Agent runs, and the client reads the runtime from canonical state.
+  const resumed = await requestInactiveSessionResume({
+    credentials: params.credentials,
+    sessionId: request.sessionId,
+    localId,
+    rawSession: committedSession,
+    metadata: params.targetMetadata,
+    // The chosen identity becomes the runner's identity env; the provider
+    // environment travels in the committed metadata.
+    ...(request.selection.agentIdentityV1 ? { agentIdentity: request.selection.agentIdentityV1 } : {}),
+  });
+  if (!resumed.ok) {
+    logger.debug('[AGENT TRANSITION] Target activation failed', {
+      code: resumed.code,
+      spawnErrorCode: resumed.spawnErrorCode ?? null,
+      message: resumed.message,
     });
-    if (!resumed.ok) {
-      logger.debug('[AGENT TRANSITION] Target activation failed', { code: resumed.code, message: resumed.message });
+    if (
+      committedSession.active !== true
+      || resumed.spawnErrorCode === SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT
+    ) {
       return committed.committed('target_start_failed');
     }
   }

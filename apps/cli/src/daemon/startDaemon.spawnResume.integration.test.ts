@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi, type MockInstance } from 'vitest';
 import { encodeBase64, encrypt } from '@/api/encryption';
 import * as processInstanceBoundary from '@happier-dev/cli-common/processInstance';
 import type { Metadata } from '@/api/types';
@@ -438,6 +438,8 @@ vi.mock('@/api/api', () => ({
   ApiClient: {
     create: vi.fn(async () => ({
       machineSyncClient: () => harness.apiMachine,
+      // Push notifications are an external service; the daemon's task-due notifier only needs the client.
+      push: () => ({}),
     })),
   },
   isMachineContentPublicKeyMismatchError: vi.fn(() => false),
@@ -1886,6 +1888,332 @@ describe('startDaemon spawn resume wiring (integration)', () => {
       spawnHappyCLI.mockReset();
       spawnHappyCLI.mockImplementation(spawnBoundary);
     }
+  });
+
+  describe('the Agent that serves an existing Session is the one its persisted current view names', () => {
+    // Incident 2026-11-17: a stale `session send` resume launched Claude while the Session was being
+    // switched to Codex; the switch's Codex resume then rejoined that Claude launch and reported
+    // success. Every runtime decision for an existing Session compares the runner with the
+    // Session's CURRENT persisted identity, never with the (possibly stale) request.
+    const claude = { kind: 'builtInAgent' as const, agentId: 'claude' as const };
+    const codex = { kind: 'builtInAgent' as const, agentId: 'codex' as const };
+    const sessionId = 'sess_switched_agent';
+    const baseMetadata = {
+      path: '/tmp', machineId: 'machine-1', startedBy: 'daemon', host: 'fixture-host', homeDir: '/tmp',
+    };
+    const sessionRecord = (metadata: Record<string, unknown>) => createSessionRecordFixture({
+      id: sessionId,
+      encryptionMode: 'plain',
+      metadata: JSON.stringify({ ...baseMetadata, ...metadata }),
+      dataEncryptionKey: null,
+    });
+
+    async function withDaemon(
+      body: (ctx: Readonly<{
+        spawnSession: Awaited<ReturnType<typeof waitForSpawnSessionRegistration>>;
+        trackedSessions: () => Map<number, import('./types').TrackedSession>;
+      }>) => Promise<void>,
+    ): Promise<void> {
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+      const refreshEnvOriginal = process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+      process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = 'false';
+      const defaultFetch = vi.mocked(fetchSessionByIdCompat).getMockImplementation();
+      const webhookModule = await import('./sessions/onHappySessionWebhook');
+      let run: Promise<void> | null = null;
+      try {
+        const { startDaemon } = await import('./startDaemon');
+        run = startDaemon();
+        const spawnSession = await waitForSpawnSessionRegistration();
+        await body({
+          spawnSession,
+          trackedSessions: () => {
+            const params = vi.mocked(webhookModule.createOnHappySessionWebhook).mock.calls.at(-1)?.[0];
+            if (!params) throw new Error('Expected the daemon to wire its tracked-session map');
+            return params.pidToTrackedSession as Map<number, import('./types').TrackedSession>;
+          },
+        });
+        harness.requestShutdown('happier-cli');
+        await run;
+        run = null;
+      } finally {
+        if (run) {
+          harness.requestShutdown('happier-cli');
+          await run.catch(() => undefined);
+        }
+        if (defaultFetch) vi.mocked(fetchSessionByIdCompat).mockImplementation(defaultFetch);
+        if (refreshEnvOriginal === undefined) delete process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED;
+        else process.env.HAPPIER_CONNECTED_SERVICES_REFRESH_ENABLED = refreshEnvOriginal;
+        await restoreDaemonExitBoundary(exitSpy);
+      }
+    }
+
+    it('refuses to rejoin a pending launch for the Agent the Session no longer names', async () => {
+      await stubRunnerProcessCensus('claude');
+      sessionRunnerActivityBoundaryMocks.readProcessRunState.mockResolvedValue('servable');
+      const waitForSessionWebhookMock = vi.mocked(waitForSessionWebhook);
+      const actualWebhookModule = await vi.importActual<typeof import('./spawn/waitForSessionWebhook')>(
+        './spawn/waitForSessionWebhook',
+      );
+      const webhookControl: { resolve: ((session: import('./types').TrackedSession) => void) | null } = { resolve: null };
+      waitForSessionWebhookMock.mockImplementationOnce((params) => {
+        const completion = actualWebhookModule.waitForSessionWebhook(params);
+        webhookControl.resolve = params.pidToAwaiter.get(params.pid) ?? null;
+        return completion;
+      });
+      try {
+        await withDaemon(async ({ spawnSession }) => {
+          // The stale resume read the Session before the switch committed: it launches Claude.
+          vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({ flavor: 'claude', claudeSessionId: 'vendor-claude-1' }));
+          await expect(spawnSession({
+            directory: '/tmp', backendTarget: claude, existingSessionId: sessionId, token: 'token-daemon',
+            executionAuthorization: { provenance: 'user_request', requestId: 'stale-send' },
+          })).resolves.toEqual({ type: 'success', sessionId, runnerAcceptance: 'newly_accepted' });
+          expect(webhookControl.resolve).not.toBeNull();
+
+          // The switch commits Codex as the Session's current view, then resumes it.
+          vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({ flavor: 'codex' }));
+          await expect(spawnSession({
+            directory: '/tmp', backendTarget: codex, existingSessionId: sessionId, token: 'token-daemon',
+            executionAuthorization: { provenance: 'user_request', requestId: 'switch-input' },
+          })).resolves.toMatchObject({ type: 'error', errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT });
+          expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+        });
+      } finally {
+        webhookControl.resolve?.({ pid: 12345, startedBy: 'daemon', happySessionId: sessionId });
+        waitForSessionWebhookMock.mockReset();
+        waitForSessionWebhookMock.mockImplementation(completeReportedSession);
+      }
+    });
+
+    it('never hands a request for one Agent the in-flight result of a launch for another', async () => {
+      // Requests without exact authorization (an app's resume) coalesce by Session. The key is read
+      // from the request, before its launch is retargeted: a Codex request arriving while a Claude
+      // launch decided before the cutover is still in flight must not be answered with that launch.
+      await stubRunnerProcessCensus('claude');
+      sessionRunnerActivityBoundaryMocks.readProcessRunState.mockResolvedValue('servable');
+      const waitForSessionWebhookMock = vi.mocked(waitForSessionWebhook);
+      const actualWebhookModule = await vi.importActual<typeof import('./spawn/waitForSessionWebhook')>(
+        './spawn/waitForSessionWebhook',
+      );
+      const webhookControl: { resolve: ((session: import('./types').TrackedSession) => void) | null } = { resolve: null };
+      waitForSessionWebhookMock.mockImplementationOnce((params) => {
+        const completion = actualWebhookModule.waitForSessionWebhook(params);
+        webhookControl.resolve = params.pidToAwaiter.get(params.pid) ?? null;
+        return completion;
+      });
+      let sessionView = sessionRecord({ flavor: 'claude', claudeSessionId: 'vendor-claude-1' });
+      let releaseSessionReads!: () => void;
+      const sessionReadsReleased = new Promise<void>((resolve) => {
+        releaseSessionReads = resolve;
+      });
+      spawnHappyCLI.mockImplementationOnce((argv: string[], opts?: unknown) => {
+        // The Claude launch is committed; the switch to Codex commits right after it.
+        sessionView = sessionRecord({ flavor: 'codex' });
+        return spawnHappyCliBoundary(argv, opts);
+      });
+      try {
+        await withDaemon(async ({ spawnSession }) => {
+          vi.mocked(fetchSessionByIdCompat).mockImplementation(async () => {
+            await sessionReadsReleased;
+            return sessionView;
+          });
+          const staleClaude = spawnSession({
+            directory: '/tmp', backendTarget: claude, existingSessionId: sessionId, token: 'token-daemon',
+          });
+          const codexAfterSwitch = spawnSession({
+            directory: '/tmp', backendTarget: codex, existingSessionId: sessionId, token: 'token-daemon',
+          });
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          releaseSessionReads();
+
+          await expect(staleClaude).resolves.toMatchObject({ type: 'success', sessionId });
+          await expect(codexAfterSwitch).resolves.toMatchObject({
+            type: 'error',
+            errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT,
+          });
+          expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+        });
+      } finally {
+        webhookControl.resolve?.({ pid: 12345, startedBy: 'daemon', happySessionId: sessionId });
+        waitForSessionWebhookMock.mockReset();
+        waitForSessionWebhookMock.mockImplementation(completeReportedSession);
+      }
+    });
+
+    it.each([
+      { name: 'adopts the live runner the Session names for a stale request, and keeps its Agent', runner: codex, request: claude, adopted: true },
+      { name: 'refuses to adopt a live runner for an Agent the Session no longer names', runner: claude, request: codex, adopted: false },
+    ])('$name', async ({ runner, request, adopted }) => {
+      await stubRunnerProcessCensus(runner.agentId);
+      const actualPsList = await vi.importActual<typeof import('ps-list')>('ps-list');
+      const { clearProcessSnapshotCacheForTests } = await import('./processSnapshotCache');
+      vi.mocked(psList).mockResolvedValue([{
+        pid: 12345, ppid: process.pid, name: 'node', cmd: `node /tmp/lib/dist/index.mjs ${runner.agentId} --started-by daemon`,
+      }]);
+      clearProcessSnapshotCacheForTests();
+      onTestFinished(() => {
+        vi.mocked(psList).mockImplementation(actualPsList.default);
+        clearProcessSnapshotCacheForTests();
+      });
+      sessionRunnerActivityBoundaryMocks.readProcessRunState.mockResolvedValue('servable');
+      pendingMaterializationRpcMocks.resolveSessionTransportContext.mockResolvedValue({
+        ok: true,
+        sessionId,
+        rawSession: { id: sessionId, active: true, encryptionMode: 'plain' },
+        mode: 'plain',
+        ctx: pendingMaterializationRpcMocks.ctx,
+      });
+      await withDaemon(async ({ spawnSession, trackedSessions }) => {
+        vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({ flavor: 'codex', codexSessionId: 'vendor-codex-1' }));
+        trackedSessions().set(12345, {
+          pid: 12345,
+          startedBy: 'daemon',
+          happySessionId: sessionId,
+          processCommand: `node /tmp/happier/package-dist/index.mjs ${runner.agentId} --started-by daemon`,
+          spawnOptions: { directory: '/tmp', existingSessionId: sessionId, backendTarget: runner },
+        });
+
+        const result = await spawnSession({
+          directory: '/tmp', backendTarget: request, existingSessionId: sessionId, token: 'token-daemon',
+          executionAuthorization: { provenance: 'user_request', requestId: 'automation-run' },
+        });
+
+        expect(spawnHappyCLI).not.toHaveBeenCalled();
+        if (adopted) {
+          expect(result).toEqual({ type: 'success', sessionId, runnerAcceptance: 'preexisting_or_adopted' });
+          expect(callSessionRpc).toHaveBeenCalledWith(expect.objectContaining({
+            method: `${sessionId}:session.pendingQueue.wake.v1`,
+          }));
+        } else {
+          expect(result).toMatchObject({ type: 'error', errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT });
+        }
+        // A live runner's Agent is a fact of its process; no request rewrites it.
+        expect(trackedSessions().get(12345)?.spawnOptions?.backendTarget).toEqual(runner);
+      });
+    });
+
+    it('never records a stale request\'s Agent on a live runner whose Agent the daemon does not know', async () => {
+      // A terminal-started runner is tracked without spawn options, so its Agent is unknown here.
+      await stubRunnerProcessCensus('codex');
+      const actualPsList = await vi.importActual<typeof import('ps-list')>('ps-list');
+      const { clearProcessSnapshotCacheForTests } = await import('./processSnapshotCache');
+      vi.mocked(psList).mockResolvedValue([{
+        pid: 12345, ppid: process.pid, name: 'node', cmd: 'node /tmp/lib/dist/index.mjs codex --started-by daemon',
+      }]);
+      clearProcessSnapshotCacheForTests();
+      onTestFinished(() => {
+        vi.mocked(psList).mockImplementation(actualPsList.default);
+        clearProcessSnapshotCacheForTests();
+      });
+      sessionRunnerActivityBoundaryMocks.readProcessRunState.mockResolvedValue('servable');
+      pendingMaterializationRpcMocks.resolveSessionTransportContext.mockResolvedValue({
+        ok: true,
+        sessionId,
+        rawSession: { id: sessionId, active: true, encryptionMode: 'plain' },
+        mode: 'plain',
+        ctx: pendingMaterializationRpcMocks.ctx,
+      });
+      await withDaemon(async ({ spawnSession, trackedSessions }) => {
+        vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({ flavor: 'codex', codexSessionId: 'vendor-codex-1' }));
+        trackedSessions().set(12345, {
+          pid: 12345,
+          startedBy: 'daemon',
+          happySessionId: sessionId,
+          processCommand: 'node /tmp/happier/package-dist/index.mjs codex --started-by daemon',
+        });
+
+        // An automation's stored target from before the switch reaches the Session's runner.
+        await expect(spawnSession({
+          directory: '/tmp', backendTarget: claude, existingSessionId: sessionId, token: 'token-daemon',
+          resume: 'vendor-claude-1', modelId: 'claude-opus-5-5', modelUpdatedAt: 1,
+          executionAuthorization: { provenance: 'user_request', requestId: 'automation-run' },
+        })).resolves.toEqual({ type: 'success', sessionId, runnerAcceptance: 'preexisting_or_adopted' });
+        expect(trackedSessions().get(12345)?.spawnOptions?.backendTarget).not.toEqual(claude);
+        expect(trackedSessions().get(12345)?.spawnOptions?.modelId).not.toBe('claude-opus-5-5');
+
+        // The Session's own Agent still reaches it.
+        await expect(spawnSession({
+          directory: '/tmp', backendTarget: codex, existingSessionId: sessionId, token: 'token-daemon',
+          executionAuthorization: { provenance: 'user_request', requestId: 'switch-input' },
+        })).resolves.toEqual({ type: 'success', sessionId, runnerAcceptance: 'preexisting_or_adopted' });
+        expect(spawnHappyCLI).not.toHaveBeenCalled();
+      });
+    });
+
+    it('retargets a stale request for an inactive Session to the Agent it names, without the old Agent\'s state', async () => {
+      // Automations store the Agent of the Session when they were authored, with its resume id,
+      // model and provider environment. A Session switched since then still runs the automation.
+      await withDaemon(async ({ spawnSession }) => {
+        vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({
+          flavor: 'codex', claudeSessionId: 'vendor-claude-1', codexSessionId: 'vendor-codex-1',
+        }));
+
+        await expect(spawnSession({
+          directory: '/tmp', backendTarget: claude, existingSessionId: sessionId, token: 'token-daemon',
+          resume: 'vendor-claude-1', modelId: 'claude-opus-5-5', modelUpdatedAt: 1,
+          environmentVariables: { CLAUDE_CONFIG_DIR: '/tmp/stale-claude-config' },
+          executionAuthorization: { provenance: 'user_request', requestId: 'automation-run' },
+        })).resolves.toMatchObject({ type: 'success', sessionId });
+
+        expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+        const argv = spawnHappyCLI.mock.calls[0]?.[0] ?? [];
+        expect(argv[0]).toBe('codex');
+        expect(argv).toEqual(expect.arrayContaining(['--resume', 'vendor-codex-1']));
+        expect(argv).not.toContain('vendor-claude-1');
+        expect(argv).not.toContain('claude-opus-5-5');
+        const launchedChildEnv = (spawnHappyCLI.mock.calls[0]?.[1] as { env?: NodeJS.ProcessEnv } | undefined)?.env;
+        expect(launchedChildEnv?.CLAUDE_CONFIG_DIR).not.toBe('/tmp/stale-claude-config');
+      });
+    });
+
+    it('runs a retargeted stale request where the Session lives, not in the directory the request named', async () => {
+      // The retarget rebuilds from the Session's persisted placement; the launch must use it too.
+      await withDaemon(async ({ spawnSession }) => {
+        vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({
+          flavor: 'codex', claudeSessionId: 'vendor-claude-1', codexSessionId: 'vendor-codex-1',
+        }));
+
+        await expect(spawnSession({
+          directory: '/var', backendTarget: claude, existingSessionId: sessionId, token: 'token-daemon',
+          resume: 'vendor-claude-1',
+          executionAuthorization: { provenance: 'user_request', requestId: 'automation-run' },
+        })).resolves.toMatchObject({ type: 'success', sessionId });
+
+        expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+        const launchOptions = spawnHappyCLI.mock.calls[0]?.[1] as { cwd?: string } | undefined;
+        expect(spawnHappyCLI.mock.calls[0]?.[0]?.[0]).toBe('codex');
+        expect(launchOptions?.cwd).toBe('/tmp');
+      });
+    });
+
+    it('runs a request without a target as the Agent the Session names, never the catalog default', async () => {
+      // The production catalog default (Claude), not the harness's Codex stub.
+      const catalog = await import('@/backends/catalog');
+      const actualCatalog = await vi.importActual<typeof import('@/backends/catalog')>('@/backends/catalog');
+      const harnessDefault = vi.mocked(catalog.resolveCatalogAgentId).getMockImplementation();
+      vi.mocked(catalog.resolveCatalogAgentId).mockImplementation(actualCatalog.resolveCatalogAgentId);
+      vi.mocked(catalog.requireCatalogEntry).mockClear();
+      onTestFinished(() => {
+        if (harnessDefault) vi.mocked(catalog.resolveCatalogAgentId).mockImplementation(harnessDefault);
+      });
+      expect(catalog.resolveCatalogAgentId(null)).toBe('claude');
+      await withDaemon(async ({ spawnSession }) => {
+        // Switched from Claude: the Claude conversation id is still on the Session.
+        vi.mocked(fetchSessionByIdCompat).mockResolvedValue(sessionRecord({
+          flavor: 'codex', claudeSessionId: 'vendor-claude-1', codexSessionId: 'vendor-codex-1',
+        }));
+
+        await expect(spawnSession({
+          directory: '/tmp', existingSessionId: sessionId, token: 'token-daemon',
+        })).resolves.toMatchObject({ type: 'success', sessionId });
+        expect(spawnHappyCLI).toHaveBeenCalledTimes(1);
+        const argv = spawnHappyCLI.mock.calls[0]?.[0];
+        expect(argv?.[0]).toBe('codex');
+        expect(argv).toEqual(expect.arrayContaining(['--resume', 'vendor-codex-1']));
+        // The launch is configured by Codex's catalog entry (spawn hooks, connected services), not Claude's.
+        expect(vi.mocked(catalog.requireCatalogEntry).mock.calls.map(([agentId]) => agentId)).not.toContain('claude');
+      });
+    });
   });
 
   it('does not launch a runner when the handoff acceptance claim fails', async () => {
@@ -5995,7 +6323,12 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         state: 'recoverable_unservable',
         reason: 'runner_absent',
       });
-      vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(createSessionRecordFixture({
+      // Every read of this Session (startup recovery and the resume's own) sees Claude.
+      const harnessSessionRead = vi.mocked(fetchSessionByIdCompat).getMockImplementation();
+      onTestFinished(() => {
+        if (harnessSessionRead) vi.mocked(fetchSessionByIdCompat).mockImplementation(harnessSessionRead);
+      });
+      vi.mocked(fetchSessionByIdCompat).mockResolvedValue(createSessionRecordFixture({
         id: sessionId,
         encryptionMode: 'plain',
         metadata: JSON.stringify({ flavor: 'claude', claudeSessionId: 'vendor-marker-exact', path: '/tmp' }),
@@ -6491,7 +6824,12 @@ describe('startDaemon spawn resume wiring (integration)', () => {
         state: 'recoverable_unservable',
         reason: 'attachment_changed',
       });
-      vi.mocked(fetchSessionByIdCompat).mockResolvedValueOnce(createSessionRecordFixture({
+      // Every read of this Session (startup recovery and the resume's own) sees Claude.
+      const harnessSessionRead = vi.mocked(fetchSessionByIdCompat).getMockImplementation();
+      onTestFinished(() => {
+        if (harnessSessionRead) vi.mocked(fetchSessionByIdCompat).mockImplementation(harnessSessionRead);
+      });
+      vi.mocked(fetchSessionByIdCompat).mockResolvedValue(createSessionRecordFixture({
         id: sessionId,
         encryptionMode: 'plain',
         metadata: JSON.stringify({ flavor: 'claude', claudeSessionId: 'vendor-stop-then-resume', path: '/tmp' }),

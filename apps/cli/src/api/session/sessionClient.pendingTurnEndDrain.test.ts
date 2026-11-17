@@ -1,7 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
+import { EventEmitter } from 'node:events';
 
 import { MessageQueue2 } from '@/agent/runtime/modeMessageQueue';
+import { registerRunnerTerminationHandlers } from '@/agent/runtime/runnerTerminationHandlers';
 import { createSessionProviderInputConsumer } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import { createClaudeUnifiedInputArbiter } from '@/backends/claude/unifiedTerminal/createClaudeUnifiedInputArbiter';
 import { createClaudeUnifiedPendingQueuePump } from '@/backends/claude/unifiedTerminal/createClaudeUnifiedPendingQueuePump';
@@ -2456,6 +2458,57 @@ describe('ApiSessionClient pending-queue turn-end drain', () => {
     );
     expect(warnSpy).not.toHaveBeenCalled();
 
+  });
+
+  it('takes no Pending row for a Session that silently came to name another Agent, and stops the runner instead', async () => {
+    // A bound Claude runtime learns of an Agent switch only through its own metadata CAS (a version
+    // mismatch carries the Session's current view), which emits no metadata update. The check before
+    // every Pending pop is then the only thing between the queued Codex input and the Claude runtime.
+    let metadataWrites = 0;
+    const client = await createClient({
+      latestTurnStatus: 'completed',
+      pendingCount: 1,
+      pendingVersion: 1,
+      metadata: { flavor: 'claude' },
+    }, {
+      sessionSocketEmitWithAck: (event, payload) => {
+        if (event !== 'update-metadata') return undefined;
+        metadataWrites += 1;
+        const request = payload as Readonly<{ expectedVersion: number; metadata: string }>;
+        if (metadataWrites > 1) return undefined;
+        return {
+          result: 'version-mismatch',
+          version: request.expectedVersion + 1,
+          metadata: JSON.stringify({ ...JSON.parse(request.metadata), flavor: 'codex' }),
+        };
+      },
+    });
+    await waitForCurrentPendingInputContract(client);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const exit = vi.fn();
+    const handlers = registerRunnerTerminationHandlers({
+      process: new EventEmitter(),
+      exit,
+      onTerminate: async () => undefined,
+    });
+    try {
+      client.bindRuntimeBackendTarget({ kind: 'builtInAgent', agentId: 'claude' });
+      await client.updateMetadata((current) => ({ ...current, summary: { text: 'runtime write', updatedAt: 1 } }));
+      expect(metadataWrites).toBe(2);
+      expect(client.getMetadataSnapshot()?.flavor).toBe('codex');
+      expect(client.hasRuntimeTerminationStarted()).toBe(false);
+      materializeNextMock.mockResolvedValueOnce(createProviderDeliveryMaterializeResult('queued-for-codex'));
+
+      await expect(client.materializeNextPendingMessageSafely({ reconcileWhenEmpty: 'force' }))
+        .resolves.not.toMatchObject({ type: 'materialized' });
+
+      expect(materializeNextMock).not.toHaveBeenCalled();
+      await expect(handlers.whenTerminated).resolves.toMatchObject({ event: { kind: 'sessionAgentConflict' } });
+      expect(exit).toHaveBeenCalledWith(0);
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      handlers.dispose();
+    }
   });
 
   it('abandons the operation-local accepted settlement retry when its originating runtime is replaced', async () => {

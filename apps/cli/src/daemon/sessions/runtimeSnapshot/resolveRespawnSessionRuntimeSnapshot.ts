@@ -4,6 +4,7 @@ import { DEFAULT_CATALOG_AGENT_ID } from '@/backends/types';
 
 import { resolveExistingSessionAttachContext } from '@/daemon/sessionEncryption/resolveExistingSessionAttachContext';
 
+import { resolveExistingSessionLaunchOptions } from '@/daemon/spawn/existingSessionBackendTargetAdmission';
 import { resolveSessionRuntimeSnapshot } from './resolveSessionRuntimeSnapshot';
 
 type ResolveExistingSessionAttachContext = typeof resolveExistingSessionAttachContext;
@@ -37,6 +38,17 @@ export async function resolveRespawnSessionRuntimeSnapshot(
     credentials: effectiveCredentials,
   }).catch(() => null);
   if (!attachContext?.ok) return params.defaultOptions;
+
+  // A respawn relaunches the Session, so it runs the Agent the Session's current view names.
+  // When that differs from the exited runner's (an Agent switch committed after it launched),
+  // the exited runner's options are a stale request: they are retargeted like any other, so the
+  // old Agent's model, vendor resume id and provider environment never reach the relaunch.
+  const launch = resolveExistingSessionLaunchOptions({
+    sessionId: params.sessionId,
+    options: { ...params.defaultOptions, backendTarget },
+    sessionMetadata: attachContext.metadata,
+  });
+  if (launch.type === 'launch' && launch.retargetedFrom) return launch.options;
 
   return resolveSessionRuntimeSnapshot({
     incomingOptions: params.defaultOptions,

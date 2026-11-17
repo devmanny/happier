@@ -5,6 +5,7 @@ import {
   type RunnerTerminationEvent,
   type RunnerTerminationOutcome,
 } from './runnerTerminationOutcome';
+import { registerRunnerTerminationRequester } from './runnerTerminationRequest';
 import { writeSessionExitReportSync } from '../../session/diagnostics/sessionExitReport';
 import {
   notifyParentSessionBestEffort,
@@ -118,7 +119,9 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
 
     const outcome = computeRunnerTerminationOutcome(event);
     writeRunnerTerminationSessionExitReport({ options: params.sessionExitReport, event, outcome });
-    const parentNoticeSession = params.parentNoticeSession ?? null;
+    // An Agent switch is not a stop the parent should act on: its next message reaches the Agent the
+    // Session now names, so "the child stopped, send it a message to resume it" would mislead it.
+    const parentNoticeSession = event.kind === 'sessionAgentConflict' ? null : params.parentNoticeSession ?? null;
     const parentNoticeWork = parentNoticeSession
       ? notifyParentSessionBestEffort({
         session: parentNoticeSession,
@@ -168,11 +171,13 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
   params.process.on('SIGINT', onSigint);
   params.process.on('unhandledRejection', onUnhandledRejection);
   params.process.on('uncaughtException', onUncaughtException);
+  const unregisterRequester = registerRunnerTerminationRequester(terminate);
 
   return {
     requestTermination: terminate,
     whenTerminated,
     dispose: () => {
+      unregisterRequester();
       params.process.removeListener('SIGTERM', onSigterm);
       params.process.removeListener('SIGINT', onSigint);
       params.process.removeListener('unhandledRejection', onUnhandledRejection);

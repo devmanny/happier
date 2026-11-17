@@ -18,7 +18,8 @@ import { resolveSessionRuntimeSnapshot } from './resolveSessionRuntimeSnapshot';
 export type BuildInactiveSessionResumeSpawnOptionsParams = Readonly<{
   fallbackMachineId?: string | null;
   sessionId: string;
-  rawSession: RawSessionRecord;
+  /** Only the row's placement facts are read. */
+  rawSession: RawSessionRecord | Readonly<{ path?: unknown; machineId?: unknown }>;
   metadata: Record<string, unknown>;
   initialTranscriptAfterSeq?: number;
   executionAuthorization?: import('@happier-dev/protocol').SpawnSessionExecutionAuthorization;

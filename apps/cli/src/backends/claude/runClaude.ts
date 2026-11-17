@@ -43,6 +43,7 @@ import { buildTerminalMetadataFromRuntimeFlags } from '@/terminal/runtime/termin
 import { persistTerminalAttachmentInfoIfNeeded, reportSessionToDaemonIfRunning, sendTerminalFallbackMessageIfNeeded } from '@/agent/runtime/startupSideEffects';
 import { bindHerdrAgentIfNeeded } from '@/integrations/herdr/bindManagedSession';
 import { applyStartupMetadataUpdateToSession, buildModelOverride, buildPermissionModeOverride } from '@/agent/runtime/startupMetadataUpdate';
+import { bindSessionClientToRuntimeAgent } from '@/agent/runtime/sessionRuntimeAgentBinding';
 import { initializeRuntimeOverridesSynchronizer } from '@/agent/runtime/runtimeOverridesSynchronizer';
 import { createBaseSessionForAttach } from '@/agent/runtime/createBaseSessionForAttach';
 import { createSessionMetadata } from '@/agent/runtime/createSessionMetadata';
@@ -530,17 +531,23 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // not launch or track it. A daemon-started runner is already tracked by PID and
     // reports exactly once through the strict readiness boundary after its runtime
     // controls exist; an earlier best-effort report would create a competing retry
-    // loop with incomplete application capability.
-    if (options.startedBy !== 'daemon') {
+    // loop with incomplete application capability. An attach reports only after its
+    // startup metadata write, which refuses (throws) a runtime for an Agent the Session no
+    // longer names, so the daemon never registers that runner as the Session's runtime; a
+    // fresh Session has no other Agent to contradict and reports right away.
+    const isAttach = baseSession.metadataVersion < 0;
+    const reportTerminalStartedRunnerToDaemon = () => {
+        if (options.startedBy === 'daemon') return;
         void reportSessionToDaemonIfRunning({ sessionId: baseSession.id, metadata }).catch((error) => {
             logger.debug('[claude] Initial daemon session report failed (non-fatal)', error);
         });
-    }
+    };
+    if (!isAttach) reportTerminalStartedRunnerToDaemon();
 
     // Mark the session as active and refresh metadata on startup.
     // For attach flows, wait for the persisted metadata snapshot before writing startup updates
     // to avoid overwriting the session's canonical workspace path with local defaults.
-    if (baseSession.metadataVersion < 0) {
+    if (isAttach) {
         let snapshot: unknown = null;
         let snapshotError: unknown = null;
         try {
@@ -553,6 +560,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 '[claude] Failed to fetch session metadata snapshot before attach startup update; continuing without metadata write (non-fatal)',
                 snapshotError ?? undefined,
             );
+            bindSessionClientToRuntimeAgent(session, metadata);
         } else {
             await applyStartupMetadataUpdateToSession({
                 session,
@@ -570,6 +578,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 mode: 'attach',
             });
         }
+        reportTerminalStartedRunnerToDaemon();
     } else {
         await applyStartupMetadataUpdateToSession({
             session,

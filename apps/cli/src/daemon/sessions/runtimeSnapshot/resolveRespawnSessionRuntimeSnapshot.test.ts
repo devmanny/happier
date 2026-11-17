@@ -150,4 +150,51 @@ describe('resolveRespawnSessionRuntimeSnapshot', () => {
       permissionModeUpdatedAt: 710,
     });
   });
+  it("respawns the Agent the Session names, not the Agent of the exited runner", async () => {
+    // Incident 2026-11-17: after a Claude -> Codex switch a stale Claude runner kept the Session;
+    // its connected-service restart relaunched `happier claude` from the tracked options.
+    const resolveAttachContext = vi.fn(async (input: { backendTarget: { kind: string; agentId?: string } }) => ({
+      ok: true as const,
+      attachPayload: { v: 2 as const, encryptionMode: 'plain' as const },
+      vendorResumeId: input.backendTarget.agentId === 'claude' ? 'claude-session-1' : null,
+      sessionPath: '/tmp/repo',
+      deliveredUserMessageSeq: null,
+      metadata: {
+        path: '/tmp/repo',
+        machineId: 'machine-1',
+        flavor: 'codex',
+        permissionMode: 'yolo',
+        permissionModeUpdatedAt: 710,
+        modelOverrideV1: { v: 1, modelId: 'gpt-6.1-sol', updatedAt: 730 },
+      },
+    }));
+    const trackedClaudeOptions = defaultRespawnOptions({
+      machineId: 'machine-1',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      modelId: 'claude-opus-5-5',
+      modelUpdatedAt: 100,
+      resume: 'claude-session-1',
+      environmentVariables: { HAPPIER_CLAUDE_ENDPOINT_STATE: 'x' },
+    });
+
+    const result = await resolveRespawnSessionRuntimeSnapshot({
+      sessionId: 'session-1',
+      spawnOptions: trackedClaudeOptions,
+      vendorResumeId: 'claude-session-1',
+      defaultOptions: trackedClaudeOptions,
+      credentials: credentials('token'),
+      readCredentials: async () => null,
+      resolveAttachContext,
+    });
+
+    expect(result.backendTarget).toEqual({ kind: 'builtInAgent', agentId: 'codex' });
+    expect(result).toMatchObject({
+      existingSessionId: 'session-1',
+      directory: '/tmp/repo',
+      permissionMode: 'yolo',
+      modelId: 'gpt-6.1-sol',
+    });
+    expect(result.resume).toBeUndefined();
+    expect(result.environmentVariables?.HAPPIER_CLAUDE_ENDPOINT_STATE).toBeUndefined();
+  });
 });

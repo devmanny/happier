@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { SPAWN_SESSION_ERROR_CODES } from '@happier-dev/protocol';
 import { RPC_ERROR_CODES } from '@happier-dev/protocol/rpc';
 import { RpcError } from '@happier-dev/protocol/rpcErrors';
 
@@ -52,6 +53,20 @@ describe('requestInactiveSessionResume failure classification', () => {
     });
 
     await expect(resume()).resolves.toMatchObject({ ok: false, code: 'resume_failed' });
+  });
+
+  it('carries the machine\'s typed spawn error, so a wrong-Agent runtime is told apart from one it could not check', async () => {
+    callMachineRpc.mockResolvedValue({
+      type: 'error',
+      errorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT,
+      errorMessage: "This session's runtime is claude, but the session now runs codex.",
+    });
+
+    await expect(resume()).resolves.toMatchObject({
+      ok: false,
+      code: 'resume_failed',
+      spawnErrorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT,
+    });
   });
 
   it('reports a machine that threw during the resume as a failure, not as an unsupported capability', async () => {
