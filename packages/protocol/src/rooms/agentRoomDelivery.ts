@@ -16,8 +16,9 @@ import {
  * How a room's messages reach its members (the daemon of each member's machine delivers them):
  * a member mentioned with `@` gets everything it hasn't read, in one message to its thread in the
  * room; its turn's final text is posted back as its reply, and its marker moves to what it got. A
- * new thread for a member that had read the room before (its thread was archived or deleted) also
- * gets the room so far, its own replies included, so the chat goes on where it was.
+ * member mid-turn gets nothing new, except what the user sends now (Steer Now): that goes into the
+ * running turn. A new thread for a member that had read the room before (its thread was archived
+ * or deleted) also gets the room so far, its own replies included, so the chat goes on where it was.
  */
 
 /** At most this many agent turns in a row without the user: the brake. */
@@ -30,6 +31,8 @@ export const ROOM_DELIVERY_LINE_CHARS = 160;
 
 export type RoomDeliveryDecision =
   | Readonly<{ kind: 'deliver'; fromSeq: number; toSeq: number }>
+  /** Into the member's running turn, past the delivery in flight (`inFlight.steers`). */
+  | Readonly<{ kind: 'steer'; fromSeq: number; toSeq: number }>
   | Readonly<{ kind: 'wait'; reason: 'archived' | 'busy' | 'caught_up' | 'paused' | 'not_mentioned' | 'brake' | 'needs_user' }>;
 
 /** The member's turns run in this permission mode; YOLO unless the member says otherwise. */
@@ -52,8 +55,13 @@ export function roomAgentStreak(messages: readonly AgentRoomMessageV1[], seq: nu
  * Whether the member gets a delivery now. It does when an unread message by someone else mentions
  * it and that message may wake it: any of the user's, or an agent's while the brake allows and the
  * member may be woken by agents. A member mid-turn waits (it gets everything once the turn ends),
- * and a paused or archived room delivers nothing. `messages` holds the unread range and the
- * `AGENT_ROOM_MAX_AGENT_TURNS - 1` messages before it.
+ * except for a user's message mentioning it that the user sends now (`sendNow`, above its in-flight
+ * `throughSeq`, once that delivery was sent): it is steered into the running turn with what came
+ * before it, and what came after waits. It waits too while the turn a Steer Now was sent past is
+ * `ended` but its ready is still to come: a new steer would replace the proof that ready needs to
+ * tell which turn ended. A paused or archived room delivers nothing. `messages`
+ * holds the unread range and the `AGENT_ROOM_MAX_AGENT_TURNS - 1` messages before it (mid-turn:
+ * the messages after the in-flight `throughSeq`).
  */
 export function decideRoomDelivery(params: Readonly<{
   room: AgentRoomV1;
@@ -63,7 +71,17 @@ export function decideRoomDelivery(params: Readonly<{
 }>): RoomDeliveryDecision {
   const { room, member, seat, messages } = params;
   if (room.archivedAt !== undefined) return { kind: 'wait', reason: 'archived' };
-  if (seat?.inFlight) return { kind: 'wait', reason: 'busy' };
+  const inFlight = seat?.inFlight;
+  if (inFlight) {
+    const sentNow = inFlight.sent === true && inFlight.steers?.ended !== true && room.pausedAt === undefined
+      ? messages.filter((message) => message.seq > inFlight.throughSeq
+        && message.sendNow === true
+        && message.author.kind === 'user'
+        && message.mentions.includes(member.agentId))
+      : [];
+    if (sentNow.length === 0) return { kind: 'wait', reason: 'busy' };
+    return { kind: 'steer', fromSeq: inFlight.throughSeq + 1, toSeq: Math.max(...sentNow.map((message) => message.seq)) };
+  }
   const range = agentRoomUnreadRange(room, seat);
   if (!range) return { kind: 'wait', reason: 'caught_up' };
   if (room.pausedAt !== undefined) return { kind: 'wait', reason: 'paused' };

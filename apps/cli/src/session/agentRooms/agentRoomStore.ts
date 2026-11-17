@@ -93,18 +93,25 @@ export class AgentRoomStore {
 
   /**
    * Records that a delivery to the member started, if its seat is still at `current` (null: it has
-   * no seat yet). False when another writer changed the seat first.
+   * no seat yet). False when another writer changed the seat first. A Steer Now delivery names the
+   * delivery in flight it is sent past (`steers`); every delivery says this daemon honors Steer Now.
    */
   async startDelivery(
     roomId: string,
     agentId: string,
-    delivery: Readonly<{ localId: string; throughSeq: number }>,
+    delivery: Readonly<{ localId: string; throughSeq: number; steers?: RoomDeliveryInFlight['steers'] }>,
     current: Readonly<{ seat: AgentRoomSeatV1; version: number }> | null,
   ): Promise<boolean> {
     const now = this.now();
     const seat: AgentRoomSeatV1 = {
       ...(current?.seat ?? { v: 1 as const, roomId, agentId, readThroughSeq: 0 }),
-      inFlight: { localId: delivery.localId, throughSeq: delivery.throughSeq, at: now },
+      inFlight: {
+        localId: delivery.localId,
+        throughSeq: delivery.throughSeq,
+        at: now,
+        sendNowSupported: true,
+        ...(delivery.steers ? { steers: { localId: delivery.steers.localId, throughSeq: delivery.steers.throughSeq } } : {}),
+      },
       updatedAt: now,
     };
     const result = await this.deps.transport.mutate([
@@ -130,7 +137,14 @@ export class AgentRoomStore {
    * Ends the member's turn for the delivery sent with `localId`, in one atomic write: its reply
    * (when it has text) is posted with the members and the user it mentions, its marker moves to what
    * that delivery read through (messages that came during the turn stay unread) and the delivery is
-   * cleared. A delivery that is not in flight any more (already finished) changes nothing.
+   * cleared. The delivery a Steer Now was sent past (`inFlight.steers`) ends the same way, keeping
+   * the Steer Now in flight; ending the Steer Now ends both (a turn it joined has no reply of its
+   * own). A delivery that is not in flight any more (already finished) changes nothing.
+   *
+   * Ended before its ready (`atReady` false: the daemon, from the transcript), the delivery a Steer
+   * Now was sent past stays as `steers.ended` until that ready (`atReady`: the runner's), which drops
+   * it without posting again: that ready then knows the turn it ended was that one, not the Steer
+   * Now's, which has only begun.
    */
   async finishTurn(params: Readonly<{
     roomId: string;
@@ -138,6 +152,8 @@ export class AgentRoomStore {
     localId: string;
     author: Extract<AgentRoomAuthor, { kind: 'agent' }>;
     text: string | null;
+    /** Called at the ready of the turn this delivery started (the runner's). */
+    atReady?: boolean;
   }>): Promise<Readonly<{ finished: false }> | Readonly<{ finished: true; message: AgentRoomMessageV1 | null }>> {
     const roomKey = agentRoomKvKey(params.roomId);
     const seatKey = agentRoomSeatKvKey(params.roomId, params.agentId);
@@ -147,16 +163,33 @@ export class AgentRoomStore {
       const seatRow = rows.find((row) => row.key === seatKey);
       const room = roomRow ? parseAgentRoomV1(this.open(roomRow.value)) : null;
       const seat = seatRow ? parseAgentRoomSeatV1(this.open(seatRow.value)) : null;
-      if (!seatRow || !seat?.inFlight || seat.inFlight.localId !== params.localId) return { finished: false };
+      const inFlight = seat?.inFlight;
+      if (!seatRow || !seat || !inFlight) return { finished: false };
+      const { inFlight: _ended, ...rest } = seat;
+      let next: AgentRoomSeatV1;
+      let posts = true;
+      if (inFlight.localId === params.localId) {
+        next = { ...rest, readThroughSeq: Math.max(seat.readThroughSeq, inFlight.throughSeq) };
+      } else if (inFlight.steers?.localId === params.localId) {
+        const { steers, ...steering } = inFlight;
+        if (steers.ended && !params.atReady) return { finished: false };
+        posts = !steers.ended;
+        next = {
+          ...rest,
+          readThroughSeq: Math.max(seat.readThroughSeq, steers.throughSeq),
+          inFlight: params.atReady ? steering : { ...steering, steers: { ...steers, ended: true } },
+        };
+      } else {
+        return { finished: false };
+      }
 
       const now = this.now();
-      const { inFlight, ...rest } = seat;
       const mutations: Array<{ key: string; value: string; version: number }> = [{
         key: seatKey,
-        value: this.seal({ ...rest, readThroughSeq: Math.max(seat.readThroughSeq, inFlight.throughSeq), updatedAt: now }),
+        value: this.seal({ ...next, updatedAt: now }),
         version: seatRow.version,
       }];
-      const text = params.text?.trim();
+      const text = posts ? params.text?.trim() : undefined;
       let message: AgentRoomMessageV1 | null = null;
       if (room && roomRow && text) {
         const next = appendRoomMessage(room, {
@@ -171,7 +204,8 @@ export class AgentRoomStore {
         );
       }
       const result = await this.deps.transport.mutate(mutations);
-      if (result.ok) return { finished: true, message };
+      // Dropping the proof of a turn posted already: it had finished before.
+      if (result.ok) return posts ? { finished: true, message } : { finished: false };
       if (!result.current.some((row) => row.key === roomKey || row.key === seatKey)) {
         throw new Error(`room ${params.roomId} already has a message at seq ${message?.seq} past its last seq`);
       }

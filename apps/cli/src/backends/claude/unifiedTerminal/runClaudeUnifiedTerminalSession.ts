@@ -52,8 +52,12 @@ import {
   createClaudeUnifiedPromptInjector,
   type ClaudeUnifiedDraftGuardStarvationInfo,
 } from './createClaudeUnifiedPromptInjector';
-import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
+import {
+  createClaudePromptSubmitVerificationPolicy,
+  type ClaudePromptSubmitVerificationPolicy,
+} from './claudePromptSubmitVerification';
 import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import {
   createClaudeUnifiedInFlightSteerEvaluator,
   type ClaudeUnifiedSteerAvailabilitySnapshot,
@@ -642,8 +646,8 @@ export function shouldProbeTmuxForClaudeUnifiedDefaultHost(
 async function resolveDefaultHostAdapter(
   preference: ClaudeUnifiedTerminalHostPreference,
   telemetry: ClaudeUnifiedTelemetrySink,
+  promptSubmitVerification: ClaudePromptSubmitVerificationPolicy,
 ): Promise<TerminalHostResolution> {
-  const promptSubmitVerification = createClaudePromptSubmitVerificationPolicy();
   const tmuxAvailable = shouldProbeTmuxForClaudeUnifiedDefaultHost()
     ? await isTmuxAvailable()
     : false;
@@ -930,6 +934,8 @@ function mapClaudeComposerClearRefusalToProtocolStatus(
       return 'generating';
     case 'no_interactive_composer':
     case 'usage_limit_wait':
+    case 'draft_changed':
+    case 'unacknowledged_clear_keys':
       return 'not_safe';
     case 'permission_prompt':
     case 'permission_editor':
@@ -953,7 +959,7 @@ function mapClaudeComposerClearFailureReasonToProtocolStatus(
   return 'clear_failed';
 }
 
-function mapClaudeComposerClearResultToProtocolResult(
+export function mapClaudeComposerClearResultToProtocolResult(
   result: ClaudeUserAuthorizedComposerClearResult,
   sessionId: string,
 ): SessionTerminalComposerClearResultV1 {
@@ -1054,10 +1060,13 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     mode: startupMode,
   };
   const hostPreference = normalizeHostPreferenceForCurrentPlatform(startupMode.claudeUnifiedTerminalHost ?? 'auto');
+  // One verifier per session: the host adapters verify each write with it, and the prompt injector
+  // reads what it last saw for the stall-budget warning.
+  const promptSubmitVerification = createClaudePromptSubmitVerificationPolicy();
   const resolveHostAdapterForPreference = async (preference: ClaudeUnifiedTerminalHostPreference): Promise<TerminalHostResolution> => (
     opts.resolveHostAdapter
       ? opts.resolveHostAdapter(preference)
-      : resolveDefaultHostAdapter(preference, telemetry)
+      : resolveDefaultHostAdapter(preference, telemetry, promptSubmitVerification)
   );
   let hostResolution = await resolveHostAdapterForPreference(hostPreference);
   telemetry.emit({
@@ -1598,6 +1607,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     explicitStopHostDisposal = guardedAttempt;
     return guardedAttempt;
   };
+  // Every composer clearer of this pane (the two own-leftover clearers and the user-authorized
+  // clear) presses Escape through one ledger, so the keys a stalled Claude has not shown yet stay
+  // bounded across all their passes and senders (Rewind hazard, 2026-11-16).
+  const composerClearKeys = createClaudeComposerClearKeyLedger({
+    stallBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
+  });
   try {
     if (opts.registerTerminalComposerClearRuntimeControl || opts.registerConnectedServiceExactApplicationHandler) {
       const terminalSessionControlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
@@ -1605,6 +1620,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         const unregister = opts.registerTerminalComposerClearRuntimeControl(async (request) => {
           const result = await clearUserAuthorizedClaudeComposerDraft({
             port: terminalSessionControlPort,
+            clearKeys: composerClearKeys,
           });
           const protocolResult = mapClaudeComposerClearResultToProtocolResult(result, request.sessionId);
           if (protocolResult.ok) {
@@ -2069,6 +2085,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       const promptInjector = createClaudeUnifiedPromptInjector<Mode>({
         inputInjection: hostInputInjection,
         deliveryVerificationBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
+        stagingObservations: promptSubmitVerification.stagingObservations,
         beforeComposerDraftGuard: runBeforePromptInjectionGates,
         // A terminal-local slash command can replace the composer with a chooser without emitting
         // a Claude turn or hook. Observe that exact successful injection boundary so the single
@@ -2100,6 +2117,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                   sendClearKey: async () => {
                     await steerDraftClearPort.sendSpecialKey('Escape');
                   },
+                  clearKeys: composerClearKeys,
                   ownComposerTexts: ownComposerTextLog,
                 });
                 // An idle recognized dialog has no real composer. Route its parsed screen through
@@ -2151,6 +2169,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               clearOwnLeftoverDraft: async () => {
                 await steerDraftClearPort.sendSpecialKey('Escape');
               },
+              clearKeys: composerClearKeys,
             }
           : {}),
         onUserDraftStarvation: opts.onInFlightSteerUserDraftStarvation,

@@ -1,15 +1,16 @@
 import { fetchEncryptedTranscriptPageAfterSeq, type TranscriptRow } from '@/api/session/fetchEncryptedTranscriptWindow';
 import { findTranscriptEncryptedMessageByLocalId } from '@/api/session/transcriptMessageLookup';
 import type { Credentials } from '@/persistence';
-import { isSessionUserMessage } from '@/session/query/detectSessionTurnInFlight';
+import { isMemoryArtifactDecryptedRow, isSessionUserMessage } from '@/session/query/detectSessionTurnInFlight';
+import { isSessionTurnEnd, isSessionTurnEndMarker } from '@/session/shared/sessionTurnLifecycle';
 import type { SessionEncryptionContext } from '@/session/transport/encryption/sessionEncryptionContext';
 
 import { extractRecentMessagesFromTranscriptRows } from './getSessionRecentMessages';
 import { resolveSessionTransportContext } from './resolveSessionTransportContext';
-import { decryptTranscriptRowContent, isAssistantTurnCompletionProof, readAssistantTurnFailure } from './sendSessionMessage';
+import { decryptTranscriptRowContent, readAssistantTurnFailure } from './sendSessionMessage';
 
 export type TurnReply = Readonly<{
-  /** The turn completed or failed (a completion or failure marker is in the transcript). */
+  /** The turn ended or failed: its end (`isSessionTurnEnd`) or a failure marker is in the transcript. */
   finished: boolean;
   /** Its final assistant message, if it wrote one. */
   text: string | null;
@@ -17,7 +18,10 @@ export type TurnReply = Readonly<{
 
 /**
  * The reply of the turn a user message started, from the transcript rows that follow it (oldest
- * first): its last assistant message up to the next user message, and whether the turn ended.
+ * first): its last assistant message up to the next user message or the turn's end marker
+ * (`isSessionTurnEndMarker`, past which only the turn's own terminal output still counts), and
+ * whether the turn ended. A message the agent writes mid-turn doesn't
+ * end it, and neither does a user message steered into it.
  */
 export function readTurnReplyFromRows(params: Readonly<{
   rows: readonly Pick<TranscriptRow, 'seq' | 'content' | 'createdAt'>[];
@@ -25,11 +29,20 @@ export function readTurnReplyFromRows(params: Readonly<{
 }>): TurnReply {
   const turnRows: Array<Pick<TranscriptRow, 'seq' | 'content' | 'createdAt'>> = [];
   let finished = false;
+  let pastEndMarker = false;
   for (const row of [...params.rows].sort((a, b) => a.seq - b.seq)) {
     const decrypted = decryptTranscriptRowContent({ content: row.content, ctx: params.ctx });
     if (isSessionUserMessage(decrypted)) break;
-    if (isAssistantTurnCompletionProof(decrypted) || readAssistantTurnFailure(decrypted)) finished = true;
+    const turnRow = !isMemoryArtifactDecryptedRow(decrypted);
+    const turnEnd = turnRow && isSessionTurnEnd(decrypted);
+    const endMarker = turnRow && isSessionTurnEndMarker(decrypted);
+    // What follows the turn's end marker is another turn's, even with no user message before it (a
+    // Codex goal continuation), except the turn's own terminal output: Claude's Stop-hook marker can
+    // be committed before the final output its transcript scanner commits.
+    if (pastEndMarker && !(turnEnd && !endMarker)) continue;
+    if (turnEnd || readAssistantTurnFailure(decrypted)) finished = true;
     turnRows.push(row);
+    if (endMarker) pastEndMarker = true;
   }
   const replies = extractRecentMessagesFromTranscriptRows({
     rows: turnRows,

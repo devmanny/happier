@@ -46,6 +46,39 @@ describe('decideRoomDelivery', () => {
     expect(decideRoomDelivery({ room: room({ lastSeq: 1, pausedAt: 5 }), member: mateo, seat: null, messages })).toEqual({ kind: 'wait', reason: 'paused' });
   });
 
+  it('gives a member mid-turn what the user sent now, with what came before it', () => {
+    const inFlight = { localId: 'room.r1.a-mateo.n1', throughSeq: 1, at: 0, sent: true };
+    const busy = seat({ inFlight });
+    const flagged = (message: AgentRoomMessageV1): AgentRoomMessageV1 => ({ ...message, sendNow: true });
+    const [first, second, third, fourth] = log(
+      [user, '@Mateo empieza', ['a-mateo']],
+      [user, '@Mateo y esto', ['a-mateo']],
+      [user, '@Mateo ¡ahora!', ['a-mateo']],
+      [user, '@Mateo luego esto', ['a-mateo']],
+    ) as [AgentRoomMessageV1, AgentRoomMessageV1, AgentRoomMessageV1, AgentRoomMessageV1];
+    const decide = (messages: AgentRoomMessageV1[], overrides: Partial<AgentRoomV1> = {}, onSeat = busy) =>
+      decideRoomDelivery({ room: room({ lastSeq: 4, ...overrides }), member: mateo, seat: onSeat, messages });
+
+    // Earlier unflagged messages ride along; later ones stay queued.
+    expect(decide([first, second, flagged(third), fourth])).toEqual({ kind: 'steer', fromSeq: 2, toSeq: 3 });
+
+    const busyWait = { kind: 'wait', reason: 'busy' };
+    expect(decide([first, second, third, fourth])).toEqual(busyWait);
+    // Not sent yet: it is sent first, as it is.
+    expect(decide([first, second, flagged(third), fourth], {}, seat({ inFlight: { ...inFlight, sent: undefined } }))).toEqual(busyWait);
+    expect(decide([first, second, flagged(third), fourth], { pausedAt: 5 })).toEqual(busyWait);
+    // The turn a Steer Now was sent past ended before that Steer Now's turn, and that turn's ready is still to come.
+    const steering = { ...inFlight, steers: { localId: 'room.r1.a-mateo.n0', throughSeq: 0, ended: true } };
+    expect(decide([first, second, flagged(third), fourth], {}, seat({ inFlight: steering }))).toEqual(busyWait);
+    expect(decide([first, second, flagged(third), fourth], {}, seat({ inFlight: { ...steering, steers: { localId: 'room.r1.a-mateo.n0', throughSeq: 0 } } })))
+      .toEqual({ kind: 'steer', fromSeq: 2, toSeq: 3 });
+    // A flag the member already has does nothing.
+    expect(decide([flagged(first), second, third, fourth])).toEqual(busyWait);
+    expect(decide([first, second, { ...flagged(third), mentions: ['a-tomas'] }, fourth])).toEqual(busyWait);
+    expect(decide([first, second, { ...flagged(third), author: agent(mateo) }, fourth])).toEqual(busyWait);
+    expect(decide([first, second, flagged(third), fourth], { archivedAt: 5 })).toEqual({ kind: 'wait', reason: 'archived' });
+  });
+
   it('does not wake a member for messages that do not mention it, or that it wrote', () => {
     const messages = log([user, 'Hola'], [agent(mateo), 'Yo, @Mateo', ['a-mateo']]);
     expect(decideRoomDelivery({ room: room({ lastSeq: 2 }), member: mateo, seat: null, messages })).toEqual({ kind: 'wait', reason: 'not_mentioned' });

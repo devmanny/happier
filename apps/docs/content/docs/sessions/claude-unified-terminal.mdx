@@ -48,9 +48,9 @@ So Happier classifies the composer before it writes:
 - **Anything else** — do not touch it. The message is held and retried.
 - **A dialog, a permission prompt, a selection list, or a generating screen** — also held; that screen does not belong to the composer.
 
-A held message is visible, not silent. The pending row shows **Terminal draft is blocking delivery**, with the notice “Waiting: a draft in the terminal composer is blocking delivery. Clear it in the terminal or interrupt the turn.” If the block persists, Happier offers **Clear composer**, which asks for confirmation first because it discards whatever is typed in the terminal.
+A held message is visible, not silent. The pending row shows **Terminal draft is blocking delivery**, with the notice “Waiting: a draft in the terminal composer is blocking delivery. Clear it in the terminal or interrupt the turn.” If the block persists, the Happier app offers **Clear composer**, and the native Apple app offers **Clear Terminal Draft** on the blocked message. Both ask for confirmation first because they discard whatever is typed in the terminal.
 
-Happier never clears a draft it did not write without you asking.
+Happier never clears a draft it did not write without you asking. When you do ask, it only presses Esc: it refuses while Claude is working, while a question, menu or permission prompt is open, and if the text changes while it is clearing. Claude needs two Esc presses to clear a draft, and Happier sends the second one only after Claude shows **Esc again to clear** for the same text, because two presses on an empty composer open Claude’s rewind menu. Once the composer is empty, the held messages go out on their own; you do not need to retry them. Use **Retry** only on a message that is still blocked a moment later.
 
 ## Turn it on
 
@@ -156,7 +156,9 @@ Happier installs a Claude Code plugin so permissions and lifecycle events can be
 
 ### A message says it is waiting on a terminal draft
 
-There is unsent text in the terminal composer. Clear it in the terminal, or use **Clear composer** in the pending messages sheet, or interrupt the turn.
+There is unsent text in the terminal composer. Clear it in the terminal, use **Clear composer** in the pending messages sheet or **Clear Terminal Draft** on the blocked message in the native Apple app, or interrupt the turn.
+
+If the clear reports that the draft was not cleared, Claude did not show that it took the first Esc (a slow or busy machine can do this). Try again in a moment, or press Esc twice in the terminal. If it says the terminal can’t be cleared safely, Claude is not at an idle input box (for example it is waiting on a usage limit), someone is typing in the composer, or Claude has not caught up with earlier key presses yet.
 
 ## Related
 

@@ -17,6 +17,7 @@ import type {
   ClaudeUnifiedPromptInjectionOptions,
   ClaudeUnifiedPromptInjector,
 } from './_types';
+import type { ClaudePromptStagingObservations } from './claudePromptSubmitVerification';
 import type { ClaudeUnifiedTelemetrySink } from './telemetry';
 import { emitClaudeUnifiedInjectionDraftGuard, emitClaudeUnifiedInjectionOutcome } from './telemetry';
 
@@ -168,6 +169,11 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
    * owns it (never an automatic replay) and later provider evidence still settles it.
    */
   deliveryVerificationBudgetMs?: number | undefined;
+  /**
+   * The terminal verifier's view of the composer during this write. Its last kind (never text)
+   * goes into the stall-budget warning, so a write that never staged says what Claude showed.
+   */
+  stagingObservations?: ClaudePromptStagingObservations | undefined;
 }>): ClaudeUnifiedPromptInjector<Mode> {
   const createNonce = opts.createNonce ?? randomUUID;
   const nowMs = opts.nowMs ?? Date.now;
@@ -348,6 +354,7 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
         },
       } as const;
       const verificationBudget = startDeliveryVerificationBudget(opts.deliveryVerificationBudgetMs);
+      opts.stagingObservations?.reset();
       let result: TerminalInputInjectionResult;
       try {
         result = await opts.inputInjection.injectUserPrompt(
@@ -361,6 +368,7 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
           budgetMs: opts.deliveryVerificationBudgetMs,
           reason: result.reason,
           phase: result.phase,
+          lastStagingObservation: opts.stagingObservations?.readLastKind() ?? 'none',
           localIdCount: batch.userMessageLocalIds?.length ?? 0,
         });
       }

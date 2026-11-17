@@ -1,17 +1,21 @@
 import type { TerminalControlPort } from '@/integrations/terminalHost/controlTypes';
+import { logger } from '@/ui/logger';
 
 import {
   captureFailureToResult,
   captureScreenState,
   sendResultToFailure,
 } from './controlRuntime';
+import {
+  captureComposerClearKeyEffect,
+  createClaudeComposerClearKeyLedger,
+  isSecondComposerClearEscapeWarranted,
+  type ClaudeComposerClearKeyLedger,
+} from './composerClearKeys';
 import type { ClaudeScreenState } from './screenState';
 import { isClaudeUsageLimitWaitBlockingComposerClear } from './screenState';
 
 const DEFAULT_USER_AUTHORIZED_COMPOSER_CLEAR_SETTLE_MS = 250;
-// Same bounded keyboard behavior as the automatic own-leftover clear path: one Escape may close an
-// intermediate composer affordance while leaving text behind, so allow one verified retry.
-const MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS = 2;
 
 export type ClaudeComposerClearRefusalReason =
   | 'generating'
@@ -25,7 +29,11 @@ export type ClaudeComposerClearRefusalReason =
   | 'slash_picker'
   | 'selection_list'
   | 'usage_limit_wait'
-  | 'no_interactive_composer';
+  | 'no_interactive_composer'
+  /** The composer text changed after the first Escape (someone is typing): never press again. */
+  | 'draft_changed'
+  /** Earlier clear keys of this pane still show no effect on the screen; another could open Rewind. */
+  | 'unacknowledged_clear_keys';
 
 export type ClaudeUserAuthorizedComposerClearResult =
   | Readonly<{ status: 'already_empty'; screen: ClaudeScreenState }>
@@ -90,11 +98,59 @@ function classifyComposerClearScreen(state: ClaudeScreenState): ComposerClearScr
   return { kind: 'clearable_draft', screen: state };
 }
 
-export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
+type UserAuthorizedComposerClearOptions = Readonly<{
   port: TerminalControlPort;
+  /**
+   * The pane's session-scoped clear-key ledger, shared with the own-leftover clearers so the
+   * Escapes of every sender stay within what Claude absorbs. Without it the bound holds only
+   * within this call.
+   */
+  clearKeys?: ClaudeComposerClearKeyLedger | undefined;
   wait?: ((ms: number) => Promise<void>) | undefined;
   settleMs?: number | undefined;
-}>): Promise<ClaudeUserAuthorizedComposerClearResult> {
+}>;
+
+type UserAuthorizedComposerClearEvidence = {
+  escapesSent: number;
+  initialScreen: ClaudeScreenState | null;
+  /** The capture the second-Escape decision read (after the first Escape). */
+  afterFirstEscapeScreen: ClaudeScreenState | null;
+};
+
+/**
+ * The one path allowed to clear a composer draft Happier did not write, and only on an explicit
+ * user request. It never types: it presses Escape onto a safe idle composer and verifies the result.
+ * Claude 2.1.322 needs two Escapes for a draft (the first arms "Esc again to clear"), so the second
+ * is pressed only on {@link isSecondComposerClearEscapeWarranted} evidence read from
+ * {@link captureComposerClearKeyEffect}, the rule the own-leftover clearers use too, and every press
+ * goes through the pane's clear-key ledger.
+ */
+export async function clearUserAuthorizedClaudeComposerDraft(
+  params: UserAuthorizedComposerClearOptions,
+): Promise<ClaudeUserAuthorizedComposerClearResult> {
+  const evidence: UserAuthorizedComposerClearEvidence = {
+    escapesSent: 0,
+    initialScreen: null,
+    afterFirstEscapeScreen: null,
+  };
+  const result = await runUserAuthorizedComposerClear(params, evidence);
+  // One info line per request so a phone-side clear is explainable from the runner log. Never the
+  // composer text.
+  logger.infoFile('[unified]: user-authorized composer clear outcome', {
+    status: result.status,
+    ...('reason' in result && result.reason !== undefined ? { reason: result.reason } : {}),
+    escapesSent: evidence.escapesSent,
+    escapeAgainToClearHintBefore: evidence.initialScreen?.escapeAgainToClearHintVisible ?? null,
+    escapeAgainToClearHintAfter: evidence.afterFirstEscapeScreen?.escapeAgainToClearHintVisible ?? null,
+    composerLength: evidence.initialScreen?.composerContent?.length ?? null,
+  });
+  return result;
+}
+
+async function runUserAuthorizedComposerClear(
+  params: UserAuthorizedComposerClearOptions,
+  evidence: UserAuthorizedComposerClearEvidence,
+): Promise<ClaudeUserAuthorizedComposerClearResult> {
   const settleMs = Math.max(
     0,
     Math.trunc(params.settleMs ?? DEFAULT_USER_AUTHORIZED_COMPOSER_CLEAR_SETTLE_MS),
@@ -103,45 +159,66 @@ export async function clearUserAuthorizedClaudeComposerDraft(params: Readonly<{
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
   }));
+  const clearKeys = params.clearKeys ?? createClaudeComposerClearKeyLedger({ stallBudgetMs: Number.POSITIVE_INFINITY });
 
-  const initial = await captureScreenState(params.port);
-  if (initial.kind !== 'state') return toComposerClearFailure(captureFailureToResult(initial));
+  async function capture(): Promise<ComposerClearScreenClassification | ClaudeUserAuthorizedComposerClearResult> {
+    const captured = await captureScreenState(params.port);
+    if (captured.kind !== 'state') return toComposerClearFailure(captureFailureToResult(captured));
+    clearKeys.observe(captured.state.text);
+    evidence.initialScreen ??= captured.state;
+    return classifyComposerClearScreen(captured.state);
+  }
 
-  const initialClassification = classifyComposerClearScreen(initial.state);
-  switch (initialClassification.kind) {
+  /** Presses one Escape onto `screen`; a result when it was withheld or could not be sent. */
+  async function pressEscape(screen: ClaudeScreenState): Promise<ClaudeUserAuthorizedComposerClearResult | null> {
+    if (!clearKeys.mayPress()) return { status: 'refused', reason: 'unacknowledged_clear_keys', screen };
+    clearKeys.recordPress(screen.text);
+    evidence.escapesSent += 1;
+    const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Escape'));
+    return sendFailure ? toComposerClearFailure(sendFailure) : null;
+  }
+
+  const initial = await capture();
+  if (!('kind' in initial)) return initial;
+  switch (initial.kind) {
     case 'empty':
-      return { status: 'already_empty', screen: initialClassification.screen };
+      return { status: 'already_empty', screen: initial.screen };
     case 'refused':
-      return {
-        status: 'refused',
-        reason: initialClassification.reason,
-        screen: initialClassification.screen,
-      };
+      return { status: 'refused', reason: initial.reason, screen: initial.screen };
     case 'clearable_draft':
       break;
   }
 
-  let lastScreen = initialClassification.screen;
-  for (let attempt = 1; attempt <= MAX_USER_AUTHORIZED_COMPOSER_CLEAR_ATTEMPTS; attempt += 1) {
-    const sendFailure = sendResultToFailure(await params.port.sendSpecialKey('Escape'));
-    if (sendFailure) return toComposerClearFailure(sendFailure);
+  let before = initial.screen;
+  for (let attempt = 1; ; attempt += 1) {
+    const pressFailure = await pressEscape(before);
+    if (pressFailure) return pressFailure;
 
-    await wait(settleMs);
-
-    const recaptured = await captureScreenState(params.port);
-    if (recaptured.kind !== 'state') return toComposerClearFailure(captureFailureToResult(recaptured));
-
-    const classification = classifyComposerClearScreen(recaptured.state);
-    lastScreen = recaptured.state;
-    switch (classification.kind) {
+    const after = await captureComposerClearKeyEffect({
+      pressedFrameText: before.text,
+      capture,
+      frameTextOf: (captured) => ('kind' in captured ? captured.screen.text : null),
+      wait,
+      settleMs,
+    });
+    if (!('kind' in after)) return after;
+    if (attempt === 1) evidence.afterFirstEscapeScreen = after.screen;
+    switch (after.kind) {
       case 'empty':
-        return { status: 'cleared', screen: classification.screen, attempts: attempt };
+        return { status: 'cleared', screen: after.screen, attempts: attempt };
       case 'refused':
-        return { status: 'refused', reason: classification.reason, screen: classification.screen };
+        return { status: 'refused', reason: after.reason, screen: after.screen };
       case 'clearable_draft':
         break;
     }
+    // Never a third Escape: the first arms the hint and the second clears.
+    if (attempt >= 2) return { status: 'failed', reason: 'clear_failed', screen: after.screen };
+    if (after.screen.composerContent !== before.composerContent) {
+      return { status: 'refused', reason: 'draft_changed', screen: after.screen };
+    }
+    if (!isSecondComposerClearEscapeWarranted(before, after.screen)) {
+      return { status: 'failed', reason: 'clear_failed', screen: after.screen };
+    }
+    before = after.screen;
   }
-
-  return { status: 'failed', reason: 'clear_failed', screen: lastScreen };
 }

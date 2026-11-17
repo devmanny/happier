@@ -13,9 +13,10 @@ import {
 import type { ExpoPushActivityNotificationOptions } from '@/activity/notifications/sendExpoPushActivityNotification';
 import { isSessionNotificationMuted } from '@/session/notifications/sessionNotificationMute';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
+import type { TurnReply } from '@/session/services/readTurnReplyAfterLocalId';
 import { logger } from '@/ui/logger';
 
-import type { AgentRoomStore } from './agentRoomStore';
+import type { AgentRoomStore, RoomDeliveryInFlight } from './agentRoomStore';
 
 /** The push channel tasks and the daemon already use (`PushNotificationClient`). */
 export type RoomPushSender = Readonly<{
@@ -30,8 +31,8 @@ const HIDDEN_TEXT_BODY = 'New message';
  * `AgentRoomStore.finishTurn`), then tells the user what `roomReplyNotices` says: every reply once
  * (a mention when it mentions them outside an agent's own chat) and a hand-off that hit the brake.
  * Every room notice carries `{type: 'room_mention', roomId, seq}` (the brake: `room_brake`), so a tap
- * opens the room at that message. The runner calls it when the turn is ready; the daemon calls it
- * for a turn whose runner ended without doing so.
+ * opens the room at that message. The runner (when the turn is ready) and the daemon (for a turn
+ * whose runner ended without doing so) reach it through `settleRoomTurn`.
  *
  * `'no_reply'` when the turn ended without a final text, so nothing was posted (or its room is gone).
  *
@@ -47,10 +48,14 @@ export async function completeRoomTurn(params: Readonly<{
   author: Extract<AgentRoomAuthor, { kind: 'agent' }>;
   reply: Readonly<{ finished: boolean; text: string | null }>;
   push: RoomPushSender | null;
+  /** At the ready of that turn (the runner's); see `AgentRoomStore.finishTurn`. */
+  atReady?: boolean;
 }>): Promise<'finished' | 'no_reply' | 'not_in_flight' | 'running'> {
   if (!params.reply.finished) return 'running';
   const { roomId } = params.delivery;
-  const result = await params.store.finishTurn({ ...params.delivery, author: params.author, text: params.reply.text });
+  const result = await params.store.finishTurn({
+    ...params.delivery, author: params.author, text: params.reply.text, ...(params.atReady ? { atReady: true } : {}),
+  });
   if (!result.finished) return 'not_in_flight';
   const message = result.message;
   if (!message) return 'no_reply';
@@ -95,4 +100,71 @@ export async function completeRoomTurn(params: Readonly<{
     }
   }
   return 'finished';
+}
+
+/** Where a member's room delivery stands after `settleRoomTurn`. */
+export type RoomTurnSettlement = Readonly<{
+  /**
+   * The delivery in flight: its turn ended here (or already had), its turn runs, it isn't in its
+   * thread's transcript yet, or its thread is gone (nothing was settled).
+   */
+  turn: 'finished' | 'running' | 'not_started' | 'thread_gone';
+  /** A turn ended here was posted as a reply (or another writer had ended it), so the room told the user. */
+  replied: boolean;
+}>;
+
+/**
+ * Ends what the thread's transcript shows ended of a member's delivery in flight and, with Steer
+ * Now, of the delivery it was sent past (`inFlight.steers`), oldest first; the one rule the runner
+ * (at a ready, `turnEnded`) and the daemon (on a room write) both apply:
+ *
+ * - the delivery it was sent past posts its own reply when its turn ended (the steer missed it);
+ *   ended before its ready (here, by the daemon), it stays on the seat as `steers.ended` until that
+ *   ready, which drops it: the room already told the user about that turn;
+ * - the delivery in flight posts its reply when its turn ended: the text after its own user row,
+ *   so a turn the steer joined gets one reply and the one sent past gets none;
+ * - at a ready, a turn that ended without a completion marker is ended too, but only the one that
+ *   ready ended: the delivery in flight when it is in the transcript and the one it was sent past
+ *   didn't end first (else that ready ended the older turn and the newer one's has only begun),
+ *   otherwise the one sent past while the steer hasn't reached the transcript.
+ */
+export async function settleRoomTurn(params: Readonly<{
+  store: AgentRoomStore;
+  delivery: Readonly<{ roomId: string; agentId: string }>;
+  inFlight: RoomDeliveryInFlight;
+  /** The member's thread, whose transcript is read. */
+  sessionId: string;
+  author: Extract<AgentRoomAuthor, { kind: 'agent' }>;
+  readTurnReply: (sessionId: string, localId: string) => Promise<TurnReply | 'thread_gone' | null>;
+  push: RoomPushSender | null;
+  turnEnded: boolean;
+}>): Promise<RoomTurnSettlement> {
+  const { inFlight, sessionId, turnEnded } = params;
+  const newest = await params.readTurnReply(sessionId, inFlight.localId);
+  if (newest === 'thread_gone') return { turn: 'thread_gone', replied: false };
+  const steers = inFlight.steers;
+  // Posted already (`ended`): it ended first, and only its ready is still to come.
+  const sentPast = steers && !steers.ended ? await params.readTurnReply(sessionId, steers.localId) : null;
+  const older = steers?.ended ? { finished: true, text: null } : sentPast === 'thread_gone' ? null : sentPast;
+
+  let replied = false;
+  const end = async (localId: string, text: string | null) => {
+    const outcome = await completeRoomTurn({
+      store: params.store,
+      delivery: { ...params.delivery, localId },
+      author: params.author,
+      reply: { finished: true, text },
+      push: params.push,
+      atReady: turnEnded,
+    });
+    if (outcome === 'finished' || outcome === 'not_in_flight') replied = true;
+  };
+
+  if (steers && older?.finished) await end(steers.localId, older.text);
+  if (newest && (newest.finished || (turnEnded && !older?.finished))) {
+    await end(inFlight.localId, newest.text);
+    return { turn: 'finished', replied };
+  }
+  if (steers && turnEnded && !newest && older && !older.finished) await end(steers.localId, older.text);
+  return { turn: newest ? 'running' : 'not_started', replied };
 }

@@ -434,7 +434,7 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         let queue = try #require(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []))
         #expect(queue.messages.map(\.seq) == [2, 3] && queue.reason == .afterCurrentTurn && queue.revisable)
 
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .cancel) == .done)
         #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)) == nil)
         // The seat is only the guard: written back byte for byte (never resealed from the model), one version on.
         let written = try #require(server.row(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")))
@@ -454,7 +454,7 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         server.put(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"), taken, version: 6)
         let before = try #require(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)))
 
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .alreadyDelivered)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .cancel) == .alreadyDelivered)
         #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2))?.value == before.value)
         #expect(server.row(AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo"))?.version == 6)
         #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 2, 3])
@@ -470,14 +470,14 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         // The turn's delivery was sent: the seat moved, but #2 still waits.
         let sent = try chatSeat(chat.id, read: 0, inFlight: ["localId": "room.c.a-mateo.n1", "throughSeq": 1, "at": 5, "sent": true])
         server.put(seatKey, sent, version: 5)
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .cancel) == .done)
         #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)) == nil)
         #expect(server.row(seatKey)?.value == sent && server.row(seatKey)?.version == 6)
         #expect(server.mutateCalls == 2)
         // The turn ended, its marker at #1: #3 still waits.
         let ended = try chatSeat(chat.id, read: 1, inFlight: nil)
         server.put(seatKey, ended, version: 9)
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, text: nil) == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, .cancel) == .done)
         #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)) == nil)
         #expect(server.row(seatKey)?.value == ended && server.row(seatKey)?.version == 10)
         #expect(store.roomMessages[chat.id]?.map(\.seq) == [1])
@@ -487,7 +487,7 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         let server = RoomKVServer()
         let (chat, seat) = try seedChat(server)
         let store = await openChat(server, chat)
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: "  mejor esto  ") == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .edit("  mejor esto  ")) == .done)
         let row = try #require(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2)))
         #expect(row.version == 1)
         let edited = try #require(AgentRoomMessage.open(row.value, machineKey: machineKey))
@@ -499,9 +499,64 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(written.value == seat && written.version == 5)
         #expect(store.roomMessages[chat.id]?.first { $0.seq == 2 }?.text == "mejor esto")
         // Edited again from what was saved.
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: "y esto") == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .edit("y esto")) == .done)
         #expect(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 2))?.version == 2)
         #expect(server.mutateCalls == 2)
+    }
+
+    @Test func sendingAWaitingMessageNowFlagsItAndWritesTheSeatBackUnchanged() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let seatKey = AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")
+        // Mateo's turn runs with #1 and #2 (sent into it past #1's delivery), from a daemon that takes
+        // what is sent now: #3 waits.
+        let seat = try chatSeat(chat.id, read: 0, inFlight: ["localId": "room.c.a-mateo.n2", "throughSeq": 2, "at": 6, "sent": true,
+                                                             "sendNowSupported": true,
+                                                             "steers": ["localId": "room.c.a-mateo.n1", "throughSeq": 1]])
+        server.put(seatKey, seat, version: 4)
+        let store = await openChat(server, chat)
+        let queue = try #require(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []))
+        #expect(queue.messages.map(\.seq) == [3] && queue.sendNowSupported)
+
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, .sendNow) == .done)
+        let row = try #require(server.row(AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)))
+        #expect(row.version == 1)
+        let flagged = try #require(AgentRoomMessage.open(row.value, machineKey: machineKey))
+        #expect(flagged.sendNow)
+        #expect(flagged.text == "m3" && flagged.seq == 3 && flagged.at == 30 && flagged.mentions == ["a-mateo"])
+        // The seat only guards the write: byte for byte as the daemon wrote it (its delivery, the one it
+        // was sent past, its stamp), one version on.
+        let written = try #require(server.row(seatKey))
+        #expect(written.value == seat && written.version == 5)
+        #expect(server.mutateCalls == 1)
+        let shown = try #require(store.room(id: chat.id)?.queued(seats: store.roomSeats[chat.id] ?? [], messages: store.roomMessages[chat.id] ?? []))
+        #expect(shown.messages.map(\.seq) == [3] && shown.sendingNowThroughSeq == 3)
+    }
+
+    @Test func sendingNowAMessageTheAgentAlreadyHasChangesNothing() async throws {
+        let server = RoomKVServer()
+        let (chat, _) = try seedChat(server)
+        let store = await openChat(server, chat)
+        let seatKey = AgentRoomSeat.kvKey(roomId: chat.id, agentId: "a-mateo")
+        let key2 = AgentRoomMessage.kvKey(roomId: chat.id, seq: 2), key3 = AgentRoomMessage.kvKey(roomId: chat.id, seq: 3)
+        // Meanwhile Mateo's daemon took #2 (into his running turn, or the next one).
+        server.put(seatKey, try chatSeat(chat.id, read: 0, inFlight: ["localId": "room.c.a-mateo.n2", "throughSeq": 2, "at": 6,
+                                                                       "sendNowSupported": true]), version: 6)
+        let before = try #require(server.row(key2))
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .sendNow) == .alreadyDelivered)
+        #expect(server.row(key2)?.value == before.value && server.row(key2)?.version == 0)
+        #expect(server.row(seatKey)?.version == 6)
+        // Another device sent #3 now first: this one finds it so and is done.
+        server.put(key3, try AccountScopedBlob.seal(["v": 1, "roomId": .string(chat.id), "seq": 3, "at": 30, "author": AgentRoomTests.user,
+                                                     "text": "m3", "mentions": ["a-mateo"], "sendNow": true],
+                                                    kind: .agentRoom, machineKey: machineKey), version: 1)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, .sendNow) == .done)
+        #expect(server.row(key3)?.version == 1 && server.row(seatKey)?.version == 6)
+        #expect(store.roomMessages[chat.id]?.first { $0.seq == 3 }?.sendNow == true)
+        // Sent now already: a second tap writes nothing.
+        let calls = server.mutateCalls
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 3, .sendNow) == .done)
+        #expect(server.mutateCalls == calls)
     }
 
     @Test func aMessageWithdrawnOnAnotherDeviceLeavesTheChat() async throws {
@@ -594,7 +649,7 @@ private final class RoomKVURLProtocol: URLProtocol, @unchecked Sendable {
         server.holdBulkReads()
         let load = Task { await store.loadRoom(id: chat.id) }
         try await waitForHeld(server, count: 1)
-        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, text: nil) == .done)
+        #expect(await store.reviseQueuedRoomMessage(roomId: chat.id, seq: 2, .cancel) == .done)
         #expect(store.roomMessages[chat.id]?.map(\.seq) == [1, 3])
         server.release()
         await load.value

@@ -66,6 +66,8 @@ public final class HappierStore {
     public let resumingSessions = KeyedStore<Bool>()
     /// Sessions being stopped and resumed for a fresh terminal (`restartSessionAndRetry`).
     public private(set) var restartingSessions: Set<String> = []
+    /// Sessions whose runner is being asked to empty Claude's terminal composer (`clearTerminalDraft`).
+    public private(set) var clearingTerminalDrafts: Set<String> = []
     public private(set) var hasOlderMessages: [String: Bool] = [:]
     public private(set) var isLoadingSessions = false
     /// True once the session list has been fetched at least once since sign-in.
@@ -2857,6 +2859,24 @@ public final class HappierStore {
         await requeuePending(localId, in: sessionId)
     }
 
+    /// Messages held back by text open in Claude's terminal composer (`terminal_composer_draft`):
+    /// asks the runner to empty it. The runner keeps those messages and sends them itself once it
+    /// has, so they are never put back in line from here: they are still in its hands.
+    public func clearTerminalDraft(in sessionId: String) async -> TerminalDraftClear.Outcome {
+        clearingTerminalDrafts.insert(sessionId)
+        defer { clearingTerminalDrafts.remove(sessionId) }
+        let outcome: TerminalDraftClear.Outcome
+        do {
+            outcome = TerminalDraftClear.outcome(try await sessionRPCResult(sessionId, method: "session.terminalComposer.clear",
+                                                                            params: ["sessionId": .string(sessionId)]))
+        } catch {
+            outcome = TerminalDraftClear.outcome(error: error)
+        }
+        if outcome != .cleared { log.notice("terminal draft clear: \(String(describing: outcome), privacy: .public)") }
+        refreshPending(sessionId)
+        return outcome
+    }
+
     public func abort(_ sessionId: String) async {
         do {
             _ = try await sessionRPC(sessionId, method: "abort", params: [
@@ -3631,8 +3651,18 @@ public final class HappierStore {
         } catch { report(error) }
     }
 
-    /// Session-scoped RPC through the server relay (`apiSocket.ts:334-405`).
+    /// Session-scoped RPC through the server relay (`apiSocket.ts:334-405`); a result reporting
+    /// failure (`ok: false`) is thrown too.
     public func sessionRPC(_ sessionId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
+        let result = try await sessionRPCResult(sessionId, method: method, params: params, timeout: timeout)
+        if result["ok"]?.boolValue == false { throw Self.rpcError(in: result) }
+        return result
+    }
+
+    /// The method's own result, a reported failure (`ok: false`) included: throws only when the
+    /// call didn't reach the method — the relay couldn't deliver it or bring the answer back, or
+    /// the runner's RPC layer answered instead (a bare `error`, such as an unknown method).
+    private func sessionRPCResult(_ sessionId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
         // Back from the background the connection is still returning: wait for it, within this
@@ -3656,12 +3686,13 @@ public final class HappierStore {
         }
         var result = response["result"] ?? .null
         if !session.isPlain, let ciphertext = result.stringValue { result = try session.cipher!.decryptBase64(ciphertext) }
-        if result["ok"]?.boolValue == false || (result["error"]?.stringValue != nil && result["ok"] == nil) {
-            throw RPCError(
-                message: result["errorMessage"]?.stringValue ?? result["error"]?.stringValue ?? "RPC failed",
-                code: result["errorCode"]?.stringValue)
-        }
+        if result["error"]?.stringValue != nil && result["ok"] == nil { throw Self.rpcError(in: result) }
         return result
+    }
+
+    private static func rpcError(in result: JSONValue) -> RPCError {
+        RPCError(message: result["errorMessage"]?.stringValue ?? result["error"]?.stringValue ?? "RPC failed",
+                 code: result["errorCode"]?.stringValue)
     }
 
     /// The relay connection once it's up, checked every tenth of a second until `deadline`. Only

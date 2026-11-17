@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { logger } from '@/ui/logger';
+
 import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
 import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 import { isClaudeScreenReadyForInput } from './tuiControls/screenState';
 
@@ -106,7 +109,42 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(clears).toBe(1);
   });
 
-  it('retries the bounded second clear when the first key leaves the draft behind', async () => {
+  it('clears a leftover made of two own pastes painted together instead of blocking on it as foreign', async () => {
+    const first = 'I signed in, but I do not see the Beta organizations.';
+    const urlPrompt = `https://example.test/dashboard ${first}`;
+    const captures = [
+      { currentInput: idleScreen(`${first}${urlPrompt}`), cursor: { x: 4 + first.length + urlPrompt.length, y: 1 } },
+      { currentInput: idleScreen('') },
+    ];
+    let clears = 0;
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => captures.shift() ?? { currentInput: idleScreen('') },
+      sendClearKey: async () => {
+        clears += 1;
+      },
+      ownComposerTexts: ownLog(first, urlPrompt),
+      wait: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(clears).toBe(1);
+  });
+
+  it('NEVER clears short replies a user typed together, even when each one was sent before', async () => {
+    for (const draft of ['sí dale', 'sídale']) {
+      const result = await clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: idleScreen(draft), cursor: { x: 4 + draft.length, y: 1 } }),
+        sendClearKey: async () => {
+          throw new Error('must not clear a genuine user draft made of earlier short replies');
+        },
+        ownComposerTexts: ownLog('sí', 'dale'),
+        wait: async () => undefined,
+      });
+      expect(result.status, draft).toBe('foreign_draft');
+    }
+  });
+
+  it('waits for a lagging repaint instead of pressing a second clear key on the unchanged frame', async () => {
     const captures = [idleScreen(OWN_TEXT), idleScreen(OWN_TEXT), idleScreen('')];
     let clears = 0;
     const attempts: number[] = [];
@@ -119,12 +157,34 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
       onClearAttempt: (info) => attempts.push(info.attempt),
     });
-    expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
-    expect(clears).toBe(2);
-    expect(attempts).toEqual([1, 2]);
+    expect(result).toMatchObject({ status: 'cleared', attempts: 1 });
+    expect(clears).toBe(1);
+    expect(attempts).toEqual([1]);
   });
 
-  it('gives up after the bounded attempts and reports clear_failed', async () => {
+  it('sends the second clear key when Claude shows "Esc again to clear" with the leftover still in place', async () => {
+    const hinted = [
+      '────────────────────────────────────────────────',
+      `❯ ${OWN_TEXT}`,
+      '────────────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n');
+    const captures = [idleScreen(OWN_TEXT), hinted, idleScreen('')];
+    const sendClearKey = vi.fn(async () => undefined);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: captures.shift() ?? idleScreen('') }),
+      sendClearKey,
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
+    expect(sendClearKey).toHaveBeenCalledTimes(2);
+  });
+
+  // Rewind hazard (repro e, 2026-11-16): a second clear key needs the same evidence as the
+  // user-authorized clear, "Esc again to clear" appearing over the same text after the first.
+  it('presses one clear key and reports clear_failed when the frame never shows the hint', async () => {
     let clears = 0;
     const result = await clearOwnLeftoverComposerDraft({
       captureInputState: async () => ({ currentInput: idleScreen(OWN_TEXT) }),
@@ -135,7 +195,25 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       wait: async () => undefined,
     });
     expect(result.status).toBe('clear_failed');
-    expect(clears).toBe(2);
+    expect(clears).toBe(1);
+  });
+
+  it('never presses a second clear key when the hint was already armed before the first', async () => {
+    const hinted = [
+      '────────────────────────────────────────────────',
+      `❯ ${OWN_TEXT}`,
+      '────────────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n');
+    const sendClearKey = vi.fn(async () => undefined);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: hinted }),
+      sendClearKey,
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('clear_failed');
+    expect(sendClearKey).toHaveBeenCalledTimes(1);
   });
 
   it('NEVER touches a genuine user draft (no recorded match) and reports foreign_draft', async () => {
@@ -456,6 +534,129 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     },
   );
 
+  it('logs each outcome at info level with its evidence but never the composer text', async () => {
+    const infoFile = vi.spyOn(logger, 'infoFile').mockImplementation(() => undefined);
+    try {
+      const draft = 'my half-typed genuine thought';
+      await clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: idleScreen(draft), cursor: { x: 33, y: 1 } }),
+        sendClearKey: async () => {
+          throw new Error('must not clear a genuine user draft');
+        },
+        ownComposerTexts: ownLog(OWN_TEXT),
+        wait: async () => undefined,
+      });
+      const hinted = [
+        '────────────────────────────────────────────────',
+        `❯ ${OWN_TEXT}`,
+        '────────────────────────────────────────────────',
+        '  Esc again to clear',
+      ].join('\n');
+      const captures = [idleScreen(OWN_TEXT), hinted, hinted];
+      await clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: captures.shift() ?? hinted }),
+        sendClearKey: async () => undefined,
+        ownComposerTexts: ownLog(OWN_TEXT),
+        wait: async () => undefined,
+      });
+
+      expect(infoFile.mock.calls).toEqual([
+        [expect.any(String), {
+          status: 'foreign_draft',
+          classification: 'foreign',
+          composerLength: draft.length,
+          clearKeysSent: 0,
+          escapeAgainToClearHintVisible: false,
+          selectionListVisible: false,
+        }],
+        [expect.any(String), {
+          status: 'clear_failed',
+          classification: 'own',
+          composerLength: OWN_TEXT.length,
+          clearKeysSent: 2,
+          escapeAgainToClearHintVisible: true,
+          selectionListVisible: false,
+        }],
+      ]);
+      const logged = JSON.stringify(infoFile.mock.calls);
+      expect(logged).not.toContain(draft);
+      expect(logged).not.toContain(OWN_TEXT);
+    } finally {
+      infoFile.mockRestore();
+    }
+  });
+
+  describe('clear keys a stalled Claude has not shown yet (Rewind hazard, 2026-11-16)', () => {
+    const hinted = [
+      '────────────────────────────────────────────────',
+      `❯ ${OWN_TEXT}`,
+      '────────────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n');
+
+    function guardPass(params: Readonly<{
+      screens: string[];
+      clearKeys: ReturnType<typeof createClaudeComposerClearKeyLedger>;
+      sendClearKey: () => Promise<void>;
+    }>) {
+      return clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: params.screens.shift() ?? idleScreen(OWN_TEXT) }),
+        sendClearKey: params.sendClearKey,
+        clearKeys: params.clearKeys,
+        ownComposerTexts: ownLog(OWN_TEXT),
+        wait: async () => undefined,
+      });
+    }
+
+    it('keeps at most the clearing pair outstanding across passes on a frozen own-text frame', async () => {
+      const clearKeys = createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => 0 });
+      const sendClearKey = vi.fn(async () => undefined);
+      const infoFile = vi.spyOn(logger, 'infoFile').mockImplementation(() => undefined);
+      try {
+        for (let pass = 0; pass < 3; pass += 1) {
+          const result = await guardPass({ screens: [], clearKeys, sendClearKey });
+          expect(result.status).toBe('clear_failed');
+        }
+
+        // When Claude resumes, the first Escape shows the hint and the second clears; any further
+        // one reaches the empty composer, and two there open Rewind.
+        expect(sendClearKey).toHaveBeenCalledTimes(2);
+        expect(infoFile.mock.calls.at(-1)?.[1]).toMatchObject({
+          status: 'clear_failed',
+          classification: 'own',
+          clearKeysSent: 0,
+          clearKeyWithheld: true,
+        });
+      } finally {
+        infoFile.mockRestore();
+      }
+    });
+
+    it('presses again once Claude repaints, or once the stall budget passes with no repaint', async () => {
+      let now = 0;
+      const clearKeys = createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => now });
+      const sendClearKey = vi.fn(async () => undefined);
+
+      // A frozen frame shows no hint, so each pass presses one key and the pair spans two passes.
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      expect(sendClearKey).toHaveBeenCalledTimes(2);
+      const repainted = await guardPass({ screens: [hinted, idleScreen('')], clearKeys, sendClearKey });
+      expect(repainted).toMatchObject({ status: 'cleared' });
+      expect(sendClearKey).toHaveBeenCalledTimes(3);
+
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      expect(sendClearKey).toHaveBeenCalledTimes(5);
+      now = 134_999;
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      expect(sendClearKey).toHaveBeenCalledTimes(5);
+      now = 135_000;
+      await guardPass({ screens: [], clearKeys, sendClearKey });
+      expect(sendClearKey).toHaveBeenCalledTimes(6);
+    });
+  });
+
   it('reports capture_failed when the screen capture throws', async () => {
     const result = await clearOwnLeftoverComposerDraft({
       captureInputState: async () => {
@@ -509,17 +710,59 @@ describe('clearOwnLeftoverComposerDraft: Claude feedback draft card (2.1.322, in
     expect(isClaudeScreenReadyForInput(result.screen)).toBe(true);
   });
 
-  it('fails closed with a precise reason when the card survives the bounded dismissals', async () => {
+  it('keeps at most two unacknowledged dismissal Escapes across passes on a frozen card', async () => {
+    // An unchanged card is no evidence the Escapes reached it: a stalled Claude keeps the frame and
+    // reads the queued keys as one burst. The card takes two (card, then its turn-off prompt); more
+    // would land on the empty composer, and Claude 2.1.322 reads two there as Rewind, which
+    // swallows the next paste (repro, 2026-11-16).
+    const clearKeys = createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => 0 });
+    const sendClearKey = vi.fn(async () => undefined);
+    for (let pass = 0; pass < 3; pass += 1) {
+      const result = await clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: card, cursor: { x: 2, y: 21 } }),
+        sendClearKey,
+        clearKeys,
+        ownComposerTexts: ownLog(OWN_TEXT),
+        wait: async () => undefined,
+      });
+      expect(result).toMatchObject({ status: 'blocked_non_input_state', blockedReason: 'feedback_draft_card' });
+    }
+
+    expect(sendClearKey).toHaveBeenCalledTimes(2);
+  });
+
+  it('still dismisses a card that ignored the first Escape inside its turn-end window', async () => {
+    const captures = [card, card, turnOffPrompt, collapsed];
     const sendClearKey = vi.fn(async () => undefined);
     const result = await clearOwnLeftoverComposerDraft({
-      captureInputState: async () => ({ currentInput: card, cursor: { x: 2, y: 21 } }),
+      captureInputState: async () => ({ currentInput: captures.shift() ?? collapsed, cursor: { x: 2, y: 21 } }),
+      sendClearKey,
+      clearKeys: createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => 0 }),
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 3 });
+    expect(sendClearKey).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not chain a card Escape onto the composer its own clear key just emptied', async () => {
+    const ownTextUnderCard = card.replace(/❯[ \u00a0]*(?=\r?\n[^❯]*$)/u, `❯ ${OWN_TEXT}`);
+    expect(ownTextUnderCard).not.toBe(card);
+    const captures = [ownTextUnderCard, card, turnOffPrompt, collapsed];
+    const sendClearKey = vi.fn(async () => undefined);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: captures.shift() ?? collapsed, cursor: { x: 2, y: 21 } }),
       sendClearKey,
       ownComposerTexts: ownLog(OWN_TEXT),
       wait: async () => undefined,
     });
 
+    // The first Escape emptied the composer. A second one now, still inside Claude's double-press
+    // window, is the Rewind gesture if the card does not take it; a later guard pass that starts
+    // from this empty composer dismisses the card instead.
+    expect(sendClearKey).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ status: 'blocked_non_input_state', blockedReason: 'feedback_draft_card' });
-    expect(sendClearKey).toHaveBeenCalledTimes(3);
   });
 
   it('never touches a user draft typed under the card', async () => {

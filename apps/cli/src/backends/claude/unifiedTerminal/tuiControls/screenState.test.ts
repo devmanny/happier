@@ -1857,3 +1857,33 @@ describe('Claude feedback draft card (2.1.322 SendFeedback)', () => {
     expect(state.feedbackDraftCardVisible).toBe(false);
   });
 });
+
+describe('Claude "Esc again to clear" hint (2.1.322)', () => {
+  // Claude Code 2.1.322 binary: the first Escape on a non-empty prompt only arms a notification
+  // `{ key: "escape-again-to-clear", text: "Esc again to clear" }`; a second press within its
+  // 800 ms double-press window clears the prompt. On an empty prompt that same pair opens Rewind.
+  it('reports the footer hint while the draft stays in the composer', () => {
+    const state = parseClaudeScreenState([
+      '────────────────────────────────────────',
+      '❯ leftover prompt text',
+      '────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n'));
+
+    expect(state.escapeAgainToClearHintVisible).toBe(true);
+    expect(state.composerContent).toBe('leftover prompt text');
+  });
+
+  it('ignores the phrase in transcript history above the composer', () => {
+    const state = parseClaudeScreenState([
+      '⏺ Press Esc again to clear the prompt if you change your mind.',
+      '',
+      '────────────────────────────────────────',
+      '❯ leftover prompt text',
+      '────────────────────────────────────────',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.escapeAgainToClearHintVisible).toBe(false);
+  });
+});

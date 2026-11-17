@@ -234,6 +234,11 @@ import Testing
         // No @ needed: it is the only one there.
         let (_, message) = try #require(chat.appendingUserMessage("¿Qué estás haciendo?", now: 8))
         #expect(message.mentions == ["a-mateo"])
+        // A reply reaches it too, even one to the user's own message (nothing else would ever deliver it).
+        let mine = Self.message(1, by: Self.user, mentions: ["a-mateo"])
+        #expect(try #require(chat.replying(to: mine, with: "y además esto", now: 9)).message.mentions == ["a-mateo"])
+        #expect(chat.replyRecipients(to: mine, text: "y además esto") == ["a-mateo"])
+        #expect(chat.replyRecipients(to: Self.message(2, by: Self.agent("a-mateo")), text: "ok") == ["a-mateo"])
         // A group room still reaches only who is mentioned.
         #expect(!Self.room().isDirect && Self.room().directAgentId == nil)
         #expect(Self.room().appendingUserMessage("hola", now: 8)?.message.mentions == [])
@@ -265,6 +270,59 @@ import Testing
         // A group room has no queue: nothing there is edited or canceled.
         #expect(Self.room().queued(seats: [], messages: messages) == nil)
         #expect(Self.room().settledThroughSeq(seats: []) == .max)
+    }
+
+    /// Mateo's seat in his chat as his daemon writes it, read as the app reads it.
+    static func chatSeat(_ chatId: String, read: Int, inFlight: [String: JSONValue]?) -> AgentRoomSeat {
+        var json: [String: JSONValue] = ["v": 1, "roomId": .string(chatId), "agentId": "a-mateo", "sessionId": "d1",
+                                         "readThroughSeq": .number(Double(read)), "updatedAt": 9]
+        if let inFlight { json["inFlight"] = .object(inFlight) }
+        return AgentRoomSeat(json: .object(json))!
+    }
+
+    @Test func aWaitingMessageCanBeSentNowOnlyWhenItsAgentsDaemonTakesIt() throws {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", providerId: "codex", account: .init(label: "ChatGPT"))
+        let chat = AgentRoom.direct(with: mateo, machineId: "m1", directory: "/p", userName: "Manny", now: 1)
+        let messages = [Self.message(1, by: Self.user, mentions: ["a-mateo"]), Self.message(2, by: Self.user, mentions: ["a-mateo"])]
+        // Mateo works on #1, delivered by a daemon that takes what the user sends now into that turn.
+        let stamped: [String: JSONValue] = ["localId": "room.c.a-mateo.n1", "throughSeq": 1, "at": 5, "sent": true, "sendNowSupported": true]
+        let queue = try #require(chat.queued(seats: [Self.chatSeat(chat.id, read: 0, inFlight: stamped)], messages: messages))
+        #expect(queue.messages.map(\.seq) == [2] && queue.reason == .afterCurrentTurn)
+        #expect(queue.sendNowSupported)
+        #expect(queue.sendingNowThroughSeq == nil)
+        // An older daemon doesn't stamp its delivery: it would hold the message to the turn's end anyway.
+        var unstamped = stamped
+        unstamped["sendNowSupported"] = nil
+        #expect(chat.queued(seats: [Self.chatSeat(chat.id, read: 0, inFlight: unstamped)], messages: messages)?.sendNowSupported == false)
+        // No turn under way: there is none to send it into.
+        let idle = try #require(chat.queued(seats: [Self.chatSeat(chat.id, read: 1, inFlight: nil)], messages: messages))
+        #expect(idle.reason == .notDeliveredYet && !idle.sendNowSupported)
+        // #3 sent now, then #4 (on another device): #2 before them goes along with them, as far as the
+        // latest (the daemon steers through it); #5 after them still waits for the turn's end.
+        func sentNow(_ seq: Int) throws -> AgentRoomMessage {
+            try #require(AgentRoomMessage(json: ["v": 1, "roomId": "r1", "seq": .number(Double(seq)), "at": .number(Double(seq)), "author": Self.user,
+                                                 "text": "ya", "mentions": ["a-mateo"], "sendNow": true]))
+        }
+        let steering = try #require(chat.queued(seats: [Self.chatSeat(chat.id, read: 0, inFlight: stamped)],
+                                                messages: messages + [try sentNow(3), try sentNow(4), Self.message(5, by: Self.user, mentions: ["a-mateo"])]))
+        #expect(steering.messages.map(\.seq) == [2, 3, 4, 5])
+        #expect(steering.sendingNowThroughSeq == 4)
+    }
+
+    @Test func sendingNowKeepsEverythingElseOfTheMessage() throws {
+        var waiting = try #require(AgentRoomMessage(json: ["v": 1, "roomId": "r1", "seq": 4, "at": 40, "author": Self.user, "text": "y esto",
+                                                           "mentions": ["a-mateo"], "replyTo": ["seq": 2], "futureField": "kept"]))
+        waiting.version = 3
+        #expect(!waiting.sendNow && waiting.json["sendNow"] == nil)
+        let now = waiting.sendingNow()
+        #expect(now.sendNow)
+        #expect(now.seq == 4 && now.at == 40 && now.author == .user && now.text == "y esto")
+        #expect(now.mentions == ["a-mateo"] && now.replyTo == 2 && now.version == 3)
+        #expect(now.json["futureField"] == "kept" && now.json["sendNow"] == true)
+        // Read back as written, and kept by an edit.
+        #expect(AgentRoomMessage(json: now.json)?.sendNow == true)
+        let edited = try #require(now.editing("mejor esto"))
+        #expect(edited.sendNow && edited.text == "mejor esto" && edited.json["sendNow"] == true)
     }
 
     @Test func anAgentsReplyFromAnotherThreadThanItsLastOneStartsANewThread() {

@@ -53,4 +53,5 @@ enum RPCErrorCodes {
     /// session method, no runner of that session is connected. `RPC_METHOD_NOT_FOUND` is
     /// different: a connected runner answered that it doesn't implement the method.
     static let noConnectedTarget = "RPC_METHOD_NOT_AVAILABLE"
+    static let notImplemented = "RPC_METHOD_NOT_FOUND"
 }

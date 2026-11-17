@@ -3698,6 +3698,45 @@ describe('claudeUnifiedTerminalLauncher', () => {
     expect(session.onThinkingChange).not.toHaveBeenCalledWith(false);
   });
 
+  it('marks an unverified submit after Enter as not-sure-it-reached instead of failing the turn when Pending owns the rows', async () => {
+    setProcessTty(false);
+    const session = createSession();
+    const observeProviderInputOutcome = vi.fn();
+    (session.client as unknown as {
+      bindProviderInputOutcomeProducer: ReturnType<typeof vi.fn>;
+    }).bindProviderInputOutcomeProducer = vi.fn(() => observeProviderInputOutcome);
+    const injectionError = Object.assign(new Error('Claude unified terminal prompt submission could not be confirmed'), {
+      code: 'claude_unified_terminal_injection_failed',
+      failureState: 'failed_ambiguous',
+      reason: 'verification_failed',
+      phase: 'after_enter_unknown',
+      duplicateRisk: 'possible',
+      recoverable: true,
+      userMessageLocalIds: ['pending-local-unverified-after-enter'],
+    });
+    let failureHandlingResult: unknown = 'not-called';
+    mocks.runClaudeUnifiedTerminalSession.mockImplementationOnce(async (opts: {
+      onTerminalInjectionFailure?: (error: Error) => unknown;
+    }) => {
+      failureHandlingResult = await opts.onTerminalInjectionFailure?.(injectionError);
+    });
+
+    await expect(claudeUnifiedTerminalLauncher(session, {
+      initialMode: {
+        permissionMode: 'default',
+        claudeUnifiedTerminalHost: 'zellij',
+      },
+    })).resolves.toEqual({ type: 'exit', code: 0 });
+
+    expect(observeProviderInputOutcome.mock.calls).toEqual([
+      [{ kind: 'effect_may_have_occurred', localId: 'pending-local-unverified-after-enter' }],
+    ]);
+    expect(failureHandlingResult).toBeUndefined();
+    expect(session.client.blockPendingMessageDelivery).not.toHaveBeenCalled();
+    expect(session.client.sessionTurnLifecycle?.failTurn).not.toHaveBeenCalled();
+    expect(session.onThinkingChange).not.toHaveBeenCalledWith(false);
+  });
+
   it('surfaces Windows-console submit failures after Enter as primary turn failures', async () => {
     setProcessTty(false);
     const session = createSession();

@@ -16,9 +16,13 @@ struct PendingBubble: View {
     @State private var confirmSendNow = false
     @State private var editing = false
     @State private var editText = ""
+    @State private var confirmClearDraft = false
+    /// Why the terminal draft wasn't cleared (or that there was none).
+    @State private var clearDraftNotice: String?
 
     private var session: Session? { store.sessions[sessionId] }
-    private var canSteerNow: Bool { working && (session?.steerAvailable ?? false) }
+    private var canSteerNow: Bool { session?.canSteerNow(at: store.presenceDate()) ?? false }
+    private var clearingDraft: Bool { store.clearingTerminalDrafts.contains(sessionId) }
 
     var body: some View {
         Group {
@@ -63,6 +67,25 @@ struct PendingBubble: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will stop the current turn and send this message immediately.")
+        }
+        .alert("Clear the terminal draft?", isPresented: $confirmClearDraft) {
+            Button("Clear Draft", role: .destructive) {
+                guard !clearingDraft else { return }
+                AppHaptics.warning()
+                Task {
+                    // The runner sends the held messages itself once the composer is empty.
+                    let outcome = await store.clearTerminalDraft(in: sessionId)
+                    if let notice = outcome.message { clearDraftNotice = notice } else { AppHaptics.success() }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes the unsent text in Claude's composer on your computer, even text you typed there. Happier only presses Esc, and won't touch the terminal while Claude is working or asking something. Your queued messages go out right after.")
+        }
+        .alert("Clear Terminal Draft", isPresented: Binding(get: { clearDraftNotice != nil }, set: { if !$0 { clearDraftNotice = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(clearDraftNotice ?? "")
         }
         .alert("Edit Pending Message", isPresented: $editing) {
             TextField("Message", text: $editText, axis: .vertical)
@@ -129,6 +152,11 @@ struct PendingBubble: View {
             Button("Copy") { MessageClipboard.copy(message.text); AppHaptics.success() }
             Button("Remove", role: .destructive) { AppHaptics.warning(); Task { await store.removePending(message.localId, in: sessionId) } }
         case .blocked(let reason):
+            if reason == Self.terminalDraftOpen, session?.terminalDraftClearSupported == true {
+                // The runner holds these until Claude's composer is empty; Retry alone can't empty it.
+                Button("Clear Terminal Draft", systemImage: "delete.left") { AppHaptics.light(); confirmClearDraft = true }
+                    .disabled(clearingDraft)
+            }
             if reason == Self.terminalNotReady {
                 // A plain retry goes back to the terminal that never came up.
                 Button("Restart Session & Retry") {
@@ -182,6 +210,7 @@ struct PendingBubble: View {
         case .delivering: String(localized: "Delivering…")
         case .discarded: String(localized: "Discarded")
         case .blocked where store.restartingSessions.contains(sessionId): String(localized: "Restarting the session…")
+        case .blocked(let reason) where reason == Self.terminalDraftOpen && clearingDraft: String(localized: "Clearing the terminal draft…")
         case .blocked(let reason): String(localized: "Blocked · \(Self.reasonLabel(reason))")
         case .uncertain: String(localized: "Not sure it reached the agent")
         }
@@ -189,11 +218,13 @@ struct PendingBubble: View {
 
     /// The runner gave up starting its terminal (`terminal_host_unreachable`).
     static let terminalNotReady = "terminal_host_unreachable"
+    /// Text the runner didn't write is open in Claude's terminal composer; it holds the messages.
+    static let terminalDraftOpen = "terminal_composer_draft"
 
     static func reasonLabel(_ reason: String) -> String {
         switch reason {
         case "steering_unavailable": String(localized: "steering unavailable")
-        case "terminal_composer_draft": String(localized: "a draft is open in the terminal")
+        case terminalDraftOpen: String(localized: "a draft is open in the terminal")
         case "payload_too_large": String(localized: "message too large")
         case terminalNotReady: String(localized: "the agent’s terminal didn’t start")
         default: reason.replacingOccurrences(of: "_", with: " ")

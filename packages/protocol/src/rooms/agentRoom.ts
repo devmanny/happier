@@ -33,12 +33,13 @@ import { SESSION_PERMISSION_INTENT_INPUTS } from '../sessionMetadata/sessionPerm
  * previews leave it out.
  *
  * Seats are written by daemons (and a member's runner when its turn ends), with one exception: the
- * app may withdraw (delete) or edit a user message its member hasn't got, above both its marker and
- * its in-flight `throughSeq`, in one atomic write that also writes that member's seat back byte for
- * byte at the version it read. That seat write is only a version guard; its content stays the
- * daemons'. A daemon reads seats before messages and claims a delivery by CAS on the seat version
- * it read, so either the withdrawal lands first and the claim fails, or the app's write conflicts
- * and the seat it gets back shows the member already has the message. Readers skip missing messages.
+ * app may withdraw (delete), edit or flag `sendNow` a user message its member hasn't got, above both
+ * its marker and its in-flight `throughSeq`, in one atomic write that also writes that member's seat
+ * back byte for byte at the version it read. That seat write is only a version guard; its content
+ * stays the daemons'. A daemon reads seats before messages and claims a delivery by CAS on the seat
+ * version it read, so either the app's write lands first and the claim fails, or the app's write
+ * conflicts and the seat it gets back shows the member already has the message. Readers skip
+ * missing messages.
  * The app revises only in an agent's own chat, and there `sala_leer` gives the member the user's
  * messages only through what its seat has, reading the seat before the messages too, so the agent
  * never reads a message that may still change.
@@ -152,6 +153,12 @@ export const AgentRoomMessageV1Schema = z.object({
    * plus whoever the user names) or picked an option on (it mentions only its author).
    */
   replyTo: z.object({ seq: SeqSchema }).passthrough().optional(),
+  /**
+   * Steer Now: the user wants this message of theirs in its member's running turn, not after it. The
+   * app sets it (guarded write above) only on a message its member hasn't got; a member's daemon
+   * honors it only while it is above that member's in-flight `throughSeq` (`decideRoomDelivery`).
+   */
+  sendNow: z.boolean().optional(),
 }).passthrough();
 export type AgentRoomMessageV1 = z.infer<typeof AgentRoomMessageV1Schema>;
 
@@ -172,6 +179,20 @@ export const AgentRoomSeatV1Schema = z.object({
     throughSeq: z.number().int().min(0).max(AGENT_ROOM_MAX_SEQ),
     at: z.number(),
     sent: z.boolean().optional(),
+    /**
+     * A Steer Now delivery names the delivery it was sent past (what was in flight when it was
+     * claimed) until that one's reply is posted (the marker then moves to its `throughSeq`) or this
+     * one's is (a turn the steer joined has no reply of its own). Posted before that turn's ready
+     * (from the transcript, by the daemon), it stays `ended` until that ready: the turn that ready
+     * ended is then known to be that one, not this one's, which has only begun.
+     */
+    steers: z.object({
+      localId: z.string().min(1),
+      throughSeq: z.number().int().min(0).max(AGENT_ROOM_MAX_SEQ),
+      ended: z.boolean().optional(),
+    }).passthrough().optional(),
+    /** Written by every delivery of a daemon that honors `sendNow`: the app offers Steer Now only then. */
+    sendNowSupported: z.boolean().optional(),
   }).passthrough().optional(),
   updatedAt: z.number(),
 }).passthrough();
