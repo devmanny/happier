@@ -38,6 +38,13 @@ final class KeyboardViewController: UIInputViewController {
         model.appeared()
     }
 
+    /// The system's own globe comes and goes (docked or floating on an iPad, an iPhone app on an
+    /// iPad): whether the keyboard shows one is asked again on every layout, as Apple recommends.
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        model.laidOut(width: view.bounds.width, needsGlobe: needsInputModeSwitchKey)
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         model.disappeared()
@@ -81,6 +88,8 @@ final class KeyboardModel {
     private(set) var waiting = false
     /// The space bar is held: the keyboard is a trackpad for the cursor.
     private(set) var trackpad = false
+    /// The keyboard's width, for its layout (the iPad's floating keyboard is narrow).
+    private(set) var width: CGFloat = 375
 
     /// Weak: the SwiftUI view keeps the model, and a status notification can still arrive after
     /// the system let go of the keyboard; there's no field to type in then.
@@ -98,8 +107,13 @@ final class KeyboardModel {
         self.controller = controller
     }
 
-    var listening: Bool { status?.isListening ?? false }
+    var listening: Bool { status?.isListening() ?? false }
     var microphoneOn: Bool { status?.microphoneOn() ?? false }
+
+    func laidOut(width: CGFloat, needsGlobe: Bool) {
+        if width > 0, abs(width - self.width) > 0.5 { self.width = width }
+        if needsGlobe != self.needsGlobe { self.needsGlobe = needsGlobe }
+    }
 
     func appeared() {
         guard let controller else { return }
@@ -120,6 +134,18 @@ final class KeyboardModel {
             self?.statusChanged()
         }
         statusChanged()
+        restartLeftTake()
+    }
+
+    /// Back with the app still recording a take this keyboard left (it closed mid-take and the
+    /// finish didn't arrive): the button would show red and type nothing. That take ends and a new
+    /// one starts, typing here.
+    private func restartLeftTake() {
+        guard let status, status.isListening(), typing.hasLeft(take: status.take) else { return }
+        log.notice("back with a left take still recording: finishing it and starting a new one")
+        autoStart.opened(waitingOut: status.take)
+        saveAutoStart()
+        send(.finish)
     }
 
     /// The keyboard went away (another field's keyboard, the app closed, the message sent): a take
@@ -159,7 +185,7 @@ final class KeyboardModel {
         }
         let current = channel.readStatus()
         log.notice("mic tapped: app \(current.map { "\($0.phase.rawValue) on=\($0.microphoneOn())" } ?? "silent", privacy: .public)")
-        if current?.isListening == true {
+        if current?.isListening() == true {
             autoStart.cancel()
             saveAutoStart()
             send(.finish)
@@ -258,11 +284,11 @@ final class KeyboardModel {
     private func statusChanged() {
         guard let status = channel?.readStatus() else { return }
         if status != self.status { self.status = status }
-        if status.isListening || status.final || status.phase == .off { waiting = false }
+        if status.isListening() || status.final || status.phase == .off { waiting = false }
         typeTake(status)
         // Back from Happier, which turned the microphone on for the tap that opened it.
         let hadRequest = autoStart.requested != nil
-        if autoStart.shouldStart(microphoneOn: status.microphoneOn(), listening: status.isListening) {
+        if autoStart.shouldStart(microphoneOn: status.microphoneOn(), listening: status.isListening(), take: status.take) {
             log.notice("back from Happier with the microphone on: starting the take")
             send(.start)
         }

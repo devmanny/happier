@@ -133,6 +133,18 @@ import Testing
         #expect(!status.microphoneOn(at: now))
     }
 
+    @Test func aTakeCountsAsListeningOnlyWhileTheAppIsAlive() {
+        // iOS killed Happier mid-take: the shared status still says recording. The keyboard showed
+        // a red button that heard nothing until tapped off and on.
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        var status = DictationKeyboard.Status(phase: .recording, take: 3, standbyUntil: now.addingTimeInterval(120), heartbeat: now.addingTimeInterval(-10))
+        #expect(status.isListening(at: now))
+        status.heartbeat = now.addingTimeInterval(-60)
+        #expect(!status.isListening(at: now))
+        status = DictationKeyboard.Status(phase: .ready, standbyUntil: now.addingTimeInterval(120), heartbeat: now)
+        #expect(!status.isListening(at: now))
+    }
+
     @Test func statusAndCommandsCrossTheSharedFolder() throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "keyboard-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -189,6 +201,19 @@ import Testing
         #expect(typing.userTookOver == 2)
         #expect(typing.edit(for: status(2, "Busca una Mac Studio.", final: true), before: "Busca una A") == nil)
         #expect(typing.edit(for: status(3, "Sí."), before: "Busca una A") == .init(delete: 0, insert: " Sí"))
+    }
+
+    @Test func itKnowsATakeItLeftIsNotOneItTypes() {
+        // Back in the field with the app still recording a take the keyboard left: the red button
+        // would listen and type nothing. The keyboard ends that take and starts a new one.
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(1, "x", final: true), before: "")
+        _ = typing.edit(for: status(2, "hola"), before: "")
+        #expect(!typing.hasLeft(take: 2))
+        typing.leave(take: 2)
+        #expect(typing.hasLeft(take: 2))
+        #expect(!typing.hasLeft(take: 3))
+        #expect(!KeyboardTyping().hasLeft(take: 5))
     }
 
     @Test func aTakeLeftWhenTheKeyboardClosedIsNotTypedOnReturn() {
@@ -250,6 +275,23 @@ import Testing
         cancelled.cancel()
         let afterCancel = starts(&cancelled, after: 5)
         #expect(!afterCancel)
+    }
+
+    @Test func aLeftTakeIsWaitedOutThenANewOneStarts() {
+        var start = KeyboardAutoStart()
+        start.opened(at: now, waitingOut: 7)
+        // Take 7 is finishing: wait.
+        let finishing = start.shouldStart(at: now.addingTimeInterval(1), microphoneOn: true, listening: true, take: 7)
+        #expect(!finishing)
+        #expect(start.requested != nil)
+        let done = start.shouldStart(at: now.addingTimeInterval(2), microphoneOn: true, listening: false, take: 7)
+        #expect(done)
+        // Another take listening (the user tapped) settles it.
+        var tapped = KeyboardAutoStart()
+        tapped.opened(at: now, waitingOut: 7)
+        let other = tapped.shouldStart(at: now.addingTimeInterval(1), microphoneOn: true, listening: true, take: 8)
+        #expect(!other)
+        #expect(tapped.requested == nil)
     }
 
     @Test func itSurvivesTheKeyboardBeingReloaded() throws {

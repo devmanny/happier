@@ -43,6 +43,9 @@ final class DictationKeyboardService {
         publish()
     }
 
+    /// Happier went to the background since it was last active.
+    private var cameFromBackground = false
+
     var microphoneOn: Bool { standby != nil }
 
     /// Opened from the keyboard: the microphone on, nothing more. The panel sends you back, and the
@@ -65,9 +68,20 @@ final class DictationKeyboardService {
     /// in (no stop tapped). It ends here, typing its last words there; left running it would keep
     /// Whisper working and hold the audio, so reading a message aloud wouldn't start.
     func appBecameActive() {
+        // Only back from the background: on an iPad, Happier's window can stay on screen beside the
+        // app being typed in and turn active again as focus moves, while the keyboard's take goes on.
+        guard cameFromBackground else { return }
+        cameFromBackground = false
         guard dictation.isRecording else { return }
         Self.log.notice("keyboard dictation: back in the app with a take still recording; finishing it")
         Task { await finishTake() }
+    }
+
+    /// Happier left the screen: the panel is done, and a take still recording when it comes back
+    /// was left behind.
+    func appEnteredBackground() {
+        showsPanel = false
+        cameFromBackground = true
     }
 
     /// The microphone off now (the panel's button, or the keyboard's).

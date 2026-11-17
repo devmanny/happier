@@ -50,7 +50,7 @@ struct HappierApp: App {
                     case .background:
                         #if os(iOS)
                         // Back in the app being typed in: the keyboard shows what it hears.
-                        delegate.keyboard.showsPanel = false
+                        delegate.keyboard.appEnteredBackground()
                         #endif
                         MessageSpeaker.shared.appMovedToBackground(true)
                         delegate.browser.appEnteredBackground()
