@@ -183,6 +183,7 @@ public final class HappierStore {
         let saved = (UserDefaults.standard.stringArray(forKey: Self.knownServersKey) ?? []).compactMap(URL.init(string:))
         self.server = current
         knownServers = RelayList.adding(current, to: saved)
+        pendingTerminalConnect = pendingTerminalConnects.load()
     }
 
     // MARK: - Account
@@ -200,6 +201,7 @@ public final class HappierStore {
 
     public func signIn(_ credentials: Credentials, server: URL) throws {
         if let link = pendingSessionLink, RelayList.canonical(link.server) != RelayList.canonical(server) { cancelSessionLink() }
+        retargetTerminalConnect(to: server)
         self.server = server
         UserDefaults.standard.set(server, forKey: "happier.server")
         try credentialStore.save(credentials, server: server)
@@ -209,6 +211,7 @@ public final class HappierStore {
 
     public func signOut() {
         cancelSessionLink()
+        cancelTerminalConnect()
         if let api, let token = UserDefaults.standard.string(forKey: Self.pushTokenKey) {
             UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
             Task { try? await api.deletePushToken(token) }
@@ -641,9 +644,11 @@ public final class HappierStore {
     /// Signed in to `api` with `keys` without the sync loop or a socket: acknowledged socket emits
     /// (machine RPCs, metadata edits) go to `socketAck`, and updates arrive through `handleUpdate`.
     func installForTesting(api: HappierAPI, keys: AccountKeys, snapshotDirectory: URL, networkPath: NetworkPathMonitor? = nil,
+                           credentials: Credentials? = nil,
                            socketAck: @escaping (_ event: String, _ payload: JSONValue) async throws -> [JSONValue]) {
         if let networkPath { watchNetworkPath(networkPath) }
         self.api = api
+        self.credentials = credentials
         self.keys = keys
         snapshots = SessionSnapshotStore(directory: snapshotDirectory, scope: "test")
         testSocketAck = socketAck
@@ -1143,6 +1148,7 @@ public final class HappierStore {
     /// there is one, otherwise the sign-in screen opens on that relay.
     public func switchServer(to url: URL) {
         if let link = pendingSessionLink, RelayList.canonical(link.server) != RelayList.canonical(url) { cancelSessionLink() }
+        retargetTerminalConnect(to: url)
         guard RelayList.canonical(url) != RelayList.canonical(server) else { return }
         let saved = try? credentialStore.load(server: url)
         if phase == .ready { disconnectAccount() }
@@ -1244,15 +1250,68 @@ public final class HappierStore {
         guard let request = AccountLinkRequest(link) else {
             throw RPCError(message: String(localized: "That isn't a Happier link code. Scan the code on the device you want to sign in."), code: "invalid_link")
         }
-        guard let api, let credentials, let accountId = credentials.accountId else {
+        guard let api, let credentials, credentials.accountId != nil else {
             throw RPCError(message: String(localized: "Sign in on this device first."), code: "signed_out")
         }
-        let encrypted = try await api.accountIsEncrypted()
-        if encrypted {
-            guard let profile = try await api.accountLinkProfile(accountId: accountId) else { throw AccountKeyProvisioning.Unavailable() }
-            try AccountKeyProvisioning.verify(encrypted: true, account: profile, credentials: credentials)
-        }
+        try await api.verifyAccountKeyForProvisioning(credentials)
         try await api.approveAccountLink(publicKey: request.publicKey, response: try credentials.accountLinkResponse(for: request))
+    }
+
+    /// A computer's `happier auth login` link opened on this device, waiting for its confirmation;
+    /// it stays through a relay switch, the sign-in that may follow and a relaunch meanwhile
+    /// (`PendingTerminalConnectStore`).
+    public private(set) var pendingTerminalConnect: TerminalConnectLink?
+    @ObservationIgnored private let pendingTerminalConnects = PendingTerminalConnectStore(defaults: .standard)
+
+    private func setPendingTerminalConnect(_ link: TerminalConnectLink?) {
+        pendingTerminalConnect = link
+        pendingTerminalConnects.save(link)
+    }
+
+    /// Takes an opened `happier auth login` link (deep link or web link) for confirmation.
+    @discardableResult
+    public func handleTerminalConnectLink(_ text: String) -> Bool {
+        guard let link = TerminalConnectLink(text) else {
+            lastError = String(localized: "This isn't a Happier connection link. Run happier auth login on the computer and use the code or link it shows.")
+            return false
+        }
+        setPendingTerminalConnect(link)
+        return true
+    }
+
+    public func cancelTerminalConnect() {
+        setPendingTerminalConnect(nil)
+    }
+
+    /// The person picked or signed in to another relay while a computer link waited: it's answered
+    /// there, as the web app's `retargetPendingTerminalConnectToServerUrl` does, rather than
+    /// switching back to the link's relay (and its sign-in screen) on Connect.
+    private func retargetTerminalConnect(to url: URL) {
+        guard let link = pendingTerminalConnect,
+              RelayList.canonical(terminalConnectRelay(for: link, allowsLoopback: true)) != RelayList.canonical(url) else { return }
+        setPendingTerminalConnect(link.retargeted(to: url))
+    }
+
+    /// The relay a computer link is approved on (see `TerminalConnect.relay`).
+    public func terminalConnectRelay(for link: TerminalConnectLink, allowsLoopback: Bool) -> URL {
+        TerminalConnect.relay(for: link, current: server, known: knownServers, allowsLoopback: allowsLoopback)
+    }
+
+    /// Signs in the computer that showed `link`, as the web app's terminal connect does: on the
+    /// link's relay (switching to it, as its saved sign-in when there is one), after checking this
+    /// device's key with that relay. Without a sign-in there the link waits in
+    /// `pendingTerminalConnect` and the sign-in screen opens on that relay.
+    public func approveTerminalConnect(_ link: TerminalConnectLink, allowsLoopback: Bool) async throws -> TerminalConnect.Outcome {
+        let target = terminalConnectRelay(for: link, allowsLoopback: allowsLoopback)
+        if RelayList.canonical(target) != RelayList.canonical(server) { switchServer(to: target) }
+        guard phase == .ready, let api, let credentials else {
+            setPendingTerminalConnect(link)
+            return .needsSignIn(target)
+        }
+        let outcome = try await TerminalConnect.approve(link, api: api, credentials: credentials)
+        // Answered (or gone): a relaunch doesn't offer it again; the open confirmation stays to show it.
+        if pendingTerminalConnect?.publicKey == link.publicKey { pendingTerminalConnects.save(nil) }
+        return outcome
     }
 
     /// The 32-byte recovery secret, when this device holds it (for showing the backup key).

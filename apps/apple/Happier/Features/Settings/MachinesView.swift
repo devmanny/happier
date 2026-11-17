@@ -5,14 +5,20 @@ import SwiftUI
 /// not listed.
 struct MachinesView: View {
     @Environment(HappierStore.self) private var store
+    @State private var connectingComputer = false
 
     var body: some View {
         // Re-evaluated every half minute: "online" means a heartbeat within the last minute.
         TimelineView(.periodic(from: .now, by: 30)) { context in
             Form {
                 if store.machines.isEmpty {
-                    ContentUnavailableView("No Machines Yet", systemImage: "desktopcomputer",
-                                           description: Text("Run happier on a computer and sign in with this account; it shows up here."))
+                    ContentUnavailableView {
+                        Label("No Machines Yet", systemImage: "desktopcomputer")
+                    } description: {
+                        Text("Run happier auth login on a computer, then connect it from here.")
+                    } actions: {
+                        Button("Connect Computer", systemImage: "qrcode.viewfinder") { connectComputer() }
+                    }
                 } else {
                     Section {
                         ForEach(store.machines) { machine in
@@ -23,15 +29,37 @@ struct MachinesView: View {
                             }
                         }
                     } footer: {
-                        Text("To add one, install the Happier CLI on it and run happier.")
+                        Text("To add one, run happier auth login on it, then choose Connect Computer and scan its code.")
                     }
                 }
             }
             .formStyle(.grouped)
         }
         .navigationTitle("Machines")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Connect Computer", systemImage: "qrcode.viewfinder") { connectComputer() }
+                    .help(Text("Connect Computer"))
+                    .accessibilityIdentifier("machines-connect-computer")
+            }
+        }
+        .sheet(isPresented: $connectingComputer) {
+            NavigationStack { ConnectComputerView() }
+                #if os(macOS)
+                .frame(minWidth: 440, minHeight: 360)
+                #endif
+        }
         .refreshable { await store.refreshMachines(reportErrors: true) }
         .task { await store.refreshMachines() }
+        // A computer just connected signs in and starts its daemon; show it.
+        .onChange(of: connectingComputer) { _, open in
+            if !open { Task { await store.refreshMachines() } }
+        }
+    }
+
+    private func connectComputer() {
+        AppHaptics.light()
+        connectingComputer = true
     }
 }
 

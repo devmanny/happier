@@ -34,7 +34,7 @@ import Testing
     func unsafeOpaqueIDsAreNotSerialized(_ id: String) {
         #expect(SessionLink(sessionId: id, server: server) == nil)
     }
-    @Test(arguments: ["http://localhost:8807", "http://127.0.0.1:8807", "http://[::1]:8807"])
+    @Test(arguments: ["http://localhost:8807", "http://127.0.0.1:8807", "http://[::1]:8807", "http://127.0.0.2:8807", "http://app.localhost:8807"])
     func loopbackRelayIsSupported(_ address: String) throws {
         let link = try #require(SessionLink(sessionId: "test-session", server: URL(string: address)!))
         #expect(SessionLink(url: link.nativeURL) == link)
@@ -54,7 +54,8 @@ import Testing
         "happier-native://session/a?server=https://relay.example%23fragment",
         "happier-native://session/a?server=http://relay.example",
         "happier-native://session/a?server=http://127.0.0.1.evil.test",
-        "happier-native://session/a?server=http://127.0.0.2",
+        "happier-native://session/a?server=http://localhost.evil.test",
+        "happier-native://session/a?server=http://128.0.0.1",
         "happier-native://session/a?server=https://relay.example/base%5Cpath",
         "happier-native://session/a?server=file:///tmp/relay",
         "happier-native://session/a?server=relay.example",

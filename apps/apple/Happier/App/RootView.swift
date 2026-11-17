@@ -57,6 +57,9 @@ struct RootView: View {
             case .session:
                 showBrowser = false
                 if store.handleSessionLink(url) { AppHaptics.light() }
+            case .terminalConnect:
+                showBrowser = false
+                if store.handleTerminalConnectLink(url.absoluteString) { AppHaptics.light() }
             case .keyboardDictation:
                 #if os(iOS)
                 showBrowser = false
@@ -77,6 +80,20 @@ struct RootView: View {
         #endif
         .sheet(isPresented: $showCookieImport) {
             NavigationStack { SafariCookieImportView(requestID: cookieImportID) }
+        }
+        // A computer's `happier auth login` link: confirmed once signed in (on its relay, when the
+        // approval had to switch and sign in there first).
+        .sheet(item: Binding(
+            get: { store.phase == .ready ? store.pendingTerminalConnect : nil },
+            set: { if $0 == nil, store.phase == .ready { store.cancelTerminalConnect() } }
+        )) { link in
+            NavigationStack {
+                TerminalConnectView(link: link, allowsLoopbackRelay: true) { store.cancelTerminalConnect() }
+                    .sheetCloseButton()
+            }
+            #if os(macOS)
+            .frame(minWidth: 440, minHeight: 360)
+            #endif
         }
         .confirmationDialog("Open on Another Relay?", isPresented: Binding(
             get: { store.sessionLinkConfirmation != nil },

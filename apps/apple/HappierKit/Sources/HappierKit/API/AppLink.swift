@@ -8,8 +8,15 @@ public enum AppLink: Equatable, Sendable {
     case task(String)
     /// Opened from the dictation keyboard: turn the microphone on and listen.
     case keyboardDictation
+    /// A computer's `happier auth login` link (`TerminalConnectLink`), deep link or web page, to
+    /// approve here rather than in a browser.
+    case terminalConnect
 
     public init?(url: URL, isBrowserRole: Bool = false) {
+        if TerminalConnectLink(url.absoluteString) != nil {
+            self = .terminalConnect
+            return
+        }
         switch (url.scheme?.lowercased(), url.host?.lowercased()) {
         case ("happier-native", "inbox"): self = .inbox
         case ("happier-native", "new"): self = .newSession

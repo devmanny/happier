@@ -37,6 +37,18 @@ import Testing
     func unsupportedURLsDoNotOpenInBrowser(_ address: String) {
         #expect(AppLink(url: URL(string: address)!) == nil)
     }
+    // Which links the system delivers is the app's registration, not this: only `happier-native`
+    // and, in the browser builds, the web link reach the app today (see README, Connect a computer).
+    @Test(arguments: [false, true]) func computerSignInLinksResolveToTheApproval(_ browserRole: Bool) {
+        let params = "key=V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE&server=https%3A%2F%2Frelay.example.com&pairingSecret=CwsL&createdAt=1&expiresAt=2"
+        for address in ["https://happier.nomada.cloud/terminal/connect#\(params)", "happier-native://terminal?\(params)", "happier://terminal?\(params)"] {
+            #expect(AppLink(url: URL(string: address)!, isBrowserRole: browserRole) == .terminalConnect)
+        }
+        // Without a key it's an ordinary page (or session-link validation for the native scheme).
+        #expect(AppLink(url: URL(string: "https://happier.nomada.cloud/terminal/connect")!, isBrowserRole: browserRole) == .website)
+        #expect(AppLink(url: URL(string: "happier-native://terminal")!, isBrowserRole: browserRole) == .session)
+    }
+
     @Test func safariImportLinksContainOnlyATransferID() {
         let id = UUID()
         #expect(AppLink(url: URL(string: "happier-native://browser-import/\(id)")!) == .browserImport(id))

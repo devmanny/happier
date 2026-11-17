@@ -35,6 +35,13 @@ struct WelcomeView: View {
                 Text("Your coding agents, in your pocket.")
                     .font(.title3)
                     .foregroundStyle(.secondary)
+                if store.pendingTerminalConnect != nil {
+                    Label("Sign in to connect the computer that ran happier auth login.", systemImage: "desktopcomputer")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 8)
+                }
             }
             Spacer()
             VStack(spacing: 12) {
@@ -131,6 +138,10 @@ struct WelcomeView: View {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
             authOptions = try? await AuthAPI(server: server).options()
+        }
+        // A computer waits for this device to sign in: on its relay.
+        .onChange(of: store.pendingTerminalConnect, initial: true) { _, link in
+            if let link { serverText = store.terminalConnectRelay(for: link, allowsLoopback: true).absoluteString }
         }
         .onChange(of: store.pendingSessionLink) { _, link in
             if let link, RelayList.canonical(link.server) == RelayList.canonical(store.server), store.sessionLinkConfirmation == nil {

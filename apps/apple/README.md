@@ -267,6 +267,29 @@ App Group provisioning, profile selection or successful sign-in on a real websit
 References: [Safari extension permissions](https://developer.apple.com/documentation/safariservices/managing-safari-web-extension-permissions),
 [native messaging](https://developer.apple.com/documentation/safariservices/messaging-between-the-app-and-javascript-in-a-safari-web-extension).
 
+## Connect a computer
+
+`happier auth login` on a computer shows a QR (`happier://terminal?key=…&server=…&pairingSecret=…`)
+and prints a web link (`https://…/terminal/connect#…`). The supported way to approve it here is
+**Settings › Machines › Connect Computer**: it scans the QR (iPhone, iPad) or takes the pasted link
+(any device, either kind); Link New Device hands a computer's code there too. Connect does what the
+web app's terminal connect does (`TerminalConnect` in HappierKit): it checks this device's key with
+the relay, reads `GET /v1/auth/request/status`, and posts the sealed answer (`POST /v1/auth/response`),
+V3 (authenticated with the link's pairing secret) when the link carries one. A link on another relay
+switches to it, as the web app does; with no sign-in there, the sign-in screen opens on that relay,
+the link waits (through a relaunch, for ten minutes or until it expires) and the confirmation comes
+back after it. Signing in to a different relay meanwhile moves the waiting link to that relay, as the
+web app's `retargetPendingTerminalConnectToServerUrl` does.
+
+**Neither link the CLI prints opens this app from outside it** in the standard build: the app
+registers only the `happier-native` scheme (`happier://` belongs to the Expo app), and
+`apple-app-site-association` gives this app only `/native/*`, so `/terminal/connect` opens the Expo
+app or the browser. Only the browser builds (`project.browser-*.yml`, Happier as the default browser)
+receive the web link, and `happier-native://terminal?…` (which the CLI doesn't print) opens the
+confirmation directly. Opening the CLI's links here needs one of two decisions outside this app:
+register `happier` (it collides with the Expo app), or give `/terminal/connect` to
+`DPF7ZLTLN2.com.devmanny.happier` in `apple-app-site-association` (the fragment carries the key).
+
 ## Protocol mapping
 
 Each Swift module follows the TypeScript owner it mirrors; check that owner when the protocol changes.
@@ -312,7 +335,8 @@ an App Shortcut on both the iPhone and the watch (Siri, Shortcuts, the Ultra's A
 
 ## Current scope
 
-Sign in by linking from another device (QR) or with the secret key; session list; chat with
+Sign in by linking from another device (QR) or with the secret key; connect a computer that ran
+`happier auth login`; session list; chat with
 Markdown, thinking, tool calls, inline permission approval, agent questions, stop and archive;
 new sessions on a machine; attachments; dictation, also from any app with the dictation keyboard;
 push notifications.

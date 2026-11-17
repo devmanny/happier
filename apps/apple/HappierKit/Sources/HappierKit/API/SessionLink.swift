@@ -62,9 +62,9 @@ public struct SessionLink: Equatable, Sendable {
               value.unicodeScalars.allSatisfy({ !CharacterSet.whitespacesAndNewlines.contains($0) && !CharacterSet.controlCharacters.contains($0) }),
               let parts = URLComponents(string: value),
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
-              let scheme = parts.scheme?.lowercased(), let host = parts.host?.lowercased(), !host.isEmpty else { return nil }
-        let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
-        guard scheme == "https" || (scheme == "http" && loopback) else { return nil }
-        return ServerAddress.normalize(value)
+              let scheme = parts.scheme?.lowercased(), let host = parts.host, !host.isEmpty,
+              let server = ServerAddress.normalize(value) else { return nil }
+        guard scheme == "https" || (scheme == "http" && ServerAddress.isLoopback(server)) else { return nil }
+        return server
     }
 }

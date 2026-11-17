@@ -56,6 +56,9 @@ public struct HTTPClient: Sendable {
         var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty {
             components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // `URLQueryItem` leaves `+` as is, and the relay reads a query as a form, where `+` is a
+            // space: a standard-base64 key would arrive changed.
+            components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         }
         var request = URLRequest(url: components.url!)
         request.httpMethod = method

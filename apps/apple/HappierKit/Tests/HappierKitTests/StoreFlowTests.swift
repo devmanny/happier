@@ -56,6 +56,73 @@ import Testing
         #expect(store.openRequest == "s1")
     }
 
+    // MARK: Connecting a computer (`happier auth login`)
+
+    @Test func aComputerLinkOnTheCurrentRelayIsApprovedWithThisAccount() async throws {
+        let relay = Relay()
+        let store = relay.store(credentials: .legacy(token: "t", secret: Data(0..<32)))
+        let text = "https://happier.nomada.cloud/terminal/connect#key=V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE&server=https%3A%2F%2Frelay.invalid"
+
+        #expect(!store.handleTerminalConnectLink("https://happier.nomada.cloud/terminal/connect"))
+        #expect(store.lastError != nil && store.pendingTerminalConnect == nil)
+        #expect(store.handleTerminalConnectLink(text))
+        let link = try #require(store.pendingTerminalConnect)
+
+        #expect(try await store.approveTerminalConnect(link, allowsLoopback: true) == .approved)
+        #expect(relay.log.values == ["terminal status", "terminal approve"])
+        #expect(store.server == URL(string: "https://relay.invalid"))
+        // Sealed for the computer's key with this account's content key.
+        let sealed = try #require(relay.terminalResponse?["response"]?.stringValue.flatMap(Base64.decode))
+        #expect(HappierCrypto.openBoxBundle(sealed, secretKey: Data(repeating: 9, count: 32)) == Data([0]) + relay.keys.content.secretKey)
+    }
+
+    @Test func aComputerOnAnotherRelayWaitsForASignInThere() async throws {
+        let defaults = UserDefaults.standard
+        let saved = (defaults.object(forKey: "happier.server"), defaults.object(forKey: "happier.knownServers"))
+        defer {
+            defaults.set(saved.0, forKey: "happier.server")
+            defaults.set(saved.1, forKey: "happier.knownServers")
+        }
+        let relay = Relay()
+        let store = relay.store(credentials: .legacy(token: "t", secret: Data(0..<32)))
+        let other = "https://terminal-\(UUID().uuidString.lowercased()).invalid"
+        let link = try #require(TerminalConnectLink("happier://terminal?key=V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE&server=\(other)"))
+
+        #expect(try await store.approveTerminalConnect(link, allowsLoopback: false) == .needsSignIn(URL(string: other)!))
+        #expect(store.server == URL(string: other) && store.phase == .signedOut)
+        #expect(store.pendingTerminalConnect == link)
+        #expect(relay.log.values.isEmpty)
+        store.cancelTerminalConnect()
+        #expect(store.pendingTerminalConnect == nil)
+    }
+
+    @Test func aComputerLinkWaitingForASignInSurvivesARelaunchAndFollowsTheRelayChosenInstead() async throws {
+        let defaults = UserDefaults.standard
+        let keys = ["happier.server", "happier.knownServers", "happier.pendingTerminalConnect"]
+        let saved = keys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, saved) { defaults.set(value, forKey: key) } }
+        let relay = Relay()
+        let store = relay.store(credentials: .legacy(token: "t", secret: Data(0..<32)))
+        let other = URL(string: "https://terminal-\(UUID().uuidString.lowercased()).invalid")!
+        let link = try #require(TerminalConnectLink("happier://terminal?key=V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE&server=\(other.absoluteString)"))
+        #expect(try await store.approveTerminalConnect(link, allowsLoopback: false) == .needsSignIn(other))
+
+        // The app ends while the person signs in there: the link is still waiting at the next launch.
+        #expect(HappierStore(server: other).pendingTerminalConnect == link)
+
+        // They sign in on another relay instead (the web app's `retargetPendingTerminalConnectToServerUrl`):
+        // the confirmation is for that relay, not a switch back to the sign-in screen.
+        let chosen = URL(string: "https://chosen-\(UUID().uuidString.lowercased()).invalid")!
+        store.switchServer(to: chosen)
+        let waiting = try #require(store.pendingTerminalConnect)
+        #expect(waiting.publicKey == link.publicKey && waiting.server == chosen)
+        #expect(store.terminalConnectRelay(for: waiting, allowsLoopback: false) == chosen)
+        #expect(HappierStore(server: chosen).pendingTerminalConnect == waiting)
+
+        store.cancelTerminalConnect()
+        #expect(HappierStore(server: chosen).pendingTerminalConnect == nil)
+    }
+
     // MARK: Message search
 
     @Test func messageSearchMergesEveryOnlineMachineWithSearchOn() async throws {
@@ -541,7 +608,7 @@ private final class Relay: @unchecked Sendable {
                          writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
                          writtenMetadata: JSONValue?.none, supportsAgentIdentity: false, pendingRows: [JSONValue](),
                          machinesWithSearchOn: Set<String>(), machinesOnline: true, switchRequests: [JSONValue](),
-                         servesMachineList: false)
+                         servesMachineList: false, terminalResponse: JSONValue?.none)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -571,6 +638,8 @@ private final class Relay: @unchecked Sendable {
         set { lock.withLock { state.machinesOnline = newValue } }
     }
     var switchRequests: [JSONValue] { lock.withLock { state.switchRequests } }
+    /// The body of the last `POST /v1/auth/response`.
+    var terminalResponse: JSONValue? { lock.withLock { state.terminalResponse } }
     var writtenTask: AgentTask? { lock.withLock { state.writtenTask } }
     var writtenTitle: String? { lock.withLock { state.writtenTitle } }
     var agentTransitionCall: JSONValue? { lock.withLock { state.agentTransitionCall } }
@@ -583,14 +652,15 @@ private final class Relay: @unchecked Sendable {
     private var machineKey: Data { keys.content.secretKey }
     private var cipher: ContentCipher { .aesGCM(key: dataKey) }
 
-    @MainActor func store(networkPath: NetworkPathMonitor? = nil) -> HappierStore {
+    @MainActor func store(networkPath: NetworkPathMonitor? = nil, credentials: Credentials? = nil) -> HappierStore {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RelayURLProtocol.self]
         RelayURLProtocol.relay = self
         let api = HappierAPI(server: URL(string: "https://relay.invalid")!, token: "t", session: URLSession(configuration: configuration))
         let store = HappierStore(server: URL(string: "https://relay.invalid")!)
         let directory = FileManager.default.temporaryDirectory.appending(path: "store-flow-\(UUID().uuidString)")
-        store.installForTesting(api: api, keys: keys, snapshotDirectory: directory, networkPath: networkPath) { [self] event, payload in
+        store.installForTesting(api: api, keys: keys, snapshotDirectory: directory, networkPath: networkPath,
+                                credentials: credentials) { [self] event, payload in
             try socketAck(event, payload)
         }
         return store
@@ -751,6 +821,15 @@ private final class Relay: @unchecked Sendable {
             }
             log.add("messages latest")
             return (200, ["messages": [try messageRow(id: "m1", seq: 1), try messageRow(id: "m2", seq: 2)], "hasMore": false])
+        case ("GET", "/v1/account/encryption"):
+            return (200, ["mode": "plain"])
+        case ("GET", "/v1/auth/request/status"):
+            log.add("terminal status")
+            return (200, ["status": "pending", "supportsV2": true, "supportsTokenOnly": true])
+        case ("POST", "/v1/auth/response"):
+            log.add("terminal approve")
+            lock.withLock { state.terminalResponse = try? JSONValue.parse(body) }
+            return (200, ["success": true])
         default:
             return (404, ["error": "not simulated"])
         }
