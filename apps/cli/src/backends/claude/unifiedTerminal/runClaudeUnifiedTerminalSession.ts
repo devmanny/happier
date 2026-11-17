@@ -28,6 +28,12 @@ import {
 } from './createClaudeUnifiedHookLifecycleBridge';
 import { createReplayableHookSubscription } from './createReplayableHookSubscription';
 import { createClaudeUnifiedTranscriptBridge } from './createClaudeUnifiedTranscriptBridge';
+import {
+  defaultClaudeProcessProbe,
+  recoverAttachedClaudeSessionIdentity,
+  type AttachedClaudeSessionIdentity,
+  type ClaudeProcessProbe,
+} from './recoverAttachedClaudeSessionIdentity';
 import type { ClaudeWorkflowActivityObservationContext } from '../workflows/claudeWorkflowActivitySource';
 import { isClaudeMainChainCompactBoundary } from '../localControl/readClaudeTranscriptTurnSignal';
 import type { ClaudeRemoteSubagentFileCollector } from '../remote/sidechains/claudeRemoteSubagentFileCollector';
@@ -113,7 +119,9 @@ import type {
 import type { EnhancedMode } from '../loop';
 import type { RawJSONLines } from '../types';
 import type { SessionHookData } from '../utils/startHookServer';
+import { proveClaudeTranscriptPath } from '../session';
 import { resolveClaudeConfigDirOverride } from '../utils/resolveClaudeConfigDirOverride';
+import { resolveConfiguredClaudeConfigDir } from '../utils/resolveConfiguredClaudeConfigDir';
 import type { MessageBatch } from '@/agent/runtime/sessionInput/types';
 import type { Metadata } from '@/api/types';
 import {
@@ -357,6 +365,10 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
    */
   onTranscriptMessageSuppressed?: ((message: RawJSONLines) => void) | undefined;
   onSessionFound?: ((sessionId: string, data?: SessionHookData) => void) | undefined;
+  /** OS process boundary used to recover an adopted Claude's id from its process record. */
+  claudeProcessProbe?: ClaudeProcessProbe | undefined;
+  /** Every live trusted primary-session transcript row; lets the identity owner retry a pending proof. */
+  onTrustedMainTranscriptRow?: ((sessionId: string) => void) | undefined;
   loadCommittedClaudeJsonlMessageBaseline?: (() =>
     | Promise<import('../utils/claudeJsonlMessageKey').CommittedClaudeJsonlMessageBaseline>
     | import('../utils/claudeJsonlMessageKey').CommittedClaudeJsonlMessageBaseline) | undefined;
@@ -998,6 +1010,64 @@ export function mapClaudeComposerClearResultToProtocolResult(
   }
 }
 
+/**
+ * A runner that adopts a live Claude gets no SessionStart, and transcript discovery deliberately
+ * ignores files that predate it. Claude's own process record is the remaining source of the live
+ * conversation: it is rewritten on every session switch (/clear, /compact, /resume), so it also
+ * reveals a switch whose new id was still pending publication when the previous runner stopped.
+ * Returns the identity to follow only when it differs from `knownSessionId` and the identity owner's
+ * transcript proof does not reject it; publication itself still waits for that proof.
+ */
+async function recoverAdoptedClaudeSessionIdentity(params: Readonly<{
+  evaluateHostLiveness: () => Promise<TerminalHostLiveness>;
+  workingDirectory: string;
+  probe: ClaudeProcessProbe;
+  knownSessionId: string | null;
+  happySessionId?: string | null | undefined;
+}>): Promise<AttachedClaudeSessionIdentity | null> {
+  const liveness = await params.evaluateHostLiveness().catch(() => null);
+  const hostRootPid = liveness?.panePid;
+  const recovery = typeof hostRootPid === 'number' && hostRootPid > 0
+    ? await recoverAttachedClaudeSessionIdentity({
+        hostRootPid,
+        claudeConfigDir: resolveConfiguredClaudeConfigDir({ env: process.env }),
+        workingDirectory: params.workingDirectory,
+        probe: params.probe,
+      })
+    : { status: 'unavailable' as const, reason: 'host_process_unavailable' };
+  if (recovery.status !== 'recovered') {
+    logger.infoFile('[unified]: adopted Claude session id could not be recovered', {
+      sessionId: params.happySessionId,
+      knownClaudeSessionId: params.knownSessionId,
+      reason: recovery.reason,
+    });
+    return null;
+  }
+  const identity = recovery.identity;
+  if (identity.sessionId === params.knownSessionId) return null;
+  const proof = await proveClaudeTranscriptPath({
+    sessionId: identity.sessionId,
+    transcriptPath: identity.transcriptPath,
+  });
+  if (proof === 'rejected') {
+    logger.infoFile('[unified]: adopted Claude process record names a conversation its transcript rejects', {
+      sessionId: params.happySessionId,
+      knownClaudeSessionId: params.knownSessionId,
+      claudeSessionId: identity.sessionId,
+      claudePid: identity.claudePid,
+    });
+    return null;
+  }
+  logger.infoFile('[unified]: recovered the adopted Claude session id from its process record', {
+    sessionId: params.happySessionId,
+    knownClaudeSessionId: params.knownSessionId,
+    claudeSessionId: identity.sessionId,
+    claudePid: identity.claudePid,
+    proof,
+  });
+  return identity;
+}
+
 export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode = EnhancedMode>(
   opts: ClaudeUnifiedTerminalSessionOptions<Mode>,
 ): Promise<void> {
@@ -1226,6 +1296,9 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     : existingTerminalHost?.handle.sessionName ?? fallbackSessionName;
   let handle: TerminalHostHandle | null = null;
   let terminalHostLifecycle: 'owned' | 'borrowed' = 'owned';
+  /** True only when this runner adopted a still-running Claude, which emits no new SessionStart. */
+  let adoptedLiveClaude = false;
+  let attachedClaudeIdentity: AttachedClaudeSessionIdentity | null = null;
   let currentTerminalProcess: Pick<OwnedTerminalProcess, 'whenExited' | 'terminate'> | null = null;
   let runtimeExitError: unknown;
   // The process owner coalesces termination, retains success, and permits retry
@@ -1417,6 +1490,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         handle = adoptedHandle.attachmentId
           ? adoptedHandle
           : { ...adoptedHandle, attachmentId: createTerminalAttachmentId() };
+        adoptedLiveClaude = true;
         ensureHookSubscription();
       } catch (error) {
         const liveness = await evaluateTerminalHostLivenessForRecovery(hostResolution.adapter, existingTerminalHost.handle);
@@ -1670,6 +1744,24 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     }
     if (opts.signal?.aborted || processSignalAbortController.signal.aborted) {
       return;
+    }
+    if (adoptedLiveClaude) {
+      attachedClaudeIdentity = await recoverAdoptedClaudeSessionIdentity({
+        evaluateHostLiveness: () => hostResolution.adapter.evaluateLiveness(activeHandle),
+        workingDirectory: opts.path,
+        probe: opts.claudeProcessProbe ?? defaultClaudeProcessProbe,
+        knownSessionId: opts.sessionId ?? null,
+        happySessionId: opts.happySessionId,
+      });
+      if (attachedClaudeIdentity) {
+        // Publication still goes through the identity owner's transcript proof.
+        opts.onSessionFound?.(attachedClaudeIdentity.sessionId, {
+          session_id: attachedClaudeIdentity.sessionId,
+          transcript_path: attachedClaudeIdentity.transcriptPath,
+          cwd: opts.path,
+          source: 'claude_process_record',
+        });
+      }
     }
 
     if (opts.dialogChoiceBroker) {
@@ -2624,8 +2716,10 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       };
       const transcriptBridge = opts.runtimeActivityAdapter || opts.onMessage || opts.onHistoricalMessage || opts.onSessionFound || lifecycleBridge
         ? createClaudeUnifiedTranscriptBridge({
-            sessionId: opts.sessionId ?? null,
-            transcriptPath: opts.transcriptPath,
+            // The live conversation of an adopted Claude, read from its process record, replaces
+            // the requested identity and is followed like a known resume.
+            sessionId: attachedClaudeIdentity ? attachedClaudeIdentity.sessionId : opts.sessionId ?? null,
+            transcriptPath: attachedClaudeIdentity ? attachedClaudeIdentity.transcriptPath : opts.transcriptPath,
             workingDirectory: opts.path,
             claudeConfigDir: resolveClaudeConfigDirOverride(process.env),
             onMessage: opts.onMessage
@@ -2660,6 +2754,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             proveAcceptedMainTranscript: (value) => confirmPromptAcceptedFromTranscript([value]),
             onSubagentFileCollectorChanged: opts.onSubagentFileCollectorChanged,
             onSessionFound: opts.onSessionFound,
+            onTrustedMainTranscriptRow: opts.onTrustedMainTranscriptRow,
             validateSessionStart: (sessionInfo) => {
               if (
                 !explicitResumeIdentityRequired

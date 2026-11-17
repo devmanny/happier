@@ -182,6 +182,24 @@ a matching Claude transcript, or an accepted Codex turn/native attachment
 materialization. Observed ids remain available inside the live runner for hook
 and transcript correlation while provisional.
 
+For Claude, `backends/claude/session.ts` is the single publisher. An id whose
+native transcript has no complete identifying record yet (Claude creates
+`<id>.jsonl` at the first prompt, and may be mid-write on its last line) stays
+pending there; the Unified transcript bridge reports every live trusted row of the
+primary conversation, plus once after reading its startup snapshot, and the owner
+re-runs the same proof until it publishes. A transcript that contradicts the id is
+rejected rather than retried. The bridge's live boundary for a known transcript is
+the end of its last complete line, so a row Claude is still writing is followed
+live rather than split. A Unified runner that adopts a still-running Claude gets
+no new `SessionStart`, and discovery ignores transcripts that predate it, so it
+reads Claude's process record `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` (which
+Claude rewrites on every session switch), accepting only a record of a process
+inside the adopted host's process tree whose live start time and project match.
+When that id differs from the known one (none, or one superseded by `/clear` or
+`/compact` before its replacement was published) and the transcript proof does not
+reject it, the runner follows that transcript and publishes through the same
+proof. Withheld and late publications are logged at info level.
+
 This changes publication timing, not the recorded identity format or resume
 failure policy. Established identities are retained; unavailable native state
 still fails closed without starting a replacement conversation or consuming the

@@ -1273,6 +1273,9 @@ export async function claudeUnifiedTerminalLauncher(
       onSessionFound: (sessionId, data) => {
         session.onSessionFound(sessionId, data);
       },
+      onTrustedMainTranscriptRow: (sessionId) => {
+        session.retryPendingSessionIdentityPublication(sessionId);
+      },
       onThinkingChange: (thinking) => {
         session.onThinkingChange(thinking);
       },
