@@ -1895,13 +1895,18 @@ public final class HappierStore {
     }
 
     private func catchUp(_ id: String) async {
-        guard let api, case .after(var after)? = transcripts[id]?.refresh else { return }
+        guard let api, let transcript = transcripts[id], case .after(var after) = transcript.refresh else { return }
+        // A reply still streaming when it was read changes in place, below `after` (`streamingSeqs`).
+        let streaming = transcript.streamingSeqs
         do {
             while true {
                 let page = try await api.messages(sessionId: id, afterSeq: after)
                 await apply(page.rows, to: id)
                 guard page.hasMore, let next = page.nextAfterSeq, next > after else { break }
                 after = next
+            }
+            for seq in streaming {
+                await apply(try await api.messages(sessionId: id, afterSeq: seq - 1, limit: 1).rows, to: id)
             }
         } catch { logBackground(error, "transcript catch-up") }
     }
@@ -1932,7 +1937,11 @@ public final class HappierStore {
     }
 
     private func applyTranscript(_ messages: [TranscriptMessage], to id: String) {
-        transcripts[id]?.apply(messages)
+        // Every write to a transcript redraws its conversation: rows that change nothing (an empty
+        // page, a streaming reply read again as it was) aren't written.
+        if let transcript = transcripts[id], messages.contains(where: transcript.changes(with:)) {
+            transcripts[id]?.apply(messages)
+        }
         for message in messages {
             guard let localId = message.localId, let send = outgoingSends[localId],
                   send.sessionId == id, send.acknowledge(message), !send.isSending else { continue }

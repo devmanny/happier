@@ -51,9 +51,35 @@ public struct Transcript: Sendable {
 
     public var refresh: Refresh { isLoaded ? .after(maxSeq) : .newestPage }
 
+    /// Main-conversation rows of a reply that was still streaming when it was read
+    /// (`happierStreamSegmentV1`). The relay rewrites such a row in place, same seq, until the reply
+    /// ends; a rewrite missed while the link was down never comes with the rows after `maxSeq`, so
+    /// these are read again. Only the main conversation is caught up (a subagent's thread is a
+    /// one-off read), so subagent rows are never listed.
+    public var streamingSeqs: [Int] {
+        rows.values.filter { $0.sidechainId == nil && Self.segment($0)?["segmentState"]?.stringValue == "streaming" }
+            .map(\.seq).sorted()
+    }
+
+    private static func segment(_ row: TranscriptMessage) -> JSONValue? {
+        row.record["meta"]?["happierStreamSegmentV1"]
+    }
+
+    /// Whether a row would change the conversation. A streamed reply's row (`upsertStreamSegmentSnapshotMessage.ts`)
+    /// would not when it is the copy already held, or one read before it: a catch-up answered while
+    /// the reply's last rewrite arrived live must not cut it back. Rewrites can share a millisecond,
+    /// so a same-stamp copy that differs still applies.
+    public func changes(with incoming: TranscriptMessage) -> Bool {
+        guard let held = rows[incoming.id],
+              let heldAt = Self.segment(held)?["updatedAtMs"]?.doubleValue,
+              let incomingAt = Self.segment(incoming)?["updatedAtMs"]?.doubleValue else { return true }
+        return incomingAt > heldAt || (incomingAt == heldAt && incoming != held)
+    }
+
     public mutating func markLoaded() { isLoaded = true }
 
     public mutating func apply(_ messages: [TranscriptMessage]) {
+        let messages = messages.filter(changes(with:))
         guard !messages.isEmpty else { return }
         let newer = messages.sorted(by: Self.inOrder)
         // Rows that only extend the conversation continue its reduction; anything else (an

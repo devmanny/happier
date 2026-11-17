@@ -204,6 +204,95 @@ import Testing
         #expect(relay.log.values.filter { $0.hasPrefix("messages") } == ["messages after=2", "messages latest"])
     }
 
+    /// Codex's replies reach the relay as one row written early and rewritten in place as the text
+    /// streams (`happierStreamSegmentV1`, same seq). A phone that goes to the background mid-reply
+    /// misses those rewrites; catching up from the newest seq never brings them back, so the reply
+    /// stayed cut where the link dropped. A row still streaming when it was read is read again.
+    @Test func aReplyStillStreamingWhenTheLinkDroppedIsReadWholeWhenTheConversationCatchesUp() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 3)]
+        relay.agentReply = Self.codexReply(Self.codexReplyText.prefix(40), state: "streaming", updatedAtMs: 1_000)
+        await store.refreshSessions()
+        store.open("s1")
+        try await until { store.transcripts["s1"]?.isLoaded == true && !store.loadingTranscripts.contains("s1") }
+        #expect(agentTexts(store, "s1") == [String(Self.codexReplyText.prefix(40))])
+
+        // The rest streamed while the link was down: no `message-updated` reached this device.
+        relay.agentReply = Self.codexReply(Self.codexReplyText[...], state: "complete", updatedAtMs: 9_000)
+        relay.log.clear()
+        store.close("s1")
+        store.open("s1")
+        try await until { agentTexts(store, "s1") == [Self.codexReplyText] }
+        try await until { !store.loadingTranscripts.contains("s1") }
+        #expect(relay.log.values.filter { $0.hasPrefix("messages") } == ["messages after=3", "messages after=2 limit=1"])
+
+        // Whole now: the next catch-up only reads what's new.
+        relay.log.clear()
+        store.close("s1")
+        store.open("s1")
+        try await until { relay.log.values.contains("messages after=3") }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(relay.log.values.filter { $0.hasPrefix("messages") } == ["messages after=3"])
+    }
+
+    /// A reply the relay still holds as streaming (an agent that died mid-reply) is read again on
+    /// every catch-up; a copy that changes nothing must not rewrite the transcript, which redraws
+    /// the whole conversation.
+    @Test func aStreamingReplyReadAgainUnchangedDoesNotRewriteTheTranscript() async throws {
+        let relay = Relay()
+        let store = relay.store()
+        relay.sessionRows = [try relay.sessionRow(id: "s1", seq: 3)]
+        relay.agentReply = Self.codexReply(Self.codexReplyText.prefix(40), state: "streaming", updatedAtMs: 1_000)
+        await store.refreshSessions()
+        store.open("s1")
+        try await until { store.transcripts["s1"]?.isLoaded == true && !store.loadingTranscripts.contains("s1") }
+        store.close("s1")
+        try await Task.sleep(for: .milliseconds(100))
+
+        let notified = Flag()
+        withObservationTracking { _ = store.transcripts["s1"] } onChange: { notified.set() }
+        relay.log.clear()
+        store.open("s1")
+        try await until { relay.log.values.contains("messages after=2 limit=1") }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!notified.value, "an unchanged copy of the streaming reply rewrote the transcript")
+        #expect(agentTexts(store, "s1") == [String(Self.codexReplyText.prefix(40))])
+    }
+
+    /// The shape of a long Codex reply (seq 418 of the reported session, 4,358 characters): a lead,
+    /// a heading, a table with links in its cells, numbered questions and reply options. Synthetic text.
+    static let codexReplyText = """
+    En `main` (`1b66983`), **el caso ya está corregido y verificado**. Abajo, lo que falta revisar.
+
+    ## Qué está implementado en `main`
+
+    | Punto | Estado |
+    |---|---|
+    | 1. Banner de consentimiento | **Corregido.** Guarda el estado y avisa a `gtag`. [banner](/src/lib/consent.ts:12) |
+    | 2. Texto de la banda | **Pendiente.** Falta el copy final. [score](/src/lib/scoring/score-band.ts:40) · [tests](/src/lib/scoring/score.test.ts:9) |
+
+    ## Preguntas para la junta
+
+    1. **Alcance.** ¿Qué cohortes entran en la primera versión?
+    2. **Datos.** ¿Quién aprueba el uso de los resultados?
+
+    Necesito **una respuesta de alcance** y **una de datos**. [Guía](https://example.com/guia) · [Acta](https://example.com/acta)
+
+    <options>
+    <option>Preparar un PR para consentimiento y copy</option>
+    <option>Retomar las preguntas para la junta</option>
+    </options>
+    """
+
+    static func codexReply(_ text: Substring, state: String, updatedAtMs: Double) -> JSONValue {
+        ["role": "agent",
+         "content": ["type": "acp", "provider": "codex", "data": ["type": "message", "message": .string(String(text))]],
+         "meta": ["sentFrom": "cli", "source": "cli",
+                  "happierStreamSegmentV1": ["v": 1, "segmentKind": "assistant", "segmentLocalId": "seg-418", "segmentState": .string(state),
+                                             "startedAtMs": 950, "updatedAtMs": .number(updatedAtMs)]]]
+    }
+
     /// The relay sends full messages only for the sessions it believes are open here. If it lost
     /// that list (a declaration that never arrived), a conversation on screen gets the bare notice:
     /// it must read the message itself rather than sit still until it's closed and reopened.
@@ -576,6 +665,10 @@ private final class Flag: @unchecked Sendable {
     (store.transcripts[id]?.items ?? []).compactMap { if case .userText(let text) = $0 { text.text } else { nil } }
 }
 
+@MainActor private func agentTexts(_ store: HappierStore, _ id: String) -> [String] {
+    (store.transcripts[id]?.items ?? []).compactMap { if case .agentText(let text) = $0 { text.text } else { nil } }
+}
+
 @MainActor private func until(_ condition: @MainActor () -> Bool) async throws {
     for _ in 0..<300 where !condition() { try await Task.sleep(for: .milliseconds(10)) }
     #expect(condition())
@@ -608,7 +701,7 @@ private final class Relay: @unchecked Sendable {
                          writtenTask: AgentTask?.none, writtenTitle: String?.none, agentTransitionCall: JSONValue?.none,
                          writtenMetadata: JSONValue?.none, supportsAgentIdentity: false, pendingRows: [JSONValue](),
                          machinesWithSearchOn: Set<String>(), machinesOnline: true, switchRequests: [JSONValue](),
-                         servesMachineList: false, terminalResponse: JSONValue?.none)
+                         servesMachineList: false, terminalResponse: JSONValue?.none, agentReply: JSONValue?.none)
 
     var sessionRows: [JSONValue] {
         get { lock.withLock { state.sessionRows } }
@@ -636,6 +729,11 @@ private final class Relay: @unchecked Sendable {
     var machinesOnline: Bool {
         get { lock.withLock { state.machinesOnline } }
         set { lock.withLock { state.machinesOnline = newValue } }
+    }
+    /// The agent's reply after "hola" / "adios", as the relay holds it now (row `m3`, seq 3).
+    var agentReply: JSONValue? {
+        get { lock.withLock { state.agentReply } }
+        set { lock.withLock { state.agentReply = newValue } }
     }
     var switchRequests: [JSONValue] { lock.withLock { state.switchRequests } }
     /// The body of the last `POST /v1/auth/response`.
@@ -683,9 +781,10 @@ private final class Relay: @unchecked Sendable {
         ]
     }
 
-    private func messageRow(id: String, seq: Int) throws -> JSONValue {
-        let record: JSONValue = ["role": "user", "content": ["type": "text", "text": .string(messageTexts[id] ?? "")]]
+    private func messageRow(id: String, seq: Int, record: JSONValue? = nil, localId: String? = nil) throws -> JSONValue {
+        let record = record ?? ["role": "user", "content": ["type": "text", "text": .string(messageTexts[id] ?? "")]]
         return ["id": .string(id), "seq": .number(Double(seq)), "createdAt": .number(Double(seq * 1000)),
+                "localId": localId.map(JSONValue.string) ?? .null,
                 "content": ["t": "encrypted", "c": .string(try cipher.encryptBase64(record))]]
     }
 
@@ -815,12 +914,15 @@ private final class Relay: @unchecked Sendable {
         case (let method, let path) where path.hasPrefix("/v2/sessions/s1/pending/"):
             return pendingMutation(method, String(path.dropFirst("/v2/sessions/s1/pending/".count)))
         case ("GET", "/v1/sessions/s1/messages"):
-            if let after = query["afterSeq"] {
-                log.add("messages after=\(after)")
-                return (200, ["messages": [], "hasMore": false])
+            var rows = [try messageRow(id: "m1", seq: 1), try messageRow(id: "m2", seq: 2)]
+            if let reply = agentReply { rows.append(try messageRow(id: "m3", seq: 3, record: reply, localId: reply["meta"]?["happierStreamSegmentV1"]?["segmentLocalId"]?.stringValue)) }
+            if let after = query["afterSeq"].flatMap(Int.init) {
+                log.add("messages after=\(after)" + (query["limit"].map { " limit=\($0)" } ?? ""))
+                let newer = rows.filter { ($0["seq"]?.intValue ?? 0) > after }
+                return (200, ["messages": .array(Array(newer.prefix(query["limit"].flatMap(Int.init) ?? newer.count))), "hasMore": false])
             }
             log.add("messages latest")
-            return (200, ["messages": [try messageRow(id: "m1", seq: 1), try messageRow(id: "m2", seq: 2)], "hasMore": false])
+            return (200, ["messages": .array(rows.reversed()), "hasMore": false])
         case ("GET", "/v1/account/encryption"):
             return (200, ["mode": "plain"])
         case ("GET", "/v1/auth/request/status"):

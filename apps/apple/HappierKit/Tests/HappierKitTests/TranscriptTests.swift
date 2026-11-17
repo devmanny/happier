@@ -89,6 +89,47 @@ import Testing
         #expect(t.items.compactMap { if case .agentText(let a) = $0 { a.text } else { nil } } == ["Hello", "AB"])
     }
 
+    /// A streamed reply is one row the relay rewrites in place. A copy read before the last rewrite
+    /// (a catch-up answered while the final `message-updated` arrived) must not cut it back, and
+    /// only rows still streaming need reading again (`Transcript.streamingSeqs`).
+    @Test func anOlderCopyOfAStreamedReplyDoesNotCutTheNewerOneBack() {
+        func reply(_ text: String, state: String, updatedAtMs: Double) -> JSONValue {
+            ["role": "agent", "content": ["type": "acp", "provider": "codex", "data": ["type": "message", "message": .string(text)]],
+             "meta": ["happierStreamSegmentV1": ["v": 1, "segmentKind": "assistant", "segmentLocalId": "seg", "segmentState": .string(state),
+                                                 "startedAtMs": 1, "updatedAtMs": .number(updatedAtMs)]]]
+        }
+        let texts = { (t: Transcript) in t.items.compactMap { if case .agentText(let a) = $0 { a.text } else { nil } } }
+        var t = Transcript()
+        t.apply([raw("u", 1, ["role": "user", "content": ["type": "text", "text": "hola"]]), raw("m", 2, reply("## Tabla\n| a |", state: "streaming", updatedAtMs: 10), localId: "seg")])
+        #expect(t.streamingSeqs == [2])
+        t.apply([raw("m", 2, reply("## Tabla\n| a |\n|---|\n| b |", state: "complete", updatedAtMs: 30), localId: "seg")])
+        #expect(texts(t) == ["## Tabla\n| a |\n|---|\n| b |"])
+        #expect(t.streamingSeqs.isEmpty)
+        t.apply([raw("m", 2, reply("## Tabla\n| a |\n|", state: "streaming", updatedAtMs: 20), localId: "seg")])
+        #expect(texts(t) == ["## Tabla\n| a |\n|---|\n| b |"])
+        #expect(t.streamingSeqs.isEmpty)
+    }
+
+    /// Rewrites can share a millisecond (`updatedAtMs` is the CLI's clock): a copy stamped the same
+    /// but saying more is the newer one. Only a sidechain-free (main) transcript is caught up, in the
+    /// main scope, so a subagent's own thread has nothing to read again.
+    @Test func aStreamedRewriteInTheSameMillisecondStillApplies() {
+        func reply(_ text: String, state: String) -> JSONValue {
+            ["role": "agent", "content": ["type": "acp", "provider": "codex", "data": ["type": "message", "message": .string(text)]],
+             "meta": ["happierStreamSegmentV1": ["v": 1, "segmentKind": "assistant", "segmentLocalId": "seg", "segmentState": .string(state),
+                                                 "startedAtMs": 1, "updatedAtMs": 20]]]
+        }
+        var t = Transcript()
+        t.apply([raw("m", 2, reply("Hola", state: "streaming"), localId: "seg")])
+        t.apply([raw("m", 2, reply("Hola, mundo", state: "streaming"), localId: "seg")])
+        #expect(t.items.compactMap { if case .agentText(let a) = $0 { a.text } else { nil } } == ["Hola, mundo"])
+
+        var thread = Transcript(sidechain: true)
+        thread.apply([TranscriptMessage(id: "m", seq: 2, localId: "seg", createdAt: Date(timeIntervalSince1970: 2),
+                                        record: reply("Hola", state: "streaming"), sidechainId: "toolu_1")])
+        #expect(thread.streamingSeqs.isEmpty)
+    }
+
     @Test func pendingPermissionAttachesToMatchingToolAndPlaceholdersOtherwise() {
         var t = Transcript()
         t.apply([raw("c", 1, assistant([["type": "tool_use", "id": "toolu_1", "name": "Bash", "input": ["command": "rm -rf build"]]]))])
