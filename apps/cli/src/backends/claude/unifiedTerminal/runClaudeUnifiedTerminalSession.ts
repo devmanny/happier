@@ -56,7 +56,7 @@ import {
   createClaudePromptSubmitVerificationPolicy,
   type ClaudePromptSubmitVerificationPolicy,
 } from './claudePromptSubmitVerification';
-import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { clearOwnLeftoverComposerDraft, createClaudeOwnComposerDraftGuardOutcomeLog } from './ownComposerDraftGuard';
 import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import {
   createClaudeUnifiedInFlightSteerEvaluator,
@@ -1613,6 +1613,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
   const composerClearKeys = createClaudeComposerClearKeyLedger({
     stallBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
   });
+  const composerDraftGuardOutcomeLog = createClaudeOwnComposerDraftGuardOutcomeLog();
   try {
     if (opts.registerTerminalComposerClearRuntimeControl || opts.registerConnectedServiceExactApplicationHandler) {
       const terminalSessionControlPort = hostResolution.adapter.createControlPort?.(activeHandle) ?? null;
@@ -1944,8 +1945,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           },
         };
       }
-      deliveryBlockedApplyStarvationTracker.reset();
-      runtimeControlOptions?.onBlockedApplyClear?.();
+      // Wake Pending only when a blocked apply clears. Every injection attempt passes this gate, so
+      // an unconditional wake re-armed the pending pump after each draft-guard deferral: a busy
+      // loop of guard passes and server reads (runner pid 63291, 2026-11-16).
+      if (deliveryBlockedApplyStarvationTracker.reset()) {
+        runtimeControlOptions?.onBlockedApplyClear?.();
+      }
       return null;
     };
 
@@ -2118,6 +2123,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                     await steerDraftClearPort.sendSpecialKey('Escape');
                   },
                   clearKeys: composerClearKeys,
+                  outcomeLog: composerDraftGuardOutcomeLog,
                   ownComposerTexts: ownComposerTextLog,
                 });
                 // An idle recognized dialog has no real composer. Route its parsed screen through
@@ -2828,6 +2834,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     throw error;
   } finally {
     runtimeAbortController.abort('claude-unified-runtime-disposed');
+    composerDraftGuardOutcomeLog.flush();
     arbiterForResumeSummaryCompaction = null;
     if (turnInterruptRegistered) {
       opts.setTurnInterrupt?.(null);

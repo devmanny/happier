@@ -421,8 +421,11 @@ export type BlockedApplyStarvationTracker = Readonly<{
     blockedReason?: string | null,
     context?: Omit<BlockedApplyStarvationInfo, 'blockedReason' | 'consecutiveBlockedApplies'> | undefined,
   ): number;
-  /** A successful (proceeding) apply ends the episode; the next starvation escalates again. */
-  reset(): void;
+  /**
+   * A successful (proceeding) apply ends the episode; the next starvation escalates again.
+   * Returns true only when this call ended a blocked episode (at least one blocked apply recorded).
+   */
+  reset(): boolean;
 }>;
 
 /**
@@ -456,9 +459,11 @@ export function createBlockedApplyStarvationTracker(opts: Readonly<{
       }
       return consecutiveBlockedApplies;
     },
-    reset(): void {
+    reset(): boolean {
+      const endedBlockedEpisode = consecutiveBlockedApplies > 0;
       consecutiveBlockedApplies = 0;
       escalated = false;
+      return endedBlockedEpisode;
     },
   };
 }

@@ -55,7 +55,7 @@ export async function clearOwnLeftoverComposerDraft(
   const result = await runOwnComposerDraftGuard(opts, evidence);
   // Info level by default: a deferral that leaves a draft in Claude's composer must be explainable
   // from the runner log (incident 2026-11-16 had only debug telemetry). Never the composer text.
-  logger.infoFile('[unified]: composer draft guard outcome', {
+  (opts.outcomeLog ?? createClaudeOwnComposerDraftGuardOutcomeLog()).observe({
     status: result.status,
     classification: evidence.classification,
     ...('screen' in result
@@ -72,7 +72,75 @@ export async function clearOwnLeftoverComposerDraft(
   return result;
 }
 
+/** What one guard pass saw and did; logged without the composer text. */
+type OwnComposerDraftGuardOutcomeFields = Readonly<{
+  status: OwnComposerDraftGuardResult['status'];
+  classification: ClaudeOwnComposerDraftClassification | null;
+  composerLength?: number | null;
+  escapeAgainToClearHintVisible?: boolean;
+  selectionListVisible?: boolean;
+  clearKeysSent: number;
+  clearKeyWithheld?: true;
+  blockedReason?: string;
+}>;
+
+export type ClaudeOwnComposerDraftGuardOutcomeLog = Readonly<{
+  observe(fields: OwnComposerDraftGuardOutcomeFields): void;
+  /** Logs the identical passes since the last line; the session owner calls it on teardown. */
+  flush(): void;
+}>;
+
+/**
+ * How often an unchanged outcome still logs its repeat count. A held draft is rechecked at most
+ * every 30 s once the injector backs off, so a line reports ~20 repeats; a hot loop reports
+ * thousands, which is the signal (runner pid 63291) the dedupe must not hide.
+ */
+const OUTCOME_REPEAT_HEARTBEAT_MS = 10 * 60_000;
+
+/**
+ * Session-scoped log of guard outcomes. A pass logs only when its outcome differs from the last
+ * logged one, and then says how many identical passes it skipped: a draft the user leaves in the
+ * composer repeats one outcome on every recheck (runner pid 63291 logged it ~5 times per second
+ * for 10 hours). An unchanged outcome still logs its repeat count every heartbeat and on flush.
+ */
+export function createClaudeOwnComposerDraftGuardOutcomeLog(params?: Readonly<{
+  nowMs?: (() => number) | undefined;
+}>): ClaudeOwnComposerDraftGuardOutcomeLog {
+  const nowMs = params?.nowMs ?? Date.now;
+  let lastLogged: Readonly<{ key: string; fields: OwnComposerDraftGuardOutcomeFields }> | null = null;
+  let lastLoggedAtMs = 0;
+  let repeatsSinceLastLogged = 0;
+  const log = (fields: OwnComposerDraftGuardOutcomeFields): void => {
+    logger.infoFile('[unified]: composer draft guard outcome', {
+      ...fields,
+      ...(repeatsSinceLastLogged > 0 ? { repeatsSinceLastLogged } : {}),
+    });
+    lastLoggedAtMs = nowMs();
+    repeatsSinceLastLogged = 0;
+  };
+  return {
+    observe(fields) {
+      const key = JSON.stringify(fields);
+      if (key === lastLogged?.key) {
+        repeatsSinceLastLogged += 1;
+        if (nowMs() - lastLoggedAtMs >= OUTCOME_REPEAT_HEARTBEAT_MS) log(fields);
+        return;
+      }
+      log(fields);
+      lastLogged = { key, fields };
+    },
+    flush() {
+      if (lastLogged && repeatsSinceLastLogged > 0) log(lastLogged.fields);
+    },
+  };
+}
+
 type OwnComposerDraftGuardOptions = Readonly<{
+  /**
+   * The pane's outcome log, so a pass logs only what changed since the session's last logged
+   * outcome. Without it this pass logs its outcome unconditionally.
+   */
+  outcomeLog?: ClaudeOwnComposerDraftGuardOutcomeLog | undefined;
   captureInputState: () => Promise<Readonly<{
     currentInput: string;
     cursor?: Readonly<{ x: number; y: number }> | undefined;

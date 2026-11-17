@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { logger } from '@/ui/logger';
 
 import { createClaudeOwnComposerTextLog } from './ownComposerTextLog';
-import { clearOwnLeftoverComposerDraft } from './ownComposerDraftGuard';
+import { clearOwnLeftoverComposerDraft, createClaudeOwnComposerDraftGuardOutcomeLog } from './ownComposerDraftGuard';
 import { createClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 import { isClaudeScreenReadyForInput } from './tuiControls/screenState';
@@ -581,6 +581,63 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
       const logged = JSON.stringify(infoFile.mock.calls);
       expect(logged).not.toContain(draft);
       expect(logged).not.toContain(OWN_TEXT);
+    } finally {
+      infoFile.mockRestore();
+    }
+  });
+
+  it('logs a session outcome only when it differs from the one it logged last', async () => {
+    // Live, runner pid 63291 (2026-11-16): a user draft held one queued message, and the guard
+    // logged the same foreign-draft outcome ~5 times per second for 10 hours (150 KB in 3 minutes).
+    const infoFile = vi.spyOn(logger, 'infoFile').mockImplementation(() => undefined);
+    try {
+      let nowMs = 0;
+      const outcomeLog = createClaudeOwnComposerDraftGuardOutcomeLog({ nowMs: () => nowMs });
+      let draft = 'typed by hand at the Mac and not sent';
+      const pass = () => clearOwnLeftoverComposerDraft({
+        captureInputState: async () => ({ currentInput: idleScreen(draft), cursor: { x: draft.length + 4, y: 1 } }),
+        sendClearKey: async () => {
+          throw new Error('must not clear a genuine user draft');
+        },
+        ownComposerTexts: ownLog(OWN_TEXT),
+        outcomeLog,
+        wait: async () => undefined,
+      });
+
+      for (let index = 0; index < 4; index += 1) {
+        expect((await pass()).status).toBe('foreign_draft');
+      }
+      draft = `${draft}, now longer`;
+      await pass();
+      await pass();
+
+      expect(infoFile.mock.calls.map(([, fields]) => fields)).toEqual([
+        expect.objectContaining({ status: 'foreign_draft', composerLength: 37 }),
+        expect.objectContaining({ status: 'foreign_draft', composerLength: 49, repeatsSinceLastLogged: 3 }),
+      ]);
+      expect(infoFile.mock.calls[0]?.[1]).not.toHaveProperty('repeatsSinceLastLogged');
+
+      // A draft left for hours keeps repeating one outcome: the repeat count still reaches the log
+      // periodically, so a hot recheck loop stays visible at low volume while it runs.
+      infoFile.mockClear();
+      for (let index = 0; index < 6; index += 1) {
+        nowMs += 100_000;
+        await pass();
+      }
+      // The pass after the longer draft's first line plus these six, logged ten minutes after it.
+      expect(infoFile.mock.calls.map(([, fields]) => fields)).toEqual([
+        expect.objectContaining({ status: 'foreign_draft', composerLength: 49, repeatsSinceLastLogged: 7 }),
+      ]);
+
+      // Teardown flushes the identical passes since the last line.
+      infoFile.mockClear();
+      await pass();
+      await pass();
+      outcomeLog.flush();
+      outcomeLog.flush();
+      expect(infoFile.mock.calls.map(([, fields]) => fields)).toEqual([
+        expect.objectContaining({ status: 'foreign_draft', composerLength: 49, repeatsSinceLastLogged: 2 }),
+      ]);
     } finally {
       infoFile.mockRestore();
     }

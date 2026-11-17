@@ -328,10 +328,15 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
             blocker: resolveDraftGuardBlocker(guard) ?? undefined,
           };
         }
-        if (guard.status === 'no_draft' || guard.status === 'cleared') {
+        // Wake Pending only when this pass ends a draft deferral episode or removed an own leftover.
+        // A clean pass with nothing deferred has nothing to wake, and the host write below can
+        // still defer (pane not quiet yet): an unconditional wake re-ran the paused pump at once,
+        // a busy loop of guard passes and server reads that bypassed the host's quiet retry.
+        const endsDraftGuardEpisode = draftGuardDeferralStartedAtMs !== null;
+        resetDraftGuardDeferralEpisode();
+        if (guard.status === 'cleared' || (guard.status === 'no_draft' && endsDraftGuardEpisode)) {
           opts.onDraftGuardClear?.();
         }
-        resetDraftGuardDeferralEpisode();
       }
 
       const input = {
