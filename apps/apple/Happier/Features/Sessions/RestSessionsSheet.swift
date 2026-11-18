@@ -34,16 +34,19 @@ struct RestSessionsSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    if chosen.isSuperset(of: request.all) {
-                        Button("Deselect All") { chosen = [] }
-                    } else {
-                        Button("Select All") { chosen = Set(request.all) }
-                    }
-                }
+                #if os(iOS)
+                ToolbarItem(placement: .primaryAction) { selectAllButton }
+                #endif
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 8) {
+                    #if os(macOS)
+                    // Not in the sheet's toolbar, where it would take the default (blue) button's place.
+                    HStack {
+                        selectAllButton.buttonStyle(.link)
+                        Spacer()
+                    }
+                    #endif
                     Group {
                         if interrupting > 0 {
                             Text("^[\(interrupting) of them](inflect: true) will be interrupted. Each conversation stays and wakes when you need it.")
@@ -74,6 +77,15 @@ struct RestSessionsSheet: View {
         #if os(macOS)
         .frame(minWidth: 480, minHeight: 540)
         #endif
+    }
+
+    @ViewBuilder
+    private var selectAllButton: some View {
+        if chosen.isSuperset(of: request.all) {
+            Button("Deselect All") { chosen = [] }
+        } else {
+            Button("Select All") { chosen = Set(request.all) }
+        }
     }
 
     private func row(_ id: String, activity: SessionRest.Activity?) -> some View {
