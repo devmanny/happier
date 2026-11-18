@@ -172,16 +172,19 @@ final class Microphone: @unchecked Sendable {
         generation += 1
         try AppAudioSession.activate()
         var engine = AVAudioEngine()
-        // An input with no valid format (the audio route was still changing) would raise an
-        // Objective-C exception in `installTap`, which Swift can't catch: check it, give the route
-        // a moment once, then report it as unavailable.
-        if !Self.hasUsableInput(engine.inputNode) {
+        // An input with no valid format (no microphone at all, as on a Mac mini with none plugged
+        // in, or the audio route still changing) would raise an Objective-C exception in
+        // `installTap`, which Swift can't catch and which quits the app: check it, give the route a
+        // moment once, then report it.
+        if Self.usableTapFormat(engine.inputNode) == nil {
             Thread.sleep(forTimeInterval: 0.25)
             engine = AVAudioEngine()
-            guard Self.hasUsableInput(engine.inputNode) else { throw MicrophoneError.unavailable }
         }
         let input = engine.inputNode
-        input.installTap(onBus: 0, bufferSize: 1024, format: input.outputFormat(forBus: 0)) { [taps] buffer, _ in
+        guard let format = Self.usableTapFormat(input) else {
+            throw input.inputFormat(forBus: 0).channelCount == 0 ? MicrophoneError.noInput : MicrophoneError.unavailable
+        }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [taps] buffer, _ in
             for tap in taps.withLock({ $0 }) { tap.onBuffer(buffer) }
         }
         engine.prepare()
@@ -224,16 +227,36 @@ final class Microphone: @unchecked Sendable {
         self.engine = nil
     }
 
-    private static func hasUsableInput(_ input: AVAudioInputNode) -> Bool {
-        let format = input.outputFormat(forBus: 0)
-        return format.sampleRate > 0 && format.channelCount > 0
+    /// The format to tap the input in, or nil when tapping would raise. The hardware side
+    /// (`inputFormat`) is what counts: with no microphone it reads 0 Hz and no channels while the
+    /// output side still claims a valid format, and a tap whose rate differs from the hardware's
+    /// is refused too.
+    static func usableTapFormat(_ input: AVAudioInputNode) -> AVAudioFormat? {
+        usableTapFormat(hardware: input.inputFormat(forBus: 0), output: input.outputFormat(forBus: 0))
+    }
+
+    static func usableTapFormat(hardware: AVAudioFormat, output: AVAudioFormat) -> AVAudioFormat? {
+        guard hardware.sampleRate > 0, hardware.channelCount > 0,
+              output.sampleRate > 0, output.channelCount > 0,
+              output.sampleRate == hardware.sampleRate else { return nil }
+        return output
     }
 }
 
 enum MicrophoneError: LocalizedError {
     case unavailable
+    /// The system has no audio input to record from.
+    case noInput
 
     var errorDescription: String? {
-        String(localized: "The microphone isn't available right now. Try again.")
+        switch self {
+        case .unavailable: String(localized: "The microphone isn't available right now. Try again.")
+        case .noInput:
+            #if os(macOS)
+            String(localized: "There's no microphone to record from. Connect one, or choose one in System Settings › Sound.")
+            #else
+            String(localized: "There's no microphone to record from right now. Try again.")
+            #endif
+        }
     }
 }
