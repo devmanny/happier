@@ -236,7 +236,11 @@ const EFFORT_STATUS_LINE = /\beffort:\s*([a-z]+)\b/im;
 // Shell recognition needs its following footer so the hint cannot match itself. Both prompt kinds
 // participate in the SAME last-input selection: an old shell capture cannot outrank a newer normal
 // draft, and an old normal composer cannot make the active shell prompt ready for ordinary input.
-const COMPOSER_LINE = /(?:^|\n)[^\S\n]*(?:[│|][^\S\n]*)?((?:>|›|❯)(?![^\S\n]*(?:\d+\.|[◯◉○●◐◑]))|!(?=[\s\S]*\n[^\S\n]*! for shell mode(?:\s|$)))[^\S\n]*(.*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)/;
+// The bash-mode footer hint the shell prompt is recognized by (also when its `!` row is scrolled away).
+const SHELL_MODE_FOOTER = /\n[^\S\n]*! for shell mode(?:\s|$)/;
+const COMPOSER_LINE = new RegExp(
+  String.raw`(?:^|\n)[^\S\n]*(?:[│|][^\S\n]*)?((?:>|›|❯)(?![^\S\n]*(?:\d+\.|[◯◉○●◐◑]))|!(?=[\s\S]*${SHELL_MODE_FOOTER.source}))[^\S\n]*(.*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)`,
+);
 const SLASH_SUGGESTION_LINE = /(?:^|\n)[^\S\n]*\/[a-z][a-z0-9-]*\b/i;
 // Agents/selection panel (live capture 2026-06-12 11:50, runner pid 58731): the selector header
 // renders `↑/↓ to select` and the focus cursor renders as `❯ ◯ <agent-type> <title>` rows. The
@@ -265,6 +269,25 @@ function lineIndexAt(text: string, index: number): number {
 // Composer-box bottom border / horizontal rule. Require a horizontal/corner glyph: whitespace-only
 // rows and vertical-only box rows can be intentional blank paragraphs inside the composer.
 const COMPOSER_BORDER_LINE = /^[\s─━—╰╯╭╮│|]*[─━—╰╯╭╮][\s─━—╰╯╭╮│|]*$/;
+// Claude Code 2.1.326 scrolls a composer taller than its window and counts the hidden rows in the
+// box rules (80x24 tmux, incidents cmw9mfl85 and cmw2rrigh, 17 nov 2026): `─── ↑ 3 more ───…` on
+// top, after `History k/n · ` while browsing history, and `─── ↓ 2 more ───…` below when the cursor
+// is above the end. Once rows are hidden above, the first row, the only one with `❯`, is out of view.
+// The live composer's rules start at column 0; assistant text and prompt echoes are indented, so a
+// pane capture quoted in the transcript never matches.
+const COMPOSER_RULE_HIDDEN_ROWS_ABOVE = /^─── (?:History(?: \d+\/\d+)? · )?↑ \d+ more ─[^\n]*$/u;
+const COMPOSER_RULE_HIDDEN_ROWS_BELOW = /^─── ↓ \d+ more ─[^\n]*$/u;
+// The scrolled composer's closing rule: plain, or counting the rows hidden below, from column 0.
+const SCROLLED_COMPOSER_CLOSING_RULE = /^[─━]+$|^─── ↓ \d+ more ─[^\n]*$/u;
+// Transcript view (ctrl+o) replaces the composer; its footer can sit under a quoted rule box.
+const TRANSCRIPT_VIEW_FOOTER = /^[^\S\n]*showing detailed transcript\b/iu;
+
+/** A composer box rule, plain or carrying the scrolled composer's hidden-row count. */
+function isComposerRuleRow(line: string): boolean {
+  return COMPOSER_BORDER_LINE.test(line)
+    || COMPOSER_RULE_HIDDEN_ROWS_ABOVE.test(line)
+    || COMPOSER_RULE_HIDDEN_ROWS_BELOW.test(line);
+}
 // Claude Code 2.1.322 feedback draft card. Keyed on the stable rows inside its box (the hint row in
 // every card state, and the `<type> drafted:` title) rather than the model-written title text.
 const FEEDBACK_DRAFT_CARD_ROW = /^[^\S\n]*│.*(?:\bto review\b.*\bto (?:send|dismiss)\b|\bclear text to (?:review|open review|dismiss|answer it)\b|\bsend without reviewing\b|\b(?:bug report|product feedback|feature request|feedback) drafted:)/iu;
@@ -295,7 +318,7 @@ function scanComposerContinuation(lines: readonly string[]): Readonly<{
   for (const rawLine of lines) {
     // Strip box border verticals so `│   wrapped text   │` reads as an indented line.
     const line = rawLine.replace(/^[^\S\n]*[│|]/, '').replace(/[│|][^\S\n]*$/, '');
-    if (COMPOSER_BORDER_LINE.test(line)) {
+    if (isComposerRuleRow(line)) {
       closedByBorder = true;
       break;
     }
@@ -326,6 +349,14 @@ const NUMBERED_COMPOSER_ROW = /^(?:[│|] ?)?[>›❯][^\S\n]*\d+\./u;
 const NUMBERED_COMPOSER_ROW_MATCH = /(?:^|\n)(?:[│|] ?)?([>›❯])[^\S\n]*(\d+\..*?)[^\S\n]*(?:[│|][^\S\n]*)?(?:\n|$)/y;
 const NUMBERED_SELECTION_ROW = new RegExp(`^[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SOURCE}[^\\S\\n]*\\d+\\.`, 'u');
 
+type ProvenComposerBox = Readonly<{
+  /** The row composer parsing reads: the `❯` row, or the top rule when that row is out of view. */
+  match: RegExpExecArray;
+  selectionScanText: string;
+  topRuleRow: number;
+  promptRowHidden: boolean;
+}>;
+
 /**
  * Proof that the live composer is on screen: the bottom-most prompt glyph row is rule-boxed — a
  * border row DIRECTLY above it, then only draft continuation rows, then the closing border. Every
@@ -344,14 +375,14 @@ const NUMBERED_SELECTION_ROW = new RegExp(`^[^\\S\\n]*${SELECTION_FOCUS_GLYPH_SO
 function resolveRuleBoxedComposer(
   text: string,
   plainComposerMatch: RegExpExecArray | null,
-): Readonly<{ match: RegExpExecArray; selectionScanText: string }> | null {
+): ProvenComposerBox | null {
   const lines = text.split('\n');
   let index = lines.length - 1;
   while (index >= 0 && !PROMPT_GLYPH_ROW.test(lines[index] ?? '')) index -= 1;
   if (index < 1) return null;
   const line = lines[index] ?? '';
   if (!RULE_BOXED_COMPOSER_ROW.test(line)) return null;
-  if (!COMPOSER_BORDER_LINE.test(lines[index - 1] ?? '')) return null;
+  if (!isComposerRuleRow(lines[index - 1] ?? '')) return null;
   const scan = scanComposerContinuation(lines.slice(index + 1));
   if (!scan.closedByBorder) return null;
   const draftEnd = index + scan.rowCount;
@@ -379,18 +410,65 @@ function resolveRuleBoxedComposer(
       return rowIndex === index ? glyph : '';
     })
     .join('\n');
-  return { match, selectionScanText };
+  return { match, selectionScanText, topRuleRow: index - 1, promptRowHidden: false };
+}
+
+/**
+ * The scrolled composer whose `❯` row is out of view (Claude Code 2.1.326): the bottom-most rule
+ * that counts hidden rows above, then only indented draft rows, then the closing rule, both rules from
+ * column 0. Only footer rows may follow it: a live `❯` row below means that box is an older render,
+ * and a selection row, transcript view or shell prompt means no composer is mounted. Like the rule-boxed
+ * proof, this composer replaces any dialog, so its rows are emptied out of the selection scan.
+ *
+ * The match it returns is the top rule row itself, with no glyph and no content group: the draft is
+ * read from the rows under it, and the current footer starts below it as for a `❯` row.
+ */
+function resolveComposerScrolledPastPromptRow(
+  text: string,
+  plainComposerMatch: RegExpExecArray | null,
+): ProvenComposerBox | null {
+  const lines = text.split('\n');
+  let top = lines.length - 1;
+  while (top >= 0 && !COMPOSER_RULE_HIDDEN_ROWS_ABOVE.test(lines[top] ?? '')) top -= 1;
+  if (top < 0) return null;
+  const scan = scanComposerContinuation(lines.slice(top + 1));
+  if (!scan.closedByBorder || scan.continuation.every((row) => row === '')) return null;
+  const bottom = top + scan.rowCount + 1;
+  if (!SCROLLED_COMPOSER_CLOSING_RULE.test((lines[bottom] ?? '').trimEnd())) return null;
+  // Only the composer footer may follow: indented rows, no prompt or selection row, no transcript
+  // view. A column-0 row there (a shell prompt, a dialog heading) means the box is not live.
+  if (lines.slice(bottom + 1).some((row) => (
+    /^\S/u.test(row) || PROMPT_GLYPH_ROW.test(row) || TRANSCRIPT_VIEW_FOOTER.test(row)
+  ))) return null;
+  if (plainComposerMatch) {
+    const promptRow = lineIndexAt(text, plainComposerMatch.index + plainComposerMatch[0].search(/[>›❯!]/u));
+    if (promptRow > bottom) return null;
+  }
+  if (lines.slice(top, bottom + 1).some((row) => SELECTION_CONFIRM_HINT.test(row))) return null;
+
+  const rowStart = lines.slice(0, top).reduce((offset, row) => offset + row.length + 1, 0);
+  const match = Object.assign([`${lines[top] ?? ''}\n`, '', ''], {
+    index: rowStart,
+    input: text,
+    groups: undefined,
+  }) as RegExpExecArray;
+  const selectionScanText = lines
+    .map((row, rowIndex) => {
+      if (rowIndex < top) return NUMBERED_SELECTION_ROW.test(row) ? '' : row;
+      return rowIndex > top && rowIndex < bottom ? '' : row;
+    })
+    .join('\n');
+  return { match, selectionScanText, topRuleRow: top, promptRowHidden: true };
 }
 
 /**
  * The card counts only when it is the block directly above the composer's top rule (blank rows
  * and right-aligned indicators between them); a card quoted in transcript history never does.
  */
-function resolveFeedbackDraftCardVisible(text: string, composerMatch: RegExpExecArray): boolean {
+function resolveFeedbackDraftCardVisible(text: string, composerTopRuleRow: number): boolean {
   const lines = text.split('\n');
-  const composerRow = lineIndexAt(text, composerMatch.index + composerMatch[0].search(/[>›❯]/u));
-  if (!COMPOSER_BORDER_LINE.test(lines[composerRow - 1] ?? '')) return false;
-  let row = composerRow - 2;
+  if (!isComposerRuleRow(lines[composerTopRuleRow] ?? '')) return false;
+  let row = composerTopRuleRow - 1;
   while (row >= 0 && ((lines[row] ?? '').trim() === '' || RIGHT_ALIGNED_STATUS_ROW.test(lines[row] ?? ''))) {
     row -= 1;
   }
@@ -566,12 +644,21 @@ function readComposerState(
   rawText: string,
   match: RegExpExecArray | null,
   context?: ClaudeScreenParseContext | undefined,
+  promptRowHidden = false,
 ): Readonly<{ content: string | null; shellContent: string | null; cursorRelation: ClaudeScreenState['composerCursorRelation'] }> {
   // Executed prompts echo as `❯ <prompt>` transcript rows (live capture 2026-06-11); the REAL
   // composer is the LAST composer-shaped line on screen (the input box renders at the bottom).
   if (!match) return { content: null, shellContent: null, cursorRelation: null };
   const content = (match[2] ?? '').trim();
   const continuation = readComposerContinuationLines(text, match.index + match[0].length);
+  // Scrolled past its prompt row: the visible rows are the draft, and no row carries a placeholder.
+  // The bash-mode footer still tells a shell prompt from a message composer.
+  if (promptRowHidden) {
+    const draft = continuation.join('\n');
+    return SHELL_MODE_FOOTER.test(text.slice(match.index + match[0].length - 1))
+      ? { content: null, shellContent: draft, cursorRelation: null }
+      : { content: draft, shellContent: null, cursorRelation: null };
+  }
   if (match[1] === '!') {
     return {
       content: null,
@@ -775,7 +862,7 @@ function isFooterlessChooserBlock(lines: readonly string[], start: number, end: 
   if (end === focusedIndex) return false;
   for (let index = start; index <= end; index += 1) {
     const line = lines[index] ?? '';
-    if (COMPOSER_BORDER_LINE.test(line) || /[│|]/u.test(line)) return false;
+    if (isComposerRuleRow(line) || /[│|]/u.test(line)) return false;
     if (index > focusedIndex && line.search(/\S/u) <= glyphColumn) return false;
   }
   return !lines.slice(end + 1).some((line) => FOCUSED_SELECTION_LINE.test(line) || COMPOSER_LINE.test(line));
@@ -865,9 +952,10 @@ function resolveDialogSelectionPresentation(
 export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenParseContext): ClaudeScreenState {
   const text = normalizeCapturedScreen(rawText);
   const plainComposerMatch = lastMatch(new RegExp(COMPOSER_LINE.source, `${COMPOSER_LINE.flags}g`), text);
-  const ruleBoxedComposer = resolveRuleBoxedComposer(text, plainComposerMatch);
-  const lastComposerMatch = ruleBoxedComposer?.match ?? plainComposerMatch;
-  const selectionScanText = ruleBoxedComposer?.selectionScanText ?? text;
+  const provenComposer = resolveComposerScrolledPastPromptRow(text, plainComposerMatch)
+    ?? resolveRuleBoxedComposer(text, plainComposerMatch);
+  const lastComposerMatch = provenComposer?.match ?? plainComposerMatch;
+  const selectionScanText = provenComposer?.selectionScanText ?? text;
   const visibleTail = tailLines(selectionScanText, 30);
   const usageLimitSemanticMatch = (
     USAGE_LIMIT_DIALOG.test(visibleTail)
@@ -907,7 +995,7 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
   // otherwise the selected row masquerades as a draft and suppresses the generic dialog path.
   const composerState = rewindSelectionVisible || visibleDialogSelection?.kind === 'focused'
     ? { content: null, shellContent: null, cursorRelation: null }
-    : readComposerState(text, rawText, lastComposerMatch, context);
+    : readComposerState(text, rawText, lastComposerMatch, context, provenComposer?.promptRowHidden);
   const composerContent = composerState.content;
   const hasComposer = composerContent !== null;
   // A host cursor on the parsed composer is direct evidence that the composer, not an older
@@ -920,9 +1008,11 @@ export function parseClaudeScreenState(rawText: string, context?: ClaudeScreenPa
     && composerContent.length > 0
     && !composerHasSlash
     && visibleDialogSelection?.kind !== 'focused';
+  const feedbackDraftCardTopRuleRow = provenComposer?.topRuleRow
+    ?? (lastComposerMatch ? lineIndexAt(text, lastComposerMatch.index + lastComposerMatch[0].search(/[>›❯]/u)) - 1 : null);
   const feedbackDraftCardVisible = hasComposer
-    && lastComposerMatch !== null
-    && resolveFeedbackDraftCardVisible(text, lastComposerMatch);
+    && feedbackDraftCardTopRuleRow !== null
+    && resolveFeedbackDraftCardVisible(text, feedbackDraftCardTopRuleRow);
 
   const unrecognizedConfirmationDialogVisible =
     (NUMBERED_SELECTION_OPTION.test(selectionScanText) || visibleDialogSelection?.kind === 'focused')
