@@ -87,6 +87,10 @@ public enum DictationKeyboard {
             case cancel
             /// Turn the microphone off now.
             case endStandby
+            /// The message went out mid-take: end this take, dropping what's still being
+            /// transcribed (it was sent), and start a new one at once, so what's said next is typed
+            /// on its own in the emptied field.
+            case next
         }
 
         public var id: UUID
@@ -312,7 +316,7 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
             return status.final ? nil : edit(for: status, before: before)
         }
         guard status.take > typedThrough else { return nil }
-        let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(status.text), before: before)
+        let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(Self.withoutOpeningPunctuation(status.text)), before: before)
         if sync.stopped {
             userTookOver = status.take
             leave(take: status.take)
@@ -323,6 +327,15 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
             sync.reset()
         }
         return edit
+    }
+
+    /// The field emptied under `take`'s words: the message went out with them. Nothing more of the
+    /// take is typed (Whisper keeps revising its text, so no cut in it lines up with what was
+    /// sent); true when the take had typed something, and the app should start a new one.
+    public mutating func messageSent(take: Int) -> Bool {
+        guard !hasLeft(take: take), sync.take == take, !sync.typed.isEmpty, !sync.stopped else { return false }
+        leave(take: take)
+        return true
     }
 
     /// The keyboard closed during `take` (another keyboard, another field): nothing more of it is
@@ -342,6 +355,12 @@ public struct KeyboardTyping: Codable, Equatable, Sendable {
     /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
     /// dictate the rest; in a text field that period is almost always one to delete. Question and
     /// exclamation marks, ellipses and the periods between sentences stay.
+    /// A take never opens with punctuation: Whisper can hear the silence before the first words as
+    /// the end of a sentence (". Es esa").
+    static func withoutOpeningPunctuation(_ text: String) -> String {
+        String(text.drop { $0.isWhitespace || ".,;:".contains($0) })
+    }
+
     static func withoutClosingPeriod(_ text: String) -> String {
         guard text.hasSuffix("."), !text.hasSuffix("..") else { return text }
         return String(text.dropLast())

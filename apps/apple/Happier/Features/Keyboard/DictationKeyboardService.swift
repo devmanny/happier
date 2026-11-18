@@ -129,6 +129,16 @@ final class DictationKeyboardService {
         watchTake(take)
     }
 
+    /// The keyboard's message went out mid-take: those words are sent. The take ends without its
+    /// last words (they went with the message) and a new one starts on the microphone that's still
+    /// on, so the next words come from a clean slate.
+    private func nextTake() async {
+        guard standby != nil else { return publish() }
+        if dictation.isRecording { dictation.stop() }
+        takeEnded()
+        await startTake()
+    }
+
     /// The engine can end a take by itself (an error, the microphone taken): the keyboard hears of it.
     private func watchTake(_ take: Int) {
         watch?.cancel()
@@ -234,6 +244,8 @@ final class DictationKeyboardService {
             takeEnded()
         case .endStandby:
             turnOff()
+        case .next:
+            Task { await nextTake() }
         }
     }
 

@@ -203,6 +203,36 @@ import Testing
         #expect(typing.edit(for: status(3, "Sí."), before: "Busca una A") == .init(delete: 0, insert: " Sí"))
     }
 
+    @Test func aMessageSentMidTakeEndsItAndTheNextWordsStartClean() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(1, "x", final: true), before: "")
+        #expect(typing.edit(for: status(2, "Si necesitas que inicie sesión"), before: "") == .init(delete: 0, insert: "Si necesitas que inicie sesión"))
+        // Sent: the field is empty. The take is done; the app starts take 3.
+        let sent = typing.messageSent(take: 2)
+        #expect(sent)
+        let again = typing.messageSent(take: 2)
+        #expect(!again)
+        // Whisper revising the sent words, with the next ones after a pause, types nothing more of
+        // take 2: not the sent words again, nor ". Es esa".
+        #expect(typing.edit(for: status(2, "Si necesitas que inicies sesión. Es esa"), before: "") == nil)
+        #expect(typing.edit(for: status(3, "Es esa"), before: "") == .init(delete: 0, insert: "Es esa"))
+    }
+
+    @Test func aTakeThatTypedNothingYetIsNotEndedByAnEmptyField() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(1, "x", final: true), before: "")
+        _ = typing.edit(for: status(2, ""), before: "")
+        let sent = typing.messageSent(take: 2)
+        #expect(!sent)
+    }
+
+    @Test func aTakeNeverOpensWithPunctuation() {
+        var typing = KeyboardTyping()
+        _ = typing.edit(for: status(1, "x", final: true), before: "")
+        #expect(typing.edit(for: status(2, ". Es esa"), before: "") == .init(delete: 0, insert: "Es esa"))
+        #expect(typing.edit(for: status(3, ", y luego."), before: "") == .init(delete: 0, insert: "y luego"))
+    }
+
     @Test func itKnowsATakeItLeftIsNotOneItTypes() {
         // Back in the field with the app still recording a take the keyboard left: the red button
         // would listen and type nothing. The keyboard ends that take and starts a new one.

@@ -53,6 +53,7 @@ final class KeyboardViewController: UIInputViewController {
     override func textDidChange(_ textInput: (any UITextInput)?) {
         super.textDidChange(textInput)
         model.fieldChanged()
+        model.checkMessageSent()
     }
 
     /// Opens the app. A keyboard has no `UIApplication.shared`; the app object is reached through
@@ -209,7 +210,25 @@ final class KeyboardModel {
     }
 
     func space() { proxy?.insertText(" ") }
-    func newline() { proxy?.insertText("\n") }
+    func newline() {
+        proxy?.insertText("\n")
+        // A send key: the app takes the text and empties the field a moment later.
+        guard proxy?.returnKeyType == .send else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            self?.checkMessageSent()
+        }
+    }
+
+    /// The field emptied under the take's words: the message went out. The take ends there and the
+    /// app starts a new one, so what's said next is typed from scratch, never the sent words again.
+    func checkMessageSent() {
+        guard let proxy, !proxy.hasText, let status, status.isListening(),
+              typing.messageSent(take: status.take) else { return }
+        log.notice("message sent mid-take: starting a new take")
+        saveTyping()
+        send(.next)
+    }
     func deleteBackward() {
         stopForEditing()
         proxy?.deleteBackward()
@@ -277,7 +296,7 @@ final class KeyboardModel {
     }
 
     private func send(_ action: DictationKeyboard.Command.Action) {
-        waiting = action == .start || action == .finish
+        waiting = action == .start || action == .finish || action == .next
         channel?.send(DictationKeyboard.Command(action: action))
     }
 
@@ -297,6 +316,7 @@ final class KeyboardModel {
 
     private func typeTake(_ status: DictationKeyboard.Status) {
         guard let proxy else { return }
+        checkMessageSent()
         let tookOver = typing.userTookOver
         let edit = typing.edit(for: status, before: proxy.documentContextBeforeInput)
         if typing.userTookOver != tookOver {
