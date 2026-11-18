@@ -50,6 +50,8 @@ struct SessionListView: View {
     /// The filter button's chosen filter and whether it's on, kept on this device.
     @AppStorage("happier.sessionListFilter") private var storedFilter = ""
     @State private var showFilter = false
+    /// The running sessions offered to put to rest, while the user picks which.
+    @State private var restChoice: SessionRest.Candidates?
     /// Sessions whose sub-sessions are unfolded.
     @State private var expanded: Set<String> = []
     /// A session dropped on another, waiting for what to do with the two.
@@ -361,19 +363,9 @@ struct SessionListView: View {
             if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty {
                 CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
                     outline(groups.active)
-                } accessory: {
-                    RestAllButton()
                 }
             } else {
-                // Held open: a header makes it a section the sidebar could fold, and this one has no title.
-                Section(isExpanded: .constant(true)) {
-                    outline(groups.active)
-                } header: {
-                    HStack {
-                        Spacer(minLength: 0)
-                        RestAllButton()
-                    }
-                }
+                Section { outline(groups.active) }
             }
         }
         // Resting or stopped, used in the last two days: still in view, one tap away.
@@ -631,9 +623,11 @@ extension View {
     }
 }
 
-/// Puts every running session to rest at once (`HappierStore.requestRestAll`), from the header of
-/// the running sessions; it asks first, in `StoreAlerts`.
+/// Opens the choice of running sessions to put to rest (`RestSessionsSheet`), from the session
+/// list's toolbar; while they're being put to rest it shows how far along it is.
 struct RestAllButton: View {
+    /// Opens the list of sessions to choose from.
+    let choose: () -> Void
     @Environment(HappierStore.self) private var store
 
     var body: some View {
@@ -646,19 +640,17 @@ struct RestAllButton: View {
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Putting sessions to rest, \(progress.done) of \(progress.total)"))
-        } else if !store.restCandidates.isEmpty {
+        } else {
+            // Always in its place, so it's found; with nothing running there's nothing to do.
             Button {
                 AppHaptics.light()
-                store.requestRestAll()
+                choose()
             } label: {
-                Label("Put All to Rest", systemImage: "moon.zzz")
-                    .labelStyle(.iconOnly)
-                    .contentShape(Rectangle())
+                Label("Put Sessions to Rest", systemImage: "moon.zzz")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .disabled(store.restCandidates.isEmpty)
             .accessibilityIdentifier("rest-all-sessions")
-            .help(Text("Put all running sessions to rest. Each one wakes when you need it."))
+            .help(Text("Choose running sessions to put to rest. Each one wakes when you need it."))
         }
     }
 }
@@ -897,6 +889,9 @@ extension SessionListView {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
+                RestAllButton { restChoice = store.restCandidates }
+            }
+            ToolbarItem(placement: .primaryAction) {
                 // A tap switches the chosen filter on and off; holding it shows the shortcuts,
                 // "Edit Filter…" and "Clear Filter" (the system menu of a primary-action button).
                 Menu {
@@ -942,6 +937,9 @@ extension SessionListView {
                 }
             }
 
+        }
+        .sheet(item: $restChoice) { request in
+            RestSessionsSheet(request: request)
         }
         .sheet(item: $olderSessions) { section in
             OlderSessionsView(initial: section) { session in openOlder(session) }

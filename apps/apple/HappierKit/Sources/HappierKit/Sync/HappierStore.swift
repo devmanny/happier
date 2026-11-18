@@ -3674,8 +3674,6 @@ public final class HappierStore {
 
     // MARK: - Putting sessions to rest
 
-    /// Set when the user asks to put their running sessions to rest; the UI asks which and calls `putToRest`.
-    public var restRequest: SessionRest.Candidates?
     /// While sessions are being put to rest: how many are done out of how many.
     public private(set) var restingProgress: (done: Int, total: Int)?
 
@@ -3684,18 +3682,16 @@ public final class HappierStore {
         SessionRest.candidates(sessions.values, sending: Set(outgoingSends.values.map(\.sessionId)))
     }
 
-    /// Asks to put every running session of the user's to rest; the UI asks and calls `confirmRest`.
-    public func requestRestAll() {
-        let candidates = restCandidates
-        guard !candidates.isEmpty else { return }
-        restRequest = candidates
+    /// What each running session of the user's is doing now, for choosing which to put to rest.
+    public var restActivities: [String: SessionRest.Activity] {
+        SessionRest.activities(sessions.values, sending: Set(outgoingSends.values.map(\.sessionId)))
     }
 
-    /// The user's answer, read against the sessions as they are now rather than when asked: one
-    /// that has started working since is left alone unless the answer was all of them.
-    public func confirmRest(includingBusy: Bool) async {
-        let candidates = restCandidates
-        await putToRest(includingBusy ? candidates.all : candidates.idle)
+    /// The sessions the user chose, each shown with what it was doing: the ones still running are
+    /// put to rest (one that stopped or was archived meanwhile has nothing left to stop).
+    public func confirmRest(_ sessionIds: [String]) async {
+        let running = restActivities
+        await putToRest(sessionIds.filter { running[$0] != nil })
     }
 
     /// Stops each session and records the idle cleaner's rest once the relay sees it stopped, as

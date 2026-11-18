@@ -22,10 +22,21 @@ struct SessionRestTests {
             RestRelay.session("background", now: now, extra: ["runtimeActivityState": "active", "runtimeActivityActiveCount": 1]),
             RestRelay.session("parent", now: now),
             RestRelay.session("child", now: now, thinking: true, turn: "in_progress", metadata: #"{"spawnedBySessionV1":{"parentSessionId":"parent"}}"#),
+            RestRelay.session("asking", now: now, extra: ["pendingPermissionRequestCount": 1]),
+            RestRelay.session("waitingParent", now: now),
+            RestRelay.session("waitingChild", now: now, metadata: #"{"spawnedBySessionV1":{"parentSessionId":"waitingParent"}}"#,
+                              extra: ["pendingPermissionRequestCount": 1]),
         ]
         let candidates = SessionRest.candidates(sessions, sending: ["sending"], now: now)
         #expect(Set(candidates.idle) == ["idle", "failed"])
-        #expect(Set(candidates.busy) == ["working", "queued", "sending", "terminal", "background", "parent", "child"])
+        #expect(Set(candidates.busy) == ["working", "queued", "sending", "terminal", "background", "parent", "child", "asking", "waitingParent", "waitingChild"])
+        // Each one says what it's doing, so the user can choose.
+        let activities = SessionRest.activities(sessions, sending: ["sending"], now: now)
+        #expect(activities == [
+            "idle": .idle, "failed": .idle, "working": .working, "queued": .queued(2), "sending": .sending,
+            "terminal": .atTerminal, "background": .backgroundWork, "parent": .subSessionWorking, "child": .working,
+            "asking": .waitingForYou, "waitingParent": .subSessionWorking, "waitingChild": .waitingForYou,
+        ])
     }
 
     @Test func puttingSessionsToRestStopsThemAndShowsThemResting() async throws {
@@ -41,17 +52,28 @@ struct SessionRestTests {
         #expect(store.restingProgress == nil)
     }
 
-    @Test func confirmingTheIdleChoiceLeavesASessionThatStartedWorkingSinceTheAsk() async throws {
-        let relay = RestRelay(ids: ["s1", "s2"])
+    @Test func confirmingPutsToRestExactlyTheChosenSessionsThatAreStillRunning() async throws {
+        let relay = RestRelay(ids: ["s1", "s2", "s3"])
         let store = try relay.store()
-        store.requestRestAll()
-        #expect(store.restRequest?.idle.count == 2)
-        // s2 starts a turn while the question is up.
-        store.sessions["s2"]?.latestTurnStatus = "in_progress"
-        store.sessions["s2"]?.latestTurnStatusObservedAt = .now
-        await store.confirmRest(includingBusy: false)
+        #expect(Set(store.restCandidates.all) == ["s1", "s2", "s3"])
+        // s2 is unchecked; s3 stopped on its own while the list was up.
+        store.sessions["s3"]?.active = false
+        await store.confirmRest(["s1", "s3"])
         #expect(relay.stopped == ["s1"])
+        #expect(store.sessions["s1"]?.isResting == true)
         #expect(store.sessions["s2"]?.active == true)
+        #expect(relay.restWrites == ["s1"])
+    }
+
+    @Test func aBusySessionTheUserKeptCheckedIsPutToRest() async throws {
+        let relay = RestRelay(ids: ["s1"])
+        let store = try relay.store()
+        store.sessions["s1"]?.latestTurnStatus = "in_progress"
+        store.sessions["s1"]?.latestTurnStatusObservedAt = .now
+        #expect(store.restActivities["s1"] == .working)
+        await store.confirmRest(["s1"])
+        #expect(relay.stopped == ["s1"])
+        #expect(store.sessions["s1"]?.isResting == true)
     }
 
     @Test func aSessionThatCannotBeStoppedIsNotMarkedRestingAndIsReportedOnce() async throws {

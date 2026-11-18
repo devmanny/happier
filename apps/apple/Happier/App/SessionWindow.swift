@@ -74,41 +74,6 @@ struct StoreAlerts: ViewModifier {
             } message: { _ in
                 Text("The agent's process on the machine will be stopped.")
             }
-            // On its own view, like the alert below: two prompts on one view can keep the second from showing.
-            .background {
-                Color.clear.confirmationDialog(
-                    "Put sessions to rest?",
-                    isPresented: Binding(get: { appearsActive && store.restRequest != nil }, set: { if !$0 { store.restRequest = nil } }),
-                    titleVisibility: .visible,
-                    presenting: store.restRequest
-                ) { request in
-                    if !request.idle.isEmpty {
-                        Button {
-                            AppHaptics.confirm()
-                            Task { await store.confirmRest(includingBusy: false) }
-                        } label: {
-                            if request.busy.isEmpty {
-                                Text("Put ^[\(request.idle.count) Sessions](inflect: true) to Rest")
-                            } else {
-                                Text("Put ^[\(request.idle.count) Idle Sessions](inflect: true) to Rest")
-                            }
-                        }
-                    }
-                    if !request.busy.isEmpty {
-                        Button("Put All \(request.all.count) to Rest", role: .destructive) {
-                            AppHaptics.warning()
-                            Task { await store.confirmRest(includingBusy: true) }
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: { request in
-                    if request.busy.isEmpty {
-                        Text("Their agents stop on their computers. Each conversation stays and wakes when you need it.")
-                    } else {
-                        Text("\(request.busy.count) of them are working or waiting for you, and putting them to rest interrupts that. Each conversation stays and wakes when you need it.")
-                    }
-                }
-            }
             // On its own view: two alerts on one view can keep the second from showing.
             .background {
                 Color.clear.alert(
