@@ -2953,7 +2953,12 @@ public final class HappierStore {
         } catch let error as RPCError where error.code == RPCErrorCodes.noConnectedTarget {
             // No runner is connected, so nothing can be working: a session still shown as
             // running is one whose process is gone. Ending it is what Stop is for; it kills nothing.
-            if sessions[sessionId]?.active == true { _ = await endDeadSession(sessionId) }
+            guard sessions[sessionId]?.active == true else { return }
+            do {
+                try await endDeadSession(sessionId)
+            } catch let failure as StopFailure {
+                lastError = failure.message
+            } catch { report(error) }
         } catch { report(error) }
     }
 
@@ -2963,30 +2968,26 @@ public final class HappierStore {
     /// Called only once the relay has no runner connected for it. The user-scoped `session-end`
     /// (`registerReleasedUiV021SessionEndSocketEvent.ts`) closes it at once, with its open turn
     /// and activity; a runner that was only cut off registers again when it reconnects.
-    private func endDeadSession(_ sessionId: String) async -> Bool {
+    private func endDeadSession(_ sessionId: String) async throws {
         guard let emit = unacknowledgedEmit, let api, let session = sessions[sessionId] else {
-            lastError = notConnectedMessage
-            return false
+            throw StopFailure(message: notConnectedMessage)
         }
         // The relay ignores an end older than the session's last activity, and caps it at its clock.
         let lastSeen = [session.activeAt, session.thinkingAt, session.latestTurnStatusObservedAt].compactMap { $0 }.max()
         let endedAt = max(Date.now, lastSeen?.addingTimeInterval(0.001) ?? .distantPast)
-        do {
-            try await emit("session-end", ["sid": .string(sessionId), "time": .number((endedAt.timeIntervalSince1970 * 1000).rounded(.up))])
-            // `session-end` has no acknowledgement: read the session back to know it ended.
-            let deadline = ContinuousClock.now + .seconds(5)
-            while true {
-                if let row = try await api.session(id: sessionId), row["active"]?.boolValue == false {
-                    try sessions[sessionId]?.apply(update: row)
-                    sessions[sessionId]?.thinking = false
-                    return true
-                }
-                guard ContinuousClock.now < deadline else { break }
-                try await Task.sleep(for: .milliseconds(250))
+        try await emit("session-end", ["sid": .string(sessionId), "time": .number((endedAt.timeIntervalSince1970 * 1000).rounded(.up))])
+        // `session-end` has no acknowledgement: read the session back to know it ended.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            if let row = try await api.session(id: sessionId), row["active"]?.boolValue == false {
+                try sessions[sessionId]?.apply(update: row)
+                sessions[sessionId]?.thinking = false
+                return
             }
-            lastError = String(localized: "Happier couldn't stop this session. Try again in a few minutes.")
-        } catch { report(error) }
-        return false
+            guard ContinuousClock.now < deadline else { break }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        throw StopFailure(message: String(localized: "Happier couldn't stop this session. Try again in a few minutes."))
     }
 
     /// Sets the session's goal or moves it along (`session.goal.set`): a new objective, or a
@@ -3629,15 +3630,26 @@ public final class HappierStore {
 
     /// Stops the session's process: through its daemon, else by asking the runner to exit.
     private func stop(_ sessionId: String) async -> Bool {
+        do {
+            try await stopProcess(sessionId)
+            return true
+        } catch let failure as StopFailure {
+            lastError = failure.message
+        } catch { report(error) }
+        return false
+    }
+
+    /// A stop that didn't go through, with what to tell the user.
+    private struct StopFailure: Error { let message: String }
+
+    /// `stop` without reporting: throws `StopFailure` or the transport's error.
+    private func stopProcess(_ sessionId: String) async throws {
         var outcome = SessionStop.Outcome.fallback
         if let machineId = sessions[sessionId]?.machineId {
             do {
                 outcome = SessionStop.daemonOutcome(try await machineRPC(machineId, method: "stop-session", params: ["sessionId": .string(sessionId)]))
             } catch is RPCError {
                 outcome = .fallback
-            } catch {
-                report(error)
-                return false
             }
         }
         if outcome == .fallback {
@@ -3645,22 +3657,102 @@ public final class HappierStore {
                 outcome = SessionStop.runnerOutcome(try await sessionRPC(sessionId, method: "killSession", params: [:]))
             } catch let error as RPCError where error.code == RPCErrorCodes.noConnectedTarget {
                 // Neither its daemon nor the relay knows a runner for it: the process is gone.
-                return await endDeadSession(sessionId)
+                return try await endDeadSession(sessionId)
             } catch let error as RPCError where RPCErrorCodes.unavailable.contains(error.code ?? "") {
                 outcome = .failed(String(localized: "The session's machine isn't reachable right now. Try again when it's online."))
-            } catch {
-                report(error)
-                return false
             }
         }
         switch outcome {
         case .stopped, .requested:
-            return true
+            return
         case .failed(let message):
-            lastError = message
-            return false
+            throw StopFailure(message: message)
         case .fallback:
-            return false
+            throw StopFailure(message: String(localized: "Happier couldn't stop this session. Try again in a few minutes."))
+        }
+    }
+
+    // MARK: - Putting sessions to rest
+
+    /// Set when the user asks to put their running sessions to rest; the UI asks which and calls `putToRest`.
+    public var restRequest: SessionRest.Candidates?
+    /// While sessions are being put to rest: how many are done out of how many.
+    public private(set) var restingProgress: (done: Int, total: Int)?
+
+    /// The running sessions of the user's that can be put to rest now.
+    public var restCandidates: SessionRest.Candidates {
+        SessionRest.candidates(sessions.values, sending: Set(outgoingSends.values.map(\.sessionId)))
+    }
+
+    /// Asks to put every running session of the user's to rest; the UI asks and calls `confirmRest`.
+    public func requestRestAll() {
+        let candidates = restCandidates
+        guard !candidates.isEmpty else { return }
+        restRequest = candidates
+    }
+
+    /// The user's answer, read against the sessions as they are now rather than when asked: one
+    /// that has started working since is left alone unless the answer was all of them.
+    public func confirmRest(includingBusy: Bool) async {
+        let candidates = restCandidates
+        await putToRest(includingBusy ? candidates.all : candidates.idle)
+    }
+
+    /// Stops each session and records the idle cleaner's rest once the relay sees it stopped, as
+    /// `happier session stop --reason idle` does (`recordSessionRestAfterStop.ts`): each one then
+    /// shows as Resting and wakes with Wake Session. A few at a time; the ones that couldn't be put
+    /// to rest are reported together at the end.
+    func putToRest(_ sessionIds: [String]) async {
+        guard restingProgress == nil, !sessionIds.isEmpty else { return }
+        restingProgress = (0, sessionIds.count)
+        defer { restingProgress = nil }
+        var failures: [(id: String, message: String)] = []
+        await withTaskGroup(of: (String, String?).self) { group in
+            var pending = sessionIds.makeIterator()
+            for _ in 0..<4 {
+                guard let id = pending.next() else { break }
+                group.addTask { await (id, self.putToRest(id)) }
+            }
+            for await (id, failure) in group {
+                restingProgress?.done += 1
+                if let failure { failures.append((id, failure)) }
+                if let next = pending.next() { group.addTask { await (next, self.putToRest(next)) } }
+            }
+        }
+        guard let first = failures.first else { return }
+        let titles = failures.map { sessions[$0.id]?.title ?? $0.id }.formatted(.list(type: .and))
+        lastError = failures.count == 1
+            ? String(localized: "\(titles) couldn't be put to rest. \(first.message)")
+            : String(localized: "\(failures.count) sessions couldn't be put to rest: \(titles). \(first.message)")
+    }
+
+    /// One session: nil once it rests, else what went wrong.
+    private func putToRest(_ sessionId: String) async -> String? {
+        guard let api else { return notConnectedMessage }
+        do {
+            try await stopProcess(sessionId)
+            // A rest describes a stop that happened: wait for the relay to see it stopped
+            // (the same wait as archiving after a stop, `confirmStop`).
+            let deadline = ContinuousClock.now + .seconds(75)
+            while sessions[sessionId]?.active == true {
+                if let row = try await api.session(id: sessionId), row["active"]?.boolValue == false {
+                    try sessions[sessionId]?.apply(update: row)
+                    sessions[sessionId]?.thinking = false
+                    break
+                }
+                guard ContinuousClock.now < deadline else {
+                    return String(localized: "The session stopped but still shows as running.")
+                }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            try await applyMetadataEdit(sessionId) { MetadataEdit.setRest(in: $0, now: $1) }
+            return nil
+        } catch let failure as StopFailure {
+            return failure.message
+        } catch let failure as NotConnected {
+            return failure.message
+        } catch {
+            return UserFacingError.message(for: error, hasNetworkPath: hasNetworkPath)
         }
     }
 
@@ -3691,32 +3783,38 @@ public final class HappierStore {
     /// Read-modify-write of the full session metadata with optimistic concurrency
     /// (`update-metadata`, retried on version mismatch like `updateSessionMetadataWithRetry.ts`).
     private func editMetadata(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async {
-        guard let emit = acknowledgedEmit else {
-            lastError = notConnectedMessage
-            return
-        }
         do {
-            for _ in 0..<6 {
-                guard let session = sessions[sessionId] else { return }
-                let next = edit(session.metadata, ServerClock.nowMs())
-                if next == session.metadata { return }
-                let ack = try await emit("update-metadata", [
-                    "sid": .string(sessionId),
-                    "expectedVersion": .number(Double(session.metadataVersion)),
-                    "metadata": .string(try session.encodeDocument(next)),
-                ], .seconds(30))
-                guard let response = ack.first, let version = response["version"]?.intValue else {
-                    throw RPCError(message: "Invalid metadata update response", code: nil)
-                }
-                try sessions[sessionId]?.apply(update: ["metadata": ["value": response["metadata"] ?? .null, "version": .number(Double(version))]])
-                switch response["result"]?.stringValue {
-                case "success": return
-                case "version-mismatch": continue
-                default: throw RPCError(message: response["message"]?.stringValue ?? "Metadata update failed", code: response["result"]?.stringValue)
-                }
-            }
-            throw RPCError(message: "The session changed too often to save this setting. Try again.", code: "version-mismatch")
+            try await applyMetadataEdit(sessionId, edit)
+        } catch let error as NotConnected {
+            lastError = error.message
         } catch { report(error) }
+    }
+
+    private struct NotConnected: Error { let message: String }
+
+    /// `editMetadata` without reporting.
+    private func applyMetadataEdit(_ sessionId: String, _ edit: (JSONValue, Double) -> JSONValue) async throws {
+        guard let emit = acknowledgedEmit else { throw NotConnected(message: notConnectedMessage) }
+        for _ in 0..<6 {
+            guard let session = sessions[sessionId] else { return }
+            let next = edit(session.metadata, ServerClock.nowMs())
+            if next == session.metadata { return }
+            let ack = try await emit("update-metadata", [
+                "sid": .string(sessionId),
+                "expectedVersion": .number(Double(session.metadataVersion)),
+                "metadata": .string(try session.encodeDocument(next)),
+            ], .seconds(30))
+            guard let response = ack.first, let version = response["version"]?.intValue else {
+                throw RPCError(message: "Invalid metadata update response", code: nil)
+            }
+            try sessions[sessionId]?.apply(update: ["metadata": ["value": response["metadata"] ?? .null, "version": .number(Double(version))]])
+            switch response["result"]?.stringValue {
+            case "success": return
+            case "version-mismatch": continue
+            default: throw RPCError(message: response["message"]?.stringValue ?? "Metadata update failed", code: response["result"]?.stringValue)
+            }
+        }
+        throw RPCError(message: "The session changed too often to save this setting. Try again.", code: "version-mismatch")
     }
 
     /// Session-scoped RPC through the server relay (`apiSocket.ts:334-405`); a result reporting

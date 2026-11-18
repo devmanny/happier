@@ -8,7 +8,9 @@ import { z } from 'zod';
  *
  * The rest holds only until the Session next starts: it is resting while it is not running and
  * `at` is no older than the runner's `lifecycleStateSince`, which every start and resume rewrites.
- * Nobody clears the record. The native Apple client reads this rule in `Session.isResting`.
+ * Nobody clears the record. The native Apple client reads this rule in `Session.isResting`, and
+ * writes the same `idle` rest when the user puts their running sessions to rest all at once
+ * (`HappierStore.putToRest`), so those show as Resting too.
  */
 export const SESSION_REST_METADATA_KEY = 'sessionRestV1' as const;
 

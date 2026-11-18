@@ -269,6 +269,15 @@ public enum MetadataEdit {
         set(metadata, "summary", ["text": .string(title), "updatedAt": .number(now)])
     }
 
+    /// The idle cleaner's rest (`sessionRestV1`, what `happier session stop --reason idle` records
+    /// once the stop is confirmed): the session shows as Resting until it next starts. `at` is
+    /// kept no older than the last start (`lifecycleStateSince`), so a clock behind the computer's
+    /// can't leave it reading as stopped (`Session.isResting`).
+    public static func setRest(in metadata: JSONValue, now: Double) -> JSONValue {
+        let at = max(now, metadata["lifecycleStateSince"]?.doubleValue ?? 0).rounded(.up)
+        return set(metadata, "sessionRestV1", ["v": 1, "reason": "idle", "at": .number(at)])
+    }
+
     private static func set(_ metadata: JSONValue, _ key: String, _ value: JSONValue) -> JSONValue {
         var object = metadata.objectValue ?? [:]
         object[key] = value

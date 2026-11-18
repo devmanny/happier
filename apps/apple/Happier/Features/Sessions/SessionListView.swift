@@ -361,9 +361,19 @@ struct SessionListView: View {
             if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty {
                 CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
                     outline(groups.active)
+                } accessory: {
+                    RestAllButton()
                 }
             } else {
-                Section { outline(groups.active) }
+                // Held open: a header makes it a section the sidebar could fold, and this one has no title.
+                Section(isExpanded: .constant(true)) {
+                    outline(groups.active)
+                } header: {
+                    HStack {
+                        Spacer(minLength: 0)
+                        RestAllButton()
+                    }
+                }
             }
         }
         // Resting or stopped, used in the last two days: still in view, one tap away.
@@ -618,6 +628,38 @@ extension View {
             // The lifted row is the glass capsule below, not a white plate around the row.
             .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 22, style: .continuous))
             #endif
+    }
+}
+
+/// Puts every running session to rest at once (`HappierStore.requestRestAll`), from the header of
+/// the running sessions; it asks first, in `StoreAlerts`.
+struct RestAllButton: View {
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        if let progress = store.restingProgress {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("\(progress.done)/\(progress.total)").monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Putting sessions to rest, \(progress.done) of \(progress.total)"))
+        } else if !store.restCandidates.isEmpty {
+            Button {
+                AppHaptics.light()
+                store.requestRestAll()
+            } label: {
+                Label("Put All to Rest", systemImage: "moon.zzz")
+                    .labelStyle(.iconOnly)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("rest-all-sessions")
+            .help(Text("Put all running sessions to rest. Each one wakes when you need it."))
+        }
     }
 }
 
