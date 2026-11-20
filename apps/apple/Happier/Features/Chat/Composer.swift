@@ -1229,9 +1229,9 @@ private struct GoalChip: View {
 
 /// The composer's mic: a tap dictates into the field (tap again to stop); held down, it's push to
 /// talk — it listens while held, then hands the result to the composer, or cancels on the trash.
-/// With Whisper it waits for Whisper's model: dimmed, with an ear on it, until the model is in
-/// memory (Apple's engine, dictating meanwhile, wrote the wrong words). A model let go when the
-/// app left the screen loads again by itself; after low memory or a failure, a tap loads it.
+/// With Whisper, an ear on it shows that Whisper's model isn't in memory yet: Apple's engine, which
+/// makes more mistakes, dictates meanwhile. A model let go when the app left the screen loads
+/// again by itself; after low memory or a failure, the next dictation loads it.
 struct PushToTalkButton: View {
     let recording: Bool
     let talking: Bool
@@ -1266,7 +1266,7 @@ struct PushToTalkButton: View {
         return DictationDiagnostics.shared.whisperStatus.readiness(of: whisper)
     }
 
-    /// Waiting for Whisper: it can't dictate yet (a take already going keeps its mic).
+    /// Whisper isn't ready: Apple's engine dictates (the ear isn't shown over a take going on).
     private var waiting: Bool { readiness != .ready && !recording && !talking }
 
     var body: some View {
@@ -1286,10 +1286,9 @@ struct PushToTalkButton: View {
                 }
             }
             .glassEffect(.regular.interactive(), in: Circle())
-            .opacity(waiting ? 0.45 : 1)
             .overlay(alignment: .topLeading) {
                 if waiting {
-                    // Whisper's model on its way (pulsing), or let go: a tap loads it.
+                    // Whisper's model on its way (pulsing), or let go: the next dictation loads it.
                     Image(systemName: readiness == .loading ? "ear" : "ear.trianglebadge.exclamationmark")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
@@ -1313,7 +1312,6 @@ struct PushToTalkButton: View {
             #endif
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in
-                    guard !waiting || pressing else { return }
                     if !pressing {
                         pressing = true
                         AppHaptics.light()
@@ -1335,17 +1333,15 @@ struct PushToTalkButton: View {
                         // Stuck to the trash it's deleted, wherever the finger is; otherwise sent.
                         onHoldEnd(cancelArmed)
                         withAnimation(.spring(duration: 0.3)) { dragOffset = .zero }
-                    } else if waiting {
-                        loadWhisper()
                     } else {
                         onTap()
                     }
                 })
-            .accessibilityLabel(waiting ? (readiness == .loading ? "Whisper is loading" : "Load Whisper")
-                                : recording ? "Stop dictation" : "Dictate")
-            .accessibilityHint(waiting ? "" : holdHint)
+            .accessibilityLabel(recording ? "Stop dictation" : "Dictate")
+            .accessibilityValue(waiting ? (readiness == .loading ? "Whisper is loading" : "Whisper isn't loaded") : "")
+            .accessibilityHint(holdHint)
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { if waiting { loadWhisper() } else { onTap() } }
+            .accessibilityAction { onTap() }
             .task(id: WhisperModels.library.inUse) { whisper = await DictationRecognizers.whisperModel() }
             .task(id: AutomaticLoad(readiness: readiness, active: scenePhase == .active)) {
                 // Let go when the app left the screen (or not loaded since launch): loads again.
@@ -1359,12 +1355,6 @@ struct PushToTalkButton: View {
         let active: Bool
     }
 
-    /// The mic tapped before Whisper is ready: it says so, and loads the model if it isn't loading.
-    private func loadWhisper() {
-        AppHaptics.warning()
-        guard let whisper, readiness != .loading else { return }
-        Task { await DictationRecognizers.load(whisper) }
-    }
 
     /// Under the finger, wherever it goes, until the finger is in the red zone near the trash:
     /// then the magnet catches it there.

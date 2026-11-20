@@ -36,10 +36,23 @@ enum DictationRecognizers {
     /// Starts loading Whisper's model, if dictation uses it and it isn't in memory: a composer on
     /// screen may dictate any moment, and Whisper dictates once its model is in memory.
     @MainActor
-    static func warmUp(language: String?) async -> DictationEngine {
-        let engine = await engine(language: language)
-        if case .whisper(let model) = engine { await load(model) }
-        return engine
+    static func warmUp(language: String?) async {
+        if case .whisper(let model) = await engine(language: language) { await load(model) }
+    }
+
+    /// The engine this take starts with: Whisper once its model is in memory; until then Apple's,
+    /// while Whisper loads for the next take.
+    @MainActor
+    static func take(language: String?) async -> DictationTake {
+        let configured = await engine(language: language)
+        var loaded = true
+        if case .whisper(let model) = configured, let folder = WhisperModels.library.folder(of: model) {
+            loaded = await WhisperRuntime.shared.isLoaded(folder)
+            if !loaded { await WhisperRuntime.shared.warmUp(folder) }
+        }
+        return await DictationEngine.forTake(configured, whisperLoaded: loaded, appleAllowed: appleAllowed) { @Sendable in
+            await SpeechTranscriberRecognizer.isReady(for: language)
+        }
     }
 
     /// Whisper's model when dictation uses it on this device; nil: Apple's engine.

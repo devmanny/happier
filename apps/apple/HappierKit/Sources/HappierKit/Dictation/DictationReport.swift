@@ -78,16 +78,15 @@ public struct WhisperModelStatus: Codable, Equatable, Sendable {
 
     public init() {}
 
-    /// Whether the composer's mic can dictate with Whisper's `model`.
+    /// Whether the composer's mic dictates with Whisper's `model` (else Apple's engine does).
     public enum Readiness: Equatable, Sendable {
         case ready
         case loading
         /// Not in memory: `reloads` when it loads again by itself (it was let go only because the
-        /// app left the screen, or hasn't loaded since launch); otherwise a tap on the mic does.
+        /// app left the screen, or hasn't loaded since launch); otherwise the next dictation does.
         case notLoaded(reloads: Bool)
     }
 
-    /// The mic waits for Whisper: Apple's engine, dictating while it loaded, wrote the wrong words.
     public func readiness(of model: WhisperModel) -> Readiness {
         guard self.model == model else { return .notLoaded(reloads: true) }
         switch phase {

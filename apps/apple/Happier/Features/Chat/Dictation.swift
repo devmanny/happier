@@ -57,7 +57,7 @@ final class Dictation {
         // push to talk after launch listens at once.
         Task.detached(priority: .utility) { _ = Dictation.supportedLocales }
         // Whisper's model loads now (a second or so), not when the first take begins.
-        Task { _ = await DictationRecognizers.warmUp(language: await Self.takeLanguage().apple) }
+        Task { await DictationRecognizers.warmUp(language: await Self.takeLanguage().apple) }
     }
     /// Waiting for the engine's last words after `finish()`.
     @ObservationIgnored private var finishing = false
@@ -152,9 +152,9 @@ final class Dictation {
         // The user's own language: the app's text is English only, so `Locale.current` is English
         // even on a Spanish phone.
         let language = await Self.takeLanguage()
-        // Whisper even while its model loads: it waits for it until its first-words deadline,
-        // and only then does Apple's engine take the take over.
-        let engine = await DictationRecognizers.warmUp(language: language.apple)
+        // Whisper once its model is in memory, else Apple's engine while Whisper loads.
+        let choice = await DictationRecognizers.take(language: language.apple)
+        let engine = choice.engine
         guard take == current else { return }
         // Whisper needs only the microphone; Apple's engines also need speech recognition.
         let speechRecognition = if case .whisper = engine { false } else { true }
@@ -170,7 +170,7 @@ final class Dictation {
             // Written in the user's style (Settings › Dictation), fixed for the whole take.
             let style = DictationStyle(defaults: .standard)
             let deliver: @MainActor (String) -> Void = { text in onText(prefix + separator + style.apply(text)) }
-            let takeLog = DictationTakeLog(engine: engine, fallback: nil)
+            let takeLog = DictationTakeLog(engine: engine, fallback: choice.fallback)
             let recognizer = try await DictationRecognizers.start(engine, language: language, takeLog: takeLog) { [weak self] text, ended, failure in
                 Task { @MainActor in
                     guard let self, self.take == current, !self.finishing || failure != nil else { return }

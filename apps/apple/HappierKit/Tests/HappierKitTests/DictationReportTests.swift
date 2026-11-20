@@ -6,7 +6,7 @@ import Testing
 struct DictationReportTests {
     private let listening = Date(timeIntervalSinceReferenceDate: 1_000)
 
-    @Test func theMicWaitsForWhisperAndReloadsItWhenItWasLetGo() {
+    @Test func theMicShowsWhetherWhisperIsLoadedAndReloadsItWhenItWasLetGo() {
         var status = WhisperModelStatus()
         status.model = .largeV3Turbo
         status.phase = .loaded
@@ -21,7 +21,7 @@ struct DictationReportTests {
         #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: true))
         status.unloaded = nil
         #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: true))
-        // Let go for low memory, or failed: loading again at once could repeat it, so a tap does.
+        // Let go for low memory, or failed: loading again at once could repeat it, so the next dictation does.
         status.unloaded = .lowMemory
         #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: false))
         status.phase = .failed

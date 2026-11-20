@@ -33,10 +33,9 @@ struct WhisperKitDownloader: WhisperModelDownloader {
 }
 
 /// The loaded Whisper model, shared by every take. One transcription at a time (WhisperKit isn't
-/// made for concurrent calls on one instance). It loads when a composer appears, and a take that
-/// starts while it loads waits for it (a second or so) until Whisper's first-words deadline;
-/// past that (minutes when the system compiles it again) Apple's engine takes the take over.
-/// Apple's engine dictating whole takes while it loaded wrote the wrong words. It is let go when
+/// made for concurrent calls on one instance). It loads when a composer appears; a take that
+/// starts before it is in memory (a second or so, minutes after an update, when the system
+/// compiles it again) is Apple's (`DictationEngine.forTake`), and the mic shows it loads. It is let go when
 /// the app leaves the screen (iPhone, iPad) and loads again when the app is back; on low memory it
 /// is let go until the next dictation asks.
 actor WhisperRuntime {
