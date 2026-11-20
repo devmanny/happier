@@ -20,7 +20,8 @@ public enum DictationEngine: Equatable, Codable, Sendable {
 
 /// Why a take Whisper was to dictate went to Apple's engine.
 public enum DictationFallback: String, Codable, Sendable {
-    /// Whisper wasn't loaded when the take began (it loads meanwhile, for the next one).
+    /// Whisper's model wasn't in memory by the take's first-words deadline (still loading, or
+    /// let go mid-take).
     case whisperNotLoaded
     /// Whisper had no words in the composer by its deadline.
     case whisperTooSlow
@@ -28,30 +29,10 @@ public enum DictationFallback: String, Codable, Sendable {
     case whisperFailed
 }
 
-/// The engine one take starts with, and why it isn't the device's Whisper when it isn't.
-public struct DictationTake: Equatable, Sendable {
-    public let engine: DictationEngine
-    public let fallback: DictationFallback?
-
-    public init(engine: DictationEngine, fallback: DictationFallback?) {
-        self.engine = engine
-        self.fallback = fallback
-    }
-}
-
 extension DictationEngine {
     /// Apple's engine for the dictation language: SpeechAnalyzer where it has it, else the older one.
     public static func apple(speechTranscriber: () async -> Bool) async -> DictationEngine {
         await speechTranscriber() ? .speechTranscriber : .speechRecognizer
-    }
-
-    /// The engine a take starts with. A take never waits for Whisper to load (seconds, minutes when
-    /// the system recompiles it): Apple's engine dictates it meanwhile. Only without speech
-    /// recognition allowed (Whisper asks for the microphone alone) does it wait for Whisper.
-    public static func forTake(_ configured: DictationEngine, whisperLoaded: Bool, appleAllowed: Bool,
-                               speechTranscriber: () async -> Bool) async -> DictationTake {
-        guard case .whisper = configured, !whisperLoaded, appleAllowed else { return DictationTake(engine: configured, fallback: nil) }
-        return DictationTake(engine: await apple(speechTranscriber: speechTranscriber), fallback: .whisperNotLoaded)
     }
 }
 

@@ -33,19 +33,15 @@ enum DictationRecognizers {
     /// Speech recognition is allowed already: Apple's engine can take a take without asking.
     nonisolated static var appleAllowed: Bool { SFSpeechRecognizer.authorizationStatus() == .authorized }
 
-    /// The engine this take starts with: Whisper once its model is in memory; until then Apple's,
-    /// while Whisper loads for the next take.
+    /// Starts loading Whisper's model, if dictation uses it and it isn't in memory: a composer on
+    /// screen may dictate any moment, and Whisper dictates once its model is in memory.
     @MainActor
-    static func take(language: String?) async -> DictationTake {
-        let configured = await engine(language: language)
-        var loaded = true
-        if case .whisper(let model) = configured, let folder = WhisperModels.library.folder(of: model) {
-            loaded = await WhisperRuntime.shared.isLoaded(folder)
-            if !loaded { await WhisperRuntime.shared.warmUp(folder) }
+    static func warmUp(language: String?) async -> DictationEngine {
+        let engine = await engine(language: language)
+        if case .whisper(let model) = engine, let folder = WhisperModels.library.folder(of: model) {
+            await WhisperRuntime.shared.warmUp(folder)
         }
-        return await DictationEngine.forTake(configured, whisperLoaded: loaded, appleAllowed: appleAllowed) { @Sendable in
-            await SpeechTranscriberRecognizer.isReady(for: language)
-        }
+        return engine
     }
 
     /// Starts recognizing a take with `engine`, in `language` (`SpeechLanguage.dictation`).

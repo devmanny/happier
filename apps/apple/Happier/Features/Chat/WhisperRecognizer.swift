@@ -33,10 +33,12 @@ struct WhisperKitDownloader: WhisperModelDownloader {
 }
 
 /// The loaded Whisper model, shared by every take. One transcription at a time (WhisperKit isn't
-/// made for concurrent calls on one instance). A take doesn't wait for it to load (a second or so,
-/// minutes when the system compiles it again): Apple's engine dictates that take while it loads
-/// (`DictationEngine.forTake`). It is let go when the app leaves the screen (iPhone, iPad) and
-/// loads again when the app is back; on low memory it is let go until the next dictation asks.
+/// made for concurrent calls on one instance). It loads when a composer appears, and a take that
+/// starts while it loads waits for it (a second or so) until Whisper's first-words deadline;
+/// past that (minutes when the system compiles it again) Apple's engine takes the take over.
+/// Apple's engine dictating whole takes while it loaded wrote the wrong words. It is let go when
+/// the app leaves the screen (iPhone, iPad) and loads again when the app is back; on low memory it
+/// is let go until the next dictation asks.
 actor WhisperRuntime {
     static let shared = WhisperRuntime()
     private static let log = Logger(subsystem: "dev.happier.apple", category: "dictation")
@@ -86,13 +88,14 @@ actor WhisperRuntime {
         try await load(folder, prewarm: true).value
     }
 
-    /// Transcribes with the model in memory. Without it, `waitForLoad` loads it first; otherwise it
-    /// throws `NotLoaded` (the next take loads it: after low memory, not at once). Returns the
+    /// Transcribes with the model in memory, waiting for its load in progress. Without either,
+    /// `waitForLoad` loads it first; otherwise it throws `NotLoaded` (the next take loads it: after
+    /// low memory, not at once). Returns the
     /// segments and the language they're in (the one recognized, when `options` has none).
     func transcribe(_ audio: [Float], options: DecodingOptions, folder: URL, waitForLoad: Bool,
                     callback: TranscriptionCallback? = nil) async throws -> (segments: [WhisperStreamTranscript.Segment], language: String?) {
         if !isLoaded(folder) {
-            guard waitForLoad else { throw NotLoaded() }
+            guard waitForLoad || loading?.folder == folder else { throw NotLoaded() }
             try await load(folder, prewarm: false).value
         }
         await acquire()
@@ -375,7 +378,7 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
             return transcript.text
         } catch {
             let reason: DictationFallback = switch error {
-            case is TooSlow: .whisperTooSlow
+            case is TooSlow: await WhisperRuntime.shared.isLoaded(folder) ? .whisperTooSlow : .whisperNotLoaded
             case is WhisperRuntime.NotLoaded: .whisperNotLoaded
             default: .whisperFailed
             }
