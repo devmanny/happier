@@ -300,6 +300,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
+  onQuotaEvidence?: ((windows: readonly NormalizedProviderUsageLimitDetailsV1[]) => void | Promise<void>) | undefined;
   onTerminalScreenObserved?: ((observation: ClaudeUnifiedTerminalScreenObservation) => void) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
@@ -2425,6 +2426,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               await opts.onReady?.();
             },
             onUsageLimitDetails: opts.onUsageLimitDetails,
+            onQuotaEvidence: opts.onQuotaEvidence,
             onRuntimeAuthFailureEvent: opts.onRuntimeAuthFailureEvent,
             onProviderPromptStarted: opts.onProviderPromptStarted,
             onProviderPromptSubmitMetadata: runtimeControlBridge

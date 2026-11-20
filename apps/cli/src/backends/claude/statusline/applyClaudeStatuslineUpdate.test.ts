@@ -160,7 +160,7 @@ describe('createClaudeStatuslineApplier', () => {
     });
     expect(fixture.getSessionEventCalls()).toEqual([
       {
-        event: { type: 'message', message: 'Model changed to Opus 4.8' },
+        event: { type: 'runtime-config-outcome', provider: 'claude', runtime: 'claude', status: 'applied', timing: 'current_window', message: 'Model changed to Opus 4.8', changes: [{ key: 'model', previous: 'claude-fable-5', effective: 'claude-opus-4-8' }] },
         id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
       },
     ]);

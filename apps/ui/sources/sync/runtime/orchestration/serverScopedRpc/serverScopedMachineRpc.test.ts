@@ -263,6 +263,46 @@ describe('machineRpcWithServerScope', () => {
             .toEqual(['machine-1:daemon.sessionHandoff.capability.v2.get']);
     });
 
+    it.each([
+        { target: 'undecryptable', expected: { status: 'error', errorCode: 'machine_rpc_decryption_failed' } },
+        { target: 'disconnected', expected: { status: 'error', errorCode: RPC_ERROR_CODES.METHOD_NOT_AVAILABLE } },
+        { target: 'missing-method', expected: { status: 'unavailable' } },
+        { target: 'old-capability', expected: { status: 'unavailable' } },
+        { target: 'supported', expected: { status: 'available' } },
+    ])('distinguishes existing-state capability from a $target target through encrypted machine RPC', async ({ target, expected }) => {
+        installScopedFallback();
+        const { Encryption } = await import('@/sync/encryption/encryption');
+        const encryption = await Encryption.create(new Uint8Array(32).fill(1));
+        createEncryptionSpy.mockResolvedValue(encryption);
+        getActiveServerSnapshotSpy.mockReturnValue({ serverId: 'server-a', serverUrl: 'https://server-a.example.test', generation: 1 });
+        listServerProfilesSpy.mockReturnValue([{ id: 'server-b', serverUrl: 'https://server-b.example.test' }]);
+        vi.stubGlobal('fetch', vi.fn(createServerFetchWithReachabilityProbe(async () => Response.json([
+            { id: 'machine-source', dataEncryptionKey: null }, { id: 'machine-target', dataEncryptionKey: null },
+        ]))));
+        const emitWithAck = async (_event: string, payload: { method: string }) => {
+            const isTarget = payload.method.startsWith('machine-target:');
+            if (isTarget && target === 'undecryptable') return { ok: true, result: 'undecryptable-response' };
+            if (isTarget && (target === 'disconnected' || target === 'missing-method')) {
+                return { ok: false, error: 'RPC target unavailable', errorCode: target === 'disconnected'
+                    ? RPC_ERROR_CODES.METHOD_NOT_AVAILABLE : RPC_ERROR_CODES.METHOD_NOT_FOUND };
+            }
+            const cipher = encryption.getMachineEncryption(isTarget ? 'machine-target' : 'machine-source');
+            if (!cipher) throw new Error('Expected machine encryption');
+            return { ok: true, result: await cipher.encodeRpcPayload({ protocolVersion: 2, atomicTargetResume: true, targetCleanup: true,
+                ...(!isTarget || target !== 'old-capability' ? { existingState: true } : {}) }) };
+        };
+        createEphemeralSocketSpy.mockReset();
+        createEphemeralSocketSpy.mockResolvedValue({ timeout: () => ({ emitWithAck }), disconnect: vi.fn() });
+        const { renderHook } = await import('@/dev/testkit');
+        const { useSessionHandoffExistingStateAvailability } = await import('@/sync/domains/sessionHandoff/useSessionHandoffExistingStateAvailability');
+        const hook = await renderHook(() => useSessionHandoffExistingStateAvailability({ serverId: 'server-b', sourceMachineId: 'machine-source', targetMachineId: 'machine-target', agentId: 'claude' }));
+        try {
+            await vi.waitFor(() => expect(hook.getCurrent()).toMatchObject(expected));
+        } finally {
+            await hook.unmount();
+        }
+    });
+
     it('preserves authorization on active direct machine RPC calls', async () => {
         getActiveServerSnapshotSpy.mockReturnValue({
             serverId: 'server-a',

@@ -17,6 +17,11 @@ import {
 import { configuration, reloadConfiguration } from '@/configuration';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { createTempDirSync, removeTempDirSync } from '@/testkit/fs/tempDir';
+import { EventEmitter } from 'node:events';
+import { sealAccountScopedBlobCiphertext } from '@happier-dev/protocol';
+import { createInMemoryAccountKv } from '@/api/kv/inMemoryAccountKv.testkit';
+import { resetAgentMemoryForTests, startAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { resetAgentTasksForTests, startAgentTasks } from '@/session/agentTasks/startAgentTasks';
 
 /**
  * D-27's total bound, at the one prompt-finalization owner.
@@ -402,6 +407,59 @@ describe('resolveProviderPromptForDispatch — D-27 total resolved-context bound
         expect(resolution.seedApplied).toBe(false);
         expect(resolution.providerPrompt.startsWith('do the thing\n\n<happier_session_reference>')).toBe(true);
         expect(resolution.providerPrompt).toContain('sess-referenced-1');
+    });
+
+    it('gives an agent thread its other threads at the start of the turn, only in the provider prompt', async () => {
+        const kv = createInMemoryAccountKv();
+        const material = { type: 'dataKey', machineKey: new Uint8Array(32).fill(8) } as const;
+        kv.rows.set('agent/a1/now/sess-other', {
+            value: sealAccountScopedBlobCiphertext({
+                kind: 'agent_memory', material, randomBytes: (n) => new Uint8Array(n),
+                payload: { v: 1, sessionId: 'sess-other', text: 'Revisando TestFlight', updatedAt: Date.now() - 3 * 60_000 },
+            }),
+            version: 0,
+        });
+        const { session } = createSession();
+        const agentSession = Object.assign(new EventEmitter(), session, { sessionId: 'sess-self' });
+        const credentials = { token: 't', encryption: { type: 'dataKey' as const, publicKey: new Uint8Array(32), machineKey: material.machineKey } };
+        const env = { HAPPIER_AGENT_IDENTITY_JSON: JSON.stringify({ v: 1, id: 'a1', name: 'Julián' }) };
+        startAgentMemory(agentSession, credentials, { transport: kv.transport, env });
+        const tasks = startAgentTasks(agentSession, credentials, { transport: kv.transport, env })!;
+        await tasks.store.create({ title: 'Revisar login', assignee: { kind: 'agent', agentId: 'a1' }, status: 'in_progress', threads: [] });
+        try {
+            const resolution = await resolveProviderPromptForDispatch({
+                session: agentSession, userText: 'do the thing', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
+            });
+            expect(resolution.providerPrompt.startsWith('do the thing\n\n[Happier · your other threads')).toBe(true);
+            expect(resolution.providerPrompt).toContain('sess-other: Revisando TestFlight (3 min ago)');
+            // Its board: the agent's open tasks, with ids it can update.
+            expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Revisar login · In progress/);
+
+            const plain = await resolveProviderPromptForDispatch({
+                session, userText: 'do the thing', allowSeed: false, localId: 'l2', nowMs: 1, refreshMetadataBeforeRead: false,
+            });
+            expect(plain.providerPrompt).toBe('do the thing');
+        } finally {
+            resetAgentMemoryForTests();
+            resetAgentTasksForTests();
+        }
+    });
+
+    it('gives a session without an agent the tasks assigned to it at the start of the turn', async () => {
+        const kv = createInMemoryAccountKv();
+        const { session } = createSession();
+        const plainSession = Object.assign(new EventEmitter(), session, { sessionId: 'sess-plain' });
+        const credentials = { token: 't', encryption: { type: 'dataKey' as const, publicKey: new Uint8Array(32), machineKey: new Uint8Array(32).fill(8) } };
+        const tasks = startAgentTasks(plainSession, credentials, { transport: kv.transport, env: {} })!;
+        await tasks.store.create({ title: 'Probar en Mac', assignee: { kind: 'session', sessionId: 'sess-plain' }, status: 'todo', threads: [] });
+        try {
+            const resolution = await resolveProviderPromptForDispatch({
+                session: plainSession, userText: 'hola', allowSeed: false, localId: 'l1', nowMs: 1, refreshMetadataBeforeRead: false,
+            });
+            expect(resolution.providerPrompt).toMatch(/your open tasks[^\n]*\n- [\w-]+ · Probar en Mac · To do/);
+        } finally {
+            resetAgentTasksForTests();
+        }
     });
 
     it('leaves a message with no references unbounded and unmeasured (legacy path untouched)', async () => {

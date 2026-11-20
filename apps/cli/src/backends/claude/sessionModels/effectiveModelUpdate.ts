@@ -1,6 +1,7 @@
 import type { reconcileClaudeSessionModelsState } from './reconcileClaudeSessionModelsState';
 import type { Metadata } from '@/api/types';
 import { updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
+import { buildModelEffortChangeOutcome, type ModelEffortChangeOutcomeEvent } from '@/agent/runtime/configChange/modelEffortChangeOutcome';
 
 import { buildClaudeSessionModelsMetadataWithCurrentModelId } from '../remote/buildClaudeSessionModelsMetadataFromSupportedModels';
 
@@ -8,13 +9,14 @@ export type ClaudeEffectiveModelUpdateSource = 'statusline' | 'transcript' | 'sd
 export type ClaudeEffectiveModelObservation = Readonly<{ modelId: string; reasoningEffort: string }>;
 
 type ClaudeEffectiveModelUpdateClient = Readonly<{
-  sendSessionEvent(event: { type: 'message'; message: string }, id?: string): void;
+  sendSessionEvent(event: ModelEffortChangeOutcomeEvent, id?: string): void;
   updateMetadata(updater: (metadata: Metadata) => Metadata): void | Promise<void>;
   getMetadataSnapshot?: () => Metadata | null;
 }>;
 
 type EffectiveModelState = {
   lastSeenModelId: string | null;
+  lastSeenEffort: string | null;
   lastMetadataRequestKey: string | null;
   lastEmittedTransitionKey: string | null;
 };
@@ -26,6 +28,7 @@ function stateFor(client: object): EffectiveModelState {
   if (existing) return existing;
   const created: EffectiveModelState = {
     lastSeenModelId: null,
+    lastSeenEffort: null,
     lastMetadataRequestKey: null,
     lastEmittedTransitionKey: null,
   };
@@ -102,8 +105,13 @@ function buildMetadataRequestKey(params: Readonly<{
 function buildModelChangedEventId(params: Readonly<{
   fromModelId: string;
   toModelId: string;
+  fromEffort?: string | null;
+  toEffort?: string | null;
 }>): string {
-  return `claude:model-changed:${encodeURIComponent(params.fromModelId)}:${encodeURIComponent(params.toModelId)}`;
+  const effort = params.fromEffort && params.toEffort && params.fromEffort !== params.toEffort
+    ? `:effort:${encodeURIComponent(params.fromEffort)}:${encodeURIComponent(params.toEffort)}`
+    : '';
+  return `claude:model-changed:${encodeURIComponent(params.fromModelId)}:${encodeURIComponent(params.toModelId)}${effort}`;
 }
 
 function resolveModelLabel(params: Readonly<{
@@ -175,19 +183,27 @@ export function applyClaudeEffectiveModelUpdate(params: Readonly<{
     );
   }
 
-  if (previousModelId && previousModelId !== modelId) {
-    const transitionKey = `${previousModelId}\u0000${modelId}`;
+  // What the runtime reports it runs with is what was applied: a change from what it ran with
+  // before is recorded once (model and effort; only what changed).
+  const previousEffort = state.lastSeenEffort;
+  const event = buildModelEffortChangeOutcome({
+    provider: 'claude',
+    runtime: 'claude',
+    previous: { model: previousModelId, effort: previousEffort },
+    applied: { model: modelId, effort: reasoningEffort ?? previousEffort },
+    modelLabel: (id) => resolveModelLabel({ metadata: metadataSnapshot, modelId: id, displayName }),
+  });
+  if (event && previousModelId) {
+    const transitionKey = `${previousModelId}\u0000${modelId}\u0000${previousEffort ?? ''}\u0000${reasoningEffort ?? ''}`;
     if (state.lastEmittedTransitionKey !== transitionKey) {
       state.lastEmittedTransitionKey = transitionKey;
       params.client.sendSessionEvent(
-        {
-          type: 'message',
-          message: `Model changed to ${resolveModelLabel({ metadata: metadataSnapshot, modelId, displayName })}`,
-        },
-        buildModelChangedEventId({ fromModelId: previousModelId, toModelId: modelId }),
+        event,
+        buildModelChangedEventId({ fromModelId: previousModelId, toModelId: modelId, fromEffort: previousEffort, toEffort: reasoningEffort }),
       );
     }
   }
 
   state.lastSeenModelId = modelId;
+  if (reasoningEffort) state.lastSeenEffort = reasoningEffort;
 }

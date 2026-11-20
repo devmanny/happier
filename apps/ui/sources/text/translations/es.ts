@@ -294,6 +294,7 @@ const acpCatalogTranslationExtension = {
     acpCatalogAuthParser: 'Analizador de estado',
     acpCatalogCapabilities: 'Capacidades',
     acpCatalogTransportProfile: 'Perfil de transporte',
+    acpCatalogSupportsLoadSession: 'Admite reanudar sesiones',
     acpCatalogSupportsModes: 'Admite modos',
     acpCatalogSupportsModels: 'Admite modelos',
     acpCatalogSupportsConfigOptions: 'Admite opciones de configuración',
@@ -1316,6 +1317,7 @@ export const es: TranslationStructure = {
     working: "trabajando...",
     workingRetained: "trabajando, esperando actualizaciones…",
     keptInAttention: "mantenida en atención",
+    archiving: "archivando…",
     backgroundActive: ({ count }: { count: number }) => `${count} en ejecución en segundo plano`,
     activityUnknown: "estado de actividad no disponible",
     readyForReview: "listo para revisión",
@@ -2555,6 +2557,7 @@ export const es: TranslationStructure = {
                 profileMissing: 'La cuenta conectada seleccionada ya no está disponible. Actualiza la lista de cuentas y elige otra.',
                 groupMissing: 'El Pool de cuentas seleccionado ya no está disponible. Actualiza la lista de cuentas y elige otro Pool.',
                 metadataUpdateFailed: 'La sesión no pudo guardar la nueva selección de autenticación. Inténtalo de nuevo cuando termine de sincronizarse.',
+                restartDisallowedByExecutionPolicy: 'Este cambio de autenticación requiere un reinicio que no está permitido mientras la sesión está en ejecución. Detén la sesión antes de cambiar su autenticación.',
                 restartFailed: 'La sesión no pudo reiniciarse con la nueva selección de autenticación. Detén la sesión e inténtalo de nuevo.',
                 hotApplyFailed: 'La sesión en ejecución rechazó la nueva selección de autenticación. Reinicia la sesión e inténtalo de nuevo.',
                 agentMismatch: 'Esta selección de autenticación no coincide con el backend de la sesión.',
@@ -4453,6 +4456,9 @@ export const es: TranslationStructure = {
       full: "Ancho completo",
       fullDescription: "Usa el ancho disponible de la ventana",
     },
+    feedback: "Respuesta",
+    haptics: "Respuesta háptica",
+    hapticsDescription: "Usa la respuesta táctil para las acciones y la reordenación en este dispositivo.",
     backdropBlur: "Desenfoque de fondo",
     backdropBlurDescription:
       "Usa desenfoque de fondo detrás de modales y menús. Desactívalo para mejorar el rendimiento del navegador.",
@@ -5557,6 +5563,11 @@ export const es: TranslationStructure = {
             showBannerAction: 'Mostrar aviso',
             hideBannerAction: 'Ocultar aviso',
 	    },
+	    runnerRestartBackgroundWork: {
+	        title: 'Hay trabajo en segundo plano en ejecución',
+	        body: ({ count }: { count: number }) => `Hay trabajo en segundo plano en ejecución (${count}). Reiniciar lo detendrá.`,
+	        confirmAction: 'Detener y reiniciar',
+	    },
 	    staleRunner: {
 	      title: "La sesión sigue ejecutándose con una CLI anterior",
 	      body: "Reinicia el runner de esta sesión para continuar con la CLI actualizada del daemon. La sesión de Happier se mantiene.",
@@ -5957,7 +5968,7 @@ export const es: TranslationStructure = {
         discarded: {
           title: "Mensajes descartados",
           subtitle:
-            "Estos mensajes no se enviaron al agente (por ejemplo, al cambiar de remoto a local).",
+            "Estos mensajes ya no están en la cola. La entrega puede ser incierta; revisa la transcripción antes de volver a enviarlos.",
           label: "Descartado",
           removeConfirm: {
             title: "¿Eliminar mensaje descartado?",
@@ -6164,6 +6175,28 @@ export const es: TranslationStructure = {
     targetSession: "Sesión objetivo",
     noTarget: "Ninguna sesión seleccionada",
     clearTarget: "Limpiar objetivo",
+    errors: {
+        sendFailed: "No se pudo enviar tu mensaje a la sesión.",
+        sttFailed: "No se pudo transcribir lo que dijiste. Inténtalo de nuevo.",
+        sttTimeout: "El reconocimiento de voz agotó el tiempo de espera. Revisa tu conexión e inténtalo de nuevo.",
+        sttAuthFailed: "El reconocimiento de voz rechazó la clave API. Revisa la clave y sus restricciones en Ajustes → Voz.",
+        sttRateLimited: "El reconocimiento de voz tiene límite de solicitudes. Espera un momento e inténtalo de nuevo.",
+        missingSttBaseUrl: "Configura la URL del servidor de reconocimiento de voz en Ajustes → Voz.",
+        missingSttApiKey: "Añade una clave API de reconocimiento de voz en Ajustes → Voz.",
+        recordingStartFailed: "No se pudo iniciar el micrófono. Comprueba que ninguna otra app lo esté usando.",
+        recordingStopFailed: "No se pudo terminar la grabación. Inténtalo de nuevo.",
+        deviceSttUnavailable: "El reconocimiento de voz no está disponible en este dispositivo. Elige otro proveedor de reconocimiento de voz en Ajustes → Voz.",
+        speechPermissionDenied: "Se denegó el acceso al micrófono o al reconocimiento de voz. Permítelo en los ajustes del dispositivo.",
+        deviceSttStartFailed: "No se pudo iniciar el reconocimiento de voz. Inténtalo de nuevo.",
+        localNeuralSttUnavailable: "El reconocimiento de voz en el dispositivo no está disponible en esta versión. Elige otro proveedor de reconocimiento de voz en Ajustes → Voz.",
+        localNeuralPackNotInstalled: "Descarga el modelo de voz en Ajustes → Voz.",
+        localNeuralSttStartFailed: "No se pudo iniciar el reconocimiento de voz en el dispositivo. Inténtalo de nuevo.",
+        localNeuralAudioCaptureFailed: "El micrófono se detuvo inesperadamente. Inténtalo de nuevo.",
+        ttsFailed: "No se pudo reproducir la respuesta hablada. Revisa la síntesis de voz en Ajustes → Voz.",
+        voiceAgentRequiresFeature: ({ feature }: { feature: string }) => `El modo agente necesita activar «${feature}» en Ajustes → Funciones.`,
+        voiceAgentUnavailable: "El agente de voz no está disponible en este servidor.",
+        generic: "La voz tuvo un problema.",
+    },
     a11y: {
       teleport: "Teletransportar agente de voz",
       toggleActivity: "Mostrar/ocultar actividad de voz",
@@ -8148,6 +8181,14 @@ settingsSession: {
 	          workingStatusAnimatedTextTitle: 'Texto de trabajo animado',
 	          workingStatusAnimatedTextEnabledSubtitle: 'Alterna verbos de trabajo mientras una sesión se ejecuta',
 	          workingStatusAnimatedTextDisabledSubtitle: 'Muestra una etiqueta fija de trabajando... mientras una sesión se ejecuta',
+	          backgroundWorkAttentionModeTitle: "Respuestas sin leer durante el trabajo en segundo plano",
+	          backgroundWorkAttentionModeSubtitle: "Elige dónde aparecen las respuestas sin leer mientras continúa el trabajo en segundo plano. Las solicitudes dirigidas a ti siguen requiriendo atención.",
+	          backgroundWorkAttentionKeepWorkingTitle: "Mantener el estado de trabajo",
+	          backgroundWorkAttentionKeepWorkingSubtitle: "Mantener el estado de trabajo y mostrar un punto central azul para las respuestas sin leer",
+	          backgroundWorkAttentionKeepWorkingUnreadTitle: "Mostrar el estado sin leer en Trabajando",
+	          backgroundWorkAttentionKeepWorkingUnreadSubtitle: "Mantener las sesiones en Trabajando y mostrar el estado sin leer hasta que leas la respuesta",
+	          backgroundWorkAttentionShowUnreadTitle: "Mover sesiones sin leer a Requiere atención",
+	          backgroundWorkAttentionShowUnreadSubtitle: "Mover las sesiones con respuestas sin leer a Requiere atención mientras continúa el trabajo en segundo plano",
 	          attentionPromotionModeTitle: 'Sesiones que requieren atención',
 	          attentionPromotionModeSubtitle: 'Elige dónde aparecen las sesiones que esperan tu acción o están listas para revisar',
 	          attentionPromotionModeOffTitle: 'Dejar en su posición normal',
@@ -9336,6 +9377,10 @@ settingsSession: {
         progressWithFiles: ({ loaded, total, filesDone, filesTotal }: { loaded: string; total: string; filesDone: number; filesTotal: number }) =>
           `${loaded} de ${total} · ${filesDone} de ${filesTotal} ${filesTotal === 1 ? 'archivo' : 'archivos'}`,
         progressAccessibilityLabel: "Progreso de la descarga",
+        verifyingDetail: "Verificando",
+        verifyingProgress: ({ verified, total, filesDone, filesTotal }: { verified: string; total: string; filesDone: number; filesTotal: number }) =>
+          `Verificado ${verified} de ${total} · ${filesDone} de ${filesTotal} ${filesTotal === 1 ? 'archivo' : 'archivos'}`,
+        verifyingAccessibilityLabel: "Progreso de la verificación",
         failedDetail: "Falló",
         failedSubtitle: "No se pudo preparar el modelo. Toca para volver a intentarlo.",
         failedResumableSubtitle: ({ size }: { size: string }) => `La descarga no terminó. Se conservan ${size}; toca para reanudarla.`,
@@ -9344,6 +9389,8 @@ settingsSession: {
         discardSubtitle: "Elimina la descarga sin terminar para liberar espacio.",
         discardConfirmTitle: "¿Descartar la descarga sin terminar?",
         discardConfirmBody: ({ size }: { size: string }) => `Se eliminarán los ${size} descargados hasta ahora. Podrás volver a descargar el modelo más adelante.`,
+        insufficientStorage: ({ required, available }: { required: string; available: string }) =>
+            `No hay suficiente espacio libre. Esta descarga necesita ${required}, pero solo hay ${available} libres.`,
       },
       localNeuralStt: {
         modelPack: {
@@ -9368,13 +9415,6 @@ settingsSession: {
           installedWithBuild: ({ build }: { build: string }) =>
             `Instalado • ${build}`,
           notInstalled: "No instalado",
-        },
-        language: {
-          title: "Idioma",
-          subtitle: "Etiqueta de idioma BCP-47 opcional.",
-          promptTitle: "Idioma",
-          promptBody:
-            "Introduce una etiqueta de idioma BCP-47 (p. ej. en, en-US).",
         },
         alerts: {
           downloadFailedTitle: "La descarga falló",
@@ -9409,6 +9449,8 @@ settingsSession: {
           enableTitle: "Activar manos libres",
           silenceTitle: "Tiempo de silencio (ms)",
           minSpeechTitle: "Habla mínima (ms)",
+          pushToTalkTitle: "Pulsar para hablar",
+          pushToTalkSubtitle: "Este proveedor transcribe una grabación terminada; toca el micrófono otra vez para enviar. Para manos libres, elige el reconocimiento de voz del dispositivo o el neuronal local.",
         },
         customBackendIdSubtitle: "Introduce un id de backend personalizado.",
         searchBackendsPlaceholder: "Buscar backends",
@@ -9667,8 +9709,7 @@ settingsSession: {
       sttProvider: "Proveedor de STT",
       neuralStt: {
         title: "STT en el dispositivo",
-        webNotAvailableSubtitle:
-          "No disponible en web. Usa Dispositivo, compatible con OpenAI o STT de Gemini.",
+        webFallbackSubtitle: "Solo funciona en la app móvil. En el navegador, la voz usa el reconocimiento de voz del navegador.",
       },
       ttsBaseUrl: "Base URL TTS",
       ttsBaseUrlTitle: "Base URL TTS",
@@ -9941,6 +9982,7 @@ settingsSession: {
       checking: "Comprobando…",
       failedGeneric: "La actualización no terminó. Inténtalo de nuevo.",
       remoteUnsupported: "Esta máquina no puede actualizar su línea de comandos a distancia. Actualízala en la propia máquina.",
+      archiveExpandedByteLimit: "El entorno descargado supera el límite de tamaño de extracción. Actualiza Happier antes de volver a intentarlo.",
       updateNotVerified: "La actualización se ejecutó, pero la versión no cambió.",
       rolledBackLocal: "La actualización no arrancó, así que este ordenador volvió a la versión anterior.",
       smokeFailed: "La nueva versión no funcionó en este ordenador, así que no cambió nada.",
@@ -11173,8 +11215,8 @@ settingsSession: {
       anthropic: "Anthropic (Predeterminado)",
       deepseek: "DeepSeek (Razonamiento)",
       zai: "Z.AI (GLM-4.6)",
-      minimax: "MiniMax (M3)",
-      minimaxCn: "MiniMax (M3, CN)",
+      minimax: "MiniMax (M3.1 Flash)",
+      minimaxCn: "MiniMax (M3.1 Flash, CN)",
       codex: "Codex (Predeterminado)",
       openai: "OpenAI (GPT-5)",
       azureOpenai: "Azure OpenAI",

@@ -727,6 +727,8 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
                 {
                     id: 's1',
                     seq: 1,
+                    // Read: an unread session would place as unread ahead of background working placement.
+                    lastViewedSessionSeq: 1,
                     createdAt: 1,
                     updatedAt: 1,
                     active: true,
@@ -879,6 +881,8 @@ describe('sessions domain: sessionListViewData rebuild gating', () => {
         const baseSession = {
             id: 's1',
             seq: 1,
+            // Read: an unread session would place as unread ahead of background working placement.
+            lastViewedSessionSeq: 1,
             createdAt: 1,
             updatedAt: 1,
             active: true,

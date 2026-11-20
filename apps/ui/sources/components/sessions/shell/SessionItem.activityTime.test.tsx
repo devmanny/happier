@@ -520,7 +520,7 @@ describe('SessionItem activity time', () => {
         expect(useSettingSpy).not.toHaveBeenCalled();
     });
 
-    it('renders background activity with the normal working spinner while retaining pending and unread row facts', async () => {
+    it('keeps the pending indicator over background activity while still showing the background status line', async () => {
         const { SessionItem } = await importSessionItemForTest();
         const rowModel = createSessionRowModel({
             status: {
@@ -555,7 +555,8 @@ describe('SessionItem activity time', () => {
         expect(rowModel.attention).toEqual({ listState: 'pending', rowState: 'pending' });
         expect(rowModel.hasUnreadMessages).toBe(true);
         expect(screen.findByTestId('session-list-status-subtitle-sess_row_model-pending')).toBeTruthy();
-        expect(screen.findByTestId('session-row-attention-indicator-spinner-sess_row_model-secondary')).toBeTruthy();
+        expect(screen.findByTestId('session-row-attention-indicator-spinner-sess_row_model-secondary')).toBeNull();
+        expect(screen.findByTestId('session-row-attention-indicator-dot-sess_row_model-secondary')).toBeTruthy();
         // The background line now renders the SESSION's status text, which is where the count
         // lives, instead of a second key the row would have to re-interpolate.
         expect(screen.findByTestId('session-list-status-subtitle-text-sess_row_model-pending')?.props.children)

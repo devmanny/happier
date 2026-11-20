@@ -2,6 +2,7 @@ import pino from 'pino';
 import { mkdirSync } from 'fs';
 import { join } from 'path';
 import { redactPublicShareCapabilityUrl } from '@happier-dev/protocol';
+import { isBunRuntime } from '../runtime/isBunRuntime';
 
 // Single log file name created once at startup
 let consolidatedLogFile: string | undefined;
@@ -32,11 +33,6 @@ function formatLocalTime(timestamp?: number) {
     const secs = String(date.getSeconds()).padStart(2, '0');
     const ms = String(date.getMilliseconds()).padStart(3, '0');
     return `${hours}:${mins}:${secs}.${ms}`;
-}
-
-function isBunRuntime() {
-    const g = globalThis as any;
-    return Boolean(g?.Bun) || Boolean((process as any)?.versions?.bun);
 }
 
 export function resolveServerLogLevelFromEnv(env: NodeJS.ProcessEnv): pino.LevelWithSilent {

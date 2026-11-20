@@ -14,12 +14,12 @@ vi.mock('@/components/sessions/shell/useSessionScreenIsFocused', () => ({
 
 const pushSpy = vi.fn();
 const navigateSpy = vi.fn();
-let attentionFixtureMode: 'working' | 'expiring' = 'working';
-let expiringAttentionObservedAt = 0;
+let attentionFixtureMode: 'working' | 'idle' = 'working';
+let idleAttentionObservedAt = 0;
 
 function makeAttentionSession() {
     const working = attentionFixtureMode === 'working';
-    const observedAt = working ? Date.now() : expiringAttentionObservedAt;
+    const observedAt = working ? Date.now() : idleAttentionObservedAt;
     return {
         id: 'session-1',
         serverId: 'server-attention',
@@ -333,7 +333,7 @@ function collectText(node: renderer.ReactTestRenderer): string[] {
 describe('InboxView session attention', () => {
     beforeEach(() => {
         attentionFixtureMode = 'working';
-        expiringAttentionObservedAt = 0;
+        idleAttentionObservedAt = 0;
         storageState.sessions['session-1'] = makeAttentionSession();
         pushSpy.mockReset();
         navigateSpy.mockReset();
@@ -373,11 +373,11 @@ describe('InboxView session attention', () => {
         );
     });
 
-    it('removes expired permission and user-action rows without a storage mutation', async () => {
+    it('keeps permission and user-action rows of an idle live session past the runtime staleness window', async () => {
         vi.useFakeTimers();
-        attentionFixtureMode = 'expiring';
-        expiringAttentionObservedAt = 1_000_000;
-        vi.setSystemTime(expiringAttentionObservedAt);
+        attentionFixtureMode = 'idle';
+        idleAttentionObservedAt = 1_000_000;
+        vi.setSystemTime(idleAttentionObservedAt);
         storageState.sessions['session-1'] = makeAttentionSession();
         const { InboxView } = await import('./InboxView');
         const tree = (await renderScreen(<InboxView />)).tree;
@@ -389,8 +389,8 @@ describe('InboxView session attention', () => {
             await vi.advanceTimersByTimeAsync(SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS + 1);
         });
 
-        expect(tree.findAllByType('PermissionPromptCard')).toHaveLength(0);
-        expect(tree.findAllByType('UserActionPromptCard')).toHaveLength(0);
+        expect(tree.findAllByType('PermissionPromptCard')).toHaveLength(1);
+        expect(tree.findAllByType('UserActionPromptCard')).toHaveLength(1);
     });
 
     it('renders unread sessions in inbox and does not list shared sessions there', async () => {

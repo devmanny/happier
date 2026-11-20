@@ -120,6 +120,12 @@ import {
   usageLimitRecoveryFeatureDisabledResult,
 } from '@/features/usageLimitRecoveryFeatureGate';
 import { normalizeCliSessionUsageLimitRecoveryOperationResult } from '@/session/usageLimitRecoveryControls/sessionUsageLimitRecoveryOperationResult';
+import { toWhoIsHereResult } from '@/session/presence/sessionPresence';
+import { getSessionPresence } from '@/session/presence/startSessionPresence';
+import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { runAgentMemoryTool } from '@/session/agentMemory/runAgentMemoryTool';
+import { getAgentTasks } from '@/session/agentTasks/startAgentTasks';
+import { runAgentTaskTool } from '@/session/agentTasks/runAgentTaskTool';
 
 export type ResumeInactiveSessionWhenUsageLimitReady = (input: Readonly<{
   sessionId: string;
@@ -608,6 +614,8 @@ export function createCliActionInventoryDeps(params: Readonly<{
 
 export function createCliActionDeps(params: Readonly<{
   token: string;
+  /** Explicit calling-session identity; sessionId may instead be a selected target. */
+  messageSenderSessionId?: string | null;
   credentials?: Credentials;
   sessionId: string;
   ctx: SessionEncryptionContext;
@@ -1568,6 +1576,7 @@ export function createCliActionDeps(params: Readonly<{
       try {
         created = await createSpawnedSession({
           ...normalized.createParams,
+          parentSessionId: params.sessionId,
           ...(typeof approvedNewDirectoryCreation === 'boolean' ? { approvedNewDirectoryCreation } : {}),
           ...(pendingFirstInput ? { pendingFirstInput } : {}),
           ...(resume ? { resume } : {}),
@@ -1686,6 +1695,7 @@ export function createCliActionDeps(params: Readonly<{
         credentials: params.credentials,
         idOrPrefix: sessionId,
         message: String(message ?? ''),
+        ...(params.messageSenderSessionId ? { senderSessionId: params.messageSenderSessionId } : {}),
         ...(localId ? { localId } : {}),
         requestedAction,
         wait: normalizedWait,
@@ -1833,6 +1843,50 @@ export function createCliActionDeps(params: Readonly<{
 
     sessionGoalClear: async ({ sessionId }) => {
       return await callRoutedSessionGoalControl(sessionId, 'clear', {});
+    },
+
+    agentTasks: async ({ sessionId, operation, input }) => {
+      const tasks = getAgentTasks(sessionId);
+      if (!tasks) {
+        return { ok: false, error: 'Tasks are available to running sessions of an encrypted account only.' };
+      }
+      return await runAgentTaskTool({ store: tasks.store, caller: tasks.caller, operation, input });
+    },
+
+    agentMemory: async ({ sessionId, operation, input }) => {
+      const memory = getAgentMemory(sessionId);
+      if (!memory) {
+        return {
+          ok: false,
+          error: 'This session is not working as one of your agents, or it is not running in this process; agent memory is not available.',
+        };
+      }
+      const credentials = params.credentials;
+      return await runAgentMemoryTool({
+        memory,
+        operation,
+        input,
+        ...(credentials
+          ? {
+              readThreadMessages: async (threadSessionId: string, limit: number) => {
+                const result = await getSessionRecentMessages({ credentials, idOrPrefix: threadSessionId, limit });
+                if (!result.ok) throw new Error(result.errorMessage);
+                return result.messages.map((message) => ({ role: message.role, text: message.text, createdAt: message.createdAt }));
+              },
+            }
+          : {}),
+      });
+    },
+
+    sessionPresenceWho: async ({ sessionId, resources }) => {
+      const presence = getSessionPresence(sessionId);
+      if (!presence) {
+        return {
+          available: false,
+          reason: 'Presence is published by the running session itself; this session is not running in this process.',
+        };
+      }
+      return toWhoIsHereResult(await presence.whoIsHere({ ...(resources ? { resources } : {}) }));
     },
 
     sessionTerminalComposerClear: async ({ sessionId, expectedStateAtMs }) => {

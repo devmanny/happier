@@ -1,4 +1,5 @@
 import React from 'react';
+import { normalizeSessionListBackgroundWorkAttentionMode } from '@/sync/domains/session/listing/sessionListBackgroundWorkAttention';
 import {
     View,
     Platform,
@@ -143,7 +144,6 @@ import {
     sessionUnarchiveWithServerScope,
 } from '@/sync/ops';
 import {
-    clearSessionVisibleWhenInactive,
     stopSessionAndMaybeArchive,
 } from '@/components/sessions/sessionStopArchiveFlow';
 import {
@@ -639,6 +639,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         storageKind: props.storageKind,
     });
     const sessionListWorkingIndicatorStyle = useSetting('sessionListNarrowWorkingIndicatorStyle');
+    const backgroundWorkAttentionMode = normalizeSessionListBackgroundWorkAttentionMode(useSetting('sessionListBackgroundWorkAttentionModeV1'));
     const sessionListAgentActivityCountEnabled = useSetting('sessionListAgentActivityCountEnabled');
     const sessionListIdentityDisplay = useSessionListIdentityDisplay();
     const sessionListActiveColorMode = useSetting('sessionListActiveColorModeV1');
@@ -936,6 +937,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             activeColorMode: normalizeActiveColorMode(sessionListActiveColorMode),
             workingIndicatorMode: normalizeWorkingIndicatorMode(sessionListWorkingIndicatorStyle),
             workingTextMode: 'static',
+            backgroundWorkAttentionMode,
             statusColors: theme.colors.status,
             hideInactiveSessions,
             showServerBadge,
@@ -972,6 +974,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         sessionListActiveColorMode,
         sessionListIdentityDisplay,
         sessionListWorkingIndicatorStyle,
+        backgroundWorkAttentionMode,
         sessionTagsEnabled,
         sessionTagsV1,
         showPinnedServerBadge,
@@ -1013,12 +1016,12 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         }
     }, [handleLoadMoreSessions, handleTreeScroll, scrollRetention]);
     const handleNativeListScrollInteractionStart = React.useCallback(() => {
-        if (Platform.OS !== 'ios') return;
+        if (Platform.OS !== 'ios' && Platform.OS !== 'android') return;
         nativeListScrollInteractionActiveRef.current = true;
         setNativeContextMenuSessionKey(null);
     }, [setNativeContextMenuSessionKey]);
     const handleNativeListScrollInteractionEnd = React.useCallback(() => {
-        if (Platform.OS !== 'ios') return;
+        if (Platform.OS !== 'ios' && Platform.OS !== 'android') return;
         nativeListScrollInteractionActiveRef.current = false;
     }, []);
 
@@ -1322,12 +1325,8 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
             stopErrorMessage: t('sessionInfo.failedToStopSession'),
             archiveErrorMessage: t('sessionInfo.failedToArchiveSession'),
             stopSession: async (target) => await sessionStopWithServerScope(target.sessionId, { serverId: target.serverId ?? null }),
-            archiveSession: async (target) => {
-                const result = await sessionArchiveWithServerScope(target.sessionId, { serverId: target.serverId ?? null });
-                if (result.success) {
-                    clearSessionVisibleWhenInactive(target.sessionId);
-                }
-                return result;
+            archiveSession: async (target, options) => {
+                return await sessionArchiveWithServerScope(target.sessionId, { serverId: target.serverId ?? null, ...options });
             },
             unarchiveSession: async (target) => await sessionUnarchiveWithServerScope(target.sessionId, { serverId: target.serverId ?? null }),
             setManualReadState: async (target, readState) => await sessionSetManualReadStateWithServerScope(
@@ -1336,8 +1335,9 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
                 { serverId: target.serverId ?? null },
             ),
             stopSessionAndMaybeArchive: async (params) => {
-                await stopSessionAndMaybeArchive({
+                return await stopSessionAndMaybeArchive({
                     sessionId: params.sessionId,
+                    serverId: params.target.serverId,
                     hideInactiveSessions: params.hideInactiveSessions,
                     isPinned: params.isPinned,
                     archiveAfterStop: params.archiveAfterStop,
@@ -1466,21 +1466,23 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
     }, [resolveDragLabel]);
 
     const handleA11yTreeDropResult = React.useCallback((event: Parameters<typeof handleTreeDropResult>[0]) => {
-        handleTreeDropResultRef.current(event);
+        const outcome = handleTreeDropResultRef.current(event);
         sessionListA11yRef.current.announceDropResult({
             label: resolveDragLabel(event.sessionKey),
             destinationLabel: resolveDropResultDestinationLabel(event.result),
             result: event.result,
         });
+        return outcome;
     }, [resolveDragLabel, resolveDropResultDestinationLabel]);
 
     const handleA11yFolderHeaderTreeDropResult = React.useCallback((event: Parameters<typeof handleFolderHeaderTreeDropResult>[0]) => {
-        handleFolderHeaderTreeDropResultRef.current(event);
+        const outcome = handleFolderHeaderTreeDropResultRef.current(event);
         sessionListA11yRef.current.announceDropResult({
             label: resolveDragLabel(event.sessionKey),
             destinationLabel: resolveDropResultDestinationLabel(event.result),
             result: event.result,
         });
+        return outcome;
     }, [resolveDragLabel, resolveDropResultDestinationLabel]);
 
     const handleStableDragCancel = React.useCallback((event: Parameters<typeof handleDragCancel>[0]) => {
@@ -2085,6 +2087,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         sessionListStatusColors: rowPresentationSettings.statusColors,
         sessionListSurfaceDataActive: surfaceOwnership.dataActive,
         sessionListWorkingIndicatorMode: rowPresentationSettings.workingIndicatorMode,
+        sessionListBackgroundWorkAttentionMode: rowPresentationSettings.backgroundWorkAttentionMode,
         sessionTagsEnabled: sessionTagsEnabled === true,
         sessionTagsSignature,
         showStructuralDragHandles,
@@ -2123,6 +2126,7 @@ export const SessionsListContent = React.memo(function SessionsListContent(props
         rowPresentationSettings.identityDisplay,
         rowPresentationSettings.statusColors,
         rowPresentationSettings.workingIndicatorMode,
+        rowPresentationSettings.backgroundWorkAttentionMode,
         sessionListOrderingMode,
         sessionListSectionMode,
         surfaceOwnership.dataActive,

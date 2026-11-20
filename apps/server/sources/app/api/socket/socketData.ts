@@ -11,6 +11,8 @@ export interface HappierSocketData {
     machineId?: string;
     connectedServiceIds?: readonly import("@happier-dev/protocol").ConnectedServiceId[];
     sessionScopedBinding?: SessionScopedSocketBinding;
+    /** Sessions a lean reader declared open (`client-open-sessions`). */
+    openSessionIds?: ReadonlySet<string>;
 }
 
 /** The sole typed view of Socket.IO's application-owned per-socket data bag. */

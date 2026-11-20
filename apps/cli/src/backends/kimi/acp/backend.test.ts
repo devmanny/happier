@@ -9,6 +9,25 @@ import { AcpBackend } from '@/agent/acp/AcpBackend';
 import { getExecutionRunBackendFactory } from '@/agent/executionRuns/registry/executionRunBackendRegistry';
 
 describe.skipIf(process.platform === 'win32')('Kimi ACP backend', () => {
+  it('delivers a negotiated background result through the actual provider factory without another prompt', async () => {
+    await withTempDir('happier-kimi-autonomous-factory-', async dir => {
+      const command = writeKimiFixture(dir, 'current', { autonomousTurns: true });
+      const backend = createKimiBackend({ cwd: dir, env: { HAPPIER_KIMI_PATH: command } });
+      const events: AgentMessage[] = [];
+      backend.onMessage(event => events.push(event));
+      try {
+        await backend.startSession();
+        events.length = 0;
+        if (!(backend instanceof AcpBackend)) throw new Error('Expected shared ACP backend');
+        await backend.requestExtension('_test/autonomous-turn');
+        await expect.poll(() => events.some(event => event.type === 'status' && event.status === 'idle' && event.turnFinished)).toBe(true);
+        expect(events.filter(event => event.type === 'model-output')).toEqual([
+          expect.objectContaining({ textDelta: 'factory background result' }),
+        ]);
+      } finally { await backend.dispose(); }
+    });
+  });
+
   it('classifies the executable then creates and resumes with plain acp and MCP', async () => {
     await withTempDir('happier-kimi-backend-', async (dir) => {
       const physicalDir = realpathSync(dir);

@@ -571,6 +571,7 @@ export {
   openProviderAccountUsageSnapshotCiphertext,
   projectProviderAccountUsageSnapshotToConnectedServiceQuotaSnapshotV1,
   projectProviderAccountUsageToConnectedServiceQuotaSnapshot,
+  isProviderAccountUsageOrganizationContextMatch,
   sealProviderAccountUsageSnapshotCiphertext,
   splitProviderAccountUsageSubscription,
   splitProviderAccountUsageSupplementalFacets,
@@ -582,6 +583,7 @@ export {
   type ProviderAccountUsageQuotaScopeV1,
   type ProviderAccountUsageRecordId,
   type ProviderAccountUsageRecordKeyV1,
+  type ProviderAccountUsageOrganizationContext,
   type ProviderAccountUsageSnapshotV1,
   type ProviderAccountUsageSourceV1,
   type ProviderAccountUsageStateV1,
@@ -750,6 +752,10 @@ export {
 
 export {
   buildConnectedServiceCredentialRecord,
+  buildConnectedServiceCredentialMetadata,
+  connectedServiceUsageRequiresOrganizationId,
+  readConnectedServiceCredentialOrganizationId,
+  type ConnectedServiceCredentialMetadata,
   normalizeConnectedServiceOauthCredentialRawMetadata,
   type ConnectedServiceOauthCredentialRawMetadata,
 } from './connect/buildConnectedServiceCredentialRecord.js';
@@ -820,6 +826,15 @@ export {
 } from './push/readyNotificationContent.js';
 
 export {
+  buildAssistantMessagePreview,
+  stripMarkdown,
+  truncatePlainTextAtWordBoundary,
+  type AssistantMessagePreview,
+} from './text/plainTextPreview.js';
+
+export { hasIncompleteOptions, parseOptionsFromText } from './text/agentResponseOptions.js';
+
+export {
   CODEX_BACKEND_MODES,
   normalizeCodexBackendMode,
   type CodexBackendMode,
@@ -877,6 +892,11 @@ export {
   normalizeClaudeTaskToolRecordsToWorkStateItems,
   normalizeClaudeTaskToolUseToWorkStateItem,
   normalizeClaudeSdkInitSkills,
+  normalizeClaudeOauthProfileEntitlement,
+  readClaudeOauthCredentialMetadata,
+  readClaudeOauthCredentialOrganizationId,
+  type ClaudeOauthCredentialMetadata,
+  type ClaudeOauthEntitlementMetadata,
   normalizeClaudeTaskEventToWorkStateItem,
   normalizeClaudeTodoWriteTodosToWorkStateItems,
   readClaudeAgentSdkProviderTaskStatus,
@@ -1784,6 +1804,9 @@ export {
   type SessionUsageLimitRecoveryOperationResultOkStatusV1,
   type SessionUsageLimitRecoveryOperationResultV1,
   type SessionUsageLimitRecoveryV1,
+  buildUsageLimitIssueFingerprint,
+  isSessionUsageLimitRecoveryForIssue,
+  readSessionUsageLimitRecoveryForIssue,
   type TurnTerminalStatusV1,
   type V2SessionByIdNotFound,
   type V2SessionByIdResponse,
@@ -2926,6 +2949,8 @@ export {
   type SessionSummaryShardV1,
 } from './structuredMessages/sessionSummaryShardV1.js';
 
+export { SessionMessageV1Schema, parseSessionMessageV1, type SessionMessageV1 } from './structuredMessages/sessionMessageV1.js';
+
 export {
   ParticipantRecipientV1Schema,
   ParticipantMessageV1Schema,
@@ -3659,7 +3684,6 @@ export {
   supportsConnectedServiceOperation,
   withConnectedServiceReaderSupport,
 } from './connect/connectedServiceReaderSupport.js';
-
 export {
   MACHINE_PLAIN_DATA_KEY_MARKER,
   encodePlainMachineStoredContent,
@@ -3679,3 +3703,128 @@ export {
 } from './machines/machineContentKeyTransitionV1.js';
 
 export { assertAccountKeyProvisioningAllowed, AccountKeyProvisioningUnavailableError, verifyAccountContentPublicKeyBinding, createAccountContentPublicKeyBindingMessage } from './auth/accountKeyProvisioning.js';
+
+export {
+  DEVICE_BROWSER_ERROR_CODES,
+  DEVICE_BROWSER_MAX_WAIT_MS,
+  DEVICE_BROWSER_RPC_SLOTS,
+  DeviceBrowserDeviceSchema,
+  DeviceBrowserFailureSchema,
+  DeviceBrowserRequestSchema,
+  DeviceBrowserResponseSchema,
+  DeviceBrowserSuccessSchema,
+  DeviceBrowserTabSchema,
+  deviceBrowserRpcMethod,
+  type DeviceBrowserDevice,
+  type DeviceBrowserErrorCode,
+  type DeviceBrowserFailure,
+  type DeviceBrowserOperation,
+  type DeviceBrowserRequest,
+  type DeviceBrowserResponse,
+  type DeviceBrowserRpcSlot,
+  type DeviceBrowserSuccess,
+  type DeviceBrowserTab,
+} from './deviceBrowser/deviceBrowserRpc.js';
+export {
+  AGENT_IDENTITY_ENV_KEY,
+  AGENT_IDENTITY_METADATA_KEY,
+  AGENT_PROFILE_KV_PREFIX,
+  AgentIdentityV1Schema,
+  agentProfileKvKey,
+  buildAgentIdentityPromptTextV1,
+  legacyAgentProfileKvKey,
+  AgentProfileV1Schema,
+  agentIdentityFromProfile,
+  parseAgentProfileV1,
+  type AgentProfileV1,
+  parseAgentIdentityV1,
+  type AgentIdentityV1,
+} from './agentProfiles/agentIdentity.js';
+export {
+  AGENT_PRESENCE_HEARTBEAT_MS,
+  AGENT_PRESENCE_KV_PREFIX,
+  AGENT_PRESENCE_STALE_AFTER_MS,
+  AgentPresenceV1Schema,
+  agentPresenceKvKey,
+  describePresenceConflict,
+  describePresenceHolder,
+  findPresenceConflicts,
+  isAgentPresenceLive,
+  parseAgentPresenceV1,
+  type AgentPresenceV1,
+  type PresenceConflict,
+} from './agentProfiles/agentPresence.js';
+export {
+  SESSION_NOTIFICATIONS_MUTED_METADATA_KEY,
+  isSessionNotificationsMuted,
+} from './sessionMetadata/sessionNotificationsMutedV1.js';
+export {
+  AgentJournalEntryV1Schema,
+  AgentNoteV1Schema,
+  AgentNowV1Schema,
+  agentJournalKvKey,
+  agentMemoryKvPrefix,
+  agentNoteKvKey,
+  agentNowKvKey,
+  buildOtherThreadsSummary,
+  describeAgo,
+  extractNoteLinks,
+  parseAgentMemoryKvKey,
+  parseAgentMemoryRecord,
+  searchAgentMemory,
+  type AgentJournalEntryV1,
+  type AgentMemoryKvKey,
+  type AgentMemoryRecord,
+  type AgentNoteV1,
+  type AgentNowV1,
+} from './agentProfiles/agentMemory.js';
+export {
+  AGENT_TASK_DUE_SOON_WINDOW_MS,
+  AGENT_TASK_KV_PREFIX,
+  AGENT_TASK_STATUSES,
+  AgentTaskV1Schema,
+  agentTaskKvKey,
+  agentTaskStatusLabel,
+  applyAgentTaskUpdate,
+  buildAgentTaskBoard,
+  describeTaskDue,
+  isAgentTaskOpen,
+  parseAgentTaskV1,
+  taskDueNotices,
+  taskPermissionIntent,
+  taskSessionPermissionMode,
+  type AgentTaskActor,
+  type AgentTaskPermissionIntent,
+  type AgentTaskAssignee,
+  type AgentTaskDueNotice,
+  type AgentTaskSource,
+  type AgentTaskStatus,
+  type AgentTaskUpdate,
+  type AgentTaskV1,
+} from './tasks/agentTask.js';
+export {
+  TASK_OCCURRENCE_STATUSES,
+  TaskOccurrenceSchema,
+  TaskRecurrenceRuleSchema,
+  TaskRecurrenceV1Schema,
+  TaskScheduledStartV1Schema,
+  buildTaskOccurrencePrompt,
+  buildTaskStartPrompt,
+  decideScheduledStart,
+  decideTaskOccurrence,
+  scheduledStartCron,
+  type ScheduledStartDecision,
+  type TaskScheduledStartV1,
+  isRecurrenceOccurrenceDay,
+  recurrenceRuleCron,
+  type TaskOccurrence,
+  type TaskOccurrenceDecision,
+  type TaskRecurrenceRule,
+  type TaskRecurrenceV1,
+} from './tasks/agentTaskRecurrence.js';
+export {
+  DEVICE_DIAGNOSTICS_KV_PREFIX,
+  DeviceDiagnosticV1Schema,
+  parseDeviceDiagnosticV1,
+  type DeviceDiagnosticV1,
+} from './diagnostics/deviceDiagnostics.js';

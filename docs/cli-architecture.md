@@ -45,19 +45,64 @@ graph TB
 - **Persistence/config:** `src/persistence.ts` + `src/configuration.ts` manage local state in `~/.happy`.
 - **Agents:** `src/claude`, `src/codex`, `src/gemini` provide provider-specific runners.
 
+## Direct-session JSONL read progress (development)
+
+The shared readers in `api/directSessions/filePaging` own byte paging for native
+JSONL sources. If their existing read allowance cannot complete the next record
+and no source has been consumed, they throw `JsonlRecordTooLargeError` with code
+`JSONL_RECORD_TOO_LARGE`. Transcript paging, follow and full import fail explicitly
+rather than repeating an unchanged cursor, skipping the record or claiming complete
+history. A larger caller allowance can read the record intact. Incomplete JSON at
+EOF remains pending for its writer to finish.
+
+Display-title scans are advisory: their shared title-page adapter logs allowance
+exhaustion through the default logger and retains the bounded fallback. An oversized
+record therefore does not hide the session from discovery. These changes are in
+development source; they do not establish preview or stable availability.
+
 ## Streamed transcript recovery (development)
 
 `api/session/streamedTranscriptWriter` owns segment text, identity, and durable
 settlement. Closing a segment freezes its completion or interruption intent and
 separates it from subsequent output. A rejected terminal write retains the full
 snapshot for the next flush with the same local id; unresolved delivery is recorded
-in the default file log. This retention is process-local, and does not promise
-automatic reconnect replay or recovery after process exit.
+in the default file log. While closed snapshots remain, the writer subscribes to
+the session's existing connection-state events and retries them when its transport
+comes online, including a reconnect that races an in-flight failed write. Retries
+reuse the same local id and terminal state through the session commit queue, without
+waiting for pending-input readiness or a new prompt. The subscription ends when
+the snapshots settle or the writer is discarded. This retention is process-local;
+it does not provide recovery after process exit or replacement of the session client.
 
 `createKeyedStreamedTranscriptBridge` keeps writers with active, in-flight, or failed
 segments and releases only drained writers. Codex tool boundaries wait for admission
 into the existing session commit queue, while acknowledgement settles in the writer;
 turn-end flushes await settlement and return the durable delivery summaries.
+
+In development source, ACP output observations enter the existing session mutation
+journal with explicit external provenance. Assistant and thinking snapshots,
+provider-observed input, media-only rows, and lifecycle mutations share that
+owner's durable custody and replay order. Calls without observation provenance
+keep their existing remote-acknowledgement contract.
+
+Pi's existing Happier bridge observes extension-origin text through Pi's `input`
+hook and forwards it using the public RPC notification channel. The Pi adapter
+consumes that observation before diagnostic tracing and sends it through the
+shared ACP transcript path. It records a submitted input, which later extension
+handlers may transform or handle; it does not claim the model received that text.
+Host input keeps its existing recording path, and raw user-message echoes do not
+create another transcript row. The bridge is required for Happier-managed Pi
+launches. Provider-started runs use the same ACP turn state and settlement path as
+host-started runs.
+
+The backend's conclusive response completion seals the captured host turn before
+a provider-started successor can begin; transient idle signals do not seal it.
+The existing flush result carries that captured turn's assistant text into ready
+notifications, including an explicitly empty answer, so later output cannot
+replace the host's notification. Replay suppression belongs to the backend's
+existing replay-capture owner. The shared runtime preserves fresh input and
+output emitted during native resume and imports captured history only when
+requested.
 
 ## CLI entry flow
 
@@ -983,6 +1028,15 @@ Local state lives under `~/.happier` (or `HAPPIER_HOME_DIR`):
 - `daemon.state.json`: daemon PID + control port + version.
 - `logs/`: CLI/daemon logs.
 
+In current development source, protected local files and MCP runtime
+configuration use the shared Windows ACL boundary in
+`packages/cli-common/src/fs/windowsProtectedAcl.ts`. It grants only the current
+user and SYSTEM access and verifies the resulting ACL. Its PowerShell children
+use the selected Windows PowerShell installation's own modules, with a
+child-only `PSModulePath`; the launching shell's environment stays unchanged.
+Both ACL scripts terminate on errors, and malformed inspection output retains
+bounded stderr diagnostics without including stdout.
+
 Configuration lives in `src/configuration.ts`:
 - `HAPPIER_SERVER_URL` and `HAPPIER_WEBAPP_URL` override defaults.
 - `HAPPIER_VARIANT`, `HAPPIER_EXPERIMENTAL`, `HAPPIER_DISABLE_CAFFEINATE` control behavior.
@@ -998,6 +1052,14 @@ Antigravity's isolated-state policy still refuses continuation across different
 accounts, including a pool rotation; the storage change does not relax it.
 Configuration inheritance remains a separate policy. Discovery probes and other
 temporary materializers retain disposable roots.
+
+Direct linking recovers a connected-service runtime snapshot only from a marker
+for the same Agent and native conversation. A matching working directory does
+not authorize borrowing another Session's binding or materialization identity,
+including when refreshing an existing link. Exact-conversation recovery remains
+valid across working-directory changes. Historical identities are retained:
+their stored shape does not identify a donor, so linking does not blindly remint
+them or move private state.
 
 When isolated history is imported into shared state and the same file already
 exists with different bytes, the existing importer preserves the destination
@@ -1438,6 +1500,17 @@ attachable. There is no parallel Herdr session synchronization service.
 
 ## Daemon architecture
 
+Startup reattachment and resume of an already-running session reconcile both
+the daemon's session access key and the session's machine routing metadata.
+The recovered-session machine-control owner uses the existing versioned
+metadata update owner, and changes routing only while the recorded host PID
+still matches the locally adopted runner. Matching workspace-location bindings
+follow the daemon identity; provider session ids, paths and unrelated metadata
+remain intact. The runner keeps its existing authenticated publisher connection.
+This recovery does not retire or replace that publisher's old Machine identity;
+replacement must wait until its surviving publishers have finished or migrated.
+A handoff that has published another runner's PID is left untouched.
+
 With no tracked runners remaining, daemon shutdown cleans each idle OpenCode
 server in its existing managed pool, not just the ambient launch profile. The
 same locked termination owner verifies daemon, relay-directory and process
@@ -1557,6 +1630,14 @@ existing dispatcher suppresses obsolete continuation when newer input is queued.
 Cancellation, newer user input, and disabled automatic
 resume take precedence, and the original interrupted input is never replayed.
 
+Protocol's `buildUsageLimitIssueFingerprint` owns usage-limit issue identity for
+the CLI and UI. Runtime-auth reporting captures that identity from the actual
+failed issue and projects it separately from `runtimeAuthRecoveryAttemptId`.
+Presentation uses recovery timing, cancellation, and action identity only when
+its fingerprint matches the current issue. Older opaque attempt fingerprints
+remain readable, but cannot establish that association; the UI shows the current
+issue's supported recovery actions without attaching historical wait state.
+
 ### Model-capacity recovery (development)
 
 `TemporaryThrottleRecoveryScheduler` owns scheduling after a terminal capacity failure.
@@ -1577,6 +1658,15 @@ In current development source, reconnect readiness uses a fresh authenticated
 feature observation and inherits that request owner's attempt deadline. A separate
 health endpoint is not an admission prerequisite. Authentication rejection fails
 closed; server failures remain retryable under the existing connection supervisor.
+The deadline covers response-body consumption as well as HTTP headers, so a partial
+feature response cannot park reconnect probing indefinitely.
+Diagnostic artifact collection likewise retains its existing request deadline until
+the server response body has been consumed.
+
+The Claude session-hook forwarder reports failed HTTP delivery, transport error codes,
+and unreadable secret-file error codes on stderr. It keeps secrets, paths, hook
+payloads, and server response bodies out of those diagnostics. A listening hook port
+alone does not prove that a hook was authenticated or processed successfully.
 
 ### Control server (local IPC)
 

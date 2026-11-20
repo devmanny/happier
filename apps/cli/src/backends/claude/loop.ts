@@ -66,8 +66,8 @@ export interface EnhancedMode {
     /**
      * The model `modelEffortLevels` was resolved for.
      *
-     * Call sites can override the model (e.g. `--model` inside `claudeArgs`), so tiers are only
-     * evidence when they belong to the model actually being launched.
+     * The tiers can lag a model change, so they are only evidence when they belong to the model
+     * actually being launched.
      */
     modelEffortLevelsModelId?: string | null;
 
@@ -236,6 +236,10 @@ export async function loop(opts: LoopOptions): Promise<number> {
     let mode: 'local' | 'remote' = opts.startingMode ?? 'local';
     let localEntry: 'initial' | 'switch' = mode === 'local' ? 'initial' : 'switch';
     while (true) {
+        // Runner termination may land while one launcher hands off to the other; never start the next.
+        if (opts.signal?.aborted) {
+            return 0;
+        }
         logger.debug(`[loop] Iteration with mode: ${mode}`);
         switch (mode) {
             case 'local': {
@@ -243,6 +247,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
                 const result = await claudeLocalLauncher(session, {
                     entry: localEntry,
                     remoteSwitchingEnabled: true,
+                    signal: opts.signal,
                 });
                 localEntry = 'switch';
                 switch (result.type) {
@@ -262,6 +267,7 @@ export async function loop(opts: LoopOptions): Promise<number> {
                 logger.infoFile('[CLAUDE_STARTUP] stage=provider_launcher_entered', { runtime: 'agent-sdk' });
                 const reason = await claudeRemoteLauncher(session, {
                     initialMode: opts.initialClaudeUnifiedTerminalMode,
+                    signal: opts.signal,
                 });
                 switch (reason) {
                     case 'exit':

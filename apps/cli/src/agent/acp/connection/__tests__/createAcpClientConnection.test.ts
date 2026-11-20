@@ -1,6 +1,11 @@
 import { agent, methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
+import { buildInitializeRequest, createAcpClientFsMethods } from '../../AcpBackend';
+import { createEnvKeyScope } from '@/testkit/env/envScope';
+import { withTempDir } from '@/testkit/fs/tempDir';
 import { createAcpClientConnection } from '../createAcpClientConnection';
 import {
   defineAcpExtensionNotification,
@@ -20,7 +25,64 @@ const objectWithStringValue = {
   },
 };
 
+const envScope = createEnvKeyScope(['HAPPIER_ACP_FS', 'HAPPIER_MACHINE_RPC_WORKING_DIRECTORY']);
+
 describe('createAcpClientConnection', () => {
+  afterEach(() => envScope.restore());
+  it('round-trips authorized files outside cwd and reports missing files through the ACP SDK', async () => {
+    envScope.patch({ HAPPIER_ACP_FS: '1', HAPPIER_MACHINE_RPC_WORKING_DIRECTORY: undefined });
+    await withTempDir('happier-acp-connection-fs-', async (root) => {
+      const workspace = join(root, 'workspace');
+      const plan = join(root, 'session', 'plans', 'active.md');
+      const missing = join(root, 'session', 'plans', 'missing.md');
+      await mkdir(workspace);
+      await mkdir(join(root, 'session', 'plans'), { recursive: true });
+      await writeFile(plan, 'version 1', 'utf8');
+      const testAgent = agent({ name: 'filesystem-contract-agent' })
+        .onRequest(methods.agent.initialize, () => ({
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: {},
+          authMethods: [],
+        }))
+        .onRequest(methods.agent.session.prompt, async (context) => {
+          const before = await context.client.request(methods.client.fs.readTextFile, { sessionId: 's', path: plan });
+          await context.client.request(methods.client.fs.writeTextFile, { sessionId: 's', path: plan, content: 'version 2' });
+          let missingCode: number | null = null;
+          try {
+            await context.client.request(methods.client.fs.readTextFile, { sessionId: 's', path: missing });
+          } catch (error) {
+            if (!(error instanceof RequestError)) throw error;
+            missingCode = error.code;
+          }
+          const after = await context.client.request(methods.client.fs.readTextFile, { sessionId: 's', path: plan });
+          return { stopReason: 'end_turn', _meta: { before: before.content, after: after.content, missingCode } };
+        });
+      const connection = createAcpClientConnection({
+        name: 'filesystem-contract-client',
+        transport: testAgent,
+        handlers: {
+          requestPermission: () => ({ outcome: { outcome: 'cancelled' } }),
+          sessionUpdate: () => {},
+          ...createAcpClientFsMethods({
+            cwd: workspace,
+            permissionHandler: { async handleToolCall() { return { decision: 'approved' }; } },
+          }),
+        },
+      });
+      try {
+        await connection.peer.initialize(buildInitializeRequest({ clientName: 'test', clientVersion: '0.0.0' }));
+        const result = await connection.peer.prompt({ sessionId: 's', prompt: [{ type: 'text', text: 'go' }] });
+        expect(result._meta).toEqual({ before: 'version 1', after: 'version 2', missingCode: -32002 });
+        expect(await readFile(plan, 'utf8')).toBe('version 2');
+        const repeated = await connection.peer.prompt({ sessionId: 's', prompt: [{ type: 'text', text: 'again' }] });
+        expect(repeated._meta).toEqual({ before: 'version 2', after: 'version 2', missingCode: -32002 });
+      } finally {
+        connection.close();
+        await connection.closed;
+      }
+    });
+  });
+
   it('uses the public app API for a long-lived standard ACP connection', async () => {
     const updates: string[] = [];
     const testAgent = agent({ name: 'connection-test-agent' })

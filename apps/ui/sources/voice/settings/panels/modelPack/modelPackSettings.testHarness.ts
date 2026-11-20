@@ -14,6 +14,7 @@ const boundary = vi.hoisted(() => ({
   failDelete: false,
   failDeleteUri: null as string | null,
   failDocumentPath: false,
+  availableDiskSpace: null as number | null,
   fetch: vi.fn<typeof fetch>(),
   alert: vi.fn<typeof import('react-native')['Alert']['alert']>(),
 }));
@@ -35,7 +36,8 @@ vi.mock('expo-file-system', () => {
     Paths: { get document() {
       if (boundary.failDocumentPath) throw new Error('storage_unavailable');
       return 'file:///docs';
-    } },
+    },
+    get availableDiskSpace() { return boundary.availableDiskSpace; } },
     Directory: class {
       uri: string;
       constructor(...parts: Array<string | { uri: string }>) { this.uri = uri(parts); }
@@ -139,6 +141,7 @@ export function useModelPackDeviceBoundary() {
     boundary.failDelete = false;
     boundary.failDeleteUri = null;
     boundary.failDocumentPath = false;
+    boundary.availableDiskSpace = null;
     boundary.fetch.mockReset();
     boundary.alert.mockReset().mockImplementation((_title, _message, buttons) => {
       buttons?.find(button => button.style !== 'cancel')?.onPress?.();

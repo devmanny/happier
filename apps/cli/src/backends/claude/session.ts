@@ -830,6 +830,12 @@ export class Session {
      * all registered callbacks (e.g., SessionScanner) about the change.
      */
     onSessionFound = (sessionId: string, hookData?: SessionHookData) => {
+        const hookEventName = hookData ? readSessionHookEventName(hookData) : '';
+        // Lifecycle notifications describe activity, not a new conversation. In particular,
+        // SessionEnd can report a different, unmaterialized id while switching to remote mode.
+        // Eventless SDK and offline discoveries still use this same identity owner.
+        if (hookEventName && hookEventName !== 'SessionStart') return;
+
         // PLAN 4.9.1 step 2: arm the provider-task identity gate HERE, at the one place this runtime
         // learns its Claude session identity, so the unified terminal, the local launcher and the
         // remote launcher inherit it instead of each remembering to arm the ledger they were handed.

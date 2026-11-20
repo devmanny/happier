@@ -74,6 +74,9 @@ describe('generateHookSettingsFile', () => {
     expect(parsed.permissions?.allow).toEqual(expect.arrayContaining([
       'mcp__happier__change_title',
       'mcp__happier__session_title_set',
+      'mcp__happier__browser_navigate',
+      'mcp__happier__browser_click',
+      'mcp__happier__browser_evaluate',
     ]));
     expect(parsed.permissions?.allow).not.toEqual(expect.arrayContaining([
       'mcp__happier__execution_run_start',

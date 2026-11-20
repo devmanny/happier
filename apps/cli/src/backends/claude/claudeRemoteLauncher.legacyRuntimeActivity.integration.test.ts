@@ -286,6 +286,55 @@ describe.sequential('claudeRemoteLauncher legacy Runtime Activity subscriber', (
     expect(appliedModes).toEqual(['bypassPermissions', 'default']);
   });
 
+  it('ends an idle Agent SDK launch and its provider dispatch when runner termination aborts the launcher', async () => {
+    const { session } = createHarness(undefined, { providerSessionId: null });
+    Object.assign(session.client, {
+      getStoredContentEncryptionContext: () => ({ mode: 'plain' }),
+      upsertSessionSystemRecord: async () => {},
+    });
+    let queryIdle = false;
+    let providerAbortObserved = false;
+    const createQuery: NonNullable<Parameters<typeof actualClaudeRemoteAgentSdk.claudeRemoteAgentSdk>[0]['createQuery']> = (params) => {
+      // The SDK query is the external child-process boundary: it ends its stream only when its
+      // abort controller kills the Claude child. Everything above it stays real.
+      const abortController = params.options?.abortController;
+      if (!(abortController instanceof AbortController)) throw new Error('SDK query requires an abortController');
+      const abortSignal = abortController.signal;
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'result' };
+          queryIdle = true;
+          await new Promise<void>((resolve) => {
+            if (abortSignal.aborted) return resolve();
+            abortSignal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          providerAbortObserved = true;
+        },
+        close: () => {},
+        setPermissionMode: async () => {}, setModel: async () => {}, setMaxThinkingTokens: async () => {},
+        supportedCommands: async () => [], supportedModels: async () => [],
+      } as unknown as Query;
+    };
+    mockClaudeRemoteAgentSdk.mockImplementation((opts: Parameters<typeof actualClaudeRemoteAgentSdk.claudeRemoteAgentSdk>[0]) => (
+      actualClaudeRemoteAgentSdk.claudeRemoteAgentSdk({ ...opts, claudeExecutablePath: '/tmp/claude', createQuery })
+    ));
+    session.queue.push('hello', { permissionMode: 'default', claudeRemoteAgentSdkEnabled: true, claudeUnifiedTerminalEnabled: false },
+      { userMessageLocalId: 'termination-idle' });
+    const termination = new AbortController();
+    const launcher = claudeRemoteLauncher(session, { signal: termination.signal });
+    await vi.waitFor(() => expect(queryIdle).toBe(true));
+
+    termination.abort('claude-runner-termination');
+
+    const settled = await Promise.race([
+      launcher.then((reason) => ({ reason })),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 2_000)),
+    ]);
+    expect(settled).toEqual({ reason: 'exit' });
+    expect(providerAbortObserved).toBe(true);
+    await expect(session.closeProviderInputAdmissionAndWaitForDispatches()).resolves.toBeUndefined();
+  });
+
   it('projects authenticated legacy hooks into the real workflow source while the child runs', async () => {
     const { session, switchHandlerReady } = createHarness();
     const transcriptDir = await mkdtemp(join(tmpdir(), 'claude-legacy-workflow-hook-'));

@@ -108,6 +108,7 @@ export default React.memo(function AppearanceSettingsScreen() {
     const [uiContentWidthMode, setUiContentWidthMode] = useLocalSettingMutable('uiContentWidthMode');
     const [uiMultiPanePanelsEnabled, setUiMultiPanePanelsEnabled] = useLocalSettingMutable('uiMultiPanePanelsEnabled');
     const [uiBackdropBlurEnabled, setUiBackdropBlurEnabled] = useLocalSettingMutable('uiBackdropBlurEnabled');
+    const [hapticsEnabled, setHapticsEnabled] = useLocalSettingMutable('hapticsEnabled');
     const [detailsPaneTabsBehavior, setDetailsPaneTabsBehavior] = useLocalSettingMutable('detailsPaneTabsBehavior');
     const [tabBarGitBadgeMode, setTabBarGitBadgeMode] = useSettingMutable('tabBarGitBadgeMode');
     const [tabBarFriendsBadgeEnabled, setTabBarFriendsBadgeEnabled] = useSettingMutable('tabBarFriendsBadgeEnabled');
@@ -539,6 +540,25 @@ export default React.memo(function AppearanceSettingsScreen() {
                     }}
                 />
             </ItemGroup>
+
+            {(Platform.OS === 'ios' || Platform.OS === 'android') && (
+                <ItemGroup title={t('settingsAppearance.feedback')}>
+                    <Item
+                        testID="settings-appearance-haptics"
+                        title={t('settingsAppearance.haptics')}
+                        subtitle={t('settingsAppearance.hapticsDescription')}
+                        icon={<Icon name="device-mobile" size={29} color={theme.colors.accent.blue} />}
+                        rightElement={
+                            <Switch
+                                testID="settings-appearance-haptics-switch"
+                                value={hapticsEnabled !== false}
+                                onValueChange={setHapticsEnabled}
+                            />
+                        }
+                        showChevron={false}
+                    />
+                </ItemGroup>
+            )}
 
             {/* Style */}
             <ItemGroup title={t('settingsAppearance.avatarStyle')}>

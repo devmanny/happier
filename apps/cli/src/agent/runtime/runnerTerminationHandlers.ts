@@ -6,6 +6,10 @@ import {
   type RunnerTerminationOutcome,
 } from './runnerTerminationOutcome';
 import { writeSessionExitReportSync } from '../../session/diagnostics/sessionExitReport';
+import {
+  notifyParentSessionBestEffort,
+  type ParentSessionNoticeSession,
+} from '@/session/lineage/notifyParentSession';
 import { logger } from '../../ui/logger';
 
 type ProcessLike = Pick<EventEmitter, 'on' | 'removeListener'>;
@@ -79,6 +83,12 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
    * Defaults to terminating on all unhandled rejections.
    */
   shouldTerminateOnUnhandledRejection?: (reason: unknown) => boolean;
+  /**
+   * The session this runner hosts. When it was spawned by another session, that parent
+   * is told the child stopped (and whether it crashed) alongside provider cleanup,
+   * inside the same termination budget.
+   */
+  parentNoticeSession?: ParentSessionNoticeSession | null;
 }>): RunnerTerminationHandlerRegistration {
   let terminated = false;
   let resolveWhenTerminated: (value: Readonly<{ event: RunnerTerminationEvent; outcome: RunnerTerminationOutcome }>) => void;
@@ -108,9 +118,19 @@ export function registerRunnerTerminationHandlers(params: Readonly<{
 
     const outcome = computeRunnerTerminationOutcome(event);
     writeRunnerTerminationSessionExitReport({ options: params.sessionExitReport, event, outcome });
-    const terminationWork = Promise.resolve()
-      .then(() => params.onTerminate(event, outcome))
-      .catch(() => undefined);
+    const parentNoticeSession = params.parentNoticeSession ?? null;
+    const parentNoticeWork = parentNoticeSession
+      ? notifyParentSessionBestEffort({
+        session: parentNoticeSession,
+        event: { kind: 'stopped', reason: outcome.terminationReason, crashed: outcome.exitCode !== 0 },
+      }).catch(() => undefined)
+      : Promise.resolve();
+    const terminationWork = Promise.all([
+      parentNoticeWork,
+      Promise.resolve()
+        .then(() => params.onTerminate(event, outcome))
+        .catch(() => undefined),
+    ]).then(() => undefined);
     const completion = new Promise<void>((resolve) => {
       const timer = setTimeout(() => resolve(), terminationTimeoutMs);
       terminationWork.finally(() => {

@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { getActionSpec, isActionSpecSurfacedOn, type ActionId } from '@happier-dev/protocol';
 
+import { readCurrentHappierSessionIdFromEnv } from '@/agent/runtime/session/currentSessionIdEnv';
 import type { Credentials } from '@/persistence';
 import { registerHappierMcpResources } from '@/mcp/resources/registerHappierMcpResources';
 import { createActionToolExecutorBridge } from '@/agent/tools/happierTools/createActionToolExecutorBridge';
@@ -36,6 +37,7 @@ export function createExternalMcpServer(params: Readonly<{
       token: params.credentials.token,
       credentials: params.credentials,
       sessionId: 'cli-global',
+      messageSenderSessionId: readCurrentHappierSessionIdFromEnv(),
       ctx,
     },
     {

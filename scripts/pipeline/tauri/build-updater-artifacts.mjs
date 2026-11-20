@@ -14,6 +14,7 @@ import { execFileSyncPortable } from '../lib/exec-file-sync-portable.mjs';
 import { applyExpoWebModalEnv } from '../expo/expoWebModalEnv.mjs';
 import { createTauriActoolEnvironment } from '../../../apps/ui/scripts/tauriActoolEnvironment.mjs';
 import { readTauriMainBinaryName, resolveTauriChannelConfigFile } from './channel-config.mjs';
+import { validateLinuxWebKitRuntime, linuxWebKitAppImageFilesConfig } from './linux-webkit-runtime.mjs';
 
 function fail(message) {
   console.error(message);
@@ -427,6 +428,15 @@ function main() {
   }
 
   const platform = process.platform;
+  if (platform === 'linux' && !noBundle && !dryRun) {
+    try {
+      // This pipeline bundles all configured Linux formats. Native candidate
+      // compilation uses --no-bundle and retains the distro headers and symbols.
+      validateLinuxWebKitRuntime({ root: '/', layout: 'installed' });
+    } catch (error) {
+      throw new Error('Linux AppImage packaging requires the pinned WebKit SDK. Prepare it with .github/actions/install-tauri-linux-dependencies (bundled-webkit: true) before bundling.', { cause: error });
+    }
+  }
   const yarn = platform === 'win32' ? null : resolveYarnInvocation();
   const targetArgs = tauriTarget ? ['--target', tauriTarget] : [];
   /** @type {string[]} */
@@ -459,6 +469,16 @@ function main() {
       );
     }
     configs.push('--config', linuxHsetupOverridePath);
+  }
+
+  if (platform === 'linux' && !noBundle) {
+    const webkitFilesOverridePath = tempFile(tmpRoot, 'tauri.linux.webkit.appimage.files.override.json');
+    if (opts.dryRun) {
+      console.log(`[dry-run] write ${webkitFilesOverridePath} (AppImage WebKit GPU helper)`);
+    } else {
+      fs.writeFileSync(webkitFilesOverridePath, `${JSON.stringify(linuxWebKitAppImageFilesConfig())}\n`, 'utf8');
+    }
+    configs.push('--config', webkitFilesOverridePath);
   }
 
   const signingKeyValue = noBundle ? '' : String(process.env.TAURI_SIGNING_PRIVATE_KEY ?? '').trim();

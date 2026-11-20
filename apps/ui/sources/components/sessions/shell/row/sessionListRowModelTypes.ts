@@ -1,3 +1,4 @@
+import type { SessionListBackgroundWorkAttentionMode } from '@/sync/domains/session/listing/sessionListBackgroundWorkAttention';
 import type { SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
 import type { SessionListRenderableSession } from '@/sync/domains/session/listing/sessionListRenderable';
 import type { Session } from '@/sync/domains/state/storageTypes';
@@ -37,6 +38,7 @@ export type SessionListRowPresentationSettings = Readonly<{
     activeColorMode: 'activityAndAttention' | 'attentionOnly' | 'allActive';
     workingIndicatorMode: 'spinner' | 'pulse';
     workingTextMode: 'animated' | 'static';
+    backgroundWorkAttentionMode?: SessionListBackgroundWorkAttentionMode;
     statusColors: Readonly<{
         connected: string;
         connecting: string;

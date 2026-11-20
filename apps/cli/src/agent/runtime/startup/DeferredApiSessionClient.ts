@@ -20,8 +20,11 @@ import type { SessionRuntimeActivitySnapshotPublisher } from '@/session/runtimeA
 import type { SessionUserMessageEnqueueResult } from '@/rpc/handlers/sessionUserMessageSend';
 import type { SessionRuntimeControls } from '@/rpc/handlers/sessionControls';
 import { cloneCallableSessionRuntimeControls } from '@/api/session/sessionRuntimeControls';
+import type { SessionTranscriptObservationProvenanceV1 } from '@happier-dev/protocol';
+import type { StreamedTranscriptWriterSession } from '@/api/session/streamedTranscriptWriter';
 
 export type DeferredApiSessionTarget = Readonly<{
+  subscribeToSessionConnectionState?: StreamedTranscriptWriterSession['subscribeToSessionConnectionState'];
   sessionId: string;
   rpcHandlerManager: RpcHandlerManagerLike;
   setSessionRuntimeControls?: (controls: SessionRuntimeControls | null) => void;
@@ -47,14 +50,14 @@ export type DeferredApiSessionTarget = Readonly<{
   sendAgentMessageCommitted: (
     provider: unknown,
     body: unknown,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
   ) => Promise<void>;
   sendCodexMessage: (body: unknown) => void;
   sendCodexMessageCommitted?: (body: unknown, opts: { localId: string }) => Promise<unknown>;
   sendUserTextMessage: (text: string, opts?: { localId?: string; meta?: Record<string, unknown> }) => void;
   sendUserTextMessageCommitted?: (
     text: string,
-    opts: { localId: string; meta?: Record<string, unknown> },
+    opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
   ) => Promise<void>;
   sendSessionEventCommitted?: (event: unknown, opts: { localId: string }) => Promise<unknown>;
   enqueueSessionUserMessage?: (params: Readonly<{
@@ -103,7 +106,7 @@ export class DeferredApiSessionClient {
     controls: Partial<SessionRuntimeControls>;
     targetDispose: (() => void) | null;
   }>();
-  private readonly pendingProviderInputBindings: Array<(target: DeferredApiSessionTarget) => void> = [];
+  private readonly pendingSessionBindings = new Set<(target: DeferredApiSessionTarget) => void>();
   private target: DeferredApiSessionTarget | null = null;
   private attachPromise: Promise<void> | null = null;
   private flushInFlight: Promise<void> | null = null;
@@ -230,7 +233,7 @@ export class DeferredApiSessionClient {
       observe = target.bindProviderInputOutcomeProducer?.(producer);
     };
     if (this.target) bind(this.target);
-    else this.pendingProviderInputBindings.push(bind);
+    else this.pendingSessionBindings.add(bind);
 
     // Unified fast startup can bind before attach. Until the canonical client exists there
     // is no claimed Pending delivery to settle; it alone validates and fences each producer.
@@ -241,6 +244,23 @@ export class DeferredApiSessionClient {
 
   hasPendingProviderInputAcceptance(localId: string): boolean {
     return this.target?.hasPendingProviderInputAcceptance?.(localId) ?? false;
+  }
+
+  subscribeToSessionConnectionState(
+    listener: Parameters<NonNullable<StreamedTranscriptWriterSession['subscribeToSessionConnectionState']>>[0],
+  ): () => void {
+    if (this.cancelled) return () => {};
+    let disposeTarget: (() => void) | undefined;
+    const bind = (target: DeferredApiSessionTarget) => {
+      disposeTarget = target.subscribeToSessionConnectionState?.(listener);
+    };
+    if (this.target) bind(this.target);
+    else this.pendingSessionBindings.add(bind);
+    return () => {
+      this.pendingSessionBindings.delete(bind);
+      disposeTarget?.();
+      disposeTarget = undefined;
+    };
   }
 
   hasCanonicalPendingProviderInputDelivery(localId: string): boolean {
@@ -321,7 +341,7 @@ export class DeferredApiSessionClient {
   sendAgentMessageCommitted(
     _provider: unknown,
     _body: unknown,
-    _opts: { localId: string; meta?: Record<string, unknown> },
+    _opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
   ): Promise<void> {
     return this.forwardCommittedCall(
       (target) => target.sendAgentMessageCommitted(_provider, _body, _opts),
@@ -369,7 +389,7 @@ export class DeferredApiSessionClient {
 
   sendUserTextMessageCommitted(
     _text: string,
-    _opts: { localId: string; meta?: Record<string, unknown> },
+    _opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
   ): Promise<void> {
     return this.forwardCommittedCall(
       (target) => {
@@ -652,7 +672,8 @@ export class DeferredApiSessionClient {
     this.target = _real;
     this.sessionId = _real.sessionId;
 
-    for (const bind of this.pendingProviderInputBindings.splice(0)) bind(_real);
+    for (const bind of this.pendingSessionBindings) bind(_real);
+    this.pendingSessionBindings.clear();
 
     for (const [method, handler] of this.registeredHandlers.entries()) {
       _real.rpcHandlerManager.registerHandler(method, handler);
@@ -692,7 +713,7 @@ export class DeferredApiSessionClient {
   cancel(): void {
     if (this.cancelled) return;
     this.cancelled = true;
-    this.pendingProviderInputBindings.length = 0;
+    this.pendingSessionBindings.clear();
     this.pendingWakeDebt = false;
 
     const entries = this.buffer;

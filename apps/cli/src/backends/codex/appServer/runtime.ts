@@ -1,7 +1,7 @@
-import { buildUsageLimitIssueFingerprint } from '@/session/usageLimitRecoveryControls/buildUsageLimitIssueFingerprint';
+import { buildUsageLimitIssueFingerprint, isSessionUsageLimitRecoveryForIssue } from '@happier-dev/protocol';
 import { randomUUID } from 'node:crypto';
 import { canPublishSessionResumeIdentity } from '@/session/metadata/sessionIdentityPublication';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import type { PermissionResult } from '@/agent/permissions/permissionResult';
 
 import type { ApiSessionClient } from '@/api/session/sessionClient';
@@ -38,6 +38,7 @@ import {
     readPendingLocalId,
 } from '@happier-dev/protocol';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
+import { getSessionPresence, reportPresenceFailure } from '@/session/presence/startSessionPresence';
 import { isChangeTitleToolNameAlias, normalizePatchInputRecord } from '@happier-dev/protocol/tools/v2';
 import { TurnChangeSetCollector } from '@/agent/tools/diff/turnChangeSetCollector';
 import { emitCanonicalTurnDiffTool } from '@/agent/runtime/emitCanonicalTurnDiffTool';
@@ -152,6 +153,7 @@ import { createCodexAppServerSessionTurnTracker } from './turns/codexAppServerSe
 import { CodexAppServerHistoryBoundary } from './codexAppServerHistoryBoundary';
 import {
     classifyCodexConnectedServiceAuthFailure,
+    attachCodexRuntimeAuthFailureIssue,
     isCodexProviderCapacityFailure,
     type CodexConnectedServiceRuntimeFailureClassification,
 } from '../connectedServices/classifyCodexConnectedServiceAuthFailure';
@@ -194,6 +196,7 @@ import { deriveUsageLimitRecoveryTiming } from '@/session/usageLimitRecoveryCont
 import { computeConnectedServiceAccessTokenFingerprint } from '@/daemon/connectedServices/refresh/credentialFreshness/tokenFingerprint';
 import type { ConnectedServiceRuntimeAuthFailureDaemonReport } from '@/daemon/connectedServices/runtimeAuth/reportConnectedServiceRuntimeAuthFailureToDaemon';
 import { isCommittedRuntimeAuthRecoveryDisposition } from '@/daemon/connectedServices/runtimeAuth/resolveRuntimeAuthRecoveryCommitDisposition';
+import { buildModelEffortChangeOutcome } from '@/agent/runtime/configChange/modelEffortChangeOutcome';
 
 type CodexAppServerStartOrLoadOptions = Readonly<{
     resumeId?: string | null;
@@ -1387,6 +1390,26 @@ export function createCodexAppServerRuntime(params: Readonly<{
     let currentCollaborationMode: NonNullable<ReturnType<typeof resolveCodexAppServerCollaborationModeSelection>>['payload'] | null = null;
     let currentModelId: string | null = null;
     let currentReasoningEffort: string | null = null;
+    /** The model and effort the last started turn ran with: a change is recorded when a turn applies it. */
+    let lastAppliedTurnConfig: { model: string | null; effort: string | null } | null = null;
+    const recordAppliedTurnConfig = (applied: { model: string | null; effort: string | null }) => {
+        const previous = lastAppliedTurnConfig;
+        lastAppliedTurnConfig = applied;
+        if (!previous) return;
+        const event = buildModelEffortChangeOutcome({
+            provider: 'codex',
+            runtime: 'codex-app-server',
+            previous,
+            applied,
+            modelLabel: (modelId) => {
+                const models = (params.session.getMetadataSnapshot?.() as { sessionModelsV1?: { availableModels?: Array<{ id?: unknown; name?: unknown }> } } | null)
+                    ?.sessionModelsV1?.availableModels;
+                const name = models?.find((model) => model.id === modelId)?.name;
+                return typeof name === 'string' && name.trim() ? name.trim() : modelId;
+            },
+        });
+        if (event) params.session.sendSessionEvent?.(event);
+    };
     let currentServiceTier: string | null = null;
     let hasServiceTierOverride = false;
     let pendingTurnStartSeqInclusive: number | null = null;
@@ -1780,6 +1803,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
                                 sessionId: params.session.sessionId,
                                 classification: {
                                     kind: 'usage_limit',
+                                    runtimeIssueFingerprint: intent.issueFingerprint,
                                     serviceId: 'openai-codex',
                                     groupId: intent.selectedAuth.groupId,
                                     profileId: intent.selectedAuth.profileId,
@@ -2937,6 +2961,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         source: 'provider_tool',
                         confidence: 'strong',
                     });
+                    // Codex never asks before applying a patch in yolo mode, so presence can only
+                    // record the files as the patch starts (no pre-edit warning for Codex).
+                    void getSessionPresence(params.session.sessionId)
+                        ?.noteFilesEdited(Object.keys(changes).map((path) => resolvePath(params.directory, path)))
+                        .catch(reportPresenceFailure('record patched files'));
                 }
             }
             if (context.sidechainId) {
@@ -3384,6 +3413,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
         error?: Error;
         emitUndeliverablePrompt?: boolean;
         failureIssue?: SessionRuntimeIssueV1 | null;
+        onFailureTurn?: (failure: Readonly<{ turnId: string; issue: SessionRuntimeIssueV1 }>) => void;
         flushReason?: 'turn-end' | 'abort' | 'failure';
         insideBridgeWork?: boolean;
     }>): Promise<void> => {
@@ -3480,6 +3510,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             await turnBoundaryTracker.failActiveTurn({
                 endSeqInclusive: readLastObservedMessageSeq(params.session),
                 issue: options.failureIssue,
+                onFailureTurn: options.onFailureTurn,
             });
         }
         if (options?.flushReason === 'turn-end' && activeTurn) {
@@ -3690,6 +3721,13 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 await finishPendingTurn({
                     error: failure,
                     failureIssue: issue,
+                    onFailureTurn: ({ issue: acceptedIssue }) => {
+                        issue = acceptedIssue;
+                        attachCodexRuntimeAuthFailureIssue(failure, acceptedIssue);
+                        void requestConnectedServiceGroupRecoveryForTerminalFailure(
+                            failure instanceof CodexAppServerTurnFailure ? failure.runtimeAuthClassification : null,
+                        );
+                    },
                     flushReason: 'failure',
                     insideBridgeWork: true,
                 });
@@ -3700,6 +3738,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
                     publishCodexTurnAbortedMessage();
                 }
             }
+        }
+        if (!params.session.sessionTurnLifecycle) {
+            void requestConnectedServiceGroupRecoveryForTerminalFailure(
+                failure instanceof CodexAppServerTurnFailure ? failure.runtimeAuthClassification : null,
+            );
         }
         await updateUsageLimitRecoveryFromSurfacedIssue(issue);
     };
@@ -3719,8 +3762,8 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 sessionId: params.session.sessionId,
                 classification,
             });
-        } catch (error) {
-            logger.debug('[codex-app-server] Failed to request connected-service group recovery after terminal provider failure', error);
+        } catch {
+            logger.infoFile('[codex-app-server] accepted_turn_failure_report_unavailable');
         }
     };
 
@@ -3760,16 +3803,6 @@ export function createCodexAppServerRuntime(params: Readonly<{
                 return;
             }
             await abortPendingTurnWithFailure(failure);
-            const groupRecoveryClassification = failure instanceof CodexAppServerTurnFailure
-                ? failure.runtimeAuthClassification
-                : null;
-            // The daemon may hot-apply a replacement credential back through this same
-            // runtime. Start recovery only after the terminal boundary and classified issue
-            // are published, but do not await it while a notification bridge owns the
-            // runtime queue or the hot-apply callback can deadlock behind that bridge.
-            void requestConnectedServiceGroupRecoveryForTerminalFailure(
-                groupRecoveryClassification,
-            );
             return;
         }
         if (terminalOutcome === 'interrupted') {
@@ -5176,6 +5209,7 @@ export function createCodexAppServerRuntime(params: Readonly<{
             currentCollaborationMode = null;
             currentModelId = null;
             currentReasoningEffort = null;
+            lastAppliedTurnConfig = null;
             currentServiceTier = null;
             permissionSupport = 'unknown';
             nextClientConnectedServiceIdentity = latestConnectedServiceRuntimeIdentity ?? nextClientConnectedServiceIdentity;
@@ -5413,6 +5447,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
                         }
                     }
                     const startedTurnId = readTurnId(response);
+                    // The provider accepted the turn with these: that's when a change is applied.
+                    recordAppliedTurnConfig({
+                        model: typeof turnStartParams.model === 'string' ? turnStartParams.model : null,
+                        effort: typeof turnStartParams.effort === 'string' ? turnStartParams.effort : null,
+                    });
                     if (startedTurnId) {
                         pendingTurn = { ...activeTurn, turnId: startedTurnId };
                         latestPendingTurnId = startedTurnId;
@@ -5863,7 +5902,11 @@ export function createCodexAppServerRuntime(params: Readonly<{
             if (request.operation === 'consume_reset_credit') {
                 return unsupportedSessionRuntimeMethod(SESSION_RPC_METHODS.SESSION_USAGE_LIMIT_CHECK_NOW);
             }
-            const currentIntent = usageLimitRecoveryScheduler.read(request.sessionId);
+            const storedIntent = usageLimitRecoveryScheduler.read(request.sessionId);
+            const currentIntent = storedIntent && latestUsageLimitIssue
+                && !isSessionUsageLimitRecoveryForIssue(latestUsageLimitIssue, storedIntent, 'codex')
+                ? null
+                : storedIntent;
             if (
                 currentIntent
                 && currentIntent.status !== 'cancelled'

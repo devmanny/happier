@@ -258,6 +258,75 @@ const SessionIdRequiredInputSchema = z.object({
   sessionId: z.string().min(1),
 }).passthrough();
 
+const TaskStatusInputSchema = z.enum(['todo', 'in_progress', 'blocked', 'in_review', 'done']);
+
+const TaskCreateInputSchema = z.object({
+  sessionId: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().optional(),
+  assignee: z.string().min(1).optional(),
+  status: TaskStatusInputSchema.optional(),
+  startAt: z.string().min(1).optional(),
+  dueAt: z.string().min(1).optional(),
+  directory: z.string().min(1).optional(),
+  machineId: z.string().min(1).optional(),
+  sourceKind: z.enum(['chat', 'email', 'session', 'other']).optional(),
+  sourceLabel: z.string().min(1).optional(),
+  sourceUrl: z.string().min(1).optional(),
+}).passthrough();
+
+const TaskUpdateInputSchema = z.object({
+  sessionId: z.string().min(1),
+  taskId: z.string().min(1),
+  status: TaskStatusInputSchema.optional(),
+  comment: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  description: z.string().optional(),
+  assignee: z.string().min(1).optional(),
+  startAt: z.string().optional(),
+  dueAt: z.string().optional(),
+  directory: z.string().optional(),
+}).passthrough();
+
+const AgentMemoryReadInputSchema = z.object({
+  sessionId: z.string().min(1),
+  kind: z.enum(['now', 'journal', 'notes', 'note']),
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  noteId: z.string().min(1).optional(),
+  limit: z.number().int().positive().optional(),
+}).passthrough();
+
+const AgentMemorySearchInputSchema = z.object({
+  sessionId: z.string().min(1),
+  query: z.string().min(1),
+  limit: z.number().int().positive().optional(),
+}).passthrough();
+
+const AgentMemoryWriteInputSchema = z.object({
+  sessionId: z.string().min(1),
+  kind: z.enum(['journal', 'note']),
+  text: z.string().min(1).optional(),
+  noteId: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  markdown: z.string().optional(),
+}).passthrough();
+
+const AgentNowUpdateInputSchema = z.object({
+  sessionId: z.string().min(1),
+  text: z.string().min(1),
+}).passthrough();
+
+const AgentThreadsReadInputSchema = z.object({
+  sessionId: z.string().min(1),
+  threadSessionId: z.string().min(1).optional(),
+  limit: z.number().int().positive().optional(),
+}).passthrough();
+
+const SessionPresenceWhoInputSchema = z.object({
+  sessionId: z.string().min(1),
+  resources: z.array(z.string().min(1)).optional(),
+}).passthrough();
+
 const SessionTitleSetInputSchema = z.object({
   sessionId: z.string().min(1).optional(),
   title: z.string().trim().min(1),
@@ -2585,6 +2654,264 @@ export const ACTION_SPECS: readonly ActionSpec[] = Object.freeze([
       ],
     },
     inputSchema: SessionGoalSetInputSchema,
+  },
+  {
+    id: 'task.create',
+    title: 'Create a task',
+    description: 'Create a task for the user (assignee "user") or for an agent ("me" for yourself, or an agent id). Dates are ISO 8601 (startAt, dueAt). Give the source (sourceKind chat/email/session/other, sourceLabel, sourceUrl link to the message) when the task came from somewhere. The user is told when their tasks are due soon or overdue.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'tarea_crear' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","title":"Buy the USB-C cable","assignee":"user","dueAt":"2026-11-10T18:00:00-06:00","sourceKind":"chat","sourceUrl":"https://..."}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Create a task',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'title', title: 'Title', widget: 'text', required: true },
+        { path: 'assignee', title: 'Assignee (user, me or agent id)', widget: 'text' },
+        { path: 'dueAt', title: 'Due (ISO 8601)', widget: 'text' },
+      ],
+    },
+    inputSchema: TaskCreateInputSchema,
+  },
+  {
+    id: 'task.update',
+    title: 'Update a task',
+    description: 'Update a task: status (todo, in_progress, blocked, in_review, done), a progress comment, or its fields. Your thread is linked to the task. Your open tasks are listed at the start of each turn with their ids. A repeating task stays open: status done records the result of the occurrence your thread is working, and only the user closes or pauses the task.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'tarea_actualizar' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","taskId":"...","status":"in_progress","comment":"Started"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Update a task',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'taskId', title: 'Task id', widget: 'text', required: true },
+        { path: 'status', title: 'Status', widget: 'text' },
+        { path: 'comment', title: 'Comment', widget: 'textarea' },
+      ],
+    },
+    inputSchema: TaskUpdateInputSchema,
+  },
+  {
+    id: 'agent.memory.read',
+    title: 'Read agent memory',
+    description: "Read your agent memory: kind 'now' (what each of your threads is doing), 'journal' (a day's entries, default today), 'notes' (all notes) or 'note' (one, by noteId). Agent memory is shared by all your threads (sessions) as this agent; it is not past-conversation recall (memory_search).",
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'memoria_leer' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","kind":"journal","day":"2026-11-07"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Read agent memory',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'kind', title: 'Kind', widget: 'text', required: true },
+        { path: 'day', title: 'Day (YYYY-MM-DD)', widget: 'text' },
+        { path: 'noteId', title: 'Note id', widget: 'text' },
+      ],
+    },
+    inputSchema: AgentMemoryReadInputSchema,
+  },
+  {
+    id: 'agent.memory.search',
+    title: 'Search agent memory',
+    description: "Search your agent memory (journal, notes and threads' now) for every word of the query. Use it before answering about work done in another thread. Agent memory is shared by all your threads (sessions) as this agent; it is not past-conversation recall (memory_search).",
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'memoria_buscar' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","query":"testflight build"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Search agent memory',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'query', title: 'Query', widget: 'text', required: true },
+      ],
+    },
+    inputSchema: AgentMemorySearchInputSchema,
+  },
+  {
+    id: 'agent.memory.write',
+    title: 'Write agent memory',
+    description: "Write to your agent memory while you work: kind 'journal' appends a fact, decision or finding (text); kind 'note' creates or replaces a Markdown note (title, markdown, noteId to edit) that may link others with [[Title]]. Agent memory is shared by all your threads (sessions) as this agent; it is not past-conversation recall (memory_search).",
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'memoria_anotar' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","kind":"journal","text":"Decided to ..."}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Write agent memory',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'kind', title: 'Kind', widget: 'text', required: true },
+        { path: 'text', title: 'Journal text', widget: 'textarea' },
+        { path: 'title', title: 'Note title', widget: 'text' },
+        { path: 'markdown', title: 'Note Markdown', widget: 'textarea' },
+        { path: 'noteId', title: 'Note id', widget: 'text' },
+      ],
+    },
+    inputSchema: AgentMemoryWriteInputSchema,
+  },
+  {
+    id: 'agent.now.update',
+    title: 'Update what this thread is doing',
+    description: 'Say in one line what this thread is doing now; your other threads see it at the start of their turns. Agent memory is shared by all your threads (sessions) as this agent; it is not past-conversation recall (memory_search).',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'ahora_actualizar' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","text":"Fixing the login screen"}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Update what this thread is doing',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'text', title: 'Now', widget: 'text', required: true },
+      ],
+    },
+    inputSchema: AgentNowUpdateInputSchema,
+  },
+  {
+    id: 'agent.threads.read',
+    title: 'Read my other threads',
+    description: "List your other threads as this agent (what each is doing and how long ago), or pass threadSessionId to read that thread's recent messages. To ask that thread something, send it a message with session_message_send. Agent memory is shared by all your threads (sessions) as this agent; it is not past-conversation recall (memory_search).",
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'mis_hilos' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","threadSessionId":"cm..."}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Read my other threads',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'threadSessionId', title: 'Thread session id', widget: 'text' },
+      ],
+    },
+    inputSchema: AgentThreadsReadInputSchema,
+  },
+  {
+    id: 'session.presence.who',
+    title: 'Who is here',
+    description: 'List the other live threads (sessions) of your agents: agent, machine, folder, task, files they are editing and shared resources in use (e.g. build-ios, testflight, daemon-restart). Pass `resources` to declare the shared resources you are about to use; they are released when your turn ends. Advisory only: nothing is locked.',
+    safety: 'safe',
+    approval: APPROVAL_RESULT_REQUIRED,
+    contextualDefaults: { sessionId: 'current_session' },
+    toolExposure: { session_agent: 'direct' },
+    placements: [],
+    bindings: { mcpToolName: 'quien_esta_aqui' },
+    examples: {
+      mcp: { argsExample: '{"sessionId":"{{sessionId}}","resources":["build-ios"]}' },
+    },
+    surfaces: {
+      ui_button: false,
+      ui_slash_command: false,
+      voice_tool: false,
+      voice_action_block: false,
+      session_agent: true,
+      mcp: true,
+      cli: false,
+    },
+    inputHints: {
+      title: 'Who is here',
+      fields: [
+        { path: 'sessionId', title: 'Session id', widget: 'text', required: true },
+        { path: 'resources', title: 'Shared resources you are about to use', widget: 'text' },
+      ],
+    },
+    inputSchema: SessionPresenceWhoInputSchema,
   },
   {
     id: 'session.goal.clear',

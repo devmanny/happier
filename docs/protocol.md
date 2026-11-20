@@ -46,7 +46,8 @@ auth: {
   token: "<bearer token>",
   clientType: "user-scoped" | "session-scoped" | "machine-scoped",
   sessionId?: "<session id>",
-  machineId?: "<machine id>"
+  machineId?: "<machine id>",
+  capabilities?: ["updates-lean-v1"]
 }
 ```
 
@@ -59,6 +60,23 @@ Rules enforced server-side:
 - `user-scoped`: receives account-wide updates.
 - `session-scoped`: receives updates for a specific session only.
 - `machine-scoped`: used by daemons; receives machine updates and emits machine state.
+
+### Lean updates (`updates-lean-v1`)
+A `user-scoped` client that declares `capabilities: ["updates-lean-v1"]` in its handshake is a lean
+reader (`apps/server/sources/app/api/socketRooms.ts`, decision in `planLeanDelivery`,
+`apps/server/sources/app/events/connectionEventRouter.ts`). Clients that don't declare it receive
+everything as before.
+- It sends `client-open-sessions {sessionIds: string[]}` (acked `{ok: true, count, truncated?}`)
+  with the sessions it shows, replacing the previous list; at most 64 are kept per socket.
+- It is not sent publisher heartbeats that only refresh `active: true` + `activeAt`; state changes
+  still arrive (`active: false` when a publisher stops signalling or closes, turn status, pending
+  requests, metadata, agent state). A lean reader therefore can't judge "working" by `activeAt`.
+- `new-message` / `message-updated` arrive in full only for its open sessions; for the others the
+  same envelope and cursor with the message's `content` removed and `contentOmitted: true`.
+- `transcript-stream-segment` / `transcript-stream-segment-delta` arrive only for open sessions.
+- No ack to `client-open-sessions` means the relay doesn't support lean updates.
+
+Heartbeats also no longer schedule account badge pushes (they change no badge).
 
 ### Server -> client events
 The server emits two event types:
@@ -95,6 +113,7 @@ Field names below match on-wire payloads.
   - `agentState`: `{ value, version }` or null
   - Optional pending-request projections use `pendingPermissionRequestCount`, `pendingUserActionRequestCount`, and nullable `pendingRequestObservedAt`.
   - Pending request counts describe the outstanding requests in Agent state, including independent execution runs. Foreground completion, cancellation, publisher close, and released-UI Stop preserve them; those lifecycle events do not own every request in the Session. The acknowledged Agent-state writer commits the request state and derived counts together, then publishes their committed projection.
+  - The development UI reconciles request content, counts and list flags together under `agentStateVersion` through the shared session projection owner. A delayed older version cannot restore a pending count after settlement clears `pendingRequestObservedAt` to null. Metadata keeps its independent version ordering; cache-only public request updates retain their envelope version without claiming that encrypted detail has been decrypted. Composer status subscribes to the existing pending-request summary so transcript-only settlement also reaches an already mounted composer.
   - Development request-settlement delivery retains encrypted, request-specific completion intents in the existing CLI runtime mutation journal before releasing the provider waiter. Delivery merges each exact occurrence into current Agent state through the existing versioned writer; it preserves independent and newer requests. Normal delivery retries while the runtime is active, and a runtime reopening the same Session replays admitted intents after restart. Runtime journals remain runtime-owned; daemon terminal recovery does not take them over. This reliability improvement requires the updated CLI, uses the existing server wire contract, and is not a release availability claim.
 
 
@@ -217,14 +236,64 @@ from this current-work projection.
 - `rpc-call`
   - `{ method, params }` -> callback `{ ok, result? | error? }`
   - Server forwards to the registered socket via `rpc-request` (ack-based).
+  - A method name maps to one socket per account; the latest `rpc-register` wins and a
+    disconnect removes that socket's methods.
+
+#### Integrated browser of the native app (`device.browser.v1.*`)
+
+The native Apple app serves its WebKit browser to session agents with no relay changes. Its
+user-scoped socket registers `<machineId>:device.browser.v1.<slot>` for every machine it
+knows. A session on that machine calls the method like any machine RPC (`callExactMachineRpc`),
+so params and result are encrypted with that machine's data key, or stay plain for plain
+machines. The daemon never registers these methods.
+
+- Slots, tried in this order by the CLI (`apps/cli/src/mcp/deviceBrowser`):
+  - `focused`: the device the user is using. An iPhone or iPad claims it whenever the app comes
+    to the foreground, so pages an agent opens show up where the user is; a Mac claims it when
+    its browser window opens. The most recent claim wins. iOS loses it when the app goes to the
+    background, because iOS closes the socket. Tabs live on the device that served the call, so
+    a session that moves to another device starts there in a new tab.
+  - `host`: a running Mac app. It serves from launch, with or without a browser window.
+- The CLI moves to the next slot only when the relay reports that no client serves the method.
+  A request that may have reached a device is never re-sent.
+- Every request carries `sessionId`, set by the CLI from the session whose MCP bridge made the
+  call. A session's first navigation opens its own tab, titled with the session's name, on the
+  device that served the call. A session lists, selects and closes only its own tabs, and may
+  have several. Any other tab id answers `tab_not_found`. Each tab has its own web view: calls
+  on one tab run in order, and other tabs run alongside. All tabs share the browser's website
+  data (cookies and logins). Agents never change the tab the user is looking at. A session's
+  tabs close when it stops or is archived, unless a browser view is showing them.
+- Operations, request/response schemas and error codes are defined in
+  `packages/protocol/src/deviceBrowser/deviceBrowserRpc.ts`. The Swift mirror is
+  `apps/apple/HappierKit/Sources/HappierKit/Browser/DeviceBrowserRPC.swift`.
+- Session agents see these operations as the Happier MCP tools `browser_navigate`,
+  `browser_screenshot`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`,
+  `browser_evaluate`, `browser_wait` and `browser_tabs`. These tools are auto-approved, and a
+  Settings toggle on each device turns agent access off.
 
 ## HTTP endpoints by area
 See `api.md` for the full HTTP endpoint catalog and auth flows.
+
+### Model and effort changes in the transcript
+When a runner applies a different model or reasoning effort, it writes one transcript event
+`runtime-config-outcome` with `status: "applied"`, `changes` holding the previous and effective value
+of what changed (`model`, `reasoningEffort`) and `message` like "Model changed to GPT 6.1 Sol ·
+Effort High" (only the part that changed). One builder owns it
+(`apps/cli/src/agent/runtime/configChange/modelEffortChangeOutcome.ts`): Claude records what its
+runtime reports it runs with (`effectiveModelUpdate.ts`, which used to write a plain "Model changed
+to" message event), Codex app-server when a `turn/start` with the new values is accepted. The first
+observation of a session is a baseline, never a change. The RN/web app already renders the event;
+the native app shows it as a centered line with its time.
 
 ## Sequencing and concurrency
 - `UpdatePayload.seq` is the per-user update sequence (monotonic) used for sync ordering.
 - Sessions, machines, and artifacts have their own `seq` fields used by clients for ordering.
 - Versioned fields (metadata, agentState, daemonState, artifact header/body, access keys, KV) use optimistic concurrency with `expectedVersion` and return a version-mismatch response containing the current version/data.
+- Account KV changes in `/v2/changes` are coalesced in one row per key family (`entityId`:
+  `presence`, `task`, `agentprofile`, `agent`, or `self` for any other key; `accountKvChangeFamily`
+  in `packages/protocol/src/changes.ts`). A row's `hint.keys` names only that row's last write, so
+  readers use the family to decide what to read again; before this, one `self` row let a presence
+  write hide an earlier task write. Readers that only check `kind: "kv"` behave as before.
 
 ### Transcript catch-up and reading position
 

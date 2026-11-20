@@ -12,6 +12,7 @@ import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices
 import { adoptClaudePermissionModeFromMetadata } from '../utils/syncPermissionModeFromMetadata';
 import {
   isClaudeRuntimeAuthRecoveryContinuing,
+  recordClaudeRateLimitQuotaEvidence,
   surfaceClaudeRuntimeAuthFailure,
   surfaceClaudeRateLimitRuntimeIssue,
 } from '../connectedServices/surfaceClaudeRuntimeIssues';
@@ -1238,6 +1239,7 @@ export async function claudeUnifiedTerminalLauncher(
         session.onThinkingChange(thinking);
       },
       onUsageLimitDetails: surfaceRateLimit,
+      onQuotaEvidence: (windows) => recordClaudeRateLimitQuotaEvidence(session, windows, '[unified-terminal]'),
       onRuntimeAuthFailureEvent: async (error) => {
         try {
           const surfaced = await surfaceClaudeRuntimeAuthFailure(session, error, '[unified]');

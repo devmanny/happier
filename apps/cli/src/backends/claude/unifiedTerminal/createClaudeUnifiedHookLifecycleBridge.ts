@@ -18,7 +18,8 @@ import type { createClaudeProviderRuntimeActivityAdapter } from '../providerActi
 import { isClaudeRuntimeAuthFailureEvidence } from '../connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
 import { containsDefinitiveClaudeOAuthRevocationEvidence } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
-  mapClaudeRateLimitEventToUsageDetails,
+  mapClaudeProviderFailureToUsageDetails,
+  mapClaudeRateLimitEventToQuotaEvidence,
   mapClaudeStopFailureHookToUsageDetails,
   type NormalizedProviderUsageLimitDetailsV1,
 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
@@ -142,6 +143,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
+  onQuotaEvidence?: ((windows: readonly NormalizedProviderUsageLimitDetailsV1[]) => void | Promise<void>) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   /**
@@ -683,7 +685,11 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (isClaudeRuntimeAuthFailureEvidence(message)) {
         chainTerminalSideEffect('runtime-auth', () => opts.onRuntimeAuthFailureEvent?.(message));
       }
-      const usageLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+      const quotaEvidence = mapClaudeRateLimitEventToQuotaEvidence(message);
+      if (quotaEvidence.length > 0) {
+        chainTerminalSideEffect('quota-evidence', () => opts.onQuotaEvidence?.(quotaEvidence));
+      }
+      const usageLimitDetails = mapClaudeProviderFailureToUsageDetails(message);
       if (usageLimitDetails) {
         chainTerminalSideEffect('usage-limit', () => opts.onUsageLimitDetails?.(usageLimitDetails));
       }

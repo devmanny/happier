@@ -9,6 +9,7 @@ import { handleBugReportCliCommand } from './commands/bugReport';
 import { handleCapabilitiesCliCommand } from './commands/capabilities';
 import { handleConnectCliCommand } from './commands/connect';
 import { handleDaemonCliCommand } from './commands/daemon';
+import { handleDiagnosticsCliCommand } from './commands/diagnostics';
 import { handleDoctorCliCommand } from './commands/doctor';
 import { handleHerdrCliCommand } from './commands/herdr';
 import { handleInstallCliCommand } from './commands/install';
@@ -65,6 +66,7 @@ export const commandRegistry: Readonly<Record<string, CommandHandler>> = {
   bridge: handleMcpCliCommand,
   connect: handleConnectCliCommand,
   daemon: handleDaemonCliCommand,
+  diagnostics: handleDiagnosticsCliCommand,
   doctor: handleDoctorCliCommand,
   herdr: handleHerdrCliCommand,
   install: handleInstallCliCommand,

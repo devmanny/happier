@@ -1,3 +1,4 @@
+import { readCurrentHappierSessionIdFromEnv } from '@/agent/runtime/session/currentSessionIdEnv';
 import type { Credentials } from '@/persistence';
 import { isActionEnabledByEnv, readActionsSettingsFromEnv } from '@/settings/actionsSettings';
 import { dispatchBuiltInHappierTool } from './dispatchBuiltInHappierTool';
@@ -84,6 +85,7 @@ export async function callBuiltInHappierTool(params: Readonly<{
       token: params.credentials.token,
       credentials: params.credentials,
       sessionId,
+      messageSenderSessionId: surface === 'session_agent' ? sessionId : readCurrentHappierSessionIdFromEnv(),
       ctx,
       mode,
       rawSession,

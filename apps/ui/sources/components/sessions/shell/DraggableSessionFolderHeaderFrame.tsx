@@ -9,7 +9,7 @@ import type { TreeDropOverlaySharedValues } from '@/components/ui/treeDragDrop';
 import {
     useSessionInlineDrag,
     type UseSessionInlineDragCancelEvent,
-    type UseSessionInlineDragDropResultEvent,
+    type UseSessionInlineDragParams,
     type UseSessionInlineDragResolveDropResultEvent,
     type UseSessionInlineDragResolvedDrop,
 } from './useSessionInlineDrag';
@@ -38,7 +38,7 @@ export const DraggableSessionFolderHeaderFrame = React.memo(function DraggableSe
     overlayShared: TreeDropOverlaySharedValues;
     onDragStart: (sessionKey: string) => void;
     resolveDropResult: (event: UseSessionInlineDragResolveDropResultEvent) => UseSessionInlineDragResolvedDrop;
-    onDropResult: (event: UseSessionInlineDragDropResultEvent) => void;
+    onDropResult: UseSessionInlineDragParams['onDropResult'];
     onDragCancel: (event: UseSessionInlineDragCancelEvent) => void;
     onRegisterTreeRowBounds: RegisterSessionListTreeRowBounds;
     onUnregisterTreeRowBounds: UnregisterSessionListTreeRowBounds;

@@ -25,6 +25,7 @@ type CreateConfiguredAcpRuntimeParams = Readonly<{
   mcpServers: Record<string, McpServerConfig>;
   permissionHandler: AcpPermissionHandler;
   launchEnv: Readonly<Record<string, string>>;
+  processEnv?: NodeJS.ProcessEnv;
   onThinkingChange: (thinking: boolean) => void;
   getPermissionMode?: () => PermissionMode | null | undefined;
   onSessionIdChange?: (nextSessionId: string | null) => void;
@@ -56,6 +57,7 @@ export function createConfiguredAcpRuntime(params: CreateConfiguredAcpRuntimePar
     provider: `acp:${params.backend.backendId}`,
     directory: params.directory,
     happierSessionId: params.session.sessionId,
+    processEnv: params.processEnv,
     session: params.session,
     messageBuffer: params.messageBuffer,
     mcpServers: params.mcpServers,
@@ -93,6 +95,8 @@ export function createConfiguredAcpRuntime(params: CreateConfiguredAcpRuntimePar
         cwd: params.directory,
         backend: params.backend,
         launchEnv: params.launchEnv,
+        env: params.processEnv,
+        happierSessionId: params.session.sessionId,
         mcpServers: params.mcpServers,
         permissionHandler: params.permissionHandler,
         ...(permissionMode ? { permissionMode } : {}),
@@ -106,6 +110,8 @@ export function createConfiguredAcpRuntime(params: CreateConfiguredAcpRuntimePar
         cwd: params.directory,
         backend: params.backend,
         launchEnv: params.launchEnv,
+        env: params.processEnv,
+        happierSessionId: params.session.sessionId,
         mcpServers: params.mcpServers,
         permissionHandler: params.permissionHandler,
       });

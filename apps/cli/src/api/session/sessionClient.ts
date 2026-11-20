@@ -309,6 +309,7 @@ import {
 } from './committedUserMessageSeqTracker';
 import {
     createSessionMutationOutbox,
+    SessionMutationJournalAdmissionBlockedError,
     type RuntimeActivitySnapshotTail,
     type SessionMutationOutbox,
 } from './mutations/createSessionMutationOutbox';
@@ -331,7 +332,6 @@ import {
 import {
     applyKnownPendingQueueState,
     countMaterializablePendingRows,
-    derivePendingQueueStateAfterMaterializeResult,
     readKnownPendingQueueState,
     UNKNOWN_PENDING_QUEUE_STATE,
     type KnownPendingQueueState,
@@ -605,6 +605,7 @@ export class ApiSessionClient extends EventEmitter {
     private sessionPermissionRpcRouter: SessionPermissionRpcRouter | null = null;
     private executionRunPermissionHandler: CodexLikePermissionHandler | null = null;
     private readonly rpcLifecycleRegistrations: RpcLifecycleRegistration[] = [];
+    private executionRunLifecycleRegistration: RpcLifecycleRegistration | null = null;
     private agentStateLock = new AsyncLock();
     private requestSettlementAdmissionLock = new AsyncLock();
     private metadataLock = new AsyncLock();
@@ -851,6 +852,11 @@ export class ApiSessionClient extends EventEmitter {
             `[API] Socket not connected; queueing ${context} until supervised reconnect.`,
             details
         );
+    }
+
+    subscribeToSessionConnectionState(listener: (state: ManagedConnectionState) => void): () => void {
+        this.on(SESSION_CONNECTION_STATE_EVENT, listener);
+        return () => { this.off(SESSION_CONNECTION_STATE_EVENT, listener); };
     }
 
     private isSessionSocketOnlineForAckWrite(): boolean {
@@ -1127,6 +1133,8 @@ export class ApiSessionClient extends EventEmitter {
         // Always register execution-run RPC methods so callers never see "RPC method not available".
         // Feature gating is enforced inside the handler implementations.
         const streamedTranscriptSession = {
+            subscribeToSessionConnectionState: (listener: (state: ManagedConnectionState) => void) =>
+                this.subscribeToSessionConnectionState(listener),
             enqueueAgentMessageCommitted: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; meta?: Record<string, unknown>; provenance: SessionTranscriptObservationProvenanceV1 }) =>
                 this.enqueueAgentMessageCommitted(provider, body, opts),
             sendAgentMessageCommitted: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; meta?: Record<string, unknown> }) =>
@@ -1141,7 +1149,7 @@ export class ApiSessionClient extends EventEmitter {
             getEphemeralStreamConnectionEpoch: () => this.getEphemeralStreamConnectionEpoch(),
         };
 
-        registerExecutionRunHandlers(this.rpcHandlerManager, {
+        this.executionRunLifecycleRegistration = registerExecutionRunHandlers(this.rpcHandlerManager, {
             sessionId: this.sessionId,
             cwd: this.resolveWorkingDirectory(),
             resolveCwd: () => this.resolveWorkingDirectory(),
@@ -1200,6 +1208,8 @@ export class ApiSessionClient extends EventEmitter {
                 return context.settings ?? null;
             },
         });
+
+        this.rpcLifecycleRegistrations.push(this.executionRunLifecycleRegistration);
 
         registerEphemeralTaskHandlers(this.rpcHandlerManager, {
           workingDirectory: this.resolveWorkingDirectory(),
@@ -4168,16 +4178,27 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+    private reportClaudeSessionMessageUsage(body: RawJSONLines): void {
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
             try {
-                this.sendUsageData(body.message.usage, body.message.model);
+                // Claude can split one API response into several transcript records.
+                // The provider response ID, unlike the JSONL UUID, identifies the usage snapshot.
+                const responseId = readNonBlankOpaqueIdentifier(body.message.id);
+                const messageKey = buildClaudeJsonlMessageKey(body);
+                if (!responseId && !messageKey) return;
+                const reportKey = responseId
+                    ? `claude-response:${responseId}`
+                    : `claude-message:${messageKey}`;
+                this.sendUsageData(body.message.usage, body.message.model, reportKey);
             } catch (error) {
                 logger.debug('[SOCKET] Failed to send usage data:', serializeAxiosErrorForLog(error));
             }
         }
+    }
 
+    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+        this.reportClaudeSessionMessageUsage(body);
         // Update metadata with summary if this is a summary message
         if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
             updateMetadataBestEffort(
@@ -4277,7 +4298,7 @@ export class ApiSessionClient extends EventEmitter {
         requireExactCommitLocalId(localId);
 
         this.logSendWhileDisconnected('Claude session message', { type: body.type });
-        return await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+        const result = await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
             sessionId: this.sessionId,
             localId,
             content: this.buildOutboundSessionMessagePayload(content),
@@ -4287,6 +4308,8 @@ export class ApiSessionClient extends EventEmitter {
             updatedAt: opts.updatedAt ?? opts.createdAt,
             provenance: opts.provenance,
         }));
+        this.reportClaudeSessionMessageUsage(body);
+        return result;
     }
 
     recordClaudeJsonlMessageConsumed(body: RawJSONLines, meta?: Record<string, unknown>): void {
@@ -4704,6 +4727,20 @@ export class ApiSessionClient extends EventEmitter {
     ): Promise<void> {
         const content = this.buildUserTextMessageContent(text, opts.meta);
         const payload = this.buildOutboundSessionMessagePayload(content);
+        if (opts.provenance !== undefined) {
+            const result = await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+                sessionId: this.sessionId,
+                localId: opts.localId,
+                content: payload,
+                sidechainId: null,
+                messageRole: 'user',
+                provenance: opts.provenance,
+            }));
+            if (!result.persisted) {
+                throw new SessionMutationJournalAdmissionBlockedError(new Error('Session transcript journal is closed'));
+            }
+            return;
+        }
         await this.enqueueMessageCommit('required', {
             operation: 'user-message-commit',
             details: {
@@ -4882,8 +4919,17 @@ export class ApiSessionClient extends EventEmitter {
     async sendAgentMessageCommitted(
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; meta?: Record<string, unknown> },
+        opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
     ): Promise<void> {
+        // Explicit observation provenance opts into durable journal custody. Callers without
+        // provenance retain the required remote-acknowledgement contract below.
+        if (opts.provenance !== undefined) {
+            const result = await this.enqueueAgentMessageCommitted(provider, body, { ...opts, provenance: opts.provenance });
+            if (!result.persisted) {
+                throw new SessionMutationJournalAdmissionBlockedError(new Error('Session transcript journal is closed'));
+            }
+            return;
+        }
         const { normalizedBody, content, localId, sidechainId } = this.prepareAcpAgentMessage({
             provider,
             body,
@@ -5192,6 +5238,11 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send a ping message to keep the connection alive
      */
+    /** Latest presence this client published (thinking = a turn is in progress). */
+    getSessionPresenceSnapshot(): SessionPresenceSnapshot {
+        return this.latestSessionPresence;
+    }
+
     keepAlive(thinking: boolean, mode: SessionAliveMode) {
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);
@@ -5383,7 +5434,7 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send usage data to the server
      */
-    sendUsageData(usage: Usage, model?: string) {
+    sendUsageData(usage: Usage, model?: string, key = 'claude-session') {
         // Calculate total tokens
         const totalTokens = usage.input_tokens + usage.output_tokens + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
 
@@ -5391,7 +5442,7 @@ export class ApiSessionClient extends EventEmitter {
 
         // Transform Claude usage format to backend expected format
         const usageReport = {
-            key: 'claude-session',
+            key,
             sessionId: this.sessionId,
             tokens: {
                 total: totalTokens,
@@ -6004,6 +6055,7 @@ export class ApiSessionClient extends EventEmitter {
 
     async close() {
         logger.debug('[API] socket.close() called');
+        this.startExecutionRunDisposal();
         this.executionRunPermissionHandler?.reset();
         this.executionRunPermissionHandler = null;
         this.pendingInputReadinessAbortController?.abort();
@@ -6082,6 +6134,17 @@ export class ApiSessionClient extends EventEmitter {
         this.runtimeTerminationStarted = true;
         this.providerInputOutcomeProducerGeneration += 1;
         this.acceptedCanonicalPendingDeliveryOperationAbortController.abort();
+        this.startExecutionRunDisposal();
+    }
+
+    private startExecutionRunDisposal(): void {
+        // Child processes must not wait behind parent provider or transport shutdown.
+        // The retained registration joins this same idempotent disposal during close().
+        void this.executionRunLifecycleRegistration?.dispose().catch((error: unknown) => {
+            logger.infoFile('[API] Failed to dispose execution runs', {
+                error: serializeAxiosErrorForLog(error),
+            });
+        });
     }
 
     hasRuntimeTerminationStarted(): boolean {
@@ -6515,13 +6578,10 @@ export class ApiSessionClient extends EventEmitter {
                 },
             };
         }
-        const pendingStateUpdate = derivePendingQueueStateAfterMaterializeResult({
-            current: this.pendingQueueState,
-            didMaterialize: materializeResult.didMaterialize,
-            authoritativeState: materializeResult.pendingQueueState ?? null,
-        });
-        if (pendingStateUpdate.state.known) {
-            this.applyPendingQueueState(pendingStateUpdate.state);
+        // Released-server acknowledgements omit the projection. Its post-commit hint may
+        // already be applied, so only the server can advance these counters and version.
+        if (materializeResult.pendingQueueState) {
+            this.applyPendingQueueState(materializeResult.pendingQueueState);
         }
         if (this.closed || this.runtimeTerminationStarted) {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
