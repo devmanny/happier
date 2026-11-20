@@ -46,6 +46,30 @@ describe('startParentLinkWatcher', () => {
   beforeEach(() => {
     resetParentLinkWatchersForTests();
     notifyParentLinkChangeBestEffort.mockClear();
+    // Moves in these cases happen after the watcher starts (their `updatedAt` is later).
+    vi.spyOn(Date, 'now').mockReturnValue(0);
+  });
+
+  it('does not announce a move made before this runner started, even if it is seen late', () => {
+    // A resumed runner can first see metadata without `listParentV1` (and with a version) and
+    // only then the nesting the user did days ago. That nesting is not news to anyone.
+    vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    const session = new FakeSession('child-1', {
+      path: '/repo',
+      host: 'mac',
+      spawnedBySessionV1: { v: 1, parentSessionId: 'parent-a', createdAtMs: 1 },
+    });
+    startParentLinkWatcher(session);
+    session.emit('metadata-updated');
+
+    session.setListParent('parent-b', 500);
+    expect(notifyParentLinkChangeBestEffort).not.toHaveBeenCalled();
+
+    session.setListParent('parent-c', 1_500);
+    expect(notifyParentLinkChangeBestEffort).toHaveBeenCalledWith(expect.objectContaining({
+      previousParentSessionId: 'parent-b',
+      nextParentSessionId: 'parent-c',
+    }));
   });
 
   it('treats the parent seen at startup as the baseline and does not announce it', () => {

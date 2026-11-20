@@ -189,6 +189,25 @@ describe('PushNotificationClient.sendToAllDevicesAsync', () => {
     expect((chunk as any[])[0]).toMatchObject({ categoryId: PUSH_NOTIFICATION_CATEGORY_IDS.permissionRequestV1 });
   });
 
+  it('marks session pushes that are not requests as repliable session messages, without a subtitle', async () => {
+    (axios as any).get.mockResolvedValue({
+      data: {
+        tokens: [{ id: '1', token: 'ExponentPushToken[a]' }],
+      },
+    });
+
+    const client = new PushNotificationClient('t', 'https://api.example.test');
+    await client.sendToAllDevicesAsync('Title', 'Body', { sessionId: 's_1' });
+    await client.sendToAllDevicesAsync('Title', 'Body', {});
+
+    const [sessionChunk] = sendPushNotificationsAsyncSpy.mock.calls.at(-2) ?? [];
+    // The native Apple app registers this category id with a text Reply action.
+    expect((sessionChunk as any[])[0].categoryId).toBe('happier.sessionMessage.v1');
+    expect((sessionChunk as any[])[0].subtitle).toBeUndefined();
+    const [accountChunk] = sendPushNotificationsAsyncSpy.mock.calls.at(-1) ?? [];
+    expect((accountChunk as any[])[0].categoryId).toBeUndefined();
+  });
+
   it('sets iOS subtitle and Android channelId for permission request pushes', async () => {
     (axios as any).get.mockResolvedValue({
       data: {

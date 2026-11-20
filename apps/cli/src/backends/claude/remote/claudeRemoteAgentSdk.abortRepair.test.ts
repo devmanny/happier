@@ -586,6 +586,80 @@ describe('claudeRemoteAgentSdk abort repair', () => {
         expect(interrupt).toHaveBeenCalledTimes(1);
     });
 
+    it('force-closes Claude when it never acknowledges the interrupt, so Stop always ends the turn', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'happier-claude-wedged-interrupt-'));
+        const transcriptPath = join(dir, 'sess_1.jsonl');
+        await writeFile(transcriptPath, '', 'utf8');
+
+        let interruptHandler: (() => Promise<void>) | null = null;
+        const turnStarted = createDeferred<void>();
+        const closed = createDeferred<void>();
+        // A wedged Claude process (event loop blocked) never answers the interrupt control request,
+        // and ignores SIGTERM (its handler runs on that blocked loop).
+        const interrupt = vi.fn(() => new Promise<void>(() => {}));
+        const close = vi.fn(() => closed.resolve(undefined));
+        const child = { kill: vi.fn((_signal?: string) => true), killed: true, exitCode: null, pid: 4242 };
+
+        const createQuery = vi.fn((params: any) => {
+            params.options.spawnClaudeCodeProcess({ command: '/tmp/claude', args: [], env: {}, signal: new AbortController().signal });
+            return {
+            async *[Symbol.asyncIterator]() {
+                turnStarted.resolve(undefined);
+                yield {
+                    type: 'assistant',
+                    uuid: 'asst_1',
+                    message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+                } as any;
+                // The stream only ends once the process is terminated.
+                await closed.promise;
+                throw new AbortError('Claude Code process aborted');
+            },
+            interrupt,
+            close,
+            setPermissionMode: vi.fn(),
+            setModel: vi.fn(),
+            setMaxThinkingTokens: vi.fn(),
+            } as any;
+        });
+
+        let didSendFirst = false;
+        const nextMessage = vi.fn(async () => {
+            if (didSendFirst) return null;
+            didSendFirst = true;
+            return { message: 'hello', mode: makeMode({ permissionMode: 'default' } as any) };
+        });
+
+        const runPromise = claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath,
+            path: dir,
+            claudeArgs: [],
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage,
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage: () => {},
+            setTurnInterrupt: (handler: () => Promise<void>) => {
+                interruptHandler = handler;
+            },
+            createQuery,
+            spawnClaudeCodeProcess: () => child,
+            interruptAckTimeoutMs: 20,
+        } as any);
+
+        await turnStarted.promise;
+        const handler = await waitForInterruptHandler(() => interruptHandler);
+        await handler();
+
+        expect(interrupt).toHaveBeenCalledTimes(1);
+        expect(close).toHaveBeenCalled();
+        // Already sent SIGTERM (so the SDK's own close() won't escalate): only SIGKILL ends it.
+        expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+        await runPromise;
+    });
+
     it('repairs missing tool_result on best-effort interrupt even when the Agent SDK does not throw AbortError', async () => {
         const baseDir = await mkdtemp(join(tmpdir(), 'happier-claude-interrupt-repair-'));
         const claudeConfigDir = join(baseDir, 'claude-config');

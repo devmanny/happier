@@ -70,6 +70,8 @@ function resolveCategoryIdFromPushData(data: Record<string, unknown> | undefined
     const kind = resolvePushRequestKindFromPushData(data)
     if (kind === 'permission') return PUSH_NOTIFICATION_CATEGORY_IDS.permissionRequestV1
     if (kind === 'user_action') return PUSH_NOTIFICATION_CATEGORY_IDS.userActionRequestV1
+    const sessionId = typeof data?.sessionId === 'string' ? data.sessionId.trim() : ''
+    if (sessionId) return PUSH_NOTIFICATION_CATEGORY_IDS.sessionMessageV1
     return undefined
 }
 
@@ -93,8 +95,7 @@ function sanitizeNotificationSubtitle(raw: string): string {
 }
 
 function resolveIosSubtitleFromPushData(data: Record<string, unknown> | undefined): string | undefined {
-    const categoryId = resolveCategoryIdFromPushData(data)
-    if (!categoryId) return undefined
+    if (!resolvePushRequestKindFromPushData(data)) return undefined
     const tool = typeof data?.tool === 'string' ? sanitizeNotificationSubtitle(data.tool) : ''
     return tool ? tool : undefined
 }

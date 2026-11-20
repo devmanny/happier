@@ -128,6 +128,28 @@ function argsContainMcpConfigFlag(args?: string[] | null): boolean {
     return false;
 }
 
+/**
+ * How long a turn interrupt may wait for Claude to acknowledge it. Claude answers the interrupt
+ * control request on its own event loop over local stdio, normally within milliseconds; no answer
+ * in this time means that loop is blocked (observed: Claude Code 2.1.302 stuck in a synchronous
+ * file open for hours), and only ending the process stops the turn. The conversation is kept: the
+ * next message starts Claude again from its own transcript.
+ */
+const CLAUDE_INTERRUPT_ACK_TIMEOUT_MS = 10_000;
+
+/** Whether `operation` settled within `timeoutMs` (a rejection still propagates). */
+async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation.then(() => true as const), timedOut]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
 export async function claudeRemoteAgentSdk(opts: {
             // Fixed parameters
             sessionId: string | null;
@@ -204,6 +226,7 @@ export async function claudeRemoteAgentSdk(opts: {
 
     // Test seam
     createQuery?: AgentSdkQueryFactory;
+    interruptAckTimeoutMs?: number;
     spawnClaudeCodeProcess?: ((options: AgentSdkSpawnOptions) => AgentSdkSpawnedProcess) | null;
 }): Promise<void> {
     const recordTraceMarker = (params: { kind: string; payload: Record<string, unknown> }) => {
@@ -882,7 +905,12 @@ export async function claudeRemoteAgentSdk(opts: {
     };
 
     const spawnBaseProcess = opts.spawnClaudeCodeProcess ?? defaultSpawnClaudeCodeProcess;
-    queryOptions.spawnClaudeCodeProcess = spawnBaseProcess;
+    // The live Claude process, kept so an unresponsive one can be killed outright.
+    let claudeProcess: AgentSdkSpawnedProcess | null = null;
+    queryOptions.spawnClaudeCodeProcess = (spawnOptions: AgentSdkSpawnOptions): AgentSdkSpawnedProcess => {
+        claudeProcess = spawnBaseProcess(spawnOptions);
+        return claudeProcess;
+    };
     let nextMessagePump: Promise<void> | null = null;
     let deferredUntilForegroundTurnEnds: ClaudeRemoteProviderAcceptedPrompt<EnhancedMode> | null = null;
     const swallowOptionalPromise = async (promise: Promise<void> | null): Promise<void> => {
@@ -1013,6 +1041,26 @@ export async function claudeRemoteAgentSdk(opts: {
         let foregroundTurnInterruptActive = true;
         let deferredInterruptedReason: string | null = null;
 
+        const interruptAckTimeoutMs = opts.interruptAckTimeoutMs ?? CLAUDE_INTERRUPT_ACK_TIMEOUT_MS;
+        /**
+         * Ends a Claude process that no longer answers. Its SIGTERM handler runs on the blocked
+         * event loop, and once a SIGTERM has been sent `Query.close()` no longer escalates, so the
+         * process is killed outright after closing the query.
+         */
+        const closeUnresponsiveClaude = (request: string): void => {
+            logger.warn(`[claudeRemoteAgentSdk] Claude did not acknowledge ${request} within ${interruptAckTimeoutMs}ms; killing the Claude process`);
+            try {
+                (response as any)?.close?.();
+            } catch {
+                // ignore: the process may already be gone
+            }
+            try {
+                claudeProcess?.kill('SIGKILL');
+            } catch {
+                // ignore: the process may already be gone
+            }
+        };
+
 	        const interruptTurn = async (): Promise<void> => {
                 let stopTaskSucceeded = false;
 	            try {
@@ -1025,8 +1073,11 @@ export async function claudeRemoteAgentSdk(opts: {
                             deferredInterruptedReason = deferredInterruptedReason ?? 'turn-interrupt';
                             awaitingRequestedTurnInterruptResult = true;
                             try {
-                                await stopTask.call(response, taskId);
-                                stopTaskSucceeded = true;
+                                if (await settlesWithin(stopTask.call(response, taskId), interruptAckTimeoutMs)) {
+                                    stopTaskSucceeded = true;
+                                } else {
+                                    closeUnresponsiveClaude('stopTask');
+                                }
                                 return;
                             } catch {
                                 awaitingRequestedTurnInterruptResult = false;
@@ -1040,7 +1091,9 @@ export async function claudeRemoteAgentSdk(opts: {
 	                    didRequestTurnInterrupt = true;
                         deferredInterruptedReason = deferredInterruptedReason ?? 'turn-interrupt';
 	                    awaitingRequestedTurnInterruptResult = true;
-	                    await interrupt.call(response);
+	                    if (!(await settlesWithin(interrupt.call(response), interruptAckTimeoutMs))) {
+                            closeUnresponsiveClaude('interrupt');
+                        }
 	                }
 	            } catch {
 	                awaitingRequestedTurnInterruptResult = false;
@@ -1567,7 +1620,11 @@ export async function claudeRemoteAgentSdk(opts: {
                                 didRequestTurnInterrupt = true;
                                 deferredInterruptedReason = deferredInterruptedReason ?? 'pending-interrupt-and-send';
                                 awaitingRequestedTurnInterruptResult = true;
-                                await interrupt.call(response);
+                                if (!(await settlesWithin(interrupt.call(response), interruptAckTimeoutMs))) {
+                                    // The prompt stays undelivered and queued for the next Claude.
+                                    closeUnresponsiveClaude('interrupt-and-send');
+                                    throw new Error('Claude did not acknowledge the interrupt');
+                                }
                                 cleanupBufferedAssistantMessages?.(null);
                                 await flushStreamedTranscriptWriter('abort', 'pending-interrupt-and-send');
                             } catch {

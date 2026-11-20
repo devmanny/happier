@@ -106,6 +106,8 @@ describe('sendApnsNotifications', () => {
       'apns-topic': 'com.devmanny.happier',
       'apns-push-type': 'alert',
       'apns-priority': '10',
+      // A session's newer notification replaces its previous one on the device.
+      'apns-collapse-id': 's1',
     });
     expect(calls[0].headers.authorization).toMatch(/^bearer [\w-]+\.[\w-]+\.[\w-]+$/);
     expect(JSON.parse(calls[0].body)).toEqual({
@@ -114,9 +116,25 @@ describe('sendApnsNotifications', () => {
         sound: 'default',
         badge: 3,
         category: 'happier.permissionRequest.v1',
+        'thread-id': 's1',
       },
       body: message.data,
     });
+  });
+
+  it('does not collapse notifications that belong to no session', async () => {
+    const calls: Parameters<ApnsTransport>[0][] = [];
+    await sendApnsNotifications({
+      tokens: ['apns:sandbox:com.devmanny.happier:0aff'],
+      message: { title: 'Happier', body: 'Hello' },
+      credentials,
+      transport: async (request) => {
+        calls.push(request);
+        return { status: 200, body: '' };
+      },
+    });
+    expect(calls[0].headers['apns-collapse-id']).toBeUndefined();
+    expect(JSON.parse(calls[0].body).aps['thread-id']).toBeUndefined();
   });
 
   it('keeps tokens that failed for reasons other than the device', async () => {

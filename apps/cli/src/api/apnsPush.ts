@@ -69,14 +69,22 @@ export function createApnsAuthToken(credentials: ApnsCredentials, nowSec: number
   return `${unsigned}.${signature.toString('base64url')}`;
 }
 
+/** The session a notification is about: its newer notification replaces this one on the device. */
+function readSessionId(message: ApnsMessage): string | null {
+  const sessionId = typeof message.data?.sessionId === 'string' ? message.data.sessionId.trim() : '';
+  return sessionId || null;
+}
+
 /** Same payload shape the Expo service delivers: `data` travels under `body`. */
 function buildApnsPayload(message: ApnsMessage): string {
+  const sessionId = readSessionId(message);
   return JSON.stringify({
     aps: {
       alert: { title: message.title, ...(message.subtitle ? { subtitle: message.subtitle } : {}), body: message.body },
       sound: 'default',
       ...(message.badge !== undefined ? { badge: message.badge } : {}),
       ...(message.categoryId ? { category: message.categoryId } : {}),
+      ...(sessionId ? { 'thread-id': sessionId } : {}),
     },
     body: message.data ?? {},
   });
@@ -105,6 +113,7 @@ export async function sendApnsNotifications(params: Readonly<{
   const transport = params.transport ?? http2ApnsTransport;
   const authorization = `bearer ${createApnsAuthToken(params.credentials, params.nowSec ?? Math.floor(Date.now() / 1000))}`;
   const body = buildApnsPayload(params.message);
+  const sessionId = readSessionId(params.message);
   const invalidTokens: string[] = [];
   for (const token of params.tokens) {
     const target = parseApnsPushToken(token);
@@ -113,7 +122,14 @@ export async function sendApnsNotifications(params: Readonly<{
       const response = await transport({
         origin: target.environment === 'sandbox' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com',
         path: `/3/device/${target.deviceToken}`,
-        headers: { authorization, 'apns-topic': target.topic, 'apns-push-type': 'alert', 'apns-priority': '10' },
+        headers: {
+          authorization,
+          'apns-topic': target.topic,
+          'apns-push-type': 'alert',
+          'apns-priority': '10',
+          // APNs rejects a collapse id over 64 bytes; such a notification is just not collapsed.
+          ...(sessionId && Buffer.byteLength(sessionId) <= 64 ? { 'apns-collapse-id': sessionId } : {}),
+        },
         body,
       });
       if (response.status === 200) continue;
