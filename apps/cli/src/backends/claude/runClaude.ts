@@ -65,8 +65,8 @@ import { resolveSessionModeOverrideFromMetadataSnapshot } from '@/agent/runtime/
 import { initializeBackendApiContext } from '@/agent/runtime/initializeBackendApiContext';
 import { ClaudeLocalPermissionBridge, DEFAULT_LOCAL_PERMISSION_HOOK_RESPONSE } from '@/backends/claude/localPermissions/localPermissionBridge';
 import { formatErrorForUi } from '@/ui/formatErrorForUi';
-import { computeRunnerTerminationOutcome, type RunnerTerminationEvent } from '@/agent/runtime/runnerTerminationOutcome';
 import { registerRunnerTerminationHandlers } from '@/agent/runtime/runnerTerminationHandlers';
+import { settleClaudeRunnerLoop, type ClaudeRunnerLoopSettlement } from './claudeRunnerLoopSettlement';
 import { createClaudeShouldTerminateOnUnhandledRejection } from './claudeUnhandledRejectionPolicy';
 import { requestClaudeExplicitRunnerStop } from './claudeExplicitRunnerStop';
 import { updateAgentStateBestEffort, updateMetadataBestEffort } from '@/api/session/sessionWritesBestEffort';
@@ -1134,34 +1134,28 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
     let activeLoopAbortController: AbortController | null = null;
     let activeLoopPromise: Promise<number> | null = null;
-    let activeLoopShouldWaitOnTermination = false;
+    let terminationRequested = false;
     let endpointArtifactsOwnedByAttachment = adoptEndpointRecovery !== null;
     let stopTerminalHostForExplicitStop: (() => Promise<void>) | null = null;
 
-    // Setup signal handlers for graceful shutdown and crash reporting.
-    const cleanup = async (event: RunnerTerminationEvent, outcome: ReturnType<typeof computeRunnerTerminationOutcome>) => {
+    let cleanupPromise: Promise<void> | null = null;
+    const cleanupOnce = (): Promise<void> => cleanupPromise ??= (async () => {
         restoreStdinBestEffort({ stdin: process.stdin as any });
-        logger.debug('[START] Cleanup initiated', {
-            kind: event.kind,
-            ...(event.kind === 'signal' ? { signal: event.signal } : {}),
-            exitCode: outcome.exitCode,
-            terminationReason: outcome.terminationReason,
-            ...(event.kind === 'unhandledRejection' ? { cause: formatErrorForUi(event.reason) } : {}),
-            ...(event.kind === 'uncaughtException' ? { cause: formatErrorForUi(event.error) } : {}),
-        });
+        // Every Claude runtime launcher honours the loop signal, so end it first: its teardown
+        // (provider child stop, workflow-activity finalize + flush) must write through a live
+        // transport, and its provider dispatch must be over before admission drains below.
+        if (terminationRequested && activeLoopPromise) {
+            if (activeLoopAbortController && !activeLoopAbortController.signal.aborted) {
+                activeLoopAbortController.abort('claude-runner-termination');
+            }
+            await activeLoopPromise.catch((error) => {
+                logger.debug('[START] Active Claude loop ended during termination cleanup', {
+                    cause: formatErrorForUi(error),
+                });
+            });
+        }
 
         try {
-            if (activeLoopShouldWaitOnTermination && activeLoopPromise) {
-                if (activeLoopAbortController && !activeLoopAbortController.signal.aborted) {
-                    activeLoopAbortController.abort('claude-runner-termination');
-                }
-                await activeLoopPromise.catch((error) => {
-                    logger.debug('[START] Active Claude loop ended during termination cleanup', {
-                        cause: formatErrorForUi(error),
-                    });
-                });
-            }
-
             if (session) {
                 try {
                     await currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
@@ -1169,8 +1163,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     // cancel and persist any outstanding local-mode permission requests.
                     disposeLocalPermissionBridge();
                     // Bound the critical metadata drain so shutdown cannot stack waits.
-                    const metadataDeadline = createSessionMetadataShutdownDeadline();
-                    await currentSession?.drainCriticalMetadataWrites({ timeoutMs: metadataDeadline.remainingMs() });
+                    const metadataDeadline = terminationRequested ? createSessionMetadataShutdownDeadline() : null;
+                    await currentSession?.drainCriticalMetadataWrites(
+                        metadataDeadline ? { timeoutMs: metadataDeadline.remainingMs() } : undefined,
+                    );
 
                     // Cleanup session resources (intervals, callbacks)
                     currentSession?.cleanup();
@@ -1185,6 +1181,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 }
             }
 
+        } finally {
+            // Hook artifacts and their secrets must be retired even if session transport cleanup fails.
             // Stop caffeinate
             stopCaffeinate();
 
@@ -1194,22 +1192,37 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 cleanupHookSettingsFile(hookSettingsPath);
                 cleanupHookPluginDir(hookPluginDir);
             }
-
-            logger.debug('[START] Cleanup complete');
-        } catch (error) {
-            logger.debug('[START] Error during cleanup (non-fatal):', error);
         }
-    };
+
+        logger.debug('[START] Cleanup complete');
+    })();
 
         const terminationHandlers = registerRunnerTerminationHandlers({
             process,
             exit: (code) => process.exit(code),
             sessionExitReport: { sessionId: session.sessionId },
+            parentNoticeSession: session,
             onTerminationRequested: () => {
+                terminationRequested = true;
                 session.beginRuntimeTermination?.();
                 void currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
             },
-            onTerminate: cleanup,
+            onTerminate: async (event, outcome) => {
+                logger.debug('[START] Cleanup initiated', {
+                    kind: event.kind,
+                    ...(event.kind === 'signal' ? { signal: event.signal } : {}),
+                    exitCode: outcome.exitCode,
+                    terminationReason: outcome.terminationReason,
+                    ...(event.kind === 'unhandledRejection' ? { cause: formatErrorForUi(event.reason) } : {}),
+                    ...(event.kind === 'uncaughtException' ? { cause: formatErrorForUi(event.error) } : {}),
+                });
+                await cleanupOnce().catch((error) => {
+                    logger.infoFile('[START] Cleanup failed (non-fatal)', {
+                        phase: 'session',
+                        cause: formatErrorForUi(error),
+                    });
+                });
+            },
             shouldTerminateOnUnhandledRejection: createClaudeShouldTerminateOnUnhandledRejection({
                 abortWasRequestedRecently: (withinMs) => currentSession?.wasUserAbortRequestedRecently(withinMs) ?? false,
                 ignoreWindowMs: configuration.claudeAbortUnhandledRejectionIgnoreWindowMs,
@@ -1273,26 +1286,14 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }, installedRuntimeCapabilities), sessionRuntimeModeKind);
     let exitCode = 0;
     let loopError: unknown = null;
+    let loopSettlement: ClaudeRunnerLoopSettlement<number> | null = null;
     try {
+        // MCP startup can finish while accepted termination is still flushing the session.
+        if (terminationRequested) {
+            await terminationHandlers.whenTerminated;
+            return;
+        }
         activeLoopAbortController = new AbortController();
-        // Only the unified-terminal runtime is abortable, so only it may be awaited on termination.
-        //
-        // `loop()` forwards `signal` to `claudeUnifiedTerminalLauncher` alone; the local and remote
-        // launchers take no signal, so aborting the controller cannot make them return and the
-        // await in `cleanup()` would simply not settle. That await runs FIRST, so a runtime that
-        // cannot honour it would starve everything behind it — the metadata drain, the session
-        // archive, session death/flush/close, the runtime-activity dispose, and the hook settings
-        // + plugin-dir removal — until `registerRunnerTerminationHandlers` hard-exits at
-        // HAPPIER_RUNNER_TERMINATION_TIMEOUT_MS. Moving the await after that teardown is no better:
-        // the launcher's shutdown finalize would then write through a transport already closed.
-        //
-        // KNOWN RESIDUAL: on SIGINT/SIGTERM/uncaught under the local and remote runtimes, those
-        // launchers' `finally` blocks (RULING-14 workflow-activity finalize + flush) may not run,
-        // so live rows stay "Working" until the next session start reconciles them from the
-        // persisted headline. Closing it belongs to the launchers — give them an `opts.signal` the
-        // way the unified-terminal launcher has one, and this flag becomes unconditional with no
-        // new mechanism here.
-        activeLoopShouldWaitOnTermination = unifiedTerminalRuntimeActive;
         logger.infoFile('[CLAUDE_STARTUP] stage=provider_loop_started');
         activeLoopPromise = loop({
             path: workingDirectory,
@@ -1392,7 +1393,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             },
             jsRuntime: options.jsRuntime,
             defaultSystemPromptText,
-            signal: activeLoopShouldWaitOnTermination ? activeLoopAbortController.signal : undefined,
+            signal: activeLoopAbortController.signal,
             expectedExistingTerminalHostAttachmentId: adoptEndpointRecovery?.state.attachmentId,
             onTerminalHostReady: async ({
                 handle,
@@ -1425,49 +1426,34 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 });
             },
         });
-        exitCode = await activeLoopPromise;
+        loopSettlement = await settleClaudeRunnerLoop(activeLoopPromise, {
+            isRequested: () => terminationRequested,
+            whenTerminated: terminationHandlers.whenTerminated,
+        }, cleanupOnce);
     } catch (error) {
         loopError = error;
+        try {
+            if (!terminationRequested) await cleanupOnce();
+        } catch (cleanupError) {
+            if (!terminationRequested) throw cleanupError;
+        }
+        if (terminationRequested) {
+            await terminationHandlers.whenTerminated;
+            return;
+        }
     } finally {
         activeLoopAbortController = null;
         activeLoopPromise = null;
-        activeLoopShouldWaitOnTermination = false;
     }
+    if (loopSettlement?.kind === 'terminated' || terminationRequested) {
+        // Termination owns teardown and the final exit, including a request in the await handoff.
+        await terminationHandlers.whenTerminated;
+        return;
+    }
+    if (loopSettlement?.kind === 'completed') exitCode = loopSettlement.value;
+    if (loopSettlement?.kind === 'failed') loopError = loopSettlement.error;
 
     terminationHandlers.dispose();
-
-    // Cleanup session resources (intervals, callbacks) - prevents memory leak
-    // Note: currentSession is set by onSessionReady callback during loop()
-    await (currentSession as import('./session').Session | null)?.drainCriticalMetadataWrites();
-    (currentSession as import('./session').Session | null)?.cleanup();
-
-    // Dispose the local permission bridge while the session transport is still alive so it can
-    // cancel and persist any outstanding local-mode permission requests.
-    disposeLocalPermissionBridge();
-
-    // Send session death message
-    session.sendSessionDeath();
-
-    // Wait for socket to flush
-    logger.debug('Waiting for socket to flush...');
-    await session.flush();
-
-    // Close session
-    logger.debug('Closing session...');
-    await session.close();
-    await runtimeActivity.lifecycle.dispose();
-
-    // Stop caffeinate before exiting
-    stopCaffeinate();
-    logger.debug('Stopped sleep prevention');
-
-    // Stop Hook server and cleanup settings file + plugin dir
-    hookServer.stop();
-    if (!endpointArtifactsOwnedByAttachment) {
-        cleanupHookSettingsFile(hookSettingsPath);
-        cleanupHookPluginDir(hookPluginDir);
-    }
-    logger.debug('Stopped Hook server and cleaned up settings file + plugin dir');
 
     if (loopError) {
         throw loopError;
@@ -1548,6 +1534,9 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
     const messageQueue = new MessageQueue2<EnhancedMode>(hashClaudeEnhancedModeForQueue);
 
     let currentSession: import('./session').Session | null = null;
+    let terminationRequested = false;
+    const loopAbortController = new AbortController();
+    let loopPromise: Promise<number> | null = null;
     const runtimeActivity = await createClaudeBackendRunRuntimeActivityLifecycle('supported');
     const activateProviderTaskRuntimeActivity = runtimeActivity.activateProviderRuntime;
     if (!activateProviderTaskRuntimeActivity) {
@@ -2169,7 +2158,7 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                         ...currentClaudeRemoteMetaState,
                     }, installedRuntimeCapabilities), sessionRuntimeModeKind);
 
-                    const exitCode = await loop({
+                    loopPromise = loop({
                         path: workingDirectory,
                         model: options.model,
                         permissionMode: options.permissionMode,
@@ -2298,9 +2287,10 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
                                 }),
                             });
                         },
+                        signal: loopAbortController.signal,
                     });
 
-                return exitCode;
+                return await loopPromise;
             },
         },
     });
@@ -2319,53 +2309,71 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
         spec: startupSpec,
     });
 
+    let cleanupPromise: Promise<void> | null = null;
+    const cleanupOnce = (): Promise<void> => cleanupPromise ??= (async () => {
+        restoreStdinBestEffort({ stdin: process.stdin as any });
+        try {
+            try {
+                // End the provider loop first so launcher teardown flushes through a live
+                // transport and its provider dispatch is over before admission drains.
+                if (terminationRequested) {
+                    loopAbortController.abort('claude-runner-termination');
+                    await loopPromise?.catch((error: unknown) => {
+                        logger.debug('[START] Active Claude loop ended during termination cleanup', {
+                            cause: formatErrorForUi(error),
+                        });
+                    });
+                }
+                coordinator.cancel();
+                if (terminationRequested) coordinator.artifacts.deferredSession.cancel();
+                await currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
+                await currentSession?.drainCriticalMetadataWrites();
+                cleanupClaudeSessionBestEffort(currentSession);
+                // Dispose the local permission bridge while the session transport is still alive so it can
+                // cancel and persist any outstanding local-mode permission requests.
+                disposeLocalPermissionBridge();
+                coordinator.artifacts.deferredSession.sendSessionDeath();
+                await coordinator.artifacts.deferredSession.flush();
+                await coordinator.artifacts.deferredSession.close();
+            } finally {
+                await runtimeActivityDisposal.current?.();
+            }
+        } catch (error) {
+            logger.infoFile('[START] Cleanup failed (non-fatal)', {
+                phase: 'session',
+                cause: formatErrorForUi(error),
+            });
+        }
+
+        try {
+            stopCaffeinate();
+            coordinator.artifacts.hookServer?.stop();
+            if (!endpointArtifactsOwnedByAttachment && coordinator.artifacts.hookSettingsPath) {
+                cleanupHookSettingsFile(coordinator.artifacts.hookSettingsPath);
+            }
+            if (!endpointArtifactsOwnedByAttachment) {
+                cleanupHookPluginDir(coordinator.artifacts.hookPluginDir);
+            }
+        } catch (error) {
+            logger.infoFile('[START] Cleanup failed (non-fatal)', {
+                phase: 'resources',
+                cause: formatErrorForUi(error),
+            });
+        }
+
+    })();
+
         const terminationHandlers = registerRunnerTerminationHandlers({
             process,
             exit: (code) => process.exit(code),
             sessionExitReport: { sessionId: coordinator.artifacts.deferredSession.sessionId },
+            parentNoticeSession: coordinator.artifacts.deferredSession,
             onTerminationRequested: () => {
+                terminationRequested = true;
                 coordinator.artifacts.deferredSession.beginRuntimeTermination?.();
                 void currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
             },
-            onTerminate: async (event, outcome) => {
-            restoreStdinBestEffort({ stdin: process.stdin as any });
-            try {
-                try {
-                    coordinator.cancel();
-                    coordinator.artifacts.deferredSession.cancel();
-                    await currentSession?.closeProviderInputAdmissionAndWaitForDispatches();
-                    await currentSession?.drainCriticalMetadataWrites();
-                    cleanupClaudeSessionBestEffort(currentSession);
-                    // Dispose the local permission bridge while the session transport is still alive so it can
-                    // cancel and persist any outstanding local-mode permission requests.
-                    disposeLocalPermissionBridge();
-                    coordinator.artifacts.deferredSession.sendSessionDeath();
-                    await coordinator.artifacts.deferredSession.flush();
-                    await coordinator.artifacts.deferredSession.close();
-                } finally {
-                    await runtimeActivityDisposal.current?.();
-                }
-            } catch {
-                // ignore
-            }
-
-            try {
-                stopCaffeinate();
-                coordinator.artifacts.hookServer?.stop();
-                if (!endpointArtifactsOwnedByAttachment && coordinator.artifacts.hookSettingsPath) {
-                    cleanupHookSettingsFile(coordinator.artifacts.hookSettingsPath);
-                }
-                if (!endpointArtifactsOwnedByAttachment) {
-                    cleanupHookPluginDir(coordinator.artifacts.hookPluginDir);
-                }
-            } catch {
-                // ignore
-            }
-
-            // Preserve existing termination semantics
-                void event;
-                void outcome;
-            },
+            onTerminate: cleanupOnce,
             shouldTerminateOnUnhandledRejection: createClaudeShouldTerminateOnUnhandledRejection({
                 abortWasRequestedRecently: (withinMs) => currentSession?.wasUserAbortRequestedRecently(withinMs) ?? false,
                 ignoreWindowMs: configuration.claudeAbortUnhandledRejectionIgnoreWindowMs,
@@ -2390,51 +2398,25 @@ async function runClaudeLocalFastStart(credentials: Credentials, options: StartO
     // materialized Happier session so the UI does not keep a dead runner active.
     let exitCode = 0;
     let spawnError: unknown = null;
-    try {
-        await coordinator.spawnPromise;
-        exitCode = coordinator.artifacts.exitCode ?? 0;
-    } catch (error) {
-        spawnError = error;
-    }
-    try {
-        await coordinator.backgroundPromise;
-    } catch {
-        // Background startup tasks already degrade their own failures into buffered
-        // session events; cleanup still needs to proceed.
-    }
-    coordinator.cancel();
-    terminationHandlers.dispose();
-
-    // Best-effort cleanup for normal exits (signals handled via terminationHandlers).
-    try {
+    const spawnSettlement = await settleClaudeRunnerLoop(coordinator.spawnPromise, {
+        isRequested: () => terminationRequested,
+        whenTerminated: terminationHandlers.whenTerminated,
+    }, async () => {
         try {
-            await (currentSession as import('./session').Session | null)?.closeProviderInputAdmissionAndWaitForDispatches();
-            await (currentSession as import('./session').Session | null)?.drainCriticalMetadataWrites();
-            cleanupClaudeSessionBestEffort(currentSession);
-            // Dispose the local permission bridge while the session transport is still alive so it can
-            // cancel and persist any outstanding local-mode permission requests.
-            disposeLocalPermissionBridge();
-            coordinator.artifacts.deferredSession.sendSessionDeath();
-            await coordinator.artifacts.deferredSession.flush();
-            await coordinator.artifacts.deferredSession.close();
-        } finally {
-            await runtimeActivityDisposal.current?.();
+            await coordinator.backgroundPromise;
+        } catch {
+            // Background startup tasks surface their own errors; cleanup must still run.
         }
-    } catch {
-        // ignore
+        await cleanupOnce();
+    });
+    if (spawnSettlement.kind === 'terminated' || terminationRequested) {
+        // Termination owns teardown and the final exit, including a request in the await handoff.
+        await terminationHandlers.whenTerminated;
+        return;
     }
-    try {
-        stopCaffeinate();
-        coordinator.artifacts.hookServer?.stop();
-        if (!endpointArtifactsOwnedByAttachment && coordinator.artifacts.hookSettingsPath) {
-            cleanupHookSettingsFile(coordinator.artifacts.hookSettingsPath);
-        }
-        if (!endpointArtifactsOwnedByAttachment) {
-            cleanupHookPluginDir(coordinator.artifacts.hookPluginDir);
-        }
-    } catch {
-        // ignore
-    }
+    if (spawnSettlement.kind === 'completed') exitCode = coordinator.artifacts.exitCode ?? 0;
+    if (spawnSettlement.kind === 'failed') spawnError = spawnSettlement.error;
+    terminationHandlers.dispose();
 
     if (spawnError) {
         throw spawnError;

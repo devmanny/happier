@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useSessionArchivePending } from '@/hooks/session/useSessionArchivePending';
 import { Pressable, View } from 'react-native';
 import { listActionSpecs } from '@happier-dev/protocol';
 import { useUnistyles } from 'react-native-unistyles';
@@ -179,6 +180,7 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
   const sessionHandoffEnabled = useFeatureEnabled('sessions.handoff');
   const executionRunsEnabled = useFeatureEnabled('execution.runs');
   const sessionServerId = usePreferredServerIdForSession(props.sessionId);
+  const archivePending = useSessionArchivePending(props.sessionId, sessionServerId);
   // Scoped to THIS Session's server, like the in-Session picker: the child is
   // created on that server, so an unrelated selected server must not decide
   // whether this conversation may continue with another Agent.
@@ -290,7 +292,9 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
         iconColor: theme.colors.chrome.header.foreground,
       });
       if (actionItem) {
-        out.push(actionItem);
+        out.push(archivePending && (actionId === SESSION_ACTION_ARCHIVE_ID || actionId === SESSION_ACTION_STOP_ID)
+          ? { ...actionItem, disabled: true }
+          : actionItem);
         existingActionIds.add(actionId);
       }
     }
@@ -307,6 +311,7 @@ function SessionHeaderActionMenuInner(props: SessionHeaderActionMenuProps) {
     return out;
   }, [
     props.extraItems,
+    archivePending,
     agentSwitchingEnabled,
     session,
     sessionActionTarget,

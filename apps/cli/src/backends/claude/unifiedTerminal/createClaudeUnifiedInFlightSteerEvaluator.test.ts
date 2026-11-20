@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TerminalHostHandle, TerminalInputState } from '@/integrations/terminalHost/_types';
 
 import { createClaudeUnifiedInFlightSteerEvaluator } from './createClaudeUnifiedInFlightSteerEvaluator';
+import { createClaudeComposerClearKeyLedger, type ClaudeComposerClearKeyLedger } from './tuiControls/composerClearKeys';
 import type { ClaudeUnifiedPromptBatch } from './_types';
 import type { EnhancedMode } from '../loop';
 
@@ -505,6 +506,7 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
     ownTexts?: readonly string[];
     onClear?: (() => void) | undefined;
     escalationThreshold?: number | undefined;
+    clearKeys?: ClaudeComposerClearKeyLedger | undefined;
   }>) {
     const telemetry = { emit: vi.fn() };
     let screen = opts.initialScreen;
@@ -531,6 +533,7 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
       onAvailabilitySnapshot: (snapshot) => snapshots.push(snapshot),
       ownComposerTexts: { matches: (draft: string) => ownTexts.has(draft.trim()) },
       clearOwnLeftoverDraft,
+      ...(opts.clearKeys ? { clearKeys: opts.clearKeys } : {}),
       draftClearSettleMs: 0,
       userDraftEscalationThreshold: opts.escalationThreshold ?? 3,
       onUserDraftStarvation: (info) => starvations.push({ ...info }),
@@ -584,8 +587,45 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
 
     const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
 
-    expect(harness.clearOwnLeftoverDraft.mock.calls.length).toBeLessThanOrEqual(2);
+    // No "Esc again to clear" over the same draft: no evidence for a second Escape (Rewind hazard,
+    // repro e, 2026-11-16), so one key and the veto.
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({ steer: false, reason: 'user_draft' });
+  });
+
+  it('presses the second clear key only after the hint appears over the same own draft', async () => {
+    const rule = '────────────────────────────────────────────────';
+    const hinted = [rule, `❯ ${ownLeftoverText}`, rule, '  Esc again to clear'].join('\n');
+    const harness = starvationHarness({
+      initialScreen: [rule, `❯ ${ownLeftoverText}`, rule, '  ? for shortcuts'].join('\n'),
+      ownTexts: [ownLeftoverText],
+      onClear: () => harness.setScreen(
+        harness.clearOwnLeftoverDraft.mock.calls.length === 1 ? hinted : idleInteractiveScreen,
+      ),
+    });
+
+    const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
+
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(2);
+    expect(decision).toEqual({ steer: true, turnLikelyEnded: true });
+  });
+
+  it('keeps at most the clearing pair outstanding across evaluations of a frozen own leftover', async () => {
+    // The arbiter re-evaluates a vetoed prompt every ~15s. A stalled Claude keeps the frame and later
+    // reads every queued Escape as one burst: two clear the draft, more reach the empty composer and
+    // open Rewind, which swallows the next paste (repro, 2026-11-16).
+    const harness = starvationHarness({
+      initialScreen: idleScreenWithDraft(ownLeftoverText),
+      ownTexts: [ownLeftoverText],
+      clearKeys: createClaudeComposerClearKeyLedger({ stallBudgetMs: 135_000, nowMs: () => 0 }),
+    });
+
+    for (let evaluation = 0; evaluation < 3; evaluation += 1) {
+      const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
+      expect(decision).toMatchObject({ steer: false, reason: 'user_draft' });
+    }
+
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(2);
   });
 
   it('NEVER clears while the screen is generating, even for an own leftover (Escape would interrupt the turn)', async () => {

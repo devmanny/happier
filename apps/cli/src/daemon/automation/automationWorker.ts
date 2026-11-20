@@ -79,6 +79,8 @@ export function startAutomationWorker(params: {
   token: string;
   machineId: string;
   encryption?: AutomationTemplateEncryption;
+  /** Works recurring task occurrences (`daemon/agentTasks/taskOccurrenceRunner.ts`). */
+  runAgentTaskOccurrence?: Parameters<typeof executeClaimedRun>[0]['runAgentTaskOccurrence'];
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   budgetRegistry?: ExecutionBudgetRegistry;
   env?: NodeJS.ProcessEnv;
@@ -305,6 +307,7 @@ export function startAutomationWorker(params: {
         leaseDurationMs: scheduler.leaseDurationMs,
         encryption: params.encryption,
         claimed,
+        ...(params.runAgentTaskOccurrence ? { runAgentTaskOccurrence: params.runAgentTaskOccurrence } : {}),
       });
 
       // Pull a fresh assignments snapshot so we have an updated nextRunAt after the run transitions/enqueue.

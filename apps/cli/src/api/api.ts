@@ -13,9 +13,16 @@ import type {
 } from '@/api/types'
 import { MachineRegistrationIdentitySchema } from '@/api/types'
 import { ApiSessionClient } from './session/sessionClient';
+import { startParentLinkWatcher } from '@/session/lineage/parentLinkWatcher';
+import { startSessionPresence } from '@/session/presence/startSessionPresence';
+import { trackSessionNotificationMute } from '@/session/notifications/sessionNotificationMute';
+import { startAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { startAgentTasks } from '@/session/agentTasks/startAgentTasks';
+import { startAgentRooms } from '@/session/agentRooms/startAgentRooms';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, encrypt, decrypt } from './encryption';
 import { PushNotificationClient } from './pushNotifications';
+import { readApnsCredentials } from './apnsPush';
 import { configuration } from '@/configuration';
 import { assertSessionEncryptionModeAllowedByEffectiveClientRequirement } from '@/settings/accountSettings/resolveEffectiveClientEncryptionRequirement';
 import { Credentials } from '@/persistence';
@@ -395,7 +402,9 @@ export class ApiClient {
   private constructor(credential: Credentials) {
     this.credential = credential
     this.connectedServiceCredentialApi = createConnectedServiceCredentialApi(credential);
-    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl())
+    this.pushClient = new PushNotificationClient(credential.token, resolveServerHttpBaseUrl(), {
+      credentials: () => readApnsCredentials(configuration.happyHomeDir),
+    })
   }
 
   private invalidateConnectedServiceProfileListCache(serviceId?: ConnectedServiceId): void {
@@ -770,9 +779,23 @@ export class ApiClient {
     session: Session,
     runtimeActivity?: import('./session/sessionClient').SessionRuntimeActivityClientConfig,
   ): ApiSessionClient {
-    return new ApiSessionClient(this.credential.token, session, runtimeActivity, {
+    const client = new ApiSessionClient(this.credential.token, session, runtimeActivity, {
       permissionRequestPushSender: this.pushClient,
     });
+    // Every runner session client watches its own nesting so a manual move in the app
+    // is announced to the new parent, the previous parent and the session itself.
+    startParentLinkWatcher(client);
+    // Every runner publishes where it is and what it touches while it works (advisory).
+    startSessionPresence(client, this.credential);
+    // Its notification bell is read from its metadata whenever it would notify.
+    trackSessionNotificationMute(client);
+    // A runner working as an agent shares that agent's memory with its other threads.
+    startAgentMemory(client, this.credential);
+    // Any runner can leave tasks; an agent's open tasks become its board each turn.
+    startAgentTasks(client, this.credential);
+    // A runner working as an agent reads the rooms (salas) its agent is in and posts its room turns' replies.
+    startAgentRooms(client, this.credential, { push: this.pushClient });
+    return client;
   }
 
   machineSyncClient(
@@ -853,6 +876,7 @@ export class ApiClient {
       kind: 'oauth' | 'token';
       providerEmail?: string | null;
       providerAccountId?: string | null;
+      providerOrganizationId?: string | null;
       expiresAt?: number | null;
     };
     expectedCredentialRevision?: ConnectedServiceCredentialRevisionV1 | null;

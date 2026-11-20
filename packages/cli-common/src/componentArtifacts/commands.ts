@@ -22,6 +22,23 @@ export type RunCommand = (
 // Standalone tools must not execute a working directory's bunfig preloads.
 export const DEFAULT_BUN_COMPILE_OPTIONS = Object.freeze({ autoloadBunfig: false });
 
+/**
+ * The Bun release every binary artifact is compiled with, the one CI pins (`bun-version` in
+ * `.github/workflows`). A compiled binary runs on the Bun that built it, and another release
+ * behaves differently: a CLI built locally with Bun 1.3.10 could not reach Codex's Unix-socket
+ * WebSocket nor speak HTTP/2 to APNs. Raise it together with the CI pins.
+ */
+export const REQUIRED_BUN_VERSION = '1.4.2';
+
+function readBunVersion(bunCommand: string): string {
+  const invocation = resolveWindowsCommandInvocation({ command: bunCommand, args: ['--version'], env: process.env });
+  const result = spawnSync(invocation.command, invocation.args, {
+    encoding: 'utf-8',
+    ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+  });
+  return String(result?.stdout ?? '').trim();
+}
+
 const DEFAULT_BUN_COMPILE_ATTEMPTS = 3;
 const MAX_BUN_COMPILE_ATTEMPTS = 5;
 
@@ -192,6 +209,7 @@ export async function compileBunBinary({
   autoloadDotenv,
   autoloadBunfig = DEFAULT_BUN_COMPILE_OPTIONS.autoloadBunfig,
   defines = {},
+  readBunVersion: readVersion = readBunVersion,
 }: {
   entrypoint: string;
   bunTarget: string;
@@ -205,6 +223,8 @@ export async function compileBunBinary({
   autoloadDotenv?: boolean;
   autoloadBunfig?: boolean;
   defines?: Readonly<Record<string, string>>;
+  /** `bun --version` of the compiler; tests stand in for the executable. */
+  readBunVersion?: (bunCommand: string) => string;
 }): Promise<void> {
   const resolvedBunCommand = (() => {
     const candidate = String(bunCommand ?? '').trim();
@@ -213,6 +233,14 @@ export async function compileBunBinary({
     if (fallback) return fallback;
     throw new Error('[component-artifacts] bun is required to compile binary artifacts');
   })();
+  const compilerVersion = readVersion(resolvedBunCommand);
+  if (compilerVersion !== REQUIRED_BUN_VERSION) {
+    throw new Error(
+      `[component-artifacts] binaries must be compiled with Bun ${REQUIRED_BUN_VERSION}, `
+      + `but ${resolvedBunCommand} is Bun ${compilerVersion || 'of unknown version'}. `
+      + `Set HAPPIER_BUN_PATH to a Bun ${REQUIRED_BUN_VERSION} executable.`,
+    );
+  }
   const args = buildRunnerEntrypoint
     ? [
         buildRunnerEntrypoint,

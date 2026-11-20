@@ -124,6 +124,7 @@ function resolveSessionListRowSession(
         storeSession.hasPendingUserActionRequests ?? (rowRenderable.hasPendingUserActionRequests === true);
     const keepVisibleWhenInactive =
         rowRenderable.keepVisibleWhenInactive === true || storeSession.keepVisibleWhenInactive === true;
+    const archiving = rowRenderable.archiving === true;
     const rowPendingBlockedCount = normalizeFiniteCount(rowRenderable.pendingBlockedCount);
     const storePendingBlockedCount = normalizeFiniteCount(storeSession.pendingBlockedCount);
     const pendingBlockedCount = storePendingBlockedCount ?? rowPendingBlockedCount;
@@ -141,6 +142,7 @@ function resolveSessionListRowSession(
         hasPendingPermissionRequests === storeSession.hasPendingPermissionRequests
         && hasPendingUserActionRequests === storeSession.hasPendingUserActionRequests
         && keepVisibleWhenInactive === storeSession.keepVisibleWhenInactive
+        && archiving === (storeSession.archiving === true)
         && pendingBlockedCount === normalizeFiniteCount(storeSession.pendingBlockedCount)
         && meaningfulActivityAt === (storeSession.meaningfulActivityAt ?? null)
     ) {
@@ -149,6 +151,7 @@ function resolveSessionListRowSession(
 
     return {
         ...storeSession,
+        archiving,
         hasPendingPermissionRequests,
         hasPendingUserActionRequests,
         keepVisibleWhenInactive,
@@ -306,6 +309,9 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         pendingCount,
         pendingBlockedCount,
         sessionState: status.state,
+        backgroundWorkAttentionMode: settings.backgroundWorkAttentionMode,
+        runtimeActivityState: resolvedSession.runtimeActivityState,
+        runtimeActivityActiveCount: resolvedSession.runtimeActivityActiveCount,
         latestTurnStatus: resolvedSession.latestTurnStatus ?? null,
         latestTurnStatusObservedAt: normalizeFiniteTimestamp(resolvedSession.latestTurnStatusObservedAt),
         lastRuntimeIssue: resolvedSession.lastRuntimeIssue ?? null,
@@ -329,13 +335,17 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
     // indicator without animation) unless a more alerting state applies —
     // otherwise the user sees a session in the working group with no
     // indicator at all.
-    const presentsRetainedWorking = item.workingPlacementReason === 'working-retained'
+    // A committed archive in flight speaks through the working indicator and the
+    // status line ("archiving…" from `getSessionStatus`), whatever the session was doing.
+    const presentsArchiving = status.state === 'archiving';
+    const presentsRetainedWorking = !presentsArchiving
+        && item.workingPlacementReason === 'working-retained'
         && (
             derivedRowAttentionState === 'quiet'
             || derivedRowAttentionState === 'unread'
             || derivedRowAttentionState === 'pending'
         );
-    const rowAttentionState = presentsRetainedWorking
+    const rowAttentionState = presentsArchiving || presentsRetainedWorking
         ? 'working'
         : derivedRowAttentionState;
     // Attention standing is the person's own instruction to keep a read, idle
@@ -358,6 +368,9 @@ export function buildSessionListRowModel(input: BuildSessionListRowModelInput): 
         workingRetained: presentsRetainedWorking,
         standing: presentsAttentionStanding,
         backgroundActive: status.state === 'background_active',
+        // Pinning lifts a session out of the Active/Inactive sections, whose headers are the
+        // only other place a quiet row's liveness is stated.
+        statesUnseenLiveness: item.groupKind === 'pinned' && status.shouldShowStatus,
     });
     // Absent unless the person asked for it (R-8): the row model always carries the field so a host
     // cannot invent a second way to get the sentence, and the setting decides whether it is drawn.

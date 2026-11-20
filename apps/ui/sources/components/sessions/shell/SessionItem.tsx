@@ -177,6 +177,7 @@ type SessionItemRenderProps = Omit<SessionItemBaseProps, 'activityTimeMode' | 's
     sessionNameResolved: string;
     sessionSubtitle: string;
     pendingCount: number;
+    hasUnreadMessages: boolean;
     draft: SessionListRowModel['draft'];
     reminder: SessionListRowModel['reminder'];
     /** Live agent work in this session, already named. `null` unless the person opted in (R-8). */
@@ -708,6 +709,7 @@ const SessionItemContent = React.memo(
         sessionNameResolved,
         sessionSubtitle,
         pendingCount,
+        hasUnreadMessages,
         draft,
         reminder,
         agentActivityLabel,
@@ -1122,6 +1124,7 @@ const SessionItemContent = React.memo(
                 setTagMenuOpen(true);
             },
             reminder,
+            archiving: sessionStatus.state === 'archiving',
         });
 
         const handleSwipeAction = React.useCallback(async () => {
@@ -1174,9 +1177,11 @@ const SessionItemContent = React.memo(
         const rowStatusColor = rowPresentation.backgroundActivityStatusLine === true
             ? theme.colors.text.secondary
             : resolveSessionRowAttentionStateColor(rowAttentionState, theme);
-        const rowAttentionAccessibilityLabel =
+        const primaryAttentionAccessibilityLabel =
             rowAttentionState === 'failed'
                 ? t('status.error')
+                : rowPresentation.attentionIndicator === 'unread'
+                ? t('settingsNotifications.badges.unreadTitle')
                 : rowPresentation.attentionIndicator === 'working'
                 || rowPresentation.attentionIndicator === 'permission'
                 || rowPresentation.attentionIndicator === 'action'
@@ -1184,6 +1189,11 @@ const SessionItemContent = React.memo(
                 : rowPresentation.statusTextKey
                     ? statusLineText
                     : undefined;
+        const announcesUnreadAndWork = (rowPresentation.attentionIndicator === 'working' && hasUnreadMessages)
+            || (rowPresentation.attentionIndicator === 'unread' && sessionStatus.state === 'background_active');
+        const rowAttentionAccessibilityLabel = announcesUnreadAndWork
+            ? `${statusLineText}, ${t('settingsNotifications.badges.unreadTitle')}`
+            : primaryAttentionAccessibilityLabel;
         const shouldShowStatusSecondaryLine = rowPresentation.secondaryLine === 'status' && statusLineText.trim().length > 0;
         const shouldShowPathSecondaryLine = rowPresentation.secondaryLine === 'path' && Boolean(sessionSubtitle);
         const shouldUsePathSubtitleStartEllipsis = shouldShowPathSecondaryLine && effectiveSubtitleEllipsizeMode === 'head';
@@ -1224,7 +1234,7 @@ const SessionItemContent = React.memo(
         const showInlineTagChips = showTagChips && tagDisplayPlan.placement === 'inline';
         const showBelowTagChips = showTagChips && tagDisplayPlan.placement === 'below';
         const enableLongPressContextMenu =
-            Platform.OS === 'ios'
+            isNativeMobile
             && nativeInlineDragEnabled !== true
             && contextMenuItems.length > 0;
         const openContextMenuFromLongPress = React.useCallback(() => {
@@ -1494,6 +1504,7 @@ const SessionItemContent = React.memo(
                                             sessionId={`${resolvedSession.id}-secondary`}
                                             attentionState={rowAttentionState}
                                             accessibilityLabel={rowAttentionAccessibilityLabel}
+                                            hasUnreadMessages={hasUnreadMessages}
                                             workingMode={workingIndicatorMode}
                                             animationEnabled={attentionIndicatorAnimationEnabled}
                                         />
@@ -1696,6 +1707,7 @@ const SessionItemContent = React.memo(
                                     sessionId={`${resolvedSession.id}-trailing`}
                                     attentionState={rowAttentionState}
                                     accessibilityLabel={rowAttentionAccessibilityLabel}
+                                    hasUnreadMessages={hasUnreadMessages}
                                     workingMode={workingIndicatorMode}
                                     workingSpinnerTone="neutral"
                                     animationEnabled={attentionIndicatorAnimationEnabled}
@@ -1865,6 +1877,7 @@ function SessionItemFromRowModel(props: SessionItemProps & { rowModel: SessionLi
             sessionNameResolved={rowModel.title}
             sessionSubtitle={itemProps.subtitleOverride ?? rowModel.subtitle}
             pendingCount={rowModel.pendingCount}
+            hasUnreadMessages={rowModel.hasUnreadMessages}
             draft={rowModel.draft}
             reminder={rowModel.reminder}
             agentActivityLabel={rowModel.agentActivityLabel}

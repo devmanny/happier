@@ -1192,6 +1192,14 @@ describe('sessionScanner', () => {
       },
     }
 
+    // Launching a background agent happens inside a turn, which Claude closes before the
+    // notification arrives; the notification alone must decide whether a turn starts.
+    const assistantEndTurn = {
+      type: 'assistant',
+      uuid: 'a3',
+      message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Launched.' }] },
+    }
+
     const taskNotification = {
       type: 'user',
       uuid: 'u3',
@@ -1212,7 +1220,7 @@ describe('sessionScanner', () => {
 
     await writeFile(
       sessionFile,
-      [assistantToolUse, userToolResult, taskNotification].map((v) => JSON.stringify(v)).join('\n') + '\n',
+      [assistantToolUse, userToolResult, assistantEndTurn, taskNotification].map((v) => JSON.stringify(v)).join('\n') + '\n',
     )
 
     tracker.observeHook({ hook_event_name: 'UserPromptSubmit', session_id: sessionId, prompt: taskNotification.message.content })

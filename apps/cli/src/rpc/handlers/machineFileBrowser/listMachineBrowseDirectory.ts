@@ -32,6 +32,7 @@ export async function listMachineBrowseDirectory(input: Readonly<{
       includeFiles: parsed.data.includeFiles !== false,
       maxEntries: parsed.data.maxEntries ?? input.maxEntries,
       statConcurrency: input.statConcurrency,
+      nameQuery: parsed.data.query,
     })
 
     return {

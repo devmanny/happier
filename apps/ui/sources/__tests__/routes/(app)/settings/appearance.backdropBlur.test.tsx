@@ -8,6 +8,7 @@ import { installSessionSettingsEntryModuleMocks, resetSessionSettingsEntryState 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const shared = vi.hoisted(() => ({
+    localSettingsState: { hapticsEnabled: true } as Record<string, unknown>,
     settingsState: {
         themePreference: 'adaptive',
         uiFontScale: 1,
@@ -23,7 +24,7 @@ const shared = vi.hoisted(() => ({
     } as Record<string, unknown>,
 }));
 
-const platform = vi.hoisted(() => ({ OS: 'web' as 'web' | 'android' }));
+const platform = vi.hoisted(() => ({ OS: 'web' as 'web' | 'android' | 'ios' }));
 
 type MutableSettingHook = (key: string) => [unknown, (next: unknown) => void];
 
@@ -71,11 +72,14 @@ installSessionSettingsEntryModuleMocks({
     storageModule: async (importOriginal) => {
         const { createStorageModuleMock } = await import('@/dev/testkit/mocks/storage');
         const mutableSetting = createMutableSettingHook(shared.settingsState);
+        const localMutableSetting: MutableSettingHook = (key) => key === 'hapticsEnabled'
+            ? createMutableSettingHook(shared.localSettingsState)(key)
+            : mutableSetting(key);
         return createStorageModuleMock({
             importOriginal,
             overrides: {
                 useSettingMutable: mutableSetting as typeof import('@/sync/domains/state/storage')['useSettingMutable'],
-                useLocalSettingMutable: mutableSetting as typeof import('@/sync/domains/state/storage')['useLocalSettingMutable'],
+                useLocalSettingMutable: localMutableSetting as typeof import('@/sync/domains/state/storage')['useLocalSettingMutable'],
             },
         });
     },
@@ -109,6 +113,7 @@ afterEach(() => {
     standardCleanup();
     resetSessionSettingsEntryState();
     shared.settingsState.uiBackdropBlurEnabled = true;
+    shared.localSettingsState.hapticsEnabled = true;
     platform.OS = 'web';
 });
 
@@ -131,6 +136,35 @@ describe('Appearance settings backdrop blur', () => {
         });
 
         expect(shared.settingsState.uiBackdropBlurEnabled).toBe(false);
+    });
+});
+
+describe('Appearance settings haptics', () => {
+    it.each(['ios', 'android'] as const)('updates the device-local haptics setting on %s independently of visual effects', async (os) => {
+        platform.OS = os;
+        shared.localSettingsState.hapticsEnabled = false;
+        shared.settingsState.uiBackdropBlurEnabled = false;
+        const mod = await import('@/app/(app)/settings/appearance');
+        const screen = await renderSettingsView(React.createElement(mod.default), {
+            flushOptions: { cycles: 0 },
+        });
+        const row = screen.findByProps({ testID: 'settings-appearance-haptics' });
+        const toggle = row.props.rightElement;
+        expect(toggle.props.value).toBe(false);
+        await act(async () => { toggle.props.onValueChange(true); });
+        expect(shared.localSettingsState.hapticsEnabled).toBe(true);
+        await act(async () => { toggle.props.onValueChange(false); });
+        expect(shared.localSettingsState.hapticsEnabled).toBe(false);
+        expect(shared.settingsState).not.toHaveProperty('hapticsEnabled');
+        expect(shared.settingsState.uiBackdropBlurEnabled).toBe(false);
+    });
+
+    it('hides the haptics control on web', async () => {
+        const mod = await import('@/app/(app)/settings/appearance');
+        const screen = await renderSettingsView(React.createElement(mod.default), {
+            flushOptions: { cycles: 0 },
+        });
+        expect(screen.findAllByProps({ testID: 'settings-appearance-haptics' })).toHaveLength(0);
     });
 });
 

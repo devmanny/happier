@@ -1,5 +1,11 @@
 import { AGENTS_CORE } from '../../manifest.js';
-import { buildAcpConfiguredBackendV1, type BackendTargetRefV1 } from '@happier-dev/protocol';
+import {
+  AGENT_IDENTITY_METADATA_KEY,
+  buildAcpConfiguredBackendV1,
+  buildAgentIdentityMetadataV1,
+  type AgentIdentityV1,
+  type BackendTargetRefV1,
+} from '@happier-dev/protocol';
 import { AGENT_IDS, type AgentId } from '../../types.js';
 
 /**
@@ -118,6 +124,9 @@ const AGENT_SELECTION_KEYS = [
   'sessionConfigOptionOverridesV1',
 ] as const;
 
+/** The runner records the provider directories it was started with under this key. */
+const NATIVE_AGENT_ENVIRONMENT_METADATA_KEY = 'nativeAgentEnvironmentV1';
+
 export type CurrentAgentSessionViewTargetV1 = Readonly<{
   agentId: AgentId;
   backendTarget?: BackendTargetRefV1;
@@ -128,6 +137,17 @@ export type CurrentAgentSessionViewTargetV1 = Readonly<{
   sessionModeId?: string | null;
   /** Target config overrides, already validated by the caller's catalog. */
   sessionConfigOptionOverrides?: unknown;
+  /**
+   * The user-defined agent the Session works as. Omitted leaves the current one in
+   * place; `null` removes it; an identity replaces it.
+   */
+  agentIdentity?: AgentIdentityV1 | null;
+  /**
+   * The target runtime's allowlisted provider environment (e.g. its Claude config
+   * dir), already validated by the caller. A transition always replaces the
+   * source's, so a provider directory never leaks into another Agent or identity.
+   */
+  nativeEnvironment?: Readonly<Record<string, string>>;
   /** Timestamp stamped on every rewritten override so cross-device ordering holds. */
   updatedAtMs: number;
 }>;
@@ -209,6 +229,19 @@ export function projectCurrentAgentSessionView(params: Readonly<{
     for (const key of CURRENT_RUNTIME_PROJECTION_KEYS) delete next[key];
     for (const key of AGENT_SELECTION_KEYS) delete next[key];
     for (const key of AGENT_SCOPED_CONNECTED_SERVICE_KEYS) delete next[key];
+    // The source runtime's provider directories describe the departed Agent.
+    delete next[NATIVE_AGENT_ENVIRONMENT_METADATA_KEY];
+    const nativeEnvironment = params.target.nativeEnvironment;
+    if (nativeEnvironment && Object.keys(nativeEnvironment).length > 0) {
+      next[NATIVE_AGENT_ENVIRONMENT_METADATA_KEY] = { ...nativeEnvironment };
+    }
+  }
+
+  const agentIdentity = params.target.agentIdentity;
+  if (agentIdentity === null) {
+    delete next[AGENT_IDENTITY_METADATA_KEY];
+  } else if (agentIdentity) {
+    next[AGENT_IDENTITY_METADATA_KEY] = buildAgentIdentityMetadataV1(agentIdentity);
   }
 
   const backendTarget = params.target.backendTarget;

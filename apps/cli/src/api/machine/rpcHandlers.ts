@@ -75,6 +75,7 @@ import {
   type StopSessionResult,
 } from '@/daemon/sessions/stopSessionContract';
 import type { DaemonExecutionRunEntry, DaemonExecutionRunProcessInfo } from '@happier-dev/protocol';
+import { parseAgentIdentityV1 } from '@happier-dev/protocol';
 
 import type { RpcHandlerManager } from '../rpc/RpcHandlerManager';
 import type { MemoryWorkerHandle } from '@/daemon/memory/memoryWorker';
@@ -725,6 +726,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
       executionAuthorization,
       initialGoal,
       sessionConfigOptionOverrides,
+      agentIdentityV1,
       windowsRemoteSessionLaunchMode,
       windowsRemoteSessionConsole,
       experimentalCodexAcp,
@@ -833,6 +835,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
       const parsed = AcpConfigOptionOverridesV1Schema.safeParse(sessionConfigOptionOverrides);
       return parsed.success ? parsed.data : undefined;
     })();
+    const normalizedAgentIdentity = agentIdentityV1 === undefined ? null : parseAgentIdentityV1(agentIdentityV1);
     const normalizedAgentRuntimeDescriptorV1 = (() => {
       if (agentRuntimeDescriptorV1 === undefined) return undefined;
       const parsed = AgentRuntimeDescriptorV1Schema.safeParse(agentRuntimeDescriptorV1);
@@ -919,6 +922,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
       modelId: normalizedModelId,
       modelUpdatedAt: typeof modelUpdatedAt === 'number' ? modelUpdatedAt : undefined,
       sessionConfigOptionOverrides: normalizedSessionConfigOptionOverrides,
+      ...(normalizedAgentIdentity ? { agentIdentity: normalizedAgentIdentity } : {}),
       windowsRemoteSessionLaunchMode,
       windowsRemoteSessionConsole,
       mcpSelection: normalizedMcpSelection,

@@ -76,6 +76,9 @@ export interface LegacySessionsSlice {
 }
 
 export interface SessionsDomainSlice {
+    sessionArchiveOperations: import('../domains/session/listing/sessionArchiveState').SessionArchiveOperations;
+    beginSessionArchive: (sessionId: string, serverId: string) => import('../domains/session/listing/sessionArchiveState').SessionArchiveOperation | null;
+    finishSessionArchive: (operation: import('../domains/session/listing/sessionArchiveState').SessionArchiveOperation) => void;
     sessions: Record<string, Session>;
     sessionLocalStateScope: ServerAccountScope | null;
     sessionListRenderables: Record<string, SessionListRenderableSession>;
@@ -104,11 +107,13 @@ export interface SessionsDomainSlice {
         options?: SessionListRenderableReplacementOptions,
     ) => void;
     mergeSessionListRenderables: (sessions: SessionListRenderableSession[]) => void;
+    /** Omit the scope for active-server patches; explicit scopes are canonical server IDs. */
     applySessionListRenderablePatches: (
         patches: ReadonlyArray<Readonly<{
             sessionId: string;
             patch: Readonly<Partial<Omit<SessionListRenderableSession, 'id'>>>;
         }>>,
+        serverId?: string | null,
     ) => void;
     applyScmStatus: (sessionId: string, status: ScmStatus | null) => void;
     getActiveSessions: () => Session[];

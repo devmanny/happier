@@ -55,7 +55,7 @@ export async function enforceMemoryDiskBudgets(params: Readonly<{
     await enforceSqliteBudget({
       dbPath: params.deepDbPath,
       budgetBytes: params.budgets.deepBytes,
-      deleteBatch: (limit) => params.deep!.deleteOldestChunks({ limit }),
+      deleteBatch: (limit) => params.deep!.deleteOldestMessages({ limit }),
       vacuum: () => params.deep!.checkpointAndVacuum(),
     });
   }

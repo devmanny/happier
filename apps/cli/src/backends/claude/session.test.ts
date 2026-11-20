@@ -703,6 +703,159 @@ describe('Session', () => {
     }
   });
 
+  it('keeps the identity pending while Claude is still writing the last line, then publishes on the next row', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'happier-claude-session-'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', tempDir);
+    const transcriptDir = join(tempDir, 'projects', 'project-a');
+    mkdirSync(transcriptDir, { recursive: true });
+    const sessionId = 'sess_pending_half_line';
+    const transcriptPath = join(transcriptDir, `${sessionId}.jsonl`);
+    let metadata: Metadata = createMetadataStub({ startedBy: 'daemon' });
+    const updateMetadata = vi.fn(async (updater: (metadata: Metadata) => Metadata) => {
+      metadata = updater(metadata);
+    });
+    const session = createSession(createSessionClientStub({ sessionId: 'happy-session-1', updateMetadata }));
+    const completeRow = JSON.stringify({ type: 'user', uuid: 'u1', sessionId, message: { role: 'user', content: 'hi' } });
+    const nextRow = JSON.stringify({ type: 'assistant', uuid: 'a1', sessionId, message: { role: 'assistant', content: 'hello' } });
+
+    try {
+      // The trusted row that re-reports the identity lands while Claude is mid-write on the next one.
+      writeFileSync(transcriptPath, `${completeRow}\n${nextRow.slice(0, 20)}`, 'utf8');
+      session.onSessionFound(sessionId, { hook_event_name: 'SessionStart', session_id: sessionId, transcript_path: transcriptPath });
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      expect(metadata.claudeSessionId).toBeUndefined();
+
+      writeFileSync(transcriptPath, `${completeRow}\n${nextRow}\n`, 'utf8');
+      session.retryPendingSessionIdentityPublication(sessionId);
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      expect(metadata).toEqual(expect.objectContaining({
+        claudeSessionId: sessionId,
+        claudeTranscriptPath: transcriptPath,
+      }));
+    } finally {
+      session.cleanup();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an unproven SessionStart identity pending and publishes it once on the first trusted transcript row', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'happier-claude-session-'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', tempDir);
+    const transcriptDir = join(tempDir, 'projects', 'project-a');
+    mkdirSync(transcriptDir, { recursive: true });
+    const sessionId = 'sess_pending_first_row';
+    const transcriptPath = join(transcriptDir, `${sessionId}.jsonl`);
+    let metadata: Metadata = createMetadataStub({ startedBy: 'daemon' });
+    const updateMetadata = vi.fn(async (updater: (metadata: Metadata) => Metadata) => {
+      metadata = updater(metadata);
+    });
+    const session = createSession(createSessionClientStub({ sessionId: 'happy-session-1', updateMetadata }));
+
+    try {
+      // SessionStart precedes the transcript file, which Claude creates at the first prompt.
+      session.onSessionFound(sessionId, { hook_event_name: 'SessionStart', session_id: sessionId, transcript_path: transcriptPath });
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      expect(metadata.claudeSessionId).toBeUndefined();
+
+      writeClaudeTranscriptInit(transcriptPath, sessionId);
+      session.retryPendingSessionIdentityPublication(sessionId);
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      expect(metadata).toEqual(expect.objectContaining({
+        claudeSessionId: sessionId,
+        claudeTranscriptPath: transcriptPath,
+      }));
+
+      // Published: later rows of the same conversation do not rewrite metadata.
+      session.retryPendingSessionIdentityPublication(sessionId);
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      expect(updateMetadata).toHaveBeenCalledTimes(1);
+    } finally {
+      session.cleanup();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: 'a newer Claude id was observed',
+      supersede: (session: Session, transcriptDir: string) => {
+        const nextSessionId = 'sess_pending_superseding';
+        session.onSessionFound(nextSessionId, {
+          hook_event_name: 'SessionStart',
+          session_id: nextSessionId,
+          transcript_path: join(transcriptDir, `${nextSessionId}.jsonl`),
+        });
+      },
+    },
+    {
+      name: 'the Claude id was cleared',
+      supersede: (session: Session) => session.clearSessionId(),
+    },
+  ])('never publishes a superseded pending id when its transcript materializes after $name', async ({ supersede }) => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'happier-claude-session-'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', tempDir);
+    const transcriptDir = join(tempDir, 'projects', 'project-a');
+    mkdirSync(transcriptDir, { recursive: true });
+    const staleSessionId = 'sess_pending_superseded';
+    const staleTranscriptPath = join(transcriptDir, `${staleSessionId}.jsonl`);
+    let metadata: Metadata = createMetadataStub({ startedBy: 'daemon' });
+    const publishedIds: Array<string | undefined> = [];
+    const updateMetadata = vi.fn(async (updater: (metadata: Metadata) => Metadata) => {
+      metadata = updater(metadata);
+      publishedIds.push(metadata.claudeSessionId);
+    });
+    const session = createSession(createSessionClientStub({ sessionId: 'happy-session-1', updateMetadata }));
+
+    try {
+      session.onSessionFound(staleSessionId, {
+        hook_event_name: 'SessionStart',
+        session_id: staleSessionId,
+        transcript_path: staleTranscriptPath,
+      });
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      supersede(session, transcriptDir);
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+
+      writeClaudeTranscriptInit(staleTranscriptPath, staleSessionId);
+      session.retryPendingSessionIdentityPublication(staleSessionId);
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+
+      expect(publishedIds).not.toContain(staleSessionId);
+      expect(metadata.claudeSessionId).not.toBe(staleSessionId);
+    } finally {
+      session.cleanup();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { hook_event_name: 'SessionEnd' },
+    { hookEventName: 'SessionEnd' },
+    { hook_event_name: 'Stop' },
+    { hook_event_name: 'UserPromptSubmit' },
+  ])('keeps lifecycle hooks from replacing the native resume identity: %j', async (event) => {
+    const session = createSession(createSessionClientStub(), ['--resume', 'sess_reachable']);
+    const transcriptPath = '/tmp/sess_reachable.jsonl';
+    session.transcriptPath = transcriptPath;
+    const discoveredSessions: string[] = [];
+    session.addSessionFoundCallback((info) => discoveredSessions.push(info.sessionId));
+
+    try {
+      session.onSessionFound('sess_missing', {
+        ...event,
+        transcript_path: '/tmp/sess_missing.jsonl',
+      });
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      session.consumeOneTimeFlags();
+
+      expect(session.sessionId).toBe('sess_reachable');
+      expect(session.transcriptPath).toBe(transcriptPath);
+      expect(discoveredSessions).toEqual([]);
+    } finally {
+      session.cleanup();
+    }
+  });
+
   it('preserves the established resume identity while a changed Claude session remains provisional', async () => {
     let metadata: Metadata = createMetadataStub({
       startedBy: 'daemon',
@@ -744,7 +897,7 @@ describe('Session', () => {
     });
 
     try {
-      session.onSessionFound('sess_missing', hookWithTranscript('/tmp/sess_missing.jsonl'));
+      session.onSessionFound('sess_missing', { ...hookWithTranscript('/tmp/sess_missing.jsonl'), hook_event_name: 'SessionStart' });
       await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
 
       expect(metadata.claudeSessionId).toBe('sess_reachable');

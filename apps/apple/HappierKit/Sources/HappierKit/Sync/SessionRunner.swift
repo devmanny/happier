@@ -1,0 +1,107 @@
+import Foundation
+
+/// A session runner still on an older CLI than its daemon, with a restart the daemon allows.
+public struct StaleRunner: Equatable, Sendable {
+    public let sessionId: String
+    public let machineId: String
+    public let expectedRunnerPid: Int
+    public let expectedProcessCommandHash: String
+    public let expectedRunnerEntrypointIdentity: String
+}
+
+/// The "session still runs an older CLI" notice (`sessionRunnerRuntimeStatus.ts`,
+/// `sessionRunnerRestart.ts`): the daemon reports runner/daemon versions through
+/// `daemon.sessionRunner.status.get` and restarts the runner on the current CLI on request.
+public enum SessionRunner {
+    public enum Outcome: Equatable, Sendable {
+        case restarted
+        /// A turn or approval is in progress; try again when it finishes.
+        case busy
+        case failed
+    }
+
+    public static let statusMethod = "daemon.sessionRunner.status.get"
+    public static let restartMethod = "daemon.sessionRunner.restart"
+
+    /// `state` is a `SessionRunnerRuntimeStateV1` from `statusMethod`.
+    public static func staleRunner(sessionId: String, machineId: String?, state: JSONValue) -> StaleRunner? {
+        guard state["v"]?.intValue == 1, state["sessionId"]?.stringValue == sessionId,
+              let machineId = nonEmpty(machineId), nonEmpty(state["machineId"]?.stringValue) == machineId,
+              state["versionState"]?.stringValue == "stale"
+        else { return nil }
+        let planned = state["plannedRestart"] ?? .null
+        guard planned["supported"]?.boolValue == true, planned["eligible"]?.boolValue == true,
+              nonEmpty(planned["disabledReason"]?.stringValue) == nil
+        else { return nil }
+        let runner = state["runner"] ?? .null
+        let daemon = state["daemon"] ?? .null
+        guard let pid = runner["pid"]?.intValue, pid > 0,
+              let commandHash = nonEmpty(runner["processCommandHash"]?.stringValue),
+              runner["entrypointSource"]?.stringValue != "unknown",
+              let runnerIdentity = nonEmpty(runner["runtimeId"]?.stringValue),
+              daemon["currentEntrypointSource"]?.stringValue != "unknown",
+              nonEmpty(daemon["currentEntrypointVersion"]?.stringValue) != nil
+        else { return nil }
+        return StaleRunner(sessionId: sessionId, machineId: machineId, expectedRunnerPid: pid,
+                           expectedProcessCommandHash: commandHash, expectedRunnerEntrypointIdentity: runnerIdentity)
+    }
+
+    /// `RestartSessionRunnerRequestV1` as the UI's composer banner sends it.
+    public static func restartRequest(_ stale: StaleRunner) -> JSONValue {
+        [
+            "sessionId": .string(stale.sessionId), "mode": "if_stale", "reason": "ui_stale_runner_banner",
+            "expectedRunnerPid": .number(Double(stale.expectedRunnerPid)),
+            "expectedProcessCommandHash": .string(stale.expectedProcessCommandHash),
+            "expectedRunnerEntrypointIdentity": .string(stale.expectedRunnerEntrypointIdentity),
+        ]
+    }
+
+    public static func outcome(_ result: JSONValue) -> Outcome {
+        switch (result["ok"]?.boolValue, result["status"]?.stringValue) {
+        case (true, "restarted"), (true, "already_current"): .restarted
+        case (false, "busy"): .busy
+        default: .failed
+        }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
+        return value
+    }
+}
+
+/// The `rpc-call` envelope for a machine-scoped RPC (`apiSocket.ts`).
+public enum MachineRPCCall {
+    /// Session writes over a machine (`SOCKET_RPC_SESSION_WRITE_AUTHORIZATION_METHODS`,
+    /// `packages/protocol/src/rpc.ts`): the relay refuses them without a `session.write` proof.
+    static let sessionWriteMethods: Set<String> = ["stop-session", "daemon.sessionRunner.restart", "session.agentTransition"]
+
+    /// `params` in plain text (the session a write acts on is read from them), `encoded` as sent.
+    public static func payload(machineId: String, method: String, params: JSONValue, encoded: JSONValue, timeoutMs: Int) -> JSONValue {
+        var call: [String: JSONValue] = [
+            "method": .string("\(machineId):\(method)"), "params": encoded, "timeoutMs": .number(Double(timeoutMs)),
+        ]
+        if sessionWriteMethods.contains(method), let sessionId = params["sessionId"]?.stringValue {
+            call["authorization"] = ["kind": "session.write", "sessionId": .string(sessionId)]
+        }
+        return .object(call)
+    }
+
+    /// One machine RPC over the relay socket (`apiSocket.ts:410-443`): params sealed with the
+    /// machine's content key, the answer opened with it. `emit` is the socket's acknowledged emit.
+    nonisolated(nonsending) public static func call(_ machine: Machine, method: String, params: JSONValue, timeout: Duration,
+                            emit: (String, JSONValue, Duration) async throws -> [JSONValue]) async throws -> JSONValue {
+        let encoded: JSONValue = try machine.cipher.map { .string(try $0.encryptBase64(params)) } ?? params
+        let ack = try await emit("rpc-call", payload(
+            machineId: machine.id, method: method, params: params, encoded: encoded,
+            timeoutMs: Int(timeout.components.seconds * 1000)), timeout + .seconds(5))
+        guard let response = ack.first, response["ok"]?.boolValue == true else {
+            throw HappierStore.RPCError(message: ack.first?["error"]?.stringValue ?? "The machine didn't respond.",
+                                        code: ack.first?["errorCode"]?.stringValue)
+        }
+        var result = response["result"] ?? .null
+        if case .array(let items) = result, items.count == 1 { result = items[0] }
+        if let cipher = machine.cipher, let ciphertext = result.stringValue { result = try cipher.decryptBase64(ciphertext) }
+        return result
+    }
+}

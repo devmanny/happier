@@ -7,6 +7,8 @@
  * @module createSessionMetadata
  */
 
+import { AGENT_IDENTITY_METADATA_KEY, buildAgentIdentityMetadataV1 } from '@happier-dev/protocol';
+import { readAgentIdentityFromEnvironment } from './agentIdentityEnvironment';
 import os from 'node:os';
 import { readProcessInstanceFingerprintSync } from '@happier-dev/cli-common/processInstance';
 import { resolve } from 'node:path';
@@ -185,8 +187,11 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         agentPath: sessionPath,
     });
     const nativeAgentEnvironmentV1 = readSessionNativeEnvironment(opts.nativeAgentEnvironment);
+    // Metadata carries the whole identity, so any later resume can hand the runner the same agent.
+    const agentIdentity = readAgentIdentityFromEnvironment();
     const metadataBase: Metadata = {
         ...(nativeAgentEnvironmentV1 ? { nativeAgentEnvironmentV1 } : {}),
+        ...(agentIdentity ? { [AGENT_IDENTITY_METADATA_KEY]: buildAgentIdentityMetadataV1(agentIdentity) } : {}),
         path: sessionPath,
         host: os.hostname(),
         version: packageJson.version,

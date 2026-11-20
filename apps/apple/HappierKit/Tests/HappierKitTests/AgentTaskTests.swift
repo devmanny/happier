@@ -1,0 +1,227 @@
+import Foundation
+import Testing
+@testable import HappierKit
+
+/// Tasks for the user or their agents (`packages/protocol/src/tasks/agentTask.ts`), sealed in the
+/// UserKVStore under `task/<uuid>` with the `agent_task` kind.
+@Suite struct AgentTaskTests {
+    static let machineKey = Data((0..<32).map { UInt8($0) })
+    static let hour = 3_600_000.0
+
+    static func task(_ overrides: [String: JSONValue] = [:]) -> AgentTask {
+        var json: [String: JSONValue] = [
+            "v": 1, "id": "t1", "title": "Revisar TestFlight", "status": "todo",
+            "assignee": ["kind": "agent", "agentId": "a-mateo", "name": "Mateo", "emoji": "🤖"],
+            "threads": [], "log": [], "createdAt": 0, "updatedAt": 0,
+        ]
+        for (key, value) in overrides { json[key] = value }
+        return AgentTask(json: .object(json))!
+    }
+
+    @Test func closingARepeatingTaskPausesItsRepetition() {
+        var task = Self.task()
+        task.recurrence = TaskRecurrence(timezone: "UTC", rules: [.init(kind: .weekly([1]), hour: 9, minute: 0)])
+        let paused = task.recurrenceToPause(closingWith: AgentTask.Update(status: .done))
+        #expect(paused?.paused == true)
+        #expect(paused?.rules.count == 1)
+        // Anything but closing it, an already paused repetition, or no repetition: nothing to pause.
+        #expect(task.recurrenceToPause(closingWith: AgentTask.Update(status: .inReview)) == nil)
+        task.recurrence?.paused = true
+        #expect(task.recurrenceToPause(closingWith: AgentTask.Update(status: .done)) == nil)
+        #expect(Self.task().recurrenceToPause(closingWith: AgentTask.Update(status: .done)) == nil)
+    }
+
+    @Test func sealsUnderItsOwnKindAndKeepsKeysOtherWritersOwn() throws {
+        let task = Self.task(["notifiedV1": ["dueSoonAt": 5], "createdBy": ["kind": "user"]])
+        let sealed = try task.sealed(machineKey: Self.machineKey)
+        #expect(AccountScopedBlob.open(sealed, kind: .agentMemory, machineKey: Self.machineKey) == nil)
+        let opened = try #require(AgentTask.open(sealed, machineKey: Self.machineKey))
+        #expect(opened.title == "Revisar TestFlight")
+        // The CLI daemon's "already told" marks survive an edit made here.
+        let edited = opened.applying(AgentTask.Update(title: "Revisar build"), now: 9)
+        #expect(edited.json["notifiedV1"] == ["dueSoonAt": 5])
+        #expect(edited.json["createdBy"] == ["kind": "user"])
+        #expect(AgentTask.kvKey(id: "ABC") == "task/abc")
+    }
+
+    @Test func reassigningOrChangingTheSourceOfAStoredTaskWritesTheNewValue() throws {
+        // Read from storage, as the app does: what was stored is kept only while it is unchanged.
+        let sealed = try Self.task(["assignee": ["kind": "user"], "source": ["kind": "chat", "label": "WhatsApp"]]).sealed(machineKey: Self.machineKey)
+        let stored = try #require(AgentTask.open(sealed, machineKey: Self.machineKey))
+        let tomas = AgentTask.Assignee.agent(id: "a-tomas", name: "Tomas", emoji: "🧭")
+        let edited = stored.applying(.assigning(tomas), now: 5)
+            .applying(AgentTask.Update(source: .some(AgentTask.Source(kind: "email", label: "Correo"))), now: 6)
+        #expect(edited.json["assignee"] == ["kind": "agent", "agentId": "a-tomas", "name": "Tomas", "emoji": "🧭"])
+        #expect(edited.json["source"] == ["kind": "email", "label": "Correo"])
+        let reopened = try #require(AgentTask.open(try edited.sealed(machineKey: Self.machineKey), machineKey: Self.machineKey))
+        #expect(reopened.assignee == tomas)
+        #expect(reopened.source?.label == "Correo")
+    }
+
+    @Test func aClearedTextFieldIsLeftOutNotWrittenAsNull() {
+        // The CLI's schema drops a task with a null optional field: an empty field is no field.
+        let cleared = Self.task(["description": "Antes", "directory": "/repo", "machineId": "m1"])
+            .applying(AgentTask.Update(description: .some(""), machineId: .some(""), directory: .some("")), now: 5)
+        #expect(cleared.json["description"] == nil)
+        #expect(cleared.json["machineId"] == nil)
+        #expect(cleared.json["directory"] == nil)
+    }
+
+    @Test func aTaskNobodyHasIsShownUnassignedAndAssignedFromThereWithoutWritingNull() throws {
+        // Missing, null (written by the 7 Nov builds on every reassignment) or a kind this build doesn't know.
+        let unknownKind: JSONValue = ["kind": "team", "teamId": "x"]
+        for (stored, keptAs) in [(JSONValue.null, nil), (nil, nil), (unknownKind, unknownKind)] as [(JSONValue?, JSONValue?)] {
+            var json = Self.task().json.objectValue!
+            json["assignee"] = stored
+            let response: JSONValue = ["items": [["key": "task/t1", "value": .string(try AccountScopedBlob.seal(.object(json), kind: .agentTask, machineKey: Self.machineKey)), "version": 4]]]
+            let task = try #require(AgentTask.records(fromList: response, machineKey: Self.machineKey).first)
+            #expect(task.assignee == .unassigned)
+            #expect(task.assignee.label == "Unassigned")
+            #expect(!task.availableActions(from: .list).offersStartNow)
+            #expect(task.availableActions(from: .list).offers(.user))
+            // Edited but still nobody's: never written as null; a newer build's assignee is kept.
+            #expect(task.applying(AgentTask.Update(comment: "¿De quién es?"), now: 5).json["assignee"] == keptAs)
+            let tomas = AgentTask.Assignee.agent(id: "a-tomas", name: "Tomas", emoji: "🧭")
+            let assigned = task.applying(.assigning(tomas), now: 6)
+            #expect(assigned.json["assignee"] == ["kind": "agent", "agentId": "a-tomas", "name": "Tomas", "emoji": "🧭"])
+            #expect(assigned.status == .todo)
+        }
+        // Grouped last, after you, the agents and the sessions.
+        var nobodys = Self.task(["id": "t2"])
+        nobodys.assignee = .unassigned
+        let sections = AgentTask.sections([nobodys, Self.task()], scope: .all, openSessionId: nil, status: .open)
+        #expect(sections.map(\.kind) == [.assignee(Self.task().assignee), .assignee(.unassigned)])
+    }
+
+    @Test func aTaskDroppedOnAnAgentIsOnlyAssignedToItNothingStarts() {
+        let tomas = AgentProfile(id: "a-tomas", name: "Tomas", emoji: "🧭", providerId: "claude", account: .init(label: "Claude"))
+        let payload = AgentTask.dragPayload(id: "T1")
+        #expect(AgentTask.id(inDragPayload: payload) == "t1")
+        #expect(AgentTask.id(inDragPayload: "happier-session:s1") == nil)
+        #expect(AgentTask.id(inDragPayload: "just text") == nil)
+
+        let inProgress = Self.task(["status": "in_progress"])
+        let update = try! #require(inProgress.dropped(on: tomas))
+        #expect(update == .assigning(.agent(tomas)))
+        let dropped = inProgress.applying(update, now: 5)
+        #expect(dropped.assignee.agentId == "a-tomas")
+        #expect(dropped.status == .inProgress)
+        #expect(dropped.log.isEmpty && dropped.threads.isEmpty)
+        // Already its task: nothing to write.
+        #expect(dropped.dropped(on: tomas) == nil)
+    }
+
+    @Test func rejectsATaskWithoutTitleOrWithAnUnknownStatus() {
+        #expect(AgentTask(json: Self.task().json.merging(["title": " "])) == nil)
+        #expect(AgentTask(json: Self.task().json.merging(["status": "later"])) == nil)
+    }
+
+    @Test func aListingKeepsTasksWithTheirVersionsAndReportsAFullListing() throws {
+        let response: JSONValue = ["items": [
+            ["key": "task/t1", "value": .string(try Self.task().sealed(machineKey: Self.machineKey)), "version": 3],
+            ["key": "task/gone", "value": "", "version": 1],
+            ["key": "task/bad", "value": "bm90IHNlYWxlZA==", "version": 0],
+        ]]
+        let tasks = AgentTask.records(fromList: response, machineKey: Self.machineKey)
+        #expect(tasks.map(\.id) == ["t1"])
+        #expect(tasks.first?.version == 3)
+    }
+
+    @Test func anUpdateLogsStatusChangesAndCommentsLinksTheThreadOnceAndNullClears() {
+        let started = Self.task().applying(AgentTask.Update(status: .inProgress, dueAt: .some(5 * Self.hour), comment: "Empecé", threadSessionId: "s1"), now: 10)
+        #expect(started.status == .inProgress)
+        #expect(started.dueAt == 5 * Self.hour)
+        #expect(started.threads == ["s1"])
+        #expect(started.log.count == 1)
+        #expect(started.log.first?.text == "Empecé")
+        #expect(started.log.first?.status == .inProgress)
+        #expect(started.log.first?.byUser == true)
+        #expect(started.updatedAt == 10)
+
+        // Same thread linked once; nil clears the date; no status change and no comment, nothing logged.
+        let cleared = started.applying(AgentTask.Update(dueAt: .some(nil), threadSessionId: "s1"), now: 11)
+        #expect(cleared.threads == ["s1"])
+        #expect(cleared.dueAt == nil)
+        #expect(cleared.json["dueAt"] == nil)
+        #expect(cleared.log.count == 1)
+    }
+
+    @Test func anEditBecomesAnUpdateOfOnlyWhatChanged() {
+        let original = Self.task(["description": "Antes"])
+        var edited = original
+        edited.title = "Revisar build"
+        edited.status = .blocked
+        let update = AgentTask.Update(from: original, to: edited)
+        #expect(update.title == "Revisar build")
+        #expect(update.status == .blocked)
+        #expect(update.description == nil)
+        // Applied on top of a newer server copy, the other writer's log entry stays.
+        let server = original.applying(AgentTask.Update(comment: "Avance de Mateo"), now: 5)
+        let merged = server.applying(update, now: 6)
+        #expect(merged.log.map(\.text) == ["Avance de Mateo", nil])
+        #expect(merged.title == "Revisar build")
+    }
+
+    @Test func filtersByAssigneeAndStatusWithTheSoonestFirst() {
+        let now = 100 * Self.hour
+        let tasks = [
+            Self.task(["id": "done", "status": "done"]),
+            Self.task(["id": "late", "dueAt": .number(now - Self.hour)]),
+            Self.task(["id": "mine", "assignee": ["kind": "user"], "dueAt": .number(now + Self.hour)]),
+            Self.task(["id": "tomas", "assignee": ["kind": "agent", "agentId": "a-tomas"]]),
+        ]
+        #expect(AgentTask.filter(tasks, assignee: .all, status: .open).map(\.id) == ["late", "mine", "tomas"])
+        #expect(AgentTask.filter(tasks, assignee: .me, status: .open).map(\.id) == ["mine"])
+        #expect(AgentTask.filter(tasks, assignee: .agent("a-mateo"), status: .all).map(\.id) == ["late", "done"])
+        #expect(AgentTask.filter(tasks, assignee: .all, status: .only(.done)).map(\.id) == ["done"])
+    }
+
+    @Test func aNewTaskInAListFilteredToAnAgentIsForThatAgent() {
+        let mateo = AgentProfile(id: "a-mateo", name: "Mateo", emoji: "🤖", providerId: "codex", account: .init(label: ""))
+        let profiles = [mateo, AgentProfile(id: "a-leo", name: "Leo", providerId: "claude", account: .init(label: ""))]
+        #expect(AgentTask.AssigneeFilter.agent("a-mateo").newTaskAssignee(profiles: profiles) == .agent(mateo))
+        // Unfiltered, "Me", or an agent this device doesn't have (deleted, not loaded yet): you.
+        #expect(AgentTask.AssigneeFilter.all.newTaskAssignee(profiles: profiles) == .user)
+        #expect(AgentTask.AssigneeFilter.me.newTaskAssignee(profiles: profiles) == .user)
+        #expect(AgentTask.AssigneeFilter.agent("a-gone").newTaskAssignee(profiles: profiles) == .user)
+    }
+
+    @Test func tasksDueAndCreatedAtTheSameTimeKeepOneOrderWhateverTheStoreOrder() {
+        // The store moves a task to its end on every write; equal dates mustn't follow that.
+        let tasks = ["c", "a", "d", "b"].map { Self.task(["id": .string($0), "createdAt": 5]) }
+        #expect(AgentTask.filter(tasks, assignee: .all, status: .open).map(\.id) == ["a", "b", "c", "d"])
+        #expect(AgentTask.filter(tasks.reversed(), assignee: .all, status: .open).map(\.id) == ["a", "b", "c", "d"])
+    }
+
+    @Test func describesTheDueDateLikeTheAgentBoard() {
+        let now = 100 * Self.hour
+        #expect(Self.task(["dueAt": .number(now - Self.hour)]).due(now: now) == AgentTask.Due(text: "overdue by 1 h", overdue: true))
+        #expect(Self.task(["dueAt": .number(now + 30 * Self.hour)]).due(now: now) == AgentTask.Due(text: "due in 30 h", overdue: false))
+        #expect(Self.task(["dueAt": .number(now + 3 * 24 * Self.hour)]).due(now: now)?.text == "due in 3 days")
+        #expect(Self.task(["dueAt": .number(now + 20 * 60_000)]).due(now: now)?.text == "due in 20 min")
+        #expect(Self.task().due(now: now) == nil)
+    }
+
+    @Test func theAssignmentMessageCarriesTheTaskContext() {
+        let task = Self.task([
+            "description": "Wendoline pidió programar X el martes",
+            "source": ["kind": "chat", "label": "WhatsApp con Wendoline", "url": "https://wa.me/msg/1"],
+            "dueAt": .number(1_794_000_000_000),
+        ])
+        let utc = TimeZone(identifier: "UTC")!
+        let text = task.assignmentMessage(agentName: "Mateo", timeZone: utc)
+        #expect(text.contains("Revisar TestFlight"))
+        #expect(text.contains("t1"))
+        #expect(text.contains("Wendoline pidió programar X el martes"))
+        #expect(text.contains("WhatsApp con Wendoline"))
+        #expect(text.contains("https://wa.me/msg/1"))
+        #expect(text.contains("2026-11-06 21:20"))
+        #expect(text.contains("tarea_actualizar"))
+    }
+}
+
+private extension JSONValue {
+    func merging(_ values: [String: JSONValue]) -> JSONValue {
+        .object((objectValue ?? [:]).merging(values) { $1 })
+    }
+}

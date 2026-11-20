@@ -295,6 +295,46 @@ describe('ApiSessionClient message commit queue', () => {
     }
   });
 
+  it('keeps Claude response usage distinct while replay and split messages replace the same report', async () => {
+    vi.resetModules();
+    const reports = new Map<string, { tokens: { total: number } }>();
+    sessionSocketStub = createApiSessionSocketStub({
+      connected: true,
+      emit: (event, args) => {
+        if (event === 'usage-report') {
+          const report = args[0] as { key: string; tokens: { total: number } };
+          reports.set(report.key, report);
+        }
+      },
+      emitWithAck: async (_event, payload: any) => ({
+        ok: true, id: 'm1', seq: 1, localId: payload?.localId, didWrite: true,
+      }),
+    });
+    userSocketStub = createApiSessionSocketStub({ connected: true });
+    const { ApiSessionClient } = await import('./sessionClient');
+    const send = async (client: InstanceType<typeof ApiSessionClient>, id: string, uuid: string, output: number) => {
+      await client.sendClaudeSessionMessageCommittedExact({
+        type: 'assistant', uuid,
+        message: { id, usage: { input_tokens: 10, output_tokens: output }, model: 'claude-sonnet-4' },
+      });
+    };
+    const client = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await send(client, 'response-a', 'chunk-a1', 10);
+    await send(client, 'response-a', 'chunk-a2', 20);
+    await send(client, 'response-b', 'chunk-b', 30);
+    await client.close();
+    // A fresh client replay must reuse the provider identity rather than adding the response again.
+    sessionSocketStub.connected = true;
+    const resumed = new ApiSessionClient('tok', createPlainSessionFixture({ id: 's1' }));
+    await send(resumed, 'response-b', 'chunk-b', 30);
+    await send(resumed, '', 'chunk-without-response-id', 5);
+    await send(resumed, '', 'chunk-without-response-id', 5);
+    expect([...reports.values()].reduce((sum, report) => sum + report.tokens.total, 0)).toBe(85);
+    expect(reports.get('claude-response:response-a')?.tokens.total).toBe(30);
+    expect(reports.get('claude-response:response-b')?.tokens.total).toBe(40);
+    await resumed.close();
+  });
+
   it('redacts usage report errors before logging', async () => {
     vi.resetModules();
     supervisorStartCount = 0;
@@ -628,8 +668,15 @@ describe('ApiSessionClient message commit queue', () => {
     supervisorStartCount = 0;
     const firstAck = createDeferred<unknown>();
     const messagePayloads: any[] = [];
+    const usageReports = new Map<string, number>();
     sessionSocketStub = createApiSessionSocketStub({
       connected: true,
+      emit: (event, args) => {
+        if (event === 'usage-report') {
+          const report = args[0] as { key: string; tokens: { total: number } };
+          usageReports.set(report.key, report.tokens.total);
+        }
+      },
       emitWithAck: async (event: string, payload: any) => {
         if (event === 'transcript-observation-capability-v1') {
           return { ok: true, capability: 'session-transcript-observation-v1' };
@@ -675,7 +722,7 @@ describe('ApiSessionClient message commit queue', () => {
     const message = {
       type: 'assistant' as const,
       uuid: 'claude-assistant-1',
-      message: { role: 'assistant', content: [{ type: 'text', text: 'caught up' }] },
+      message: { id: 'response-history', role: 'assistant', content: [{ type: 'text', text: 'caught up' }], usage: { input_tokens: 10, output_tokens: 5 } },
     };
 
     let commitResolved = false;
@@ -717,6 +764,7 @@ describe('ApiSessionClient message commit queue', () => {
       persisted: true,
       delivered: true,
     });
+    expect([...usageReports.entries()]).toEqual([['claude-response:response-history', 15]]);
     await client.close();
     vi.unstubAllGlobals();
   });

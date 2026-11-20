@@ -178,6 +178,19 @@ export function resolveClaudeUnifiedPendingDeliveryBlock(
   const pendingProviderAction = (error as { pendingProviderAction?: unknown }).pendingProviderAction;
 
   if (
+    failureState === 'failed_terminal'
+    && reason === 'unsupported_command'
+    && phase === 'before_write'
+    && duplicateRisk === 'none'
+  ) {
+    return {
+      localIds,
+      reason: 'unsupported_action',
+      providerEffect: 'none',
+    };
+  }
+
+  if (
     (failureState === 'failed_terminal' || failureState === 'failed_ambiguous')
     && pendingProviderAction === 'steer'
     && reason === 'no_target'

@@ -177,6 +177,12 @@ export const LOCAL_SETTING_DEFINITIONS = defineSettingDefinitions({
         description: 'Enable backdrop blur effects behind modals and overlay menus',
         storageScope: 'local',
     },
+    hapticsEnabled: {
+        schema: z.boolean().catch(true),
+        default: true,
+        description: 'Enable haptic feedback on this device',
+        storageScope: 'local',
+    },
     uiContentWidthMode: {
         schema: z.enum(['compact', 'medium', 'full']),
         default: 'compact',

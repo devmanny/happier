@@ -50,6 +50,21 @@ describe('provider account usage refs session metadata', () => {
     });
   });
 
+  it('moves a republished record id to the end so the last ref is the account the session runs on now', () => {
+    const buildRecordId = requireFunction('buildProviderAccountUsageRecordId');
+    const readRefs = requireFunction('readProviderAccountUsageRecordIdsFromMetadata');
+    const writeRef = requireFunction('writeProviderAccountUsageRecordIdToMetadata');
+    const firstAccount = buildRecordId(key('acct_first'));
+    const secondAccount = buildRecordId(key('acct_second'));
+
+    const switchedBack = [firstAccount, secondAccount, firstAccount].reduce<Record<string, unknown>>(
+      (metadata, recordId, index) => writeRef(metadata, { recordId, updatedAtMs: 1_000 + index }) as Record<string, unknown>,
+      {},
+    );
+
+    expect(readRefs(switchedBack)).toEqual([secondAccount, firstAccount]);
+  });
+
   it('deduplicates existing refs, ignores malformed record ids, and keeps the newest bounded window', () => {
     const buildRecordId = requireFunction('buildProviderAccountUsageRecordId');
     const readRefs = requireFunction('readProviderAccountUsageRecordIdsFromMetadata');

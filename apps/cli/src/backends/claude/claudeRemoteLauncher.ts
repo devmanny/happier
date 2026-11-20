@@ -386,7 +386,15 @@ export function resolveClaudeRemoteLaunchErrorDisposition(params: Readonly<{
 
 export async function claudeRemoteLauncher(
     session: Session,
-    options: Readonly<{ initialMode?: EnhancedMode }> = {},
+    options: Readonly<{
+        initialMode?: EnhancedMode;
+        /**
+         * Runner termination. Aborting ends the launcher through the same launch abort as a user
+         * abort (which stops the Claude child), so its teardown and flush run while the session
+         * transport is still alive and the caller can then await the launcher's return.
+         */
+        signal?: AbortSignal;
+    }> = {},
 ): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
     const turnAssistantPreviewTracker = createTurnAssistantPreviewTracker();
@@ -567,6 +575,19 @@ export async function claudeRemoteLauncher(
 	        await ensureSessionInfoBeforeSwitch({ session });
             await interruptThenTeardown('switch');
 	    }
+
+    // Runner termination wins over any pending switch: the process is going away.
+    const terminationSignal = options.signal;
+    const onTermination = () => {
+        logger.debug('[remote]: runner termination requested');
+        exitReason = 'exit';
+        abortController?.abort(terminationSignal?.reason ?? 'claude-runner-termination');
+    };
+    if (terminationSignal?.aborted) {
+        onTermination();
+    } else {
+        terminationSignal?.addEventListener('abort', onTermination, { once: true });
+    }
 
     // When to abort
     session.client.rpcHandlerManager.registerHandler('abort', doAbort); // When abort clicked
@@ -1354,6 +1375,10 @@ export async function claudeRemoteLauncher(
             const sessionIdAtLaunchStart = session.sessionId;
             const controller = new AbortController();
             abortController = controller;
+            if (terminationSignal?.aborted) {
+                // Termination arrived between launches; never start another provider run.
+                controller.abort(terminationSignal.reason ?? 'claude-runner-termination');
+            }
             abortFuture = new Future<void>();
             didUserAbortThisLaunch = false;
             let modeHash: string | null = null;
@@ -2322,6 +2347,7 @@ export async function claudeRemoteLauncher(
             }
         }
     } finally {
+        terminationSignal?.removeEventListener('abort', onTermination);
 
         try {
             await inputConsumer.closeProviderInputAdmissionAndWaitForDispatches();

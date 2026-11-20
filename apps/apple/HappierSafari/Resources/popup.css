@@ -1,0 +1,10 @@
+html { color-scheme: light dark; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+body { width: 300px; margin: 0; padding: 20px; box-sizing: border-box; }
+header { display: flex; align-items: center; gap: 10px; }
+h1 { font-size: 18px; margin: 0; }
+p { line-height: 1.45; }
+#site { font-weight: 600; overflow-wrap: anywhere; }
+button, #open { box-sizing: border-box; display: block; border: 0; border-radius: 10px; padding: 11px; width: 100%; background: #007aff; color: white; font: inherit; text-align: center; text-decoration: none; }
+button:disabled { opacity: .45; }
+[hidden] { display: none !important; }
+.note { color: GrayText; font-size: 12px; }

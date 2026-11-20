@@ -1,0 +1,401 @@
+import Foundation
+import notify
+
+/// The dictation keyboard and the app talk through the App Group: an iOS keyboard can't use the
+/// microphone (nor hold a Whisper model in its little memory), so the app listens and transcribes
+/// and the keyboard types what it hears. Each side writes one small JSON file in the shared
+/// container and wakes the other with a Darwin notification.
+///
+/// The app opened from the keyboard keeps the microphone on in the background for a while
+/// (`standbyUntil`): taps on the keyboard's mic then start a take without leaving the app in use.
+public enum DictationKeyboard {
+    public static let appGroup = "group.com.devmanny.happier"
+    /// The app, opened from the keyboard: starts the microphone (and the first take).
+    public static let openURL = URL(string: "happier-native://keyboard-dictation")!
+
+    /// Posted by the app whenever `Status` changes.
+    public static let statusNotification = "com.devmanny.happier.keyboard.status"
+    /// Posted by the keyboard after writing a `Command`.
+    public static let commandNotification = "com.devmanny.happier.keyboard.command"
+
+    /// What the app is doing for the keyboard.
+    public struct Status: Codable, Equatable, Sendable {
+        public enum Phase: String, Codable, Sendable {
+            /// The microphone is off: the keyboard has to open the app to start.
+            case off
+            /// The microphone is on, waiting for a take.
+            case ready
+            /// The take is starting (permission, the microphone, the engine).
+            case starting
+            case recording
+            /// No more audio; the last words are being transcribed.
+            case finishing
+        }
+
+        public var phase: Phase
+        /// Bumped by every take: the keyboard edits only the text of the take it's on.
+        public var take: Int
+        /// The take's whole text so far.
+        public var text: String
+        /// The take is over: `text` won't change any more.
+        public var final: Bool
+        /// The microphone stays on until then.
+        public var standbyUntil: Date?
+        /// Written every few seconds while the microphone is on: a status whose app was killed
+        /// stops being fresh.
+        public var heartbeat: Date
+        public var error: String?
+        /// The last command the app acted on.
+        public var command: UUID?
+
+        public init(phase: Phase = .off, take: Int = 0, text: String = "", final: Bool = false, standbyUntil: Date? = nil,
+                    heartbeat: Date = .distantPast, error: String? = nil, command: UUID? = nil) {
+            self.phase = phase
+            self.take = take
+            self.text = text
+            self.final = final
+            self.standbyUntil = standbyUntil
+            self.heartbeat = heartbeat
+            self.error = error
+            self.command = command
+        }
+
+        /// How long a heartbeat counts.
+        public static let heartbeatLifetime: TimeInterval = 45
+
+        /// Whether the app is alive with the microphone on, so a take can start without opening it.
+        public func microphoneOn(at now: Date = .now) -> Bool {
+            guard phase != .off, let standbyUntil, standbyUntil > now else { return false }
+            return now.timeIntervalSince(heartbeat) < Self.heartbeatLifetime
+        }
+
+        public var isListening: Bool { phase == .starting || phase == .recording || phase == .finishing }
+    }
+
+    /// What the keyboard asks.
+    public struct Command: Codable, Equatable, Sendable {
+        public enum Action: String, Codable, Sendable {
+            case start
+            /// Stop listening and type the last words.
+            case finish
+            /// Stop listening and drop the take's last words.
+            case cancel
+            /// Turn the microphone off now.
+            case endStandby
+        }
+
+        public var id: UUID
+        public var action: Action
+        public var sent: Date
+
+        public init(id: UUID = UUID(), action: Action, sent: Date = .now) {
+            self.id = id
+            self.action = action
+            self.sent = sent
+        }
+
+        /// A command this old was meant for an app that wasn't listening then.
+        public static let lifetime: TimeInterval = 10
+
+        public func isFresh(at now: Date = .now) -> Bool { now.timeIntervalSince(sent) < Self.lifetime }
+    }
+
+    /// The shared container's files (nil when the App Group isn't reachable: a keyboard without
+    /// Full Access).
+    public struct Channel: Sendable {
+        let directory: URL
+
+        public init?(appGroup: String = DictationKeyboard.appGroup) {
+            guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) else { return nil }
+            self.init(directory: container.appending(path: "DictationKeyboard", directoryHint: .isDirectory))
+        }
+
+        public init(directory: URL) {
+            self.directory = directory
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+
+        private var statusFile: URL { directory.appending(path: "status.json") }
+        private var commandFile: URL { directory.appending(path: "command.json") }
+
+        public func readStatus() -> Status? { read(statusFile) }
+        public func readCommand() -> Command? { read(commandFile) }
+
+        /// Writes the status and wakes the keyboard.
+        public func publish(_ status: Status) {
+            write(status, to: statusFile)
+            DictationKeyboard.post(DictationKeyboard.statusNotification)
+        }
+
+        /// Writes a command and wakes the app.
+        public func send(_ command: Command) {
+            write(command, to: commandFile)
+            DictationKeyboard.post(DictationKeyboard.commandNotification)
+        }
+
+        private func read<T: Decodable>(_ file: URL) -> T? {
+            guard let data = try? Data(contentsOf: file) else { return nil }
+            return try? JSONDecoder().decode(T.self, from: data)
+        }
+
+        private func write(_ value: some Encodable, to file: URL) {
+            guard let data = try? JSONEncoder().encode(value) else { return }
+            try? data.write(to: file, options: .atomic)
+        }
+    }
+
+    // MARK: Darwin notifications (they cross processes; they carry no data)
+
+    public static func post(_ name: String) {
+        notify_post(name)
+    }
+
+    /// Calls `handler` on the main queue whenever `name` is posted, until the returned observer is
+    /// cancelled or released.
+    public static func observe(_ name: String, _ handler: @escaping @MainActor @Sendable () -> Void) -> Observer {
+        Observer(name: name, handler: handler)
+    }
+
+    public final class Observer: @unchecked Sendable {
+        private var token: Int32 = NOTIFY_TOKEN_INVALID
+
+        init(name: String, handler: @escaping @MainActor @Sendable () -> Void) {
+            notify_register_dispatch(name, &token, .main) { _ in
+                MainActor.assumeIsolated { handler() }
+            }
+        }
+
+        public func cancel() {
+            guard token != NOTIFY_TOKEN_INVALID else { return }
+            notify_cancel(token)
+            token = NOTIFY_TOKEN_INVALID
+        }
+
+        deinit { cancel() }
+    }
+}
+
+/// Keeps the text field in step with a take's text as it changes. Whisper revises its last words
+/// while you speak, so each update deletes back to where the new text differs and types the rest.
+/// Edits are computed here (testable); the keyboard applies them with the text document proxy.
+/// Codable: a keyboard reloaded mid-take picks up where the last one was.
+public struct KeyboardTextSync: Codable, Equatable, Sendable {
+    public struct Edit: Equatable, Sendable {
+        /// Characters to delete before the cursor.
+        public var delete: Int
+        public var insert: String
+
+        public init(delete: Int, insert: String) {
+            self.delete = delete
+            self.insert = insert
+        }
+
+        public var isEmpty: Bool { delete == 0 && insert.isEmpty }
+    }
+
+    /// The take this text belongs to.
+    public private(set) var take: Int?
+    /// What this take has typed so far, the separator included.
+    public private(set) var typed = ""
+    /// The space put before the take's text, when it followed a word.
+    private var separator: String?
+    /// The text before the cursor stopped ending with what was typed (the cursor moved, or the
+    /// user edited): the user is fixing the text, and nothing more of the take is typed.
+    public private(set) var stopped = false
+    /// Characters of the take's text that went out with a message: the field emptied (sent) while
+    /// the take went on. Only what comes after them is typed.
+    private var sentLength = 0
+    /// Where in the take's text what was typed begins.
+    private var typedFrom = 0
+
+    public init() {}
+
+    /// The edit that brings the field to `text` of `take`. `before` is the text before the cursor
+    /// as the field reports it (it may be cut short, or nil when the app doesn't say).
+    public mutating func edit(take: Int, text: String, before: String?) -> Edit {
+        if take != self.take {
+            self.take = take
+            typed = ""
+            separator = nil
+            stopped = false
+            sentLength = 0
+            typedFrom = 0
+        }
+        // The field emptied under typed words: the message was sent. They went with it, even if
+        // Whisper revises them now.
+        if let before, before.isEmpty, !typed.isEmpty, !stopped {
+            sentLength = typedFrom + typed.count - (separator ?? "").count
+            typed = ""
+            separator = nil
+        }
+        let text = sentLength == 0 ? text : Self.after(sentLength, in: text, from: &typedFrom)
+        if separator == nil, !text.isEmpty {
+            separator = Self.needsSpace(before: before, text: text) ? " " : ""
+        }
+        let target = (separator ?? "") + text
+        if !stopped, !Self.ends(before, with: typed) { stopped = true }
+        if stopped { return Edit(delete: 0, insert: "") }
+        let common = Self.commonPrefixCount(typed, target)
+        let edit = Edit(delete: typed.count - common, insert: String(target.dropFirst(common)))
+        typed = target
+        return edit
+    }
+
+    /// The take's text after its first `sent` characters, for the next message: not the rest of a
+    /// word cut there ("turno" sent, now "turnos"), nor the space or punctuation that closed the
+    /// sent words. `from` is where it begins.
+    static func after(_ sent: Int, in text: String, from: inout Int) -> String {
+        let chars = Array(text)
+        var index = min(sent, chars.count)
+        if index > 0, index < chars.count, chars[index - 1].isLetter || chars[index - 1].isNumber {
+            while index < chars.count, chars[index].isLetter || chars[index].isNumber { index += 1 }
+        }
+        while index < chars.count, chars[index].isWhitespace || ".,;:".contains(chars[index]) { index += 1 }
+        from = index
+        return String(chars[index...])
+    }
+
+    /// The take is over: the next update belongs to a new one.
+    public mutating func reset() {
+        self = KeyboardTextSync()
+    }
+
+    /// Whether the field's text before the cursor still ends with `typed`. A field that reports
+    /// nothing, or less than was typed, is trusted for the part it shows.
+    static func ends(_ before: String?, with typed: String) -> Bool {
+        guard let before, !typed.isEmpty else { return true }
+        let shown = min(before.count, typed.count)
+        return before.suffix(shown) == typed.suffix(shown)
+    }
+
+    static func needsSpace(before: String?, text: String) -> Bool {
+        guard let last = before?.last, let first = text.first else { return false }
+        if last.isWhitespace || last.isNewline { return false }
+        // "hola" + ", qué tal": punctuation sticks to the word before it; "¿", "¡", "(" and
+        // quotes open the next one.
+        if "¿¡([{\"“«'‘".contains(first) { return true }
+        if first.isPunctuation { return false }
+        return true
+    }
+
+    static func commonPrefixCount(_ a: String, _ b: String) -> Int {
+        var count = 0
+        for (x, y) in zip(a, b) {
+            guard x == y else { break }
+            count += 1
+        }
+        return count
+    }
+}
+
+/// Which takes the keyboard types, and how far it got in the one going on. Kept across keyboard
+/// reloads (iOS makes a new keyboard for each app, and the app was opened in between to start the
+/// microphone): every take from the first one the keyboard saw is typed once.
+public struct KeyboardTyping: Codable, Equatable, Sendable {
+    /// Takes up to this one are typed, or were over before the keyboard first looked.
+    public private(set) var typedThrough: Int?
+    public private(set) var sync = KeyboardTextSync()
+    /// The last take the user edited mid-way (it stopped typing; the keyboard ends it).
+    public private(set) var userTookOver: Int?
+
+    public init() {}
+
+    /// The edit that types `status`'s take into the field; nil when the take isn't one to type.
+    public mutating func edit(for status: DictationKeyboard.Status, before: String?) -> KeyboardTextSync.Edit? {
+        guard let typedThrough else {
+            self.typedThrough = status.final ? status.take : status.take - 1
+            return status.final ? nil : edit(for: status, before: before)
+        }
+        guard status.take > typedThrough else { return nil }
+        let edit = sync.edit(take: status.take, text: Self.withoutClosingPeriod(status.text), before: before)
+        if sync.stopped {
+            userTookOver = status.take
+            leave(take: status.take)
+            return nil
+        }
+        if status.final {
+            self.typedThrough = status.take
+            sync.reset()
+        }
+        return edit
+    }
+
+    /// The keyboard closed during `take` (another keyboard, another field): nothing more of it is
+    /// typed, even if it's still being transcribed when the keyboard comes back.
+    public mutating func leave(take: Int) {
+        typedThrough = max(typedThrough ?? take, take)
+        sync.reset()
+    }
+
+    /// Whisper closes every take with a period, also when you stop mid-sentence to keep typing or
+    /// dictate the rest; in a text field that period is almost always one to delete. Question and
+    /// exclamation marks, ellipses and the periods between sentences stay.
+    static func withoutClosingPeriod(_ text: String) -> String {
+        guard text.hasSuffix("."), !text.hasSuffix("..") else { return text }
+        return String(text.dropLast())
+    }
+}
+
+/// Moves the cursor a line up or down for the keyboard's trackpad (hold space and drag). A keyboard
+/// only sees the text around the cursor, not how the field lays it out, so a line is a hard line
+/// (between newlines) cut into wrapped lines of `lineLength` characters, an estimate from the
+/// field's width. Long paragraphs land near, not exactly on, the column above or below.
+public enum KeyboardCursor {
+    public enum Direction: Sendable { case up, down }
+
+    /// The character offset that moves the cursor one line `direction`, from the text `before`
+    /// and `after` it; to the start or end when there's no line that way.
+    public static func lineOffset(_ direction: Direction, before: String, after: String, lineLength: Int) -> Int {
+        let width = max(lineLength, 1)
+        let lineBefore = before.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? before
+        let column = lineBefore.count
+        switch direction {
+        case .up:
+            if column >= width { return -width }
+            let lines = before.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 2 else { return -column }
+            let above = lines[lines.count - 2].count
+            let lastWrapStart = above == 0 ? 0 : ((above - 1) / width) * width
+            let target = min(lastWrapStart + column, above)
+            return -(column + 1 + (above - target))
+        case .down:
+            let parts = after.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            let rest = parts.first?.count ?? 0
+            let length = column + rest
+            let wrapStart = (column / width) * width
+            if wrapStart + width < length { return min(column + width, length) - column }
+            guard parts.count == 2 else { return rest }
+            let below = parts[1].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first?.count ?? 0
+            return rest + 1 + min(column % width, below)
+        }
+    }
+}
+
+/// The microphone tap that opened Happier to turn the microphone on. A keyboard can't listen by
+/// itself, so that tap leaves for the app; back in the app being typed in, the take starts as soon
+/// as the microphone is on, without a second tap. Saved: the system often reloads the keyboard
+/// while another app is in front.
+public struct KeyboardAutoStart: Codable, Equatable, Sendable {
+    /// Longer than this to come back and the tap is stale: the keyboard waits for a new one.
+    public static let window: TimeInterval = 120
+
+    public private(set) var requested: Date?
+
+    public init() {}
+
+    public mutating func opened(at date: Date = .now) { requested = date }
+
+    public mutating func cancel() { requested = nil }
+
+    /// Whether to start a take now; true once per tap.
+    public mutating func shouldStart(at date: Date = .now, microphoneOn: Bool, listening: Bool) -> Bool {
+        guard let requested else { return false }
+        if listening || date.timeIntervalSince(requested) > Self.window {
+            self.requested = nil
+            return false
+        }
+        guard microphoneOn else { return false }
+        self.requested = nil
+        return true
+    }
+}

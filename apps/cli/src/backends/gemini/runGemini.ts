@@ -486,6 +486,7 @@ export async function runGemini(opts: {
       pushSender: api.push(),
       waitingForCommandLabel: 'Gemini',
       logPrefix: '[Gemini]',
+      turnKey: context?.turnToken ?? null,
       sessionTitle: getSessionNotificationTitle(session.getMetadataSnapshot.bind(session)),
       assistantPreviewText: resolveReadyNotificationAssistantText({
         includeMessageText: includeAssistantPreviewText,
@@ -642,6 +643,7 @@ export async function runGemini(opts: {
     process,
     exit: (code) => process.exit(code),
     sessionExitReport: { sessionId: session.sessionId },
+    parentNoticeSession: session,
     onTerminationRequested: () => {
       session.beginRuntimeTermination?.();
       void closeProviderInputAdmission();
@@ -1277,19 +1279,15 @@ export async function runGemini(opts: {
             session,
             error: turnFailureError,
             logPrefix: '[gemini]',
+            failedTurn: { sessionSeq: session.getLastObservedMessageSeq() },
           });
-          if (runtimeAuthResult?.recoveryReport?.handled !== true) {
+          if (!runtimeAuthResult) {
             await surfacePrimarySessionRuntimeIssue({
               provider: 'gemini',
               session,
               sessionSeq: session.getLastObservedMessageSeq(),
               cause: 'status_error',
-              error: runtimeAuthResult
-                ? Object.assign(
-                    turnFailureError instanceof Error ? turnFailureError : new Error(String(turnFailureError)),
-                    { runtimeAuthClassification: runtimeAuthResult.classification },
-                  )
-                : turnFailureError,
+              error: turnFailureError,
             });
           }
         }

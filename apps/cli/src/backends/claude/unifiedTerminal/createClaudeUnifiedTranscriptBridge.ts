@@ -4,7 +4,7 @@ import type { CommittedClaudeJsonlMessageBaseline } from '../utils/claudeJsonlMe
 import type { RawJSONLines } from '../types';
 import { readClaudeTranscriptTurnSignal } from '../localControl/readClaudeTranscriptTurnSignal';
 import { isSidechainSessionHook } from '../utils/sessionHookAttribution';
-import { stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
 import { getProjectPath } from '../utils/path';
@@ -156,6 +156,34 @@ function readKnownResumeTranscriptPath(opts: Readonly<{
   };
 }
 
+const COMPLETE_LINE_BOUNDARY_READ_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Byte offset just past the last complete JSONL line. A line Claude is still writing belongs to the
+ * live follower: a boundary inside it would split the row so that neither the startup snapshot nor
+ * the follower could read it. Missing or unreadable files start at 0.
+ */
+async function readCompleteJsonlLineBoundaryBytes(filePath: string): Promise<number> {
+  let file: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    file = await open(filePath, 'r');
+    let end = (await file.stat()).size;
+    const buffer = Buffer.alloc(COMPLETE_LINE_BOUNDARY_READ_CHUNK_BYTES);
+    while (end > 0) {
+      const start = Math.max(0, end - buffer.length);
+      const { bytesRead } = await file.read(buffer, 0, end - start, start);
+      const newlineIndex = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (newlineIndex >= 0) return start + newlineIndex + 1;
+      end = start;
+    }
+    return 0;
+  } catch {
+    return 0;
+  } finally {
+    await file?.close().catch(() => {});
+  }
+}
+
 export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
   sessionId: string | null;
   transcriptPath?: string | null | undefined;
@@ -177,11 +205,17 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     reason: string;
   }>) => void) | undefined;
   /**
-   * Returns true only when a trusted transcript row proves that Happier's exact accepted prompt
-   * reached the primary Claude session. The bridge then re-reports the original SessionStart so
-   * the canonical session metadata owner can re-check the now-materialized transcript path.
+   * Observes every live trusted row of the primary Claude session so an exact Pending prompt can be
+   * accepted from the transcript (rows such as native queued commands reach only this raw channel).
    */
   proveAcceptedMainTranscript?: ((value: unknown) => boolean) | undefined;
+  /**
+   * Called for every live trusted row of the primary Claude session, and once after the startup
+   * snapshot of the trusted session has been read. A reported id is published only once its
+   * transcript proves it, and SessionStart precedes the file Claude creates at the first prompt;
+   * the identity owner re-runs that proof here while the id is still pending.
+   */
+  onTrustedMainTranscriptRow?: ((sessionId: string) => void) | undefined;
   /**
    * Publishes the scanner's ONE sidechain importer for as long as that scanner is alive, and `null`
    * once it is gone. The bridge builds the scanner lazily (after the SessionStart subscription and
@@ -235,7 +269,6 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     data: SessionHookData;
     sessionInfo: ClaudeUnifiedSessionStartInfo;
   }> | null = null;
-  let acceptedMainTranscriptProvenForSessionId: string | null = null;
 
   const recordSessionStartBaselines = (
     sessionInfo: ClaudeUnifiedSessionStartInfo,
@@ -254,14 +287,6 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
     sessionStartReceivedAtMs: number | null,
   ) => {
     if (disposed) return;
-    const previousSessionInfo = activeTrustedSessionBinding?.sessionInfo;
-    if (
-      !previousSessionInfo
-      || previousSessionInfo.sessionId !== sessionInfo.sessionId
-      || previousSessionInfo.transcriptPath !== sessionInfo.transcriptPath
-    ) {
-      acceptedMainTranscriptProvenForSessionId = null;
-    }
     activeTrustedSessionBinding = { data, sessionInfo };
     if (sessionStartReceivedAtMs !== null) {
       recordSessionStartBaselines(sessionInfo, sessionStartReceivedAtMs);
@@ -309,25 +334,19 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
   ): void => {
     opts.onRawTranscriptValue?.(value, observation);
     if (observation.historicalReplay) return;
-    const activeSessionStart = activeTrustedSessionBinding;
-    if (!opts.proveAcceptedMainTranscript) return;
     // The scanner serializes trusted raw observations behind preceding visible-message commits,
     // including a known resume whose adopted provider emits no new SessionStart. A real
     // SessionStart takes precedence over that initial requested identity.
-    const trustedSessionId = activeSessionStart?.sessionInfo.sessionId ?? knownResumeSessionId;
+    const trustedSessionId = activeTrustedSessionBinding?.sessionInfo.sessionId ?? knownResumeSessionId;
     const sessionId = readTranscriptString(value as RawJSONLines, 'sessionId');
     if (!sessionId) return;
     if (trustedSessionId ? sessionId !== trustedSessionId : !promotedDiscoveredMainSessionIds.has(sessionId)) return;
-    if (!opts.proveAcceptedMainTranscript(value)) return;
-
     // Acceptance proof is per exact Pending prompt and must keep observing every authenticated
-    // primary-session raw row. Only the metadata re-report is one-shot for a Claude session.
-    if (acceptedMainTranscriptProvenForSessionId === sessionId) return;
-
-    acceptedMainTranscriptProvenForSessionId = sessionId;
-    if (activeSessionStart) {
-      opts.onSessionFound?.(sessionId, activeSessionStart.data);
-    }
+    // primary-session raw row.
+    opts.proveAcceptedMainTranscript?.(value);
+    // Independent of acceptance: a UserPromptSubmit hook usually accepts the prompt before its row
+    // lands, so identity publication must not wait for this row to match a Pending prompt.
+    opts.onTrustedMainTranscriptRow?.(sessionId);
   };
 
   const observeLiveProviderTaskJsonlValue = (
@@ -411,7 +430,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
       // Capture the live boundary before baseline loading: Claude can append queued-command
       // evidence while the durable replay baseline is in flight. The scanner owns both paths.
       const initialLiveTranscriptStartOffsetBytes = waitForSessionStartHook && knownResumeTranscriptPath
-        ? await stat(knownResumeTranscriptPath).then((snapshot) => snapshot.size, () => 0)
+        ? await readCompleteJsonlLineBoundaryBytes(knownResumeTranscriptPath)
         : undefined;
       if (waitForSessionStartHook) {
         const baseline = await loadClaudeJsonlReplayBaseline({
@@ -474,7 +493,7 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
             opts.onTranscriptMessage?.(message);
           }
         },
-        onRawJsonlValue: opts.onRawTranscriptValue || opts.proveAcceptedMainTranscript
+        onRawJsonlValue: opts.onRawTranscriptValue || opts.proveAcceptedMainTranscript || opts.onTrustedMainTranscriptRow
           ? observeTrustedRawTranscriptValue
           : undefined,
         onLiveJsonlValue: opts.onLiveProviderTaskJsonlValue
@@ -513,6 +532,12 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
       scanner = nextScanner;
       opts.onSubagentFileCollectorChanged?.(nextScanner.subagentFileCollector);
       flushPendingSessionBindings();
+      // The startup snapshot replays rows as history, which never reach the live-row report. A
+      // transcript that materialized while nobody followed it must still let a pending identity
+      // proof run now instead of waiting for Claude's next row.
+      const startupTrustedSessionId = activeTrustedSessionBinding?.sessionInfo.sessionId
+        ?? (prebindKnownResumeTranscript ? knownResumeSessionId : null);
+      if (startupTrustedSessionId) opts.onTrustedMainTranscriptRow?.(startupTrustedSessionId);
       opts.onStartupReplayComplete?.();
     },
     async dispose() {
@@ -523,7 +548,6 @@ export function createClaudeUnifiedTranscriptBridge(opts: Readonly<{
       pendingSessionBindings.length = 0;
       promotedDiscoveredMainSessionIds.clear();
       activeTrustedSessionBinding = null;
-      acceptedMainTranscriptProvenForSessionId = null;
       if (scanner) opts.onSubagentFileCollectorChanged?.(null);
       await scanner?.cleanup();
       scanner = null;

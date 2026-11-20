@@ -77,10 +77,13 @@ export const MeterBar = React.memo<MeterBarProps>((props) => {
             animatedFill.setValue(fill);
             return;
         }
+        // Transfers report progress every ~100ms and each report restarts this animation. A decelerating
+        // curve then lurches and stalls on every report; a linear glide spanning a few reports reads as
+        // one continuous motion.
         const animation = Animated.timing(animatedFill, {
             toValue: fill,
-            duration: motionTokens.durationMs.fast,
-            easing: motionTokens.easing.standard,
+            duration: motionTokens.durationMs.slow,
+            easing: motionTokens.easing.linear,
             useNativeDriver: Platform.OS !== 'web',
         });
         animation.start();

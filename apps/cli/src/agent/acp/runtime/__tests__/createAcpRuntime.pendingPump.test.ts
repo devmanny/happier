@@ -4,7 +4,9 @@ import { MessageBuffer } from '@/ui/ink/messageBuffer';
 import { createTestAcpRuntime as createAcpRuntime } from '@/testkit/backends/acpRuntime';
 import type { AcpRuntimeBackend } from '../createAcpRuntime';
 import { createApprovedPermissionHandler } from '@/testkit/backends/permissionHandler';
-import { createSessionClientWithMetadata } from '@/testkit/backends/sessionFixtures';
+import { createBasicSessionClientWithOverrides, createSessionClientWithMetadata } from '@/testkit/backends/sessionFixtures';
+import { createFakeAcpRuntimeBackend } from '@/testkit/backends/acpRuntimeBackend';
+import { createSessionTurnLifecycle } from '@/agent/runtime/session/turn/lifecycle';
 import type { DrainPendingOptions, DrainPendingResult } from '@/agent/runtime/sessionInput/types';
 
 function nextTick(): Promise<void> {
@@ -338,6 +340,61 @@ describe('createAcpRuntime pending queue pump', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(pumpPendingWhileActive).toHaveBeenCalledTimes(1);
+
+    await runtime.reset();
+  });
+
+  // A message queued while the turn ran is drained as the next turn once the turn ends, with no
+  // `ready` between the two (the session never went idle): the turn's `task_complete` is what tells
+  // a transcript reader where it ended, so it must be in the transcript before that message.
+  it('commits the turn\'s end to the transcript before a queued message is drained as the next turn', async () => {
+    const backend = createFakeAcpRuntimeBackend();
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    // The relay's transcript, in the order rows are committed.
+    const transcript: string[] = [];
+    // The session client's best-effort lane: each row waits for the previous row's ACK.
+    let bestEffortTail: Promise<unknown> = Promise.resolve();
+    const lifecycle = createSessionTurnLifecycle({
+      sessionId: 'queued-next-turn',
+      enqueueSessionTurn: async () => {},
+      // The turn's end wakes the pending queue, which materializes the queued message over HTTP.
+      onTurnLifecycleEvent: (event) => {
+        if (event === 'assistant_message_end') transcript.push('user');
+      },
+    });
+    const runtime = createAcpRuntime({
+      provider: 'kimi',
+      directory: '/tmp',
+      session: createBasicSessionClientWithOverrides({
+        sessionTurnLifecycle: lifecycle,
+        sendAgentMessage: (provider, body) => {
+          const marked = lifecycle.observeAcpLifecycleMarker({ provider, body }).body;
+          bestEffortTail = bestEffortTail.then(() => delay(20)).then(() => { transcript.push(`agent:${marked.type}`); });
+        },
+        sendAgentMessageCommitted: async (_provider, body) => {
+          await delay(5);
+          transcript.push(`agent:${body.type}`);
+        },
+      }),
+      messageBuffer: new MessageBuffer(),
+      mcpServers: {},
+      permissionHandler: createApprovedPermissionHandler(),
+      onThinkingChange: () => {},
+      ensureBackend: async () => backend,
+    });
+
+    await runtime.startOrLoad({ resumeId: null });
+    runtime.beginTurn();
+    backend.emit({ type: 'status', status: 'running' });
+    backend.emit({ type: 'tool-call', toolName: 'Read', args: { file_path: 'a.txt' }, callId: 't1' });
+    backend.emit({ type: 'tool-result', toolName: 'Read', callId: 't1', result: { ok: true } });
+    backend.emit({ type: 'model-output', fullText: 'Listo.', fullTextScope: 'segment' });
+    await runtime.flushTurn();
+    await bestEffortTail;
+
+    expect(transcript.filter((entry) => entry === 'agent:task_complete' || entry === 'user'))
+      .toEqual(['agent:task_complete', 'user']);
+    expect(transcript.indexOf('agent:message')).toBeLessThan(transcript.indexOf('agent:task_complete'));
 
     await runtime.reset();
   });

@@ -23,6 +23,12 @@ acceptance remain owned by the existing terminal readiness and custody paths.
 Once a provider effect may have occurred, steering failures do not automatically
 replay the prompt through ordinary delivery.
 
+In development source, Claude's main-chain `[Request interrupted by user]` and
+`[Request interrupted by user for tool use]` transcript markers both abort the
+foreground turn through the shared transcript lifecycle classifier. This releases
+a waiting **Send now** prompt through the existing arbiter; the interruption
+itself does not establish provider acceptance of that follow-up.
+
 ## Composer busy-steer policy (development)
 
 `decideSessionMessageDelivery` owns the requested action for ordinary composer
@@ -38,6 +44,17 @@ Provider acceptance carries the exact Pending `localId` to `SessionClient`, whic
 requests server settlement. The server transaction commits or updates the
 transcript message and removes that Pending row before publishing the message
 event and the separate Pending count/version event.
+
+In development source, Claude's Agent SDK and legacy remote runtimes share
+`createClaudeRemotePromptSettlementTracker`. They request the documented
+[`--replay-user-messages`](https://code.claude.com/docs/en/cli-reference) acknowledgment and correlate its main-chain user UUID
+with the exact submitted Pending prompt. Local enqueue, SDK iterable consumption,
+and stdin writes do not settle Pending or retire its replay handoff. A submitted
+prompt without acknowledgment has an uncertain delivery outcome; its handoff
+remains available and Pending does not automatically resend it. Inputs rejected
+before submission remain retryable. Matching acknowledgment echoes carry
+provider-only context and are excluded from the visible transcript. Locally
+handled commands retain their explicit local settlement.
 
 In development source, Claude unified terminal reports exact transcript-proven acceptance before stopping
 for missing required session hooks. The hook failure still stops the wrapper and
@@ -114,6 +131,12 @@ does not write to the provider's interactive terminal.
 
 ## Live runner wake-up recovery (development)
 
+Pending counts and versions come from the server's projection. A materialization
+acknowledgement without that projection, including the released-server adapter,
+retains the last server state. It does not decrement counts or increment versions:
+the same claim's post-commit hint may already have arrived during transcript lookup.
+Older snapshots and hints remain unable to replace newer pending state.
+
 The session client owns pending-input wake subscriptions. A transient socket
 disconnect does not end those subscriptions: idle and active-turn consumers must
 still observe later eligibility updates. Caller cancellation and client close
@@ -124,6 +147,26 @@ Idle and active consumers share the same wake handling. The existing backoff for
 unavailable adapters does not periodically materialize the queue. Reconnect does
 not bypass settings convergence, admission, or the Pending row's blocked state;
 an explicitly blocked message still requires its existing Retry action.
+
+A `terminal_composer_draft` block is the exception: the Claude Unified runner
+keeps custody of the held batch at the head of its queue, and the block is
+reversible. The user-authorized `session.terminalComposer.clear` RPC (Happier
+app **Clear composer**, native Apple app **Clear Terminal Draft**) empties
+Claude's composer with Escape only. On `cleared` or `already_empty` the runner
+wakes its input arbiter, which re-drives the held batch at once; Claude's
+acceptance of that batch settles the blocked row. A clear therefore never
+requeues or retries anything itself, and clients do not Retry as part of it.
+Retry stays the action for a row that is still blocked after the runner has
+re-driven its batch (the native app's "already empty" message points there).
+Every composer text clearer of the pane (this clear, the idle own-leftover
+draft guard and the in-flight steer evaluator) presses the second Escape only
+on screen evidence that Claude took the first one: its "Esc again to clear" hint
+over the same text, read from a capture that differs from the frame the key was
+pressed on (recaptured for up to about 750 ms). They also share the pane's
+clear-key ledger, so their Escapes stay within what Claude absorbs without
+opening Rewind. A draft that changes mid-clear, earlier Escapes the screen has
+not shown yet, a usage-limit wait, or no input box report `not_safe`; a draft
+Claude did not visibly take reports `clear_failed`.
 
 If the session socket stays connected after a transient server-feature probe
 failure, a later pending materialization attempt reuses the session client's
@@ -203,6 +246,92 @@ Happier session ID. The Claude session ID identifies the provider transcript and
 must not replace the daemon's Happier session identity. Otherwise a subsequent
 wake can miss the live runner and attach a second one; replacing the publisher
 turns unresolved delivery claims into `delivery_outcome_uncertain`.
+
+## Claude unified terminal deliveries that never reach Claude (development)
+
+A materialized Pending row must not wait silently in `delivering` when Claude never
+shows, consumes, or records the prompt (incidents `cmwcg4h31` and `cmw9m36zc`,
+11 Nov 2026, Claude Code 2.1.322):
+
+- The screen parser reads a scrolled composer whose first visible row is a blank
+  paragraph row (a long expanded paste in an 80x24 tmux pane) as composer content,
+  not as an empty composer. Before this, staging verification never saw the prompt,
+  never pressed Enter, and waited for the whole session lifetime.
+- One prompt write's staging and consumption verification is bounded by the
+  session's existing stall budget (the mid-turn stall probe's quiet window times its
+  attempts, 45 s × 3). When it expires the attempt ends as the verifier's ambiguous
+  failure: the arbiter keeps terminal custody (no automatic replay), the row becomes
+  `blocked / delivery_outcome_uncertain` (or `ambiguous_terminal_delivery` after
+  Enter), later rows keep flowing, and late provider evidence still resolves the row
+  as `provider_accepted`. The runner logs `prompt delivery was not observed within the
+  session stall budget`.
+- Bare commands that Claude runs only as an interactive panel (`/mcp`, `/config`,
+  `/hooks`, `/permissions`, `/help`, `/status`, `/cost`, `/usage`, owned by
+  `controlCommandRows.ts`) are refused before any write, also mid-turn. They open a
+  panel even mid-turn and write no transcript row on open, on Esc, or with the next
+  prompt, so their delivery could never be accepted. The row becomes
+  `blocked / unsupported_action` with no provider effect; like other pre-effect blocks
+  it holds later rows until it is dismissed.
+- Provider acceptance correlates by prompt text (`promptIdentity.ts`). Inside a pasted
+  block Claude escapes quoted paste markers (`<pasted_content` → `<\pasted_content`,
+  `</pasted_content` → `<\/pasted_content`); identity undoes that before comparing.
+  Before this, a prompt that quoted the marker (a child-session notice, incident
+  `cmvepv5n2`, 11 Nov 2026) was recorded and answered but never accepted, and held the
+  queue until its row was dismissed. Confusable spellings of the marker, which Claude
+  also escapes, are not undone. A row whose text evidence never correlates is released
+  once its canonical Pending row is dismissed (`delivery/dismiss`).
+
+## Inherited uncertain deliveries (development)
+
+When a runner registers as the session publisher, the server marks every
+`delivering` row `blocked / delivery_outcome_uncertain`
+(`providerDeliveryClaimStaleness.ts`): a possible provider effect becomes
+durable uncertainty at once. This also happens on a socket reconnect of the same
+runner, which keeps its custody and still settles the row from late provider
+evidence. A replacement runner (after a restart or a runner crash) holds no
+custody for these rows, so the provider decides each from its own evidence once
+its runtime is established. The session client lists them, decoded, in server
+order; the provider leaf classifies them; the client resolves them through the
+existing Pending resolutions.
+
+Claude unified terminal reads the transcript of the session it resumes, backwards
+only as far as the oldest inherited row's creation (these files reach hundreds of
+megabytes). Only rows between the row's creation and this runtime's start count:
+
+- exactly one main-chain consumption of the exact prompt (a user prompt or a
+  consumed `queued_command`; the stored text, optionally followed by the
+  provider-only context Happier appends) settles the row through the ordinary
+  accepted settlement, so it commits to the transcript with its `localId`;
+- no consumption at all, in a transcript that already existed when the row was
+  created and once the predecessor's terminal host is gone, sends the row again once
+  through `delivery/send-as-new`. A prompt only held in Claude's native queue
+  (`queue-operation enqueue`) died with that process. The host is gone when this
+  runner confirms the saved host dead, or when no host is recorded for the session at
+  all: the terminal attachment registry drops a record only after the host is
+  confirmed dead or torn down (the daemon does this before a Resume and on stop). A
+  borrowed or adopted live host keeps the row with its owner;
+- identical prompts, the prompt inside a larger one, a native-queue release
+  without its consumption, an unreadable transcript, or a predecessor host that may
+  still be alive leave the row blocked for its owner.
+
+Sending a row again uses Pending Input v3 when the server advertises it
+(`capabilities.session.pendingInput.protocolVersion >= 3`): the current runner emits
+`pending-delivery-not-received-v1`, and the server, by that runner's publisher
+authority only, returns the exact row to its place in line (same `localId` and
+position, unblocked, no provider action) for one ordinary delivery. Older servers
+only offer `delivery/send-as-new`, which queues a copy at the end.
+
+Automatic delivery stays FIFO, except that a blocked row the agent may already
+have (`doesPendingDeliveryHoldLaterRowsV1`) no longer holds the rows behind it on a
+v3 server, neither for materialization nor for accepted settlement; pre-effect
+blocks still hold. Older servers hold later rows behind it until it is resolved.
+
+An ordinary row settles only after every queued row ahead of it that still holds;
+exact actions settle out of order, as the server allows. Other providers and
+runtimes leave inherited rows to the owner. RN and the native app present them as possibly
+delivered and resolve them through the same server actions: send again as a new
+message (`delivery/send-as-new`) or remove (`delivery/dismiss`). The server refuses
+ordinary retry, edit, and delete for them.
 
 ## Current Queue V2 activation ownership
 

@@ -63,6 +63,8 @@ export type SummaryShardIndexDbHandle = Readonly<{
   enforceMaxShardsPerSession: (args: Readonly<{ sessionId: string; maxShardsPerSession: number }>) => void;
   markDeepIndexSuccess: (args: Readonly<{ sessionId: string; seqTo: number; nowMs: number }>) => void;
   markDeepIndexFailure: (args: Readonly<{ sessionId: string; nowMs: number; backoffBaseMs: number; backoffMaxMs: number }>) => void;
+  /** The deep index was rebuilt empty: every session must be read again from its first message. */
+  resetDeepIndexCursors: () => void;
   deleteOldestSummaryShards: (args: Readonly<{ limit: number }>) => number;
   checkpointAndVacuum: () => void;
   close: () => void;
@@ -341,6 +343,15 @@ export function openSummaryShardIndexDb(args: Readonly<{ dbPath: string }>): Sum
     WHERE sessionId = ?;
   `);
 
+  const deepResetStmt = db.prepare(`
+    UPDATE session_cursors
+    SET
+      lastDeepIndexedSeq = 0,
+      lastDeepErrorAtMs = NULL,
+      consecutiveDeepFailures = 0,
+      nextDeepEligibleAtMs = 0;
+  `);
+
   const evictStmt = db.prepare(`
     DELETE FROM summary_shards
     WHERE shardId IN (
@@ -610,6 +621,9 @@ export function openSummaryShardIndexDb(args: Readonly<{ dbPath: string }>): Sum
       }
       const nextEligibleAt = now + Math.max(0, Math.trunc(backoff));
       deepFailureStmt.run(now, nextEligibleAt, now, id);
+    },
+    resetDeepIndexCursors: () => {
+      deepResetStmt.run();
     },
     recordMemorySessionIndexState: queueDb.recordMemorySessionIndexState,
     recordMemoryWorkerRun: queueDb.recordMemoryWorkerRun,

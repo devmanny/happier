@@ -26,9 +26,11 @@ export type ClaudeOwnComposerTextLog = Readonly<{
    */
   recordPossiblePartialResidue: (text: string, opts?: { minPrefixChars?: number | undefined }) => void;
   /**
-   * True when the composer draft matches recorded own text or a long visible window from an
-   * interrupted own injection. Short windows are accepted only during an explicitly recorded
-   * possible-write interval so a genuine user draft does not classify as ours.
+   * True when the composer draft matches recorded own text, two or more whole recorded texts of
+   * identity-carrying length painted together, or a long visible window from an interrupted own
+   * injection. Short windows
+   * are accepted only during an explicitly recorded possible-write interval so a genuine user
+   * draft does not classify as ours.
    */
   matches: (draft: string) => boolean;
 }>;
@@ -72,6 +74,49 @@ function isRecordedComposerWindow(params: Readonly<{
       ? params.entry.minShortPrefixResidueChars
       : CLAUDE_UNIFIED_LONG_COMPOSER_RESIDUE_MIN_CHARS,
   });
+}
+
+/**
+ * True when the whole draft is two or more COMPLETE recorded texts, repeats allowed, with nothing
+ * or only whitespace between them. A stalled TUI can paint an earlier own paste and a later one
+ * (for example a Send Again copy) together; that composer holds only text we wrote. A partial,
+ * truncated, or extended entry never covers the draft, so a genuine user edit stays foreign.
+ *
+ * Only entries that carry identity on their own may be pieces: at least
+ * {@link MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS}, the shortest fragment this log ever accepts as own
+ * evidence. The log also holds transcript-seeded replies and controller-typed commands, so short
+ * entries such as "sí" and "dale" would otherwise make a user's "sí dale" ours, and the guard
+ * would erase it. A short own composite stays foreign and blocked, which is the safe failure.
+ */
+function isConcatenationOfRecordedTexts(
+  draft: string,
+  entries: readonly OwnComposerTextLogEntry[],
+  form: 'text' | 'collapsedText',
+): boolean {
+  const pieces = [...new Set(entries
+    .filter((entry) => entry.text.length >= MIN_CONTEXTUAL_PREFIX_RESIDUE_CHARS)
+    .map((entry) => entry[form]))];
+  if (pieces.length === 0) return false;
+  const visited = new Set<number>([0]);
+  const starts = [0];
+  while (starts.length > 0) {
+    const start = starts.pop()!;
+    for (const piece of pieces) {
+      if (!draft.startsWith(piece, start)) continue;
+      let next = start + piece.length;
+      // A single piece covering the whole draft is an exact match, owned by the caller's check.
+      if (next === draft.length) {
+        if (start > 0) return true;
+        continue;
+      }
+      while (next < draft.length && /\s/.test(draft[next]!)) next += 1;
+      if (!visited.has(next)) {
+        visited.add(next);
+        starts.push(next);
+      }
+    }
+  }
+  return false;
 }
 
 function isCollapsedPasteMarkerMatch(params: Readonly<{
@@ -201,7 +246,9 @@ export function createClaudeOwnComposerTextLog(opts?: Readonly<{
           normalizedDraft: collapsed,
           nowMs: referenceMs,
         }))
-      ));
+      ))
+        || isConcatenationOfRecordedTexts(normalized, entries, 'text')
+        || isConcatenationOfRecordedTexts(collapsed, entries, 'collapsedText');
     },
   };
 }

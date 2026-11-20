@@ -163,11 +163,20 @@ function maybeLogRuntimeFetchFailure(params: {
     }
 }
 
-export async function serverFetch(
+export function serverFetch(path: string, init?: RequestInit, options?: ServerFetchOptions): Promise<Response>;
+/** Await response consumption before releasing caller, Home-switch, and opted-in timeout cancellation. */
+export function serverFetch<T>(
+    path: string,
+    init: RequestInit | undefined,
+    options: ServerFetchOptions,
+    consumeResponse: (response: Response) => Promise<T>,
+): Promise<T>;
+export async function serverFetch<T>(
     path: string,
     init?: RequestInit,
     options: ServerFetchOptions = {},
-): Promise<Response> {
+    consumeResponse?: (response: Response) => Promise<T>,
+): Promise<Response | T> {
     const localAbortSequence = abortSequence;
     const snapshot = getActiveServerSnapshot();
     const normalizedPath = normalizePath(path);
@@ -265,6 +274,20 @@ export async function serverFetch(
         }, effectiveTimeoutMs);
     }
 
+    const throwIfRequestAborted = (error: unknown, reportTimeout: boolean): void => {
+        if (!requestController.signal.aborted && !(error instanceof Error && error.name === 'AbortError')) return;
+        const reason = (requestController.signal as unknown as { reason?: unknown }).reason;
+        if (reason === 'server-switch' || abortSequence !== localAbortSequence) {
+            throw new ServerFetchAbortedForServerSwitchError();
+        }
+        if (didWriteTimeout) {
+            if (reportTimeout) reportServerUnreachable(snapshot.serverUrl, error);
+            throw new ServerFetchWriteTimeoutError();
+        }
+        // Caller cancellation does not establish a server reachability failure.
+        throw error;
+    };
+
     const retryMode: 'default' | 'none' = options.retry ?? 'default';
     const isActiveOrigin =
         !isCrossOrigin
@@ -293,20 +316,8 @@ export async function serverFetch(
                             acceptAuthFailed: true,
                         });
                     } catch (error) {
-                        const aborted =
-                            requestController.signal.aborted || (error instanceof Error && error.name === 'AbortError');
-                        if (aborted) {
-                            const reason = (requestController.signal as unknown as { reason?: unknown }).reason;
-                            const serverSwitchAbort = reason === 'server-switch' || abortSequence !== localAbortSequence;
-                            if (serverSwitchAbort) {
-                                throw new ServerFetchAbortedForServerSwitchError();
-                            }
-                            if (didWriteTimeout) {
-                                reportServerUnreachable(snapshot.serverUrl, error);
-                                throw new ServerFetchWriteTimeoutError();
-                            }
-                            throw error;
-                        }
+                        // The surrounding transport catch owns timeout reachability reporting.
+                        throwIfRequestAborted(error, false);
                         if (error instanceof ServerReachabilityWaitTimeoutError) {
                             throw new ServerFetchConnectivityTimeoutError();
                         }
@@ -341,24 +352,7 @@ export async function serverFetch(
                     activeServerId: snapshot.serverId,
                     error,
                 });
-                const aborted =
-                    requestController.signal.aborted || (error instanceof Error && error.name === 'AbortError');
-                if (aborted) {
-                    const reason = (requestController.signal as unknown as { reason?: unknown }).reason;
-                    const serverSwitchAbort = reason === 'server-switch' || abortSequence !== localAbortSequence;
-                    if (serverSwitchAbort) {
-                        throw new ServerFetchAbortedForServerSwitchError();
-                    }
-                    if (didWriteTimeout) {
-                        // The server accepted the connection but never responded within the write
-                        // bound. Report unreachable (so backoff/reachability track it) and surface a
-                        // retryable timeout so the pending outbox re-POSTs with the same localId.
-                        reportServerUnreachable(snapshot.serverUrl, error);
-                        throw new ServerFetchWriteTimeoutError();
-                    }
-                    // Caller aborts should not poison reachability state.
-                    throw error;
-                }
+                throwIfRequestAborted(error, true);
                 if (error instanceof ServerFetchConnectivityTimeoutError) {
                     // Reachability wait timeouts already represent a "paused/offline" state; do not report an extra
                     // transport failure which can reset backoff scheduling.
@@ -410,6 +404,23 @@ export async function serverFetch(
 
             break;
         }
+        if (!response) throw new Error('serverFetch did not attempt the request');
+        if (!consumeResponse) return response;
+
+        // A body-consuming owner keeps cancellation attached until its read settles. Parsing
+        // failures stay outside the transport retry/classification path and never replay a write.
+        try {
+            const result = await consumeResponse(response);
+            if (requestController.signal.aborted) {
+                const error = new Error('Aborted');
+                error.name = 'AbortError';
+                throw error;
+            }
+            return result;
+        } catch (error) {
+            throwIfRequestAborted(error, false);
+            throw error;
+        }
     } finally {
         if (writeTimeoutHandle) {
             clearTimeout(writeTimeoutHandle);
@@ -417,10 +428,4 @@ export async function serverFetch(
         removeUpstreamListener();
         inFlightControllers.delete(requestController);
     }
-
-    if (!response) {
-        // Defensive: loop always runs at least once, but keep return type strict.
-        throw new Error('serverFetch did not attempt the request');
-    }
-    return response;
 }

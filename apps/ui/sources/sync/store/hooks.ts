@@ -32,10 +32,7 @@ import {
   deriveSessionListRenderableHasUnreadMessagesFromReadableSeq,
   type SessionListRenderableSession,
 } from '../domains/session/listing/sessionListRenderable';
-import {
-  areServerProfileIdentifiersEquivalent,
-  resolveServerProfileScopeIdForIdentifier,
-} from '../domains/server/serverProfiles';
+import { resolveSessionListCacheServerId } from '../domains/session/listing/sessionListPresentation';
 import {
   resolveSessionReadableSeq,
 } from '../domains/session/readCursor/resolveSessionReadableSeq';
@@ -1389,21 +1386,6 @@ function normalizeSelectedSessionListServerIds(serverIds: ReadonlyArray<string> 
   return out;
 }
 
-function resolveSelectedSessionListServerId(
-  dataByServerId: Readonly<Record<string, SessionListViewItem[] | null>>,
-  requestedServerId: string,
-): string | null {
-  if (Object.prototype.hasOwnProperty.call(dataByServerId, requestedServerId)) return requestedServerId;
-
-  const scopedServerId = resolveServerProfileScopeIdForIdentifier(requestedServerId);
-  if (scopedServerId && Object.prototype.hasOwnProperty.call(dataByServerId, scopedServerId)) return scopedServerId;
-
-  for (const cachedServerId of Object.keys(dataByServerId)) {
-    if (areServerProfileIdentifiersEquivalent(cachedServerId, requestedServerId)) return cachedServerId;
-  }
-  return null;
-}
-
 export function useSessionListViewDataByServerId(
   serverIds?: ReadonlyArray<string>,
 ): Record<string, SessionListViewItem[] | null> {
@@ -1562,6 +1544,7 @@ export function buildSessionListShellViewItemSignature(item: SessionListViewItem
     item.session.active === true ? '1' : '0',
     item.session.archivedAt ?? '',
     item.session.keepVisibleWhenInactive === true ? '1' : '0',
+    item.session.archiving === true ? '1' : '0',
     item.session.pendingCount ?? '',
     item.session.pendingBlockedCount ?? '',
     metadata?.name ?? '',
@@ -1746,7 +1729,7 @@ function getStableSelectedSessionListShellViewDataByServerId(
   const selectedDataByServerId: SessionListShellViewDataByServerId = {};
   let hasSelectedData = false;
   for (const serverId of selectedServerIds) {
-    const cachedServerId = resolveSelectedSessionListServerId(dataByServerId, serverId);
+    const cachedServerId = resolveSessionListCacheServerId(dataByServerId, serverId);
     if (!cachedServerId || Object.prototype.hasOwnProperty.call(selectedDataByServerId, cachedServerId)) continue;
     selectedDataByServerId[cachedServerId] = dataByServerId[cachedServerId] ?? null;
     hasSelectedData = true;

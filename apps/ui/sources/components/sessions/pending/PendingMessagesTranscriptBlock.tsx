@@ -409,15 +409,17 @@ export function PendingMessagesTranscriptBlock(props: Readonly<{
     }, [props.onEditPendingMessage]);
 
     const handleReorderIds = React.useCallback(async (ids: string[]) => {
-        if (!canReorderPendingMessages || ids.length <= 1) return;
+        if (!canReorderPendingMessages || ids.length <= 1) return 'refused' as const;
         const current = props.pendingMessages.map((m) => m.id);
         if (ids.length === current.length && ids.every((id, idx) => id === current[idx])) {
-            return;
+            return 'unchanged' as const;
         }
         try {
             await sync.reorderPendingMessages(props.sessionId, ids);
+            return 'applied' as const;
         } catch (e) {
             Modal.alert(t('common.error'), e instanceof Error ? e.message : t('session.pendingMessages.errors.reorderFailed'));
+            return 'unknown' as const;
         }
     }, [canReorderPendingMessages, props.pendingMessages, props.sessionId]);
 

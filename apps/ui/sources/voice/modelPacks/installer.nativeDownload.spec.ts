@@ -171,11 +171,12 @@ describe('native model pack file downloads', () => {
     if (platform === 'ios') expect(harness.nativeOptions[0]?.sessionType).toBe(1);
     expect(harness.files.get(harness.fileUri)).toEqual(harness.bytes);
     expect(harness.files.has(harness.metaUri)).toBe(true);
-    // Bytes arrive while the file transfers; it counts as done only once verified.
+    // Bytes arrive while the file transfers, then hashing reports verified bytes; it counts as done only once verified.
     expect(progress).toEqual([
-      { loaded: 2, total: 4, filesDone: 0, filesTotal: 1 },
-      { loaded: 4, total: 4, filesDone: 0, filesTotal: 1 },
-      { loaded: 4, total: 4, filesDone: 1, filesTotal: 1 },
+      { loaded: 2, total: 4, verified: 0, filesDone: 0, filesTotal: 1 },
+      { loaded: 4, total: 4, verified: 0, filesDone: 0, filesTotal: 1 },
+      { loaded: 4, total: 4, verified: 4, filesDone: 0, filesTotal: 1 },
+      { loaded: 4, total: 4, verified: 4, filesDone: 1, filesTotal: 1 },
     ]);
     expect(harness.lifecycle).toMatchObject({ subscribed: false, retainedNativeTask: false });
   });

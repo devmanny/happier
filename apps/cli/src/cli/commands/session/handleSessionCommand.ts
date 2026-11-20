@@ -85,7 +85,7 @@ const SESSION_HELP_BY_COMMAND = {
   create: SESSION_CREATE_USAGE,
   send: 'happier session send <session-id-or-prefix-or-tag> <message> [--local-id <id>] [--permission-mode <mode>] [--model <model-id>] [--wait] [--timeout <seconds>] [--json]',
   wait: 'happier session wait <session-id-or-prefix-or-tag> [--timeout <seconds>] [--json]',
-  stop: 'happier session stop <session-id-or-prefix-or-tag> [--json]',
+  stop: 'happier session stop <session-id-or-prefix-or-tag> [--reason idle] [--json]',
   history: 'happier session history <session-id-or-prefix-or-tag> [--limit N] [--format compact|raw] [--include-meta] [--include-structured-payload] [--json]',
   'set-title': 'happier session set-title <session-id-or-prefix-or-tag> <title> [--json]',
   'set-permission-mode': 'happier session set-permission-mode <session-id-or-prefix-or-tag> <mode> [--json]',

@@ -19,6 +19,14 @@ vi.mock('../../configuration', () => ({
   },
 }));
 
+const { notifyParentSessionBestEffort } = vi.hoisted(() => ({
+  notifyParentSessionBestEffort: vi.fn(async () => undefined),
+}));
+
+vi.mock('@/session/lineage/notifyParentSession', () => ({
+  notifyParentSessionBestEffort,
+}));
+
 import { registerRunnerTerminationHandlers } from './runnerTerminationHandlers';
 
 function createFakeProcess() {
@@ -168,6 +176,51 @@ describe('registerRunnerTerminationHandlers', () => {
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       handlers.dispose();
+    }
+  });
+
+  it('tells the parent session the child stopped, before the process exits, for clean and crashed terminations', async () => {
+    notifyParentSessionBestEffort.mockClear();
+    const fakeProcess = createFakeProcess();
+    const exit = vi.fn();
+    const session = { sessionId: 'child-1', getMetadataSnapshot: () => ({}) };
+    const handlers = registerRunnerTerminationHandlers({
+      process: fakeProcess,
+      exit,
+      onTerminate: async () => undefined,
+      parentNoticeSession: session,
+    });
+
+    try {
+      handlers.requestTermination({ kind: 'uncaughtException', error: new Error('boom') });
+      await handlers.whenTerminated;
+
+      expect(notifyParentSessionBestEffort).toHaveBeenCalledWith({
+        session,
+        event: { kind: 'stopped', reason: 'Uncaught exception', crashed: true },
+      });
+      expect(notifyParentSessionBestEffort.mock.invocationCallOrder[0]).toBeLessThan(exit.mock.invocationCallOrder[0]!);
+    } finally {
+      handlers.dispose();
+    }
+
+    notifyParentSessionBestEffort.mockClear();
+    const cleanProcess = createFakeProcess();
+    const cleanHandlers = registerRunnerTerminationHandlers({
+      process: cleanProcess,
+      exit: () => undefined,
+      onTerminate: async () => undefined,
+      parentNoticeSession: session,
+    });
+    try {
+      cleanHandlers.requestTermination({ kind: 'killSession' });
+      await cleanHandlers.whenTerminated;
+      expect(notifyParentSessionBestEffort).toHaveBeenCalledWith({
+        session,
+        event: { kind: 'stopped', reason: 'Killed by user', crashed: false },
+      });
+    } finally {
+      cleanHandlers.dispose();
     }
   });
 

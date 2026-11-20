@@ -19,6 +19,8 @@ import {
     isAgentStateRequestCoveredByCompletedRequests,
 } from '@happier-dev/agents';
 import { normalizeAskUserQuestionInputForPublication } from '@/agent/questions/normalizeAskUserQuestionInput';
+import { summarizeToolInputForNotification } from '@happier-dev/protocol';
+import { notifyParentSessionInBackground } from '@/session/lineage/notifyParentSession';
 import { logger } from '@/ui/logger';
 import { deepEqual } from '@/utils/deterministicJson';
 
@@ -451,6 +453,21 @@ export class AgentStateRequestStore {
         toolInput: unknown;
         createdAtMs?: number;
     }>): void {
+        // The spawning session learns the child is blocked independently of device push:
+        // the notifier below is per-request deduplicated, so republishes after a
+        // reconnect do not repeat the notice.
+        const requestKind = resolveAgentRequestKind(params.toolName);
+        notifyParentSessionInBackground({
+            session: this.session,
+            event: {
+                kind: 'blocked',
+                requestKind,
+                requestId: params.permissionId,
+                toolName: params.toolName,
+                toolDetails: summarizeToolInputForNotification(params.toolName, params.toolInput),
+            },
+        });
+
         const notifier = this.getOrCreatePermissionRequestPushNotifier();
         if (!notifier) return;
 

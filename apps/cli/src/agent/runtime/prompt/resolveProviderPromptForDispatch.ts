@@ -15,8 +15,11 @@ import {
     resolveStructuredInputProviderContextInMeta,
     type StructuredInputCatalogReaders,
 } from '@/agent/runtime/prompt/resolveStructuredInputProviderContext';
-import { buildSessionReferenceBlockV1 } from '@/agent/runtime/prompt/sessionReferenceBlock';
+import { buildSessionReferenceBlockV1, HAPPIER_SESSION_REFERENCE_OPEN_TAG } from '@/agent/runtime/prompt/sessionReferenceBlock';
+import { AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER } from '@/session/agentMemory/agentMemory';
 import { logger } from '@/ui/logger';
+import { getAgentMemory } from '@/session/agentMemory/startAgentMemory';
+import { getAgentTasks } from '@/session/agentTasks/startAgentTasks';
 
 /**
  * Prompt finalization: the one place a queued user message becomes the exact prompt and
@@ -30,6 +33,8 @@ import { logger } from '@/ui/logger';
  */
 
 export type ProviderPromptDispatchSession = Readonly<{
+    /** The Happier session; an agent thread's per-turn context is looked up by it. */
+    sessionId?: string;
     getMetadataSnapshot: () => unknown;
     updateMetadata: (updater: (metadata: any) => any) => void | Promise<void>;
     refreshSessionSnapshotFromServerBestEffort?: (opts?: { reason: 'connect' | 'waitForMetadataUpdate' }) => Promise<void>;
@@ -92,10 +97,53 @@ export type ResolvedProviderPromptForDispatch = Readonly<{
     settleReplaySeedOnProviderAcceptance: () => Promise<ReplaySeedSettlementResultV1>;
 }>;
 
+/** Advisory context: a read failure never blocks the send, but it is logged. */
+async function readAdvisory(label: string, read: () => Promise<string | null>): Promise<string | null> {
+    try {
+        return await read();
+    } catch (error) {
+        logger.warn(`[PromptDispatch] Agent ${label} unavailable (non-fatal)`, {
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+    }
+}
+
+const AGENT_TASK_BOARD_HEADER = '[Happier · your open tasks (update them with tarea_actualizar and their id).]';
+
+/**
+ * Whether `suffix` is the provider-only context this owner appends after the prompt body, joined
+ * by a blank line: Session references, then the agent turn context. It lets recovery recognize a
+ * delivered prompt in a provider transcript without reproducing that context.
+ */
+export function isHappierProviderOnlyPromptSuffix(suffix: string): boolean {
+    return [HAPPIER_SESSION_REFERENCE_OPEN_TAG, AGENT_OTHER_THREADS_TURN_CONTEXT_HEADER, AGENT_TASK_BOARD_HEADER]
+        .some((header) => suffix.startsWith(header));
+}
+
+/** What an agent thread hears at each turn start: its other threads, then its open tasks. */
+async function readAgentTurnContext(sessionId: string | undefined): Promise<string | null> {
+    const memory = getAgentMemory(sessionId);
+    const tasks = getAgentTasks(sessionId);
+    const [threads, board] = await Promise.all([
+        memory ? readAdvisory('thread context', () => memory.turnContextBlock()) : null,
+        // Tasks assigned to this thread's agent, or to the session itself (with or without an agent).
+        tasks ? readAdvisory('task board', () => tasks.store.boardFor({ agentId: tasks.caller.agent?.id, sessionId: tasks.caller.sessionId })) : null,
+    ]);
+    const boardBlock = board ? `${AGENT_TASK_BOARD_HEADER}\n${board}` : null;
+    return [threads, boardBlock].filter(Boolean).join('\n\n') || null;
+}
+
 export async function resolveProviderPromptForDispatch(params: Readonly<{
     session: ProviderPromptDispatchSession;
     userText: string;
-    allowSeed: boolean;
+    /**
+     * Whether this prompt opens a conversation turn that may carry Happier's turn context: the
+     * replay seed before it and the agent thread context after it. False for a command the
+     * provider must receive verbatim (appended text becomes its arguments, or turns it into plain
+     * text) and for a prompt an earlier dispatch already resolved.
+     */
+    allowTurnContext: boolean;
     localId: string | null;
     nowMs: number;
     refreshMetadataBeforeRead: boolean;
@@ -140,7 +188,7 @@ export async function resolveProviderPromptForDispatch(params: Readonly<{
     const seedResolution = await resolveProviderPromptWithReplaySeed({
         session: params.session,
         userText: params.userText,
-        allowSeed: params.allowSeed,
+        allowSeed: params.allowTurnContext,
         localId: params.localId,
         nowMs: params.nowMs,
         refreshMetadataBeforeRead: params.refreshMetadataBeforeRead,
@@ -178,8 +226,13 @@ export async function resolveProviderPromptForDispatch(params: Readonly<{
     // for the next dispatch, which may well have room.
     const seedDelivered = seedResolution.seedApplied && fittedSeedText.length > 0;
 
+    // An agent thread hears, every turn, what its other threads are doing. Provider-only text,
+    // like the reference block: the stored message stays the user's own.
+    const agentTurnContext = params.allowTurnContext ? await readAgentTurnContext(params.session.sessionId) : null;
+    const providerPrompt = [promptBody, sessionReferenceBlock, agentTurnContext].filter(Boolean).join('\n\n');
+
     return {
-        providerPrompt: sessionReferenceBlock ? `${promptBody}\n\n${sessionReferenceBlock}` : promptBody,
+        providerPrompt,
         meta,
         seedApplied: seedDelivered,
         seedText: fittedSeedText || seedResolution.seedText,

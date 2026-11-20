@@ -7,6 +7,9 @@ import type { ClientToServerEvents, ServerToClientEvents } from '../types';
 import { resolveServerHttpBaseUrl } from '@/session/transport/http/serverHttpBaseUrl';
 import { emitSocketWithAck } from '@/session/transport/shared/socketAck';
 import {
+    NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+    NotReceivedPendingDeliveryRequestV1Schema,
+    NotReceivedPendingDeliveryResponseV1Schema,
     ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
     AcceptedPendingSettlementRequestV1Schema,
     AcceptedPendingSettlementResponseV1Schema,
@@ -466,11 +469,15 @@ function readPendingRowDeliveryStatus(record: Record<string, unknown>): PendingD
     return typedStatus ?? legacyStatus;
 }
 
-type PendingQueueV2ProjectionEntry = Readonly<{
+export type PendingQueueV2ProjectionEntry = Readonly<{
     localId: string;
     deliveryStatus: PendingDeliveryStatusV1;
     messageRole: SessionMessageRole | null;
     requestedAction: PendingRequestedActionV1 | null;
+    /** The stored envelope (`{t:'encrypted',c}` / `{t:'plain',v}`), null when unusable. */
+    content: SessionMessageContent | null;
+    /** When the row was enqueued (ms), null when absent. */
+    createdAt: number | null;
 }>;
 
 function parsePendingQueueV2Projection(value: unknown): PendingQueueV2ProjectionEntry[] {
@@ -492,6 +499,7 @@ function parsePendingQueueV2Projection(value: unknown): PendingQueueV2Projection
         const deliveryStatus = readPendingRowDeliveryStatus(pendingRecord);
         const messageRole = SessionMessageRoleSchema.safeParse(pendingRecord.messageRole);
         const requestedAction = PendingRequestedActionV1Schema.safeParse(pendingRecord.requestedAction);
+        const content = SessionMessageContentSchema.safeParse(pendingRecord.content);
         if (
             localId === null
             || seenLocalIds.has(localId)
@@ -505,6 +513,8 @@ function parsePendingQueueV2Projection(value: unknown): PendingQueueV2Projection
             deliveryStatus,
             messageRole: messageRole.success ? messageRole.data : null,
             requestedAction: requestedAction.success ? requestedAction.data : null,
+            content: content.success ? content.data : null,
+            createdAt: parseMaterializedMessageTimestamp(pendingRecord.createdAt),
         });
     }
     return entries;
@@ -724,6 +734,29 @@ function isProviderDeliveryMaterializationValid(params: {
     return isLegacyProviderClaim || isRowFirstProviderDelivery;
 }
 
+export async function listPendingQueueV2RowsFromServer(params: {
+    token: string;
+    sessionId: string;
+}): Promise<PendingQueueV2ProjectionEntry[]> {
+    return await fetchPendingQueueV2Projection(params);
+}
+
+/**
+ * For a row whose provider effect may have occurred: the server queues a copy as a new `enqueue`
+ * row (deterministic `send-as-new-…` localId, idempotent) and hides the original as `resent_as_new`.
+ */
+export async function sendPendingQueueV2DeliveryAsNew(params: {
+    token: string;
+    sessionId: string;
+    localId: string;
+}): Promise<{ pendingQueueState?: KnownPendingQueueState }> {
+    return postPendingQueueV2DeliveryAction({
+        ...params,
+        action: 'send-as-new',
+        body: {},
+    });
+}
+
 export async function listPendingQueueV2LocalIdsFromServer(params: {
     token: string;
     sessionId: string;
@@ -909,6 +942,84 @@ export async function resolveAcceptedPendingQueueV2Delivery(params: {
     };
 }
 
+function createNotReceivedPendingDeliveryAckSocket(
+    socket: Socket<ServerToClientEvents, ClientToServerEvents>,
+): PendingMaterializeAckSocket {
+    const build = (target: Socket<ServerToClientEvents, ClientToServerEvents>): PendingMaterializeAckSocket => ({
+        connected: target.connected,
+        emitWithAck: async (event, payload) => {
+            if (event !== NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1) {
+                throw new Error(`Unexpected not-received pending delivery socket ACK event: ${event}`);
+            }
+            return await target.emitWithAck(
+                NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+                NotReceivedPendingDeliveryRequestV1Schema.parse(payload),
+            );
+        },
+        timeout: (ms) => build(target.timeout(ms)),
+    });
+    return build(socket);
+}
+
+/**
+ * Pending Input v3: as the session's current runner, report that the provider never received this
+ * possibly-delivered row, so the server returns it to its place in line. Failures throw with the
+ * server's typed error; only the current publisher is authorized.
+ */
+export async function requeueNotReceivedPendingQueueV2Delivery(params: {
+    socket: Socket<ServerToClientEvents, ClientToServerEvents>;
+    sessionId: string;
+    localId: string;
+}): Promise<{ didRequeue: boolean; pendingQueueState?: KnownPendingQueueState }> {
+    const localId = requirePendingLocalId(params.localId);
+    const raw = await emitSocketWithAck<Record<string, unknown>>({
+        socket: createNotReceivedPendingDeliveryAckSocket(params.socket),
+        event: NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+        payload: { v: 1, sessionId: params.sessionId, localId },
+    });
+    const parsed = NotReceivedPendingDeliveryResponseV1Schema.safeParse(raw);
+    if (!parsed.success) throw new Error('Invalid not-received pending delivery acknowledgement');
+    const ack = parsed.data;
+    if (!ack.ok) throw new Error(`Not-received pending delivery failed: ${ack.error}`);
+    const pendingQueueState = readKnownPendingQueueState(ack);
+    return {
+        didRequeue: ack.didRequeue,
+        ...(pendingQueueState ? { pendingQueueState } : {}),
+    };
+}
+
+/**
+ * Replace a queued row's requested action — the operation a user's tap on a blocked row sends.
+ * For a row blocked before any provider effect was possible the server also clears the block and
+ * keeps the row's place in line; a possibly-delivered row is refused with `action-conflict`.
+ */
+export async function updatePendingQueueV2RequestedAction(params: {
+    token: string;
+    sessionId: string;
+    localId: string;
+    requestedAction: PendingRequestedActionV1;
+}): Promise<{ didUpdate: boolean; pendingQueueState?: KnownPendingQueueState }> {
+    const localId = requirePendingLocalId(params.localId);
+    const serverUrl = resolveServerHttpBaseUrl();
+    const response = await axios.patch(
+        `${serverUrl}/v2/sessions/${encodeURIComponent(params.sessionId)}/pending/${encodeURIComponent(localId)}/action`,
+        { requestedAction: params.requestedAction },
+        {
+            headers: buildSessionRunnerHttpHeaders(params.token, 'application/json'),
+            timeout: 10_000,
+        },
+    );
+    const data: unknown = response?.data;
+    if (!data || typeof data !== 'object' || (data as Record<string, unknown>).ok !== true) {
+        throw new Error('Invalid pending requested-action response');
+    }
+    const pendingQueueState = readKnownPendingQueueState(data);
+    return {
+        didUpdate: (data as Record<string, unknown>).didUpdate === true,
+        ...(pendingQueueState ? { pendingQueueState } : {}),
+    };
+}
+
 export async function blockPendingQueueV2Delivery(params: {
     token: string;
     sessionId: string;
@@ -957,7 +1068,7 @@ async function postPendingQueueV2DeliveryAction(params: {
     token: string;
     sessionId: string;
     localId: string;
-    action: 'block' | 'handled';
+    action: 'block' | 'handled' | 'send-as-new';
     body: Record<string, unknown>;
 }): Promise<{ pendingQueueState?: KnownPendingQueueState; message?: PendingQueueMaterializedMessage | null; didResolve?: boolean }> {
     const localId = requirePendingLocalId(params.localId);

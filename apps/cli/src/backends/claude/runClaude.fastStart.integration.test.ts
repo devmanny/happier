@@ -1,9 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { rmSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
+import * as childProcess from 'node:child_process';
 
 import type { Credentials } from '@/persistence';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
@@ -13,6 +15,12 @@ import type { registerRunnerTerminationHandlers as registerRunnerTerminationHand
 import type { RunnerTerminationEvent, RunnerTerminationOutcome } from '@/agent/runtime/runnerTerminationOutcome';
 import type { AgentModelDescriptor } from '@happier-dev/agents';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
+
+// Observe/replace only the OS child boundary; the startup regression runs the real provider loop.
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 
@@ -78,6 +86,32 @@ function createLegacyCredentials(): Credentials {
       secret: new Uint8Array(32).fill(7),
     },
   };
+}
+
+const readySessions = new Set<import('./session').Session>();
+
+afterEach(() => {
+  for (const session of readySessions) session.cleanup();
+  readySessions.clear();
+});
+
+async function createReadySession(opts: Parameters<typeof import('./loop').loop>[0]) {
+  const { Session } = await import('./session');
+  const session = new Session({
+    client: opts.session,
+    path: opts.path,
+    logPath: '/tmp/happier.log',
+    sessionId: null,
+    messageQueue: opts.messageQueue,
+    onModeChange: opts.onModeChange,
+    hookSettingsPath: opts.hookSettingsPath,
+    hookPluginDir: opts.hookPluginDir,
+    pushSender: opts.pushSender,
+    accountSettings: opts.accountSettings,
+    startedBy: opts.startedBy,
+  });
+  readySessions.add(session);
+  return session;
 }
 
 async function waitFor<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -149,17 +183,7 @@ vi.mock('@/backends/claude/loop', () => ({
     invocationLoopEntered.resolve();
     if (invocationBeforeLoopCapture) await invocationBeforeLoopCapture;
     if (invocationAutoSessionReady) {
-      const sessionReady = opts?.onSessionReady?.({
-        cleanup: vi.fn(),
-        drainCriticalMetadataWrites: vi.fn(async () => {}),
-        ensureMetadataSnapshot: vi.fn(async () => ({})),
-        updateMetadata: vi.fn(async () => {}),
-        setPushSender: vi.fn(),
-        client: {
-          getMetadataSnapshot: vi.fn(() => ({})),
-        },
-        getOrCreatePermissionRpcRouter: () => ({ registerConsumer: vi.fn() }),
-      });
+      const sessionReady = opts?.onSessionReady?.(await createReadySession(opts));
       if (invocationAwaitAutoSessionReadyCallback) {
         await sessionReady;
       }
@@ -403,6 +427,211 @@ describe('runClaude fast-start', () => {
     exitSpy.mockRestore();
   });
 
+  it('does not start provider work when termination is accepted during main MCP startup', async () => {
+    vi.resetModules();
+    backendInitDelayMs = 0;
+    getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_terminating_startup', metadataVersion: 1 }));
+    const mcpStarted = createDeferred<void>();
+    const releaseMcp = createDeferred<void>();
+    const flushStarted = createDeferred<void>();
+    const releaseFlush = createDeferred<void>();
+    const providerStarted = createDeferred<void>();
+    const fakeProcess = new EventEmitter();
+    let providerWorkStarted = false;
+    let terminationAccepted = false;
+    const environment = createEnvKeyScope(['HAPPIER_CLAUDE_PATH', 'CLAUDE_CONFIG_DIR']);
+    const root = await mkdtemp(join(tmpdir(), 'happier-claude-startup-stop-'));
+    environment.patch({ HAPPIER_CLAUDE_PATH: process.execPath, CLAUDE_CONFIG_DIR: root });
+    const originalServer = startHappyServerSpy.getMockImplementation();
+    if (!originalServer) throw new Error('MCP server boundary fixture is missing');
+    startHappyServerSpy.mockImplementationOnce(async (client) => {
+      mcpStarted.resolve();
+      await releaseMcp.promise;
+      return originalServer(client);
+    });
+    const originalSession = sessionSyncClientSpy.getMockImplementation();
+    if (!originalSession) throw new Error('Session transport fixture is missing');
+    sessionSyncClientSpy.mockImplementationOnce(response => {
+      const client = originalSession(response);
+      let terminating = false;
+      Object.assign(client, {
+        beginRuntimeTermination: () => { terminating = true; },
+        hasRuntimeTerminationStarted: () => terminating,
+        peekPendingMessageQueueV2Count: async () => 0,
+        waitForPendingEligibilityUpdate: (signal: AbortSignal) => new Promise<boolean>(resolve => {
+          if (signal.aborted) resolve(false);
+          else signal.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+      });
+      client.flush.mockImplementation(async () => {
+        flushStarted.resolve();
+        await releaseFlush.promise;
+      });
+      return client;
+    });
+    const actualLoop = await vi.importActual<typeof import('./loop')>('./loop');
+    const { loop } = await import('./loop');
+    const originalLoop = vi.mocked(loop).getMockImplementation();
+    if (!originalLoop) throw new Error('Provider loop fixture is missing');
+    vi.mocked(loop).mockImplementationOnce(opts => actualLoop.loop({
+      ...opts,
+      onSessionReady: async session => {
+        readySessions.add(session);
+        await opts.onSessionReady?.(session);
+      },
+    }));
+    const actualTermination = await vi.importActual<typeof import('@/agent/runtime/runnerTerminationHandlers')>(
+      '@/agent/runtime/runnerTerminationHandlers',
+    );
+    const { registerRunnerTerminationHandlers } = await import('@/agent/runtime/runnerTerminationHandlers');
+    vi.mocked(registerRunnerTerminationHandlers).mockImplementationOnce(params => actualTermination.registerRunnerTerminationHandlers({
+      ...params,
+      process: fakeProcess,
+      exit: code => { process.exit(code); },
+    }));
+    const originalSpawn = vi.mocked(childProcess.spawn).getMockImplementation();
+    if (!originalSpawn) throw new Error('OS process boundary fixture is missing');
+    vi.mocked(childProcess.spawn).mockImplementation((command, args, options) => {
+      if (command !== process.execPath) return originalSpawn(command, args, options);
+      if (terminationAccepted) {
+        providerWorkStarted = true;
+        providerStarted.resolve();
+      }
+      const child = new childProcess.ChildProcess();
+      Object.assign(child, { pid: 12345, stdio: [] });
+      queueMicrotask(() => child.emit('exit', 0, null));
+      return child;
+    });
+    const { runClaude } = await import('./runClaude');
+    const run = runClaude(createLegacyCredentials(), {
+      startedBy: 'daemon',
+      startingMode: 'local',
+      terminalRuntime: {
+        mode: 'herdr',
+        herdrSessionName: 'startup-stop',
+        herdrSocketPath: '/tmp/herdr-startup-stop.sock',
+        herdrTerminalId: 'startup-stop',
+      },
+    });
+    try {
+      await waitFor(Promise.race([
+        mcpStarted.promise,
+        run.then(() => { throw new Error('Runner ended before MCP startup'); }),
+      ]), loopStartWaitMs);
+      terminationAccepted = true;
+      fakeProcess.emit('SIGTERM');
+      await waitFor(flushStarted.promise, loopStartWaitMs);
+      releaseMcp.resolve();
+      // Keep transport cleanup in flight while the resumed startup can reach the real OS boundary.
+      await Promise.race([providerStarted.promise, new Promise(resolve => setTimeout(resolve, 1_000))]);
+      expect(providerWorkStarted).toBe(false);
+    } finally {
+      releaseMcp.resolve();
+      releaseFlush.resolve();
+      await run;
+      vi.mocked(loop).mockReset().mockImplementation(originalLoop);
+      vi.mocked(childProcess.spawn).mockImplementation(originalSpawn);
+      environment.restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a failed session close through default diagnostics while completing best-effort cleanup', async () => {
+    vi.resetModules();
+    loopStarted = createDeferred<void>();
+    loopExit = createDeferred<number>();
+    lastLoopOpts = null;
+    autoSessionReady = true;
+    backendInitDelayMs = 0;
+    getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_cleanup_failure', metadataVersion: 1 }));
+    const previousSessionImpl = sessionSyncClientSpy.getMockImplementation();
+    if (!previousSessionImpl) throw new Error('Session transport fixture is missing');
+    const error = new Error('injected session close failure');
+    let failedClose: ReturnType<typeof vi.fn<() => Promise<void>>> | undefined;
+    sessionSyncClientSpy.mockImplementation((response) => {
+      const client = previousSessionImpl(response);
+      client.close.mockRejectedValueOnce(error);
+      failedClose = client.close;
+      return client;
+    });
+    const { logger } = await import('@/ui/logger');
+    vi.mocked(logger.infoFile).mockClear();
+    exitSpy.mockClear();
+    const { runClaude } = await import('./runClaude');
+    const run = runClaude(createLegacyCredentials(), { startedBy: 'terminal', startingMode: 'local' });
+    try {
+      await waitFor(loopStarted.promise, loopStartWaitMs);
+      loopExit.resolve(0);
+      await expect(run).resolves.toBeUndefined();
+      expect(exitSpy).toHaveBeenCalledWith(0);
+      expect(failedClose).toHaveBeenCalledTimes(1);
+      expect(logger.infoFile).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        phase: 'session',
+        cause: expect.stringContaining(error.message),
+      }));
+    } finally {
+      loopExit.resolve(0);
+      await run;
+      sessionSyncClientSpy.mockImplementation(previousSessionImpl);
+    }
+  });
+
+  it('removes main-path hook resources after session close fails while preserving the error', async () => {
+    vi.resetModules();
+    loopStarted = createDeferred<void>();
+    loopExit = createDeferred<number>();
+    autoSessionReady = true;
+    backendInitDelayMs = 0;
+    getOrCreateSessionSpy.mockImplementation(async () => ({ id: 'sess_main_cleanup_failure', metadataVersion: 1 }));
+    const originalSession = sessionSyncClientSpy.getMockImplementation();
+    if (!originalSession) throw new Error('Session transport fixture is missing');
+    const error = new Error('injected main session close failure');
+    sessionSyncClientSpy.mockImplementationOnce(response => {
+      const client = originalSession(response);
+      client.close.mockRejectedValueOnce(error);
+      return client;
+    });
+    const root = await mkdtemp(join(tmpdir(), 'happier-main-cleanup-failure-'));
+    const settingsPath = join(root, 'hooks.json');
+    const pluginDir = join(root, 'plugin');
+    const resourcePaths = [settingsPath, join(root, 'hooks.overlay.json'), join(root, 'hooks.statusline-secret'), pluginDir];
+    await Promise.all(resourcePaths.slice(0, 3).map(path => writeFile(path, 'synthetic hook fixture')));
+    await mkdir(pluginDir);
+    const hookServer = createServer();
+    await new Promise<void>((resolve, reject) => {
+      hookServer.once('error', reject);
+      hookServer.listen(0, '127.0.0.1', resolve);
+    });
+    const address = hookServer.address();
+    if (!address || typeof address === 'string') throw new Error('Hook server boundary was not listening');
+    const hookBoundary = await import('./utils/startHookServer');
+    vi.mocked(hookBoundary.startHookServer).mockResolvedValueOnce({ port: address.port, stop: () => { hookServer.close(); } });
+    const settingsBoundary = await import('./utils/generateHookSettings');
+    const actualSettings = await vi.importActual<typeof import('./utils/generateHookSettings')>('./utils/generateHookSettings');
+    const hookGenerator = await import('./utils/generateHookSettingsFileWithEnsuredRuntime');
+    vi.mocked(hookGenerator.generateHookSettingsFileWithEnsuredRuntime).mockResolvedValueOnce(settingsPath);
+    vi.mocked(hookGenerator.generateHookPluginDirWithEnsuredRuntime).mockResolvedValueOnce(pluginDir);
+    vi.mocked(settingsBoundary.cleanupHookSettingsFile).mockImplementation(actualSettings.cleanupHookSettingsFile);
+    vi.mocked(settingsBoundary.cleanupHookPluginDir).mockImplementation(actualSettings.cleanupHookPluginDir);
+    const { runClaude } = await import('./runClaude');
+    const outcome = runClaude(createLegacyCredentials(), { startedBy: 'terminal', startingMode: 'remote' })
+      .then(() => null, failure => failure);
+    try {
+      await waitFor(loopStarted.promise, loopStartWaitMs);
+      loopExit.resolve(0);
+      await expect(outcome).resolves.toBe(error);
+      expect(hookServer.listening).toBe(false);
+      for (const path of resourcePaths) await expect(access(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      loopExit.resolve(0);
+      await outcome;
+      if (hookServer.listening) hookServer.close();
+      vi.mocked(settingsBoundary.cleanupHookSettingsFile).mockReset();
+      vi.mocked(settingsBoundary.cleanupHookPluginDir).mockReset();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   async function assertUnifiedHookIdentityRouting(branch: 'regular' | 'fast-start'): Promise<void> {
     vi.resetModules();
     loopStarted = createDeferred<void>();
@@ -419,18 +648,6 @@ describe('runClaude fast-start', () => {
     ));
 
     const { runClaude } = await import('./runClaude');
-    const onSessionFound = vi.fn<(sessionId: string, data?: unknown) => void>();
-    const onClaudeSessionHook = vi.fn();
-    const sessionStub: any = {
-      sessionId: null,
-      cleanup: vi.fn(),
-      drainCriticalMetadataWrites: vi.fn(async () => {}),
-      setPushSender: vi.fn(),
-      onSessionFound,
-      onClaudeSessionHook,
-      client: { getMetadataSnapshot: vi.fn(() => ({})) },
-      getOrCreatePermissionRpcRouter: () => ({ registerConsumer: vi.fn() }),
-    };
 
     let testError: unknown = null;
     const runPromise = runClaude(createLegacyCredentials(), {
@@ -445,7 +662,10 @@ describe('runClaude fast-start', () => {
     try {
       await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
       if (testError) throw testError;
-      lastLoopOpts?.onSessionReady?.(sessionStub);
+      const sessionStub = await createReadySession(lastLoopOpts);
+      const onSessionFound = vi.spyOn(sessionStub, 'onSessionFound');
+      const onClaudeSessionHook = vi.spyOn(sessionStub, 'onClaudeSessionHook');
+      await lastLoopOpts?.onSessionReady?.(sessionStub);
 
       const sessionId = '31313131-3131-4131-8131-313131313131';
       const transcriptPath = `/tmp/${sessionId}.jsonl`;
@@ -1453,6 +1673,8 @@ describe('runClaude fast-start', () => {
       const event: RunnerTerminationEvent = { kind: 'signal', signal: 'SIGTERM' };
       const outcome: RunnerTerminationOutcome = { exitCode: 0, terminationReason: 'Signal SIGTERM' };
       let cleanupCompleted = false;
+      // Match the real registration contract: the synchronous admission fence precedes cleanup.
+      lastTerminationHandlerParams!.onTerminationRequested?.(event);
       const cleanupPromise = Promise.resolve(lastTerminationHandlerParams!.onTerminate(event, outcome))
         .then(() => {
           cleanupCompleted = true;
@@ -1522,14 +1744,7 @@ describe('runClaude fast-start', () => {
         }),
         5_000,
       );
-      lastLoopOpts?.onSessionReady?.({
-        cleanup: vi.fn(),
-        closeProviderInputAdmissionAndWaitForDispatches: vi.fn(async () => {}),
-        drainCriticalMetadataWrites: vi.fn(async () => {}),
-        setPushSender: vi.fn(),
-        client: { getMetadataSnapshot: vi.fn(() => ({})) },
-        getOrCreatePermissionRpcRouter: () => ({ registerConsumer: vi.fn() }),
-      });
+      await lastLoopOpts?.onSessionReady?.(await createReadySession(lastLoopOpts));
     } catch (e) {
       testError = e;
     } finally {
@@ -1578,16 +1793,9 @@ describe('runClaude fast-start', () => {
     try {
       await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
       if (testError) throw testError;
-      lastLoopOpts?.onSessionReady?.({
-        cleanup: vi.fn(),
-        drainCriticalMetadataWrites: vi.fn(async () => {}),
-        setPushSender: vi.fn(),
-        onClaudeSessionHook: (data: unknown) => {
-          observedHooks.push(data);
-        },
-        client: { getMetadataSnapshot: vi.fn(() => ({})) },
-        getOrCreatePermissionRpcRouter: () => ({ registerConsumer: vi.fn() }),
-      });
+      const readySession = await createReadySession(lastLoopOpts);
+      readySession.addClaudeSessionHookCallback(data => { observedHooks.push(data); });
+      await lastLoopOpts?.onSessionReady?.(readySession);
 
       await lastStartHookServerOptions?.onPermissionHook?.({
         hook_event_name: 'PermissionRequest',
@@ -1885,16 +2093,6 @@ describe('runClaude fast-start', () => {
       testError = e;
     });
 
-    const sessionReady = {
-      cleanup: vi.fn(),
-      drainCriticalMetadataWrites: vi.fn(async () => {}),
-      setPushSender: vi.fn(),
-      client: {
-        getMetadataSnapshot: vi.fn(() => ({})),
-      },
-      getOrCreatePermissionRpcRouter: () => ({ registerConsumer: vi.fn() }),
-    };
-
     try {
       await expect(waitFor(loopStarted.promise, loopStartWaitMs)).resolves.toBeUndefined();
 
@@ -1917,8 +2115,10 @@ describe('runClaude fast-start', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
       expect(lastLoopOpts).not.toBeNull();
+      const sessionReady = await createReadySession(lastLoopOpts);
+      const setPushSender = vi.spyOn(sessionReady, 'setPushSender');
       await lastLoopOpts?.onSessionReady?.(sessionReady);
-      expect(sessionReady.setPushSender).toHaveBeenCalled();
+      expect(setPushSender).toHaveBeenCalled();
     } catch (e) {
       testError = e;
     } finally {
