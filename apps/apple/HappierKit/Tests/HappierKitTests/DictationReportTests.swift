@@ -6,6 +6,29 @@ import Testing
 struct DictationReportTests {
     private let listening = Date(timeIntervalSinceReferenceDate: 1_000)
 
+    @Test func theMicWaitsForWhisperAndReloadsItWhenItWasLetGo() {
+        var status = WhisperModelStatus()
+        status.model = .largeV3Turbo
+        status.phase = .loaded
+        #expect(status.readiness(of: .largeV3Turbo) == .ready)
+        // Another model in memory (the one in use was just switched): this one still has to load.
+        #expect(status.readiness(of: .small) == .notLoaded(reloads: true))
+        status.phase = .loading
+        #expect(status.readiness(of: .largeV3Turbo) == .loading)
+        // Let go when the app left the screen, or never loaded since launch: it loads again by itself.
+        status.phase = .notLoaded
+        status.unloaded = .background
+        #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: true))
+        status.unloaded = nil
+        #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: true))
+        // Let go for low memory, or failed: loading again at once could repeat it, so a tap does.
+        status.unloaded = .lowMemory
+        #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: false))
+        status.phase = .failed
+        status.unloaded = nil
+        #expect(status.readiness(of: .largeV3Turbo) == .notLoaded(reloads: false))
+    }
+
     @Test func firstWordsCountFromListeningToTheFirstTextShown() {
         var report = DictationReport(date: listening, engine: .whisper(.largeV3Turbo), fallback: nil)
         // Whisper's empty passes put nothing in the composer: they don't count as words.

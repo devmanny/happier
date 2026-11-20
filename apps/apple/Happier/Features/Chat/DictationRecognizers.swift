@@ -38,10 +38,22 @@ enum DictationRecognizers {
     @MainActor
     static func warmUp(language: String?) async -> DictationEngine {
         let engine = await engine(language: language)
-        if case .whisper(let model) = engine, let folder = WhisperModels.library.folder(of: model) {
-            await WhisperRuntime.shared.warmUp(folder)
-        }
+        if case .whisper(let model) = engine { await load(model) }
         return engine
+    }
+
+    /// Whisper's model when dictation uses it on this device; nil: Apple's engine.
+    @MainActor
+    static func whisperModel() async -> WhisperModel? {
+        guard case .whisper(let model) = await engine(language: nil) else { return nil }
+        return model
+    }
+
+    /// Loads `model`, unless it is in memory or loading already.
+    @MainActor
+    static func load(_ model: WhisperModel) async {
+        guard let folder = WhisperModels.library.folder(of: model) else { return }
+        await WhisperRuntime.shared.warmUp(folder)
     }
 
     /// Starts recognizing a take with `engine`, in `language` (`SpeechLanguage.dictation`).

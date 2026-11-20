@@ -77,4 +77,25 @@ public struct WhisperModelStatus: Codable, Equatable, Sendable {
     public var failure: String?
 
     public init() {}
+
+    /// Whether the composer's mic can dictate with Whisper's `model`.
+    public enum Readiness: Equatable, Sendable {
+        case ready
+        case loading
+        /// Not in memory: `reloads` when it loads again by itself (it was let go only because the
+        /// app left the screen, or hasn't loaded since launch); otherwise a tap on the mic does.
+        case notLoaded(reloads: Bool)
+    }
+
+    /// The mic waits for Whisper: Apple's engine, dictating while it loaded, wrote the wrong words.
+    public func readiness(of model: WhisperModel) -> Readiness {
+        guard self.model == model else { return .notLoaded(reloads: true) }
+        switch phase {
+        case .loaded: return .ready
+        case .loading: return .loading
+        // Loading again at once after low memory or a failure could just repeat it.
+        case .failed: return .notLoaded(reloads: false)
+        case .notLoaded: return .notLoaded(reloads: unloaded != .lowMemory)
+        }
+    }
 }

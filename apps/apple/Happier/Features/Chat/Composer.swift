@@ -1229,6 +1229,9 @@ private struct GoalChip: View {
 
 /// The composer's mic: a tap dictates into the field (tap again to stop); held down, it's push to
 /// talk — it listens while held, then hands the result to the composer, or cancels on the trash.
+/// With Whisper it waits for Whisper's model: dimmed, with an ear on it, until the model is in
+/// memory (Apple's engine, dictating meanwhile, wrote the wrong words). A model let go when the
+/// app left the screen loads again by itself; after low memory or a failure, a tap loads it.
 struct PushToTalkButton: View {
     let recording: Bool
     let talking: Bool
@@ -1254,6 +1257,17 @@ struct PushToTalkButton: View {
     @State private var holdTimer: Task<Void, Never>?
     /// Where the held mic sits: under the finger, or stuck to the trash.
     @State private var dragOffset: CGSize = .zero
+    /// Whisper's model when dictation uses it; nil: Apple's engine, which needs no loading.
+    @State private var whisper: WhisperModel?
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var readiness: WhisperModelStatus.Readiness {
+        guard let whisper else { return .ready }
+        return DictationDiagnostics.shared.whisperStatus.readiness(of: whisper)
+    }
+
+    /// Waiting for Whisper: it can't dictate yet (a take already going keeps its mic).
+    private var waiting: Bool { readiness != .ready && !recording && !talking }
 
     var body: some View {
         // The mic stays a mic: the thumb covers it, and the panel shows that it listens.
@@ -1272,6 +1286,21 @@ struct PushToTalkButton: View {
                 }
             }
             .glassEffect(.regular.interactive(), in: Circle())
+            .opacity(waiting ? 0.45 : 1)
+            .overlay(alignment: .topLeading) {
+                if waiting {
+                    // Whisper's model on its way (pulsing), or let go: a tap loads it.
+                    Image(systemName: readiness == .loading ? "ear" : "ear.trianglebadge.exclamationmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .symbolEffect(.pulse, isActive: readiness == .loading)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(readiness == .loading ? Color.orange : Color.red))
+                        .offset(x: -4, y: -4)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .animation(.smooth(duration: 0.2), value: waiting)
             // Bigger while held, so it shows around the thumb, and it follows the finger.
             .scaleEffect(talking ? Self.heldScale : pressing ? 0.9 : 1)
             .offset(talking ? dragOffset : .zero)
@@ -1284,6 +1313,7 @@ struct PushToTalkButton: View {
             #endif
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in
+                    guard !waiting || pressing else { return }
                     if !pressing {
                         pressing = true
                         AppHaptics.light()
@@ -1305,14 +1335,35 @@ struct PushToTalkButton: View {
                         // Stuck to the trash it's deleted, wherever the finger is; otherwise sent.
                         onHoldEnd(cancelArmed)
                         withAnimation(.spring(duration: 0.3)) { dragOffset = .zero }
+                    } else if waiting {
+                        loadWhisper()
                     } else {
                         onTap()
                     }
                 })
-            .accessibilityLabel(recording ? "Stop dictation" : "Dictate")
-            .accessibilityHint(holdHint)
+            .accessibilityLabel(waiting ? (readiness == .loading ? "Whisper is loading" : "Load Whisper")
+                                : recording ? "Stop dictation" : "Dictate")
+            .accessibilityHint(waiting ? "" : holdHint)
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction { onTap() }
+            .accessibilityAction { if waiting { loadWhisper() } else { onTap() } }
+            .task(id: WhisperModels.library.inUse) { whisper = await DictationRecognizers.whisperModel() }
+            .task(id: AutomaticLoad(readiness: readiness, active: scenePhase == .active)) {
+                // Let go when the app left the screen (or not loaded since launch): loads again.
+                guard let whisper, scenePhase == .active, readiness == .notLoaded(reloads: true) else { return }
+                await DictationRecognizers.load(whisper)
+            }
+    }
+
+    private struct AutomaticLoad: Equatable {
+        let readiness: WhisperModelStatus.Readiness
+        let active: Bool
+    }
+
+    /// The mic tapped before Whisper is ready: it says so, and loads the model if it isn't loading.
+    private func loadWhisper() {
+        AppHaptics.warning()
+        guard let whisper, readiness != .loading else { return }
+        Task { await DictationRecognizers.load(whisper) }
     }
 
     /// Under the finger, wherever it goes, until the finger is in the red zone near the trash:
