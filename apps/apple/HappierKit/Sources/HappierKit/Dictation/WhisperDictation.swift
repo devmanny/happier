@@ -93,8 +93,8 @@ public struct WhisperStreamTranscript: Equatable, Sendable {
     private var confirmed: [Segment] = []
     /// The text after `confirmedEnd`, as last decoded.
     private var pending: [String] = []
-    /// The take's language ("es"), when known.
-    private let language: String?
+    /// The take's language ("es"), when known: the one chosen, or the one Whisper recognized.
+    public var language: String?
     /// Words Whisper wrote in lowercase in this take: the same word capitalized at the start of a
     /// pass, mid-sentence, is a pass decoded out of context, not a name.
     private var lowercaseWords: Set<String> = []

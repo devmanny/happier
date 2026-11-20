@@ -46,6 +46,24 @@ import Testing
         #expect(SpeechLanguage.dictationLocale(chosen: "eo", preferred: english, region: "MX", supported: supported) == "en-US")
     }
 
+    /// Automatic on a phone set to English, spoken to in Spanish. Whisper isn't told a language: it
+    /// recognizes the one spoken (told English, it translated short Spanish passes into English).
+    /// Apple's engines can't recognize it, so they use the language Whisper heard last.
+    @Test func automaticDictationListensForTheLanguageSpoken() {
+        let supported = ["en-US", "en-GB", "es-ES", "es-MX", "es-US", "fr-FR"]
+        let english = ["en-US", "es-MX"]
+        #expect(SpeechLanguage.dictation(chosen: nil, heard: nil, preferred: english, region: "MX", supported: supported)
+            == DictationLanguage(whisper: nil, apple: "en-US"))
+        #expect(SpeechLanguage.dictation(chosen: nil, heard: "es", preferred: english, region: "MX", supported: supported)
+            == DictationLanguage(whisper: nil, apple: "es-MX"))
+        // A language chosen in Settings is told to both, whatever was heard.
+        #expect(SpeechLanguage.dictation(chosen: "es", heard: "en", preferred: english, region: "MX", supported: supported)
+            == DictationLanguage(whisper: "es", apple: "es-MX"))
+        // A choice the recognizers don't (or no longer) support is Automatic.
+        #expect(SpeechLanguage.dictation(chosen: "eo", heard: nil, preferred: english, region: "MX", supported: supported)
+            == DictationLanguage(whisper: nil, apple: "en-US"))
+    }
+
     /// What Settings › Dictation offers: each supported language once, whatever its regions.
     @Test func dictationChoicesAreTheSupportedLanguagesOnce() {
         let supported = ["en-US", "en_GB", "es-ES", "es-MX", "fr-FR", "zh-CN", "zh-TW"]

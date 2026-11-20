@@ -1,6 +1,20 @@
 import Foundation
 import NaturalLanguage
 
+/// The language one dictation take is in (`SpeechLanguage.dictation`).
+public struct DictationLanguage: Equatable, Sendable {
+    /// The language code Whisper is told (`es`), or nil: Whisper recognizes the language spoken.
+    public let whisper: String?
+    /// The recognizer locale for Apple's engines (`es-MX`), which can't recognize the language
+    /// spoken: on Automatic, the language Whisper heard last, else the device's first.
+    public let apple: String?
+
+    public init(whisper: String?, apple: String?) {
+        self.whisper = whisper
+        self.apple = apple
+    }
+}
+
 /// The language and voice for dictation and reading aloud. The app's own text is English only, so
 /// the system reports English as the app's language even on a Spanish phone: these go by the
 /// user's languages (`Locale.preferredLanguages`) and region instead.
@@ -48,6 +62,17 @@ public enum SpeechLanguage {
     /// the recognizers don't support it, the automatic choice from the user's languages.
     public static func dictationLocale(chosen: String?, preferred: [String], region: String?, supported: [String]) -> String? {
         dictationLocale(preferred: (chosen.map { [$0] } ?? []) + preferred, region: region, supported: supported)
+    }
+
+    /// The language a take is dictated in, with the language chosen in Settings › Dictation
+    /// (`chosen`, nil: Automatic) and the one Whisper last recognized in a take (`heard`). Automatic
+    /// doesn't tell Whisper a language: told the device's (English), it translated short passes of
+    /// Spanish speech into English. A choice the recognizers don't support is Automatic.
+    public static func dictation(chosen: String?, heard: String?, preferred: [String], region: String?,
+                                 supported: [String]) -> DictationLanguage {
+        let apple = dictationLocale(chosen: chosen ?? heard, preferred: preferred, region: region, supported: supported)
+        let whisper = chosen.flatMap { chosen in apple.map(languageCode) == languageCode(chosen) ? languageCode(chosen) : nil }
+        return DictationLanguage(whisper: whisper, apple: apple)
     }
 
     /// The languages Settings › Dictation offers: each supported language once (`es`, not every region).

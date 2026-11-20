@@ -8,7 +8,7 @@ import UIKit
 /// (once, over the network) to dictate on the device itself: several can be kept, one is in use.
 struct DictationSettingsView: View {
     @State private var engine: DictationEngine?
-    /// What Automatic resolves to on this device, for its label.
+    /// The locale Automatic gives Apple's engines on this device, for its label.
     @State private var automatic: String?
     @State private var choices: [String] = []
     @AppStorage(Dictation.languageKey) private var chosenLanguage: String?
@@ -29,7 +29,7 @@ struct DictationSettingsView: View {
                     }
                 }
             } footer: {
-                Text("Whisper runs on this device: your voice never leaves it. Until a Whisper model is downloaded, dictation uses Apple's speech recognition. Automatic dictates in your device's first language; choose one if you speak another.")
+                Text("Whisper runs on this device: your voice never leaves it. Until a Whisper model is downloaded, dictation uses Apple's speech recognition. Automatic: Whisper recognizes the language you speak, and Apple's speech recognition uses the last one Whisper heard (else your device's first). Choose a language to always dictate in it.")
             }
             Section {
                 Toggle("Opening ¿ and ¡", isOn: $openingMarks)
@@ -78,12 +78,14 @@ struct DictationSettingsView: View {
                 Self.languageName($0).localizedStandardCompare(Self.languageName($1)) == .orderedAscending
             }
         }
-        automatic = await Dictation.dictationLanguage(chosen: nil)
-        let language = await Dictation.dictationLanguage(chosen: chosenLanguage)
-        engine = await DictationRecognizers.engine(language: language)
+        automatic = await Dictation.takeLanguage(chosen: nil).apple
+        let language = await Dictation.takeLanguage(chosen: chosenLanguage)
+        engine = await DictationRecognizers.engine(language: language.apple)
     }
 
     private var automaticTitle: String {
+        // Whisper recognizes the language each take: no one language to name.
+        if case .whisper = engine { return String(localized: "Automatic") }
         guard let automatic else { return String(localized: "Automatic") }
         return String(localized: "Automatic (\(Self.languageName(SpeechLanguage.languageCode(automatic))))")
     }

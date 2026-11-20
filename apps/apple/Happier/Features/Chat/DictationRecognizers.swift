@@ -48,25 +48,26 @@ enum DictationRecognizers {
         }
     }
 
-    /// Starts recognizing a take with `engine`, in `language` (`SpeechLanguage.dictationLocale`).
+    /// Starts recognizing a take with `engine`, in `language` (`SpeechLanguage.dictation`).
     @MainActor
-    static func start(_ engine: DictationEngine, language: String?, takeLog: DictationTakeLog,
+    static func start(_ engine: DictationEngine, language: DictationLanguage, takeLog: DictationTakeLog,
                       update: @escaping DictationUpdate) async throws -> any DictationRecognizer {
-        guard case .whisper(let model) = engine else { return try await startApple(engine, language: language, update: update) }
+        guard case .whisper(let model) = engine else { return try await startApple(engine, language: language.apple, update: update) }
         guard let folder = WhisperModels.library.folder(of: model) else { throw DictationError.modelMissing }
-        // Whisper gets the language fixed, never detected: the dictation language, else the user's first.
-        let code = SpeechLanguage.languageCode(language ?? Locale.preferredLanguages.first ?? "en")
-        Self.log.notice("dictation engine: whisper \(model.id, privacy: .public) language \(code, privacy: .public)")
-        // Apple's engine takes the take over when Whisper can't keep it (speech recognition allowed).
+        // Whisper is told the language chosen in Settings; on Automatic it recognizes the one spoken.
+        Self.log.notice("dictation engine: whisper \(model.id, privacy: .public) language \(language.whisper ?? "recognized", privacy: .public)")
+        // Apple's engine takes the take over when Whisper can't keep it (speech recognition allowed),
+        // in the language Whisper recognized if it got that far.
         var handover: WhisperRecognizer.Handover?
         if appleAllowed {
             handover = { @Sendable update in
-                let apple = await DictationEngine.apple { @Sendable in await SpeechTranscriberRecognizer.isReady(for: language) }
-                let recognizer = try await startApple(apple, language: language, update: update)
+                let locale = await Dictation.takeLanguage().apple
+                let apple = await DictationEngine.apple { @Sendable in await SpeechTranscriberRecognizer.isReady(for: locale) }
+                let recognizer = try await startApple(apple, language: locale, update: update)
                 return (apple, recognizer)
             }
         }
-        return WhisperRecognizer(folder: folder, language: code, handover: handover, log: takeLog, update: update)
+        return WhisperRecognizer(folder: folder, language: language.whisper, handover: handover, log: takeLog, update: update)
     }
 
     nonisolated private static func startApple(_ engine: DictationEngine, language: String?, update: @escaping DictationUpdate) async throws -> any DictationRecognizer {

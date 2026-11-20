@@ -149,9 +149,9 @@ final class Dictation {
         }
         // The user's own language: the app's text is English only, so `Locale.current` is English
         // even on a Spanish phone.
-        let language = await Self.dictationLanguage()
+        let language = await Self.takeLanguage()
         // Whisper once its model is in memory, else Apple's engine while Whisper loads.
-        let choice = await DictationRecognizers.take(language: language)
+        let choice = await DictationRecognizers.take(language: language.apple)
         guard take == current else { return }
         // Whisper needs only the microphone; Apple's engines also need speech recognition.
         let speechRecognition = if case .whisper = choice.engine { false } else { true }
@@ -220,24 +220,34 @@ final class Dictation {
     // Speech and audio call these closures on their own background queues. They are built in
     // nonisolated helpers so Swift 6 does not attach (and trap on) a main-actor assumption.
 
-    /// Settings › Dictation's language, a language code (`es`); none is Automatic, by the user's
-    /// languages. Both engines, Whisper and Apple's, dictate in it.
+    /// Settings › Dictation's language, a language code (`es`); none is Automatic: Whisper
+    /// recognizes the language spoken. Both engines, Whisper and Apple's, dictate in a chosen one.
     static let languageKey = "happier.dictation.language"
+    /// The language Whisper last recognized on Automatic (`es`): what Apple's engines, which can't
+    /// recognize it, dictate in.
+    nonisolated static let heardLanguageKey = "happier.dictation.heardLanguage"
 
     /// The recognizers' languages, listed once (listing them is slow, and push to talk should
     /// listen the moment it's held).
     nonisolated private static let supportedLocales: [String] = SFSpeechRecognizer.supportedLocales().map(\.identifier)
 
-    /// The recognizer locale for a take: the language chosen in Settings, else the user's own.
+    /// A take's language: the one chosen in Settings, else Automatic.
     /// Off the main thread: the first time it lists every supported language.
-    nonisolated static func dictationLanguage() async -> String? {
-        await dictationLanguage(chosen: UserDefaults.standard.string(forKey: languageKey))
+    nonisolated static func takeLanguage() async -> DictationLanguage {
+        await takeLanguage(chosen: UserDefaults.standard.string(forKey: languageKey))
     }
 
-    /// The locale `chosen` (nil: Automatic) resolves to on this device.
-    nonisolated static func dictationLanguage(chosen: String?) async -> String? {
-        SpeechLanguage.dictationLocale(chosen: chosen, preferred: Locale.preferredLanguages,
-                                       region: Locale.current.region?.identifier, supported: supportedLocales)
+    /// What `chosen` (nil: Automatic) resolves to on this device.
+    nonisolated static func takeLanguage(chosen: String?) async -> DictationLanguage {
+        SpeechLanguage.dictation(chosen: chosen, heard: UserDefaults.standard.string(forKey: heardLanguageKey),
+                                 preferred: Locale.preferredLanguages, region: Locale.current.region?.identifier,
+                                 supported: supportedLocales)
+    }
+
+    /// Whisper recognized `language` (a code, `es`) in a take on Automatic.
+    nonisolated static func heard(_ language: String) {
+        guard UserDefaults.standard.string(forKey: heardLanguageKey) != language else { return }
+        UserDefaults.standard.set(language, forKey: heardLanguageKey)
     }
 
     /// The languages Settings › Dictation offers.

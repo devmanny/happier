@@ -87,9 +87,10 @@ actor WhisperRuntime {
     }
 
     /// Transcribes with the model in memory. Without it, `waitForLoad` loads it first; otherwise it
-    /// throws `NotLoaded` (the next take loads it: after low memory, not at once).
+    /// throws `NotLoaded` (the next take loads it: after low memory, not at once). Returns the
+    /// segments and the language they're in (the one recognized, when `options` has none).
     func transcribe(_ audio: [Float], options: DecodingOptions, folder: URL, waitForLoad: Bool,
-                    callback: TranscriptionCallback? = nil) async throws -> [WhisperStreamTranscript.Segment] {
+                    callback: TranscriptionCallback? = nil) async throws -> (segments: [WhisperStreamTranscript.Segment], language: String?) {
         if !isLoaded(folder) {
             guard waitForLoad else { throw NotLoaded() }
             try await load(folder, prewarm: false).value
@@ -101,7 +102,7 @@ actor WhisperRuntime {
         // Let go meanwhile (the app left the screen, low memory).
         guard let kit, isLoaded(folder) else { throw NotLoaded() }
         let results = try await kit.transcribe(audioArray: audio, decodeOptions: options, callback: callback)
-        return results.flatMap(\.segments).map { .init(text: $0.text, start: $0.start, end: $0.end) }
+        return (results.flatMap(\.segments).map { .init(text: $0.text, start: $0.start, end: $0.end) }, results.first?.language)
     }
 
     /// Lets the model go (`only` that folder's, when given).
@@ -263,8 +264,9 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
     private var loop: Task<String, Never>?
 
     /// Without `handover` (speech recognition not allowed) Whisper keeps the take whatever happens,
-    /// waiting for its model if it must.
-    init(folder: URL, language: String, handover: Handover?, log: DictationTakeLog, update: @escaping DictationUpdate) {
+    /// waiting for its model if it must. Without `language` (Automatic) Whisper recognizes the
+    /// language spoken.
+    init(folder: URL, language: String?, handover: Handover?, log: DictationTakeLog, update: @escaping DictationUpdate) {
         self.handover = handover
         takeLog = log
         self.update = update
@@ -304,15 +306,17 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
         apple?.cancel()
     }
 
-    private func run(folder: URL, language: String) async -> String {
+    private func run(folder: URL, language: String?) async -> String {
         var transcript = WhisperStreamTranscript(language: language)
         // The final pass is what gets sent: WhisperKit's fallback decodes it again at rising
         // temperatures when it isn't sure. A live pass is a draft the next one replaces: one decode,
         // stopped once it starts repeating itself (as WhisperKit's AudioStreamTranscriber does);
         // with the fallback a pass could decode up to 6 times, seconds on an iPhone, each time
         // with different words.
+        // On Automatic each pass recognizes the language until one has words in it; the rest of the
+        // take keeps that language, so a take isn't written in two.
         let last = DecodingOptions(task: .transcribe, language: language, temperature: 0, usePrefillPrompt: true,
-                                   detectLanguage: false, skipSpecialTokens: true)
+                                   detectLanguage: language == nil, skipSpecialTokens: true)
         var live = last
         live.temperatureFallbackCount = 0
         let stopRepeating = Self.stopRepeating(threshold: live.compressionRatioThreshold)
@@ -338,13 +342,15 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
                 }
                 var options = ended ? last : live
                 options.clipTimestamps = [pass.start]
+                options.language = transcript.language
+                options.detectLanguage = transcript.language == nil
                 var audio = lock.withLock { Array(samples.prefix(frames * Self.frameSamples)) }
                 // A take too short to decode is read with silence after it.
                 let length = Int((Double(pass.end) * Self.sampleRate).rounded(.up))
                 if audio.count < length { audio += repeatElement(Float(0), count: length - audio.count) }
                 if handover != nil, !shown, deadline == nil { deadline = .now + Self.firstTextDeadline }
                 let started = ContinuousClock.now
-                let segments = try await Self.within(shown ? nil : deadline) { [audio, options] in
+                let (segments, heard) = try await Self.within(shown ? nil : deadline) { [audio, options] in
                     try await WhisperRuntime.shared.transcribe(audio, options: options, folder: folder, waitForLoad: self.handover == nil,
                                                                callback: ended ? nil : stopRepeating)
                 }
@@ -353,7 +359,13 @@ final class WhisperRecognizer: DictationRecognizer, @unchecked Sendable {
                 takeLog.pass(seconds: took.seconds)
                 // How much of what this pass read is speech: little, and Whisper's silence phrases go.
                 let speech = DictationSpeech.speechSeconds(frameLevels: levels, from: Int(Double(pass.start) / DictationSpeech.frameSeconds))
+                let recognizing = transcript.language == nil
                 transcript.update(segments, final: ended, speech: speech)
+                if recognizing, let heard, !transcript.text.isEmpty {
+                    transcript.language = heard
+                    Dictation.heard(heard)
+                    Self.log.notice("whisper recognized the language: \(heard, privacy: .public)")
+                }
                 Self.log.debug("whisper pass \(audio.count / Self.frameSamples) frames in \(took, privacy: .public)")
                 if ended { break }
                 shown = shown || !transcript.text.isEmpty

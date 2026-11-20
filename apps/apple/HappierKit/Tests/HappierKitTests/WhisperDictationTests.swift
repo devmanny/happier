@@ -123,6 +123,11 @@ struct WhisperDictationTests {
         var vitamin = WhisperStreamTranscript(language: "es")
         vitamin.update([segment(" Vitamina C.", 0, 1)], final: true)
         #expect(vitamin.text == "Vitamina C.")
+        // Automatic: the language Whisper recognized in the take.
+        var heard = WhisperStreamTranscript()
+        heard.language = "es"
+        heard.update([segment(" C.", 0, 1)], final: true)
+        #expect(heard.text == "Sí.")
     }
 
     @Test func confirmsAllButTheLastTwoSegments() {
