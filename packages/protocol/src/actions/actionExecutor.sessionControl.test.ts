@@ -155,6 +155,34 @@ describe('createActionExecutor (session control)', () => {
     expect(sessionStop).toHaveBeenCalledWith({ sessionId: 's1', serverId: 'server-a' });
   });
 
+  it('forwards a known session.stop reason to deps.sessionStop', async () => {
+    const sessionStop = vi.fn(async () => ({ success: true }));
+    const executor = createExecutor({ sessionStop });
+
+    const res = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1', reason: 'idle' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: true, result: { success: true } });
+    expect(sessionStop).toHaveBeenCalledWith({ sessionId: 's1', reason: 'idle' });
+  });
+
+  it('rejects a session.stop reason outside the closed set without stopping', async () => {
+    const sessionStop = vi.fn(async () => ({ success: true }));
+    const executor = createExecutor({ sessionStop });
+
+    const res = await executor.execute(
+      'session.stop' as any,
+      { sessionId: 's1', reason: 'user' },
+      { surface: 'cli', defaultSessionId: null },
+    );
+
+    expect(res).toEqual({ ok: false, errorCode: 'invalid_parameters', error: 'invalid_parameters' });
+    expect(sessionStop).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       label: 'control unavailable',
@@ -501,6 +529,54 @@ describe('createActionExecutor (session control)', () => {
 
     expect(res).toEqual({ ok: true, result: { ok: true } });
     expect(sessionWaitIdle).toHaveBeenCalledWith({ sessionId: 's1', timeoutSeconds: 42, serverId: 'server-a' });
+  });
+
+  it('routes the agent memory tools to the session runner with their operation and input', async () => {
+    const agentMemory = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentMemory });
+    await executor.execute('agent.memory.search' as any, { sessionId: 's1', query: 'testflight' }, { surface: 'session_agent' as any });
+    await executor.execute('agent.memory.write' as any, { sessionId: 's1', kind: 'journal', text: 'Subí el build' }, { surface: 'session_agent' as any });
+    await executor.execute('agent.now.update' as any, { sessionId: 's1', text: 'Probando' }, { surface: 'session_agent' as any });
+    expect(agentMemory.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'search', input: { query: 'testflight' } },
+      { sessionId: 's1', operation: 'write', input: { kind: 'journal', text: 'Subí el build' } },
+      { sessionId: 's1', operation: 'now', input: { text: 'Probando' } },
+    ]);
+  });
+
+  it('routes the task tools to the session runner with their operation and input', async () => {
+    const agentTasks = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentTasks });
+    await executor.execute('task.create' as any, { sessionId: 's1', title: 'Comprar el cable USB-C', assignee: 'user' }, { surface: 'session_agent' as any });
+    await executor.execute('task.update' as any, { sessionId: 's1', taskId: 't1', status: 'done' }, { surface: 'session_agent' as any });
+    expect(agentTasks.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'create', input: { title: 'Comprar el cable USB-C', assignee: 'user' } },
+      { sessionId: 's1', operation: 'update', input: { taskId: 't1', status: 'done' } },
+    ]);
+  });
+
+  it('routes the room tool to the session runner with its input', async () => {
+    const agentRooms = vi.fn(async () => ({ ok: true }));
+    const executor = createExecutor({ agentRooms });
+    const result = await executor.execute('room.read' as any, { sessionId: 's1', roomId: 'r1', fromSeq: 3 }, { surface: 'session_agent' as any });
+    expect(result).toEqual({ ok: true, result: { ok: true } });
+    expect(agentRooms.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      { sessionId: 's1', operation: 'read', input: { roomId: 'r1', fromSeq: 3 } },
+    ]);
+  });
+
+  it('asks the current session who else is here, passing declared resources', async () => {
+    const sessionPresenceWho = vi.fn(async () => ({ others: [] }));
+    const executor = createExecutor({ sessionPresenceWho });
+
+    const result = await executor.execute(
+      'session.presence.who' as any,
+      { sessionId: 's1', resources: ['build-ios', 'testflight'] },
+      { surface: 'session_agent' as any },
+    );
+
+    expect(result).toEqual({ ok: true, result: { others: [] } });
+    expect(sessionPresenceWho).toHaveBeenCalledWith({ sessionId: 's1', resources: ['build-ios', 'testflight'] });
   });
 
   it('executes session work-state and goal actions through protocol deps', async () => {

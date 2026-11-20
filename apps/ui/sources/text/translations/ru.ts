@@ -296,6 +296,7 @@ const acpCatalogTranslationExtension = {
     acpCatalogAuthParser: 'Парсер статуса',
     acpCatalogCapabilities: 'Возможности',
     acpCatalogTransportProfile: 'Профиль транспорта',
+    acpCatalogSupportsLoadSession: 'Поддержка возобновления сеансов',
     acpCatalogSupportsModes: 'Поддержка режимов',
     acpCatalogSupportsModels: 'Поддержка моделей',
     acpCatalogSupportsConfigOptions: 'Поддержка параметров конфигурации',
@@ -2508,6 +2509,7 @@ export const ru: TranslationStructure = {
                 profileMissing: 'Выбранный подключенный аккаунт больше недоступен. Обновите список аккаунтов и выберите другой.',
                 groupMissing: 'Выбранный пул аккаунтов больше недоступен. Обновите список аккаунтов и выберите другой пул.',
                 metadataUpdateFailed: 'Сессии не удалось сохранить новый выбор аутентификации. Попробуйте снова после завершения синхронизации сессии.',
+                restartDisallowedByExecutionPolicy: 'Это изменение аутентификации требует перезапуска, который запрещён во время работы сессии. Остановите сессию перед изменением её аутентификации.',
                 restartFailed: 'Не удалось перезапустить сессию с новым выбором аутентификации. Остановите сессию и попробуйте снова.',
                 hotApplyFailed: 'Запущенная сессия отклонила новый выбор аутентификации. Перезапустите сессию и попробуйте снова.',
                 agentMismatch: 'Этот выбор аутентификации не соответствует бэкенду сессии.',
@@ -4409,6 +4411,9 @@ export const ru: TranslationStructure = {
       full: "На всю ширину",
       fullDescription: "Использовать доступную ширину окна",
     },
+    feedback: "Отклик",
+    haptics: "Тактильный отклик",
+    hapticsDescription: "Использовать тактильный отклик для действий и изменения порядка на этом устройстве.",
     backdropBlur: "Размытие фона",
     backdropBlurDescription:
       "Использовать размытие фона за модальными окнами и меню. Отключите, чтобы повысить производительность браузера.",
@@ -5750,6 +5755,7 @@ export const ru: TranslationStructure = {
     working: "работаю...",
     workingRetained: "работает, ожидание обновлений…",
     keptInAttention: "оставлено в разделе внимания",
+    archiving: "архивация…",
     backgroundActive: ({ count }: { count: number }) => `${count} выполняется в фоне`,
     activityUnknown: "статус активности недоступен",
     readyForReview: "готово к проверке",
@@ -6093,6 +6099,11 @@ export const ru: TranslationStructure = {
         composerBanners: {
             showBannerAction: 'Показать баннер',
             hideBannerAction: 'Скрыть баннер',
+	    },
+	    runnerRestartBackgroundWork: {
+	        title: 'Выполняется фоновая работа',
+	        body: ({ count }: { count: number }) => `Фоновых задач в работе: ${count}. Перезапуск остановит их.`,
+	        confirmAction: 'Остановить и перезапустить',
 	    },
 	    staleRunner: {
 	      title: "Сессия всё ещё работает на старой CLI",
@@ -6495,7 +6506,7 @@ export const ru: TranslationStructure = {
         discarded: {
           title: "Отброшенные сообщения",
           subtitle:
-            "Эти сообщения не были отправлены агенту (например, при переключении с удалённого на локальный режим).",
+            "Эти сообщения больше не находятся в очереди. Результат доставки может быть неизвестен; проверьте историю разговора перед повторной отправкой.",
           label: "Отброшено",
           removeConfirm: {
             title: "Удалить отброшенное сообщение?",
@@ -6701,6 +6712,28 @@ export const ru: TranslationStructure = {
           targetSession: "Целевая сессия",
           noTarget: "Сессия не выбрана",
           clearTarget: "Очистить цель",
+          errors: {
+              sendFailed: "Не удалось отправить сообщение в сессию.",
+              sttFailed: "Не удалось распознать сказанное. Попробуйте ещё раз.",
+              sttTimeout: "Время распознавания речи истекло. Проверьте подключение и попробуйте ещё раз.",
+              sttAuthFailed: "Сервис распознавания речи отклонил API-ключ. Проверьте ключ и его ограничения в разделе Настройки → Голос.",
+              sttRateLimited: "Превышен лимит запросов распознавания речи. Подождите немного и попробуйте ещё раз.",
+              missingSttBaseUrl: "Укажите URL сервера распознавания речи в разделе Настройки → Голос.",
+              missingSttApiKey: "Добавьте API-ключ распознавания речи в разделе Настройки → Голос.",
+              recordingStartFailed: "Не удалось включить микрофон. Убедитесь, что его не использует другое приложение.",
+              recordingStopFailed: "Не удалось завершить запись. Попробуйте ещё раз.",
+              deviceSttUnavailable: "Распознавание речи недоступно на этом устройстве. Выберите другого провайдера распознавания речи в разделе Настройки → Голос.",
+              speechPermissionDenied: "Доступ к микрофону или распознаванию речи запрещён. Разрешите его в настройках устройства.",
+              deviceSttStartFailed: "Не удалось запустить распознавание речи. Попробуйте ещё раз.",
+              localNeuralSttUnavailable: "Распознавание речи на устройстве недоступно в этой сборке. Выберите другого провайдера распознавания речи в разделе Настройки → Голос.",
+              localNeuralPackNotInstalled: "Скачайте речевую модель в разделе Настройки → Голос.",
+              localNeuralSttStartFailed: "Не удалось запустить распознавание речи на устройстве. Попробуйте ещё раз.",
+              localNeuralAudioCaptureFailed: "Микрофон неожиданно отключился. Попробуйте ещё раз.",
+              ttsFailed: "Не удалось воспроизвести голосовой ответ. Проверьте синтез речи в разделе Настройки → Голос.",
+              voiceAgentRequiresFeature: ({ feature }: { feature: string }) => `Для режима агента включите «${feature}» в разделе Настройки → Функции.`,
+              voiceAgentUnavailable: "Голосовой агент недоступен на этом сервере.",
+              generic: "В работе голоса возникла проблема.",
+          },
           a11y: {
             teleport: "Телепортировать голосового агента",
             toggleActivity: "Переключить голосовую активность",
@@ -8144,6 +8177,14 @@ settingsSession: {
 	        workingStatusAnimatedTextTitle: 'Анимированный рабочий текст',
 	        workingStatusAnimatedTextEnabledSubtitle: 'Менять рабочие глаголы, пока сессия выполняется',
 	        workingStatusAnimatedTextDisabledSubtitle: 'Показывать постоянную метку работаю..., пока сессия выполняется',
+	        backgroundWorkAttentionModeTitle: "Непрочитанные ответы во время фоновой работы",
+	        backgroundWorkAttentionModeSubtitle: "Выберите, где показывать непрочитанные ответы, пока продолжается фоновая работа. Запросы к вам по-прежнему требуют внимания.",
+	        backgroundWorkAttentionKeepWorkingTitle: "Сохранять статус работы",
+	        backgroundWorkAttentionKeepWorkingSubtitle: "Сохранять статус работы и показывать синюю точку в центре для непрочитанных ответов",
+	        backgroundWorkAttentionKeepWorkingUnreadTitle: "Показывать статус непрочитанного в «В работе»",
+	        backgroundWorkAttentionKeepWorkingUnreadSubtitle: "Оставлять сессии в «В работе» и показывать статус непрочитанного, пока вы не прочитаете ответ",
+	        backgroundWorkAttentionShowUnreadTitle: "Перемещать непрочитанные сессии в «Требует внимания»",
+	        backgroundWorkAttentionShowUnreadSubtitle: "Перемещать сессии с непрочитанными ответами в «Требует внимания», пока продолжается фоновая работа",
 	        attentionPromotionModeTitle: 'Сессии, требующие внимания',
 	        attentionPromotionModeSubtitle: 'Выберите, где показывать сессии, ожидающие вас или готовые к проверке',
 	        attentionPromotionModeOffTitle: 'Оставлять на обычном месте',
@@ -9308,6 +9349,10 @@ settingsSession: {
         progressWithFiles: ({ loaded, total, filesDone, filesTotal }: { loaded: string; total: string; filesDone: number; filesTotal: number }) =>
           `${loaded} из ${total} · ${filesDone} из ${filesTotal} ${plural({ count: filesTotal, one: 'файла', few: 'файлов', many: 'файлов' })}`,
         progressAccessibilityLabel: "Ход загрузки",
+        verifyingDetail: "Проверка",
+        verifyingProgress: ({ verified, total, filesDone, filesTotal }: { verified: string; total: string; filesDone: number; filesTotal: number }) =>
+          `Проверено ${verified} из ${total} · ${filesDone} из ${filesTotal} ${plural({ count: filesTotal, one: 'файла', few: 'файлов', many: 'файлов' })}`,
+        verifyingAccessibilityLabel: "Ход проверки",
         failedDetail: "Ошибка",
         failedSubtitle: "Не удалось подготовить модель. Нажмите, чтобы повторить.",
         failedResumableSubtitle: ({ size }: { size: string }) => `Загрузка не завершилась. ${size} сохранено — нажмите, чтобы продолжить.`,
@@ -9316,6 +9361,8 @@ settingsSession: {
         discardSubtitle: "Удалите незавершённую загрузку, чтобы освободить место.",
         discardConfirmTitle: "Удалить незавершённую загрузку?",
         discardConfirmBody: ({ size }: { size: string }) => `Будут удалены уже загруженные ${size}. Модель можно будет загрузить снова позже.`,
+        insufficientStorage: ({ required, available }: { required: string; available: string }) =>
+            `Недостаточно свободного места. Для загрузки нужно ${required}, а свободно только ${available}.`,
       },
       localNeuralStt: {
         modelPack: {
@@ -9339,12 +9386,6 @@ settingsSession: {
           installedWithBuild: ({ build }: { build: string }) =>
             `Установлено • ${build}`,
           notInstalled: "Не установлено",
-        },
-        language: {
-          title: "Язык",
-          subtitle: "Необязательный языковой тег BCP-47.",
-          promptTitle: "Язык",
-          promptBody: "Введите языковой тег BCP-47 (например: en, en-US).",
         },
         alerts: {
           downloadFailedTitle: "Ошибка загрузки",
@@ -9379,6 +9420,8 @@ settingsSession: {
           enableTitle: "Включить hands-free",
           silenceTitle: "Таймаут тишины (мс)",
           minSpeechTitle: "Минимальная речь (мс)",
+          pushToTalkTitle: "Нажмите, чтобы говорить",
+          pushToTalkSubtitle: "Этот провайдер распознаёт готовую запись — нажмите микрофон ещё раз, чтобы отправить. Для режима без рук выберите распознавание речи устройства или локальное нейронное.",
         },
         customBackendIdSubtitle: "Введите пользовательский id бэкенда.",
         searchBackendsPlaceholder: "Поиск бэкендов",
@@ -9634,8 +9677,7 @@ settingsSession: {
       sttProvider: "Провайдер STT",
       neuralStt: {
         title: "STT на устройстве",
-        webNotAvailableSubtitle:
-          "Недоступно в вебе. Используйте STT устройства, OpenAI-совместимый или Gemini STT.",
+        webFallbackSubtitle: "Работает только в мобильном приложении. В браузере используется распознавание речи браузера.",
       },
       ttsBaseUrl: "Базовый URL TTS",
       ttsBaseUrlTitle: "Текст в речь",
@@ -9893,6 +9935,7 @@ settingsSession: {
       checking: "Проверка…",
       failedGeneric: "Обновление не завершилось. Попробуйте ещё раз.",
       remoteUnsupported: "Эта машина не может обновить командную строку удалённо. Обновите её на самой машине.",
+      archiveExpandedByteLimit: "Загруженная среда превышает ограничение размера распаковки. Обновите Happier перед повторной попыткой.",
       updateNotVerified: "Обновление выполнилось, но версия не изменилась.",
       rolledBackLocal: "Обновление не запустилось, поэтому на этом компьютере восстановлена предыдущая версия.",
       smokeFailed: "Новая версия не заработала на этом компьютере, поэтому ничего не изменилось.",
@@ -11084,8 +11127,8 @@ settingsSession: {
       anthropic: "Anthropic (по умолчанию)",
       deepseek: "DeepSeek (Рассуждение)",
       zai: "Z.AI (GLM-4.6)",
-      minimax: "MiniMax (M3)",
-      minimaxCn: "MiniMax (M3, CN)",
+      minimax: "MiniMax (M3.1 Flash)",
+      minimaxCn: "MiniMax (M3.1 Flash, CN)",
       codex: "Codex (по умолчанию)",
       openai: "OpenAI (GPT-5)",
       azureOpenai: "Azure OpenAI",

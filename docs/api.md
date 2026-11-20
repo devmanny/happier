@@ -77,6 +77,152 @@ Auth flows:
 - `POST /v1/kv/bulk`
 - `POST /v1/kv` (batch mutate)
 
+Keys are clear text, so they stay opaque; everything readable lives in the sealed value
+(account-scoped blob, `packages/protocol/src/crypto/accountScopedCipher.ts`). Current client-owned
+prefixes:
+
+- `agentprofile/<uuid>` — a user-defined Agent (name, emoji, description, provider/model/effort,
+  account label and optional Claude config folder), kind `agent_profile`. Written by the native app.
+  Builds before 2026-11-07 kept it at `agent/<uuid>/profile`, mixed with the agent's memory. Current
+  builds read both places, copy a profile only the old place has (or that an old build edited later,
+  by `updatedAt`) with a versioned write (concurrent migrations: one lands, the other re-reads), and
+  keep the old key in step on edit/delete; the old key is never deleted by the migration. Drop the
+  legacy read/write once no older build is installed.
+  A spawn carries only `agentIdentityV1` `{v, id, name, emoji?, description?}`; the runner keeps
+  `{v, id, name, emoji?}` in session metadata `agentIdentityV1` and adds the description to the
+  coding prompt (`packages/protocol/src/agentProfiles/agentIdentity.ts`).
+- `presence/<sessionId>` — "who is where", kind `agent_presence`, written only by that session's
+  runner while a turn runs (folder, task, files being edited, declared shared resources), refreshed
+  every 60 s and ignored by readers after 3 min without a signal; removed when the turn ends.
+  Advisory, never a lock (`packages/protocol/src/agentProfiles/agentPresence.ts`). Claude sessions
+  on the Agent SDK runner get a pre-edit warning through a `PreToolUse` hook; Codex app-server in
+  yolo mode exposes no pre-edit hook, so its patches are only recorded as they start. Agents can
+  ask and declare resources with the `quien_esta_aqui` MCP tool (`session.presence.who`).
+- `agent/<uuid>/now/<sessionId>`, `agent/<uuid>/journal/<YYYY-MM-DD>/<entryId>`,
+  `agent/<uuid>/note/<noteId>` — the agent's shared memory, kind `agent_memory`
+  (`packages/protocol/src/agentProfiles/agentMemory.ts`). `now` is written only by that thread (its
+  title at each turn start, then what the agent says with `ahora_actualizar`); journal entries are
+  append-only, one key each (version -1), so threads never collide; notes are Markdown with
+  `[[links]]`, edited with CAS by any thread or the app. Every provider prompt that opens a
+  conversation turn in an agent thread ends with a short summary of its other threads' `now`
+  (`resolveProviderPromptForDispatch`, provider-only text). A command the provider must receive
+  verbatim (a Claude slash command, `/compact`, an ACP-native command) and a prompt an earlier
+  dispatch already resolved carry no such summary and no replay seed. Tools: `memoria_leer`, `memoria_buscar` (searched in the CLI after
+  decrypting), `memoria_anotar`, `ahora_actualizar`, `mis_hilos`. One listing returns at most
+  1000 rows, so reads go per kind and the journal per day.
+- `task/<uuid>` — a task for the user or one of their agents, kind `agent_task`
+  (`packages/protocol/src/tasks/agentTask.ts`): title, description, assignee, status (todo,
+  in_progress, blocked, in_review, done), start/due dates, optional machine and folder, source with
+  link, the threads that worked it and a comment/status log. Any thread (`tarea_crear`,
+  `tarea_actualizar`) or the native app edits it with CAS, re-applying the change on a version
+  conflict. A thread joins `threads` only when it works the task (assigned to its agent or to the
+  session itself). A session that creates a task for the user or another agent stays in
+  `createdBy` and `source.sessionId`, one that updates it in the log, because the native app counts every session in
+  `threads` as a task session and leaves it out of the usual list. An agent thread's
+  provider prompt ends with its open tasks (its board). Each daemon checks every 5 minutes for the
+  user's open tasks due within a day or overdue; it records `notifiedV1` with a versioned write
+  before pushing, so only one machine notifies.
+  A task may repeat (`recurrence`, `packages/protocol/src/tasks/agentTaskRecurrence.ts`): rules in
+  the user's time zone (weekdays + time, every N days from an anchor date, a day of the month), each
+  one a server Automation (`/v2/automations`, cron + time zone, assigned to the task's machine, named
+  opaquely `task <id> rule <id>`) whose sealed template carries only `agentTaskV1 {taskId, ruleId}`.
+  The Automations engine stays the only scheduler. When a run is claimed, the daemon works the
+  occurrence with the agent's current profile (identity, account, engine): it continues the task's
+  last thread or opens a new one, as the task says. "Every N days" fires daily and is decided against
+  its anchor at run time. Occurrences never overlap: while the previous occurrence's thread has a
+  live presence record the new firing is recorded as skipped (waiting would hold the run past its
+  lease, and the next firing comes anyway). Each occurrence (running, completed at its turn end,
+  skipped, failed, interrupted) is kept in the task's history with its thread. A repeating task
+  stays open: an agent's `tarea_actualizar` with status done records the result of the occurrence
+  its thread is working (and is refused with a clear message when it has none); only the user
+  closes or pauses the task, and closing it from the app pauses its Automations so they stop
+  firing (the daemon also skips firings on a closed task without recording them).
+  A task's assignee is the user, an agent, or an existing session (with or without an agent); a
+  session's provider prompt ends with the tasks assigned to it too, and `tarea_actualizar` works the
+  same from a session without an agent ("me" is the session). A one-time "Schedule…" start
+  (`scheduledStartV1 {at, timezone, automationId}`) is one Automation whose cron names that minute,
+  day and month (so within a year) with an `agentTaskV1 {taskId, kind: scheduled_start}` template.
+  When it fires the daemon opens the agent's thread, or sends the assigned session the task through
+  the canonical send path (resuming it), links the thread, clears the schedule and deletes the
+  Automation; a later yearly firing finds no schedule and does nothing.
+  Each task keeps its permission mode (`permissionMode`: `read_only`, `default`, `auto`, `yolo`;
+  absent means `yolo`, for new tasks and for tasks written before the field). "Start now",
+  "Schedule…" and every occurrence use it: a new thread is spawned with it, and a message to an
+  existing session carries it as that message's permission intent (`sendSessionMessage`
+  `permissionModeOverride`, as `session send --permission-mode`) without changing the session's
+  mode. `archivedAt` marks a task the user is not going to do: hidden by default, never deleted,
+  off every board, and its repetitions and scheduled start do nothing. Both fields are optional.
+  Task writers keep fields they don't know, at every level (passthrough schemas in the CLI; kept
+  JSON in the native app), so a newer build's field survives an older writer. CLI builds up to
+  0.2.17-native.22 and app builds before 2026-11-07 14:30 strip unknown fields when they rewrite a
+  task (they would drop `permissionMode` and `archivedAt`).
+- `diag/<uuid>` — a MetricKit report (crash/hang diagnostic or daily metrics) from the native Apple
+  app, kind `device_diagnostics` (`packages/protocol/src/diagnostics/deviceDiagnostics.ts`):
+  `{v:1, kind, createdAt, device {model, os}, appVersion, build, encoding: 'zlib', payloadBase64}`,
+  where the payload is `jsonRepresentation()` compressed with Apple's zlib (raw DEFLATE). Written
+  once (version -1); a report whose write would exceed the relay's request body limit (100 MiB
+  `bodyLimit`) is saved as `{v:1, kind, tooLarge: true, compressedBytes, rawBytes, build, createdAt}`.
+  No client reads it back: `happier diagnostics pull [--out <dir>] [--keep] [--json]` saves each one
+  to `<out>/<createdAt>-<kind>-<build>-<uuid>.json` (default `~/.happier/diagnostics`) and deletes the
+  key only after its file is written. `diag` is not a change family the relay knows, so a write
+  marks the `self` KV family: the native app's next catch-up after a reconnect re-reads its tasks,
+  profiles and open memories once; the RN client filters it out by prefix (`todo.`).
+- `room/<uuid>`, `roommsg/<uuid>/<seq10>`, `roomseat/<uuid>/<agentId>` — rooms (salas): group chats
+  of the user and the agents they invite, kind `agent_room`
+  (`packages/protocol/src/rooms/agentRoom.ts`, delivery policy in `agentRoomDelivery.ts`). The room
+  holds `{title, userName?, members [{agentId, name?, emoji?, machineId, directory, wakeByAgents?,
+  permissionMode?, dismissedMentionSeq?}], lastSeq, pausedAt?, archivedAt?}`; each message is its own row
+  `{seq, at, author (user | agent with name/emoji/sessionId), text, mentions [agentId], mentionsUser?,
+  replyTo? {seq}}`
+  created with version -1 in the same atomic write that moves the room's `lastSeq` to its seq, so
+  concurrent writers (the app, every member's thread) get gap-free ordered seqs and re-run on a
+  conflict. Messages are read by exact key through `POST /v1/kv/bulk` (≤100 keys per call), never
+  listed, so a long room never crowds a listing. A member's seat holds its thread (`sessionId`), its
+  read marker (`readThroughSeq`) and the delivery in flight (`inFlight {localId, throughSeq, at,
+  sent?}`). Writers: the app writes the room and the user's messages (mentions resolved by its
+  picker; "Que conteste" is the user's own message mentioning that member); the daemon of each
+  member's machine writes that member's seat; the member's thread posts its replies. A user's
+  message with `replyTo` answers that message: Reply (quoting any message) mentions its author when
+  that is a member, plus whoever the user names, never the quoted message's own mentions; picking an
+  agent's `<options>` option mentions only its author. A member's `dismissedMentionSeq` is app-only
+  state: the user dismissed its "Let It Answer" notice for the agent mention at that seq, so no device
+  shows it until a later agent mention; daemons don't read it and keep it when they rewrite the room
+  (passthrough), and it changes no delivery.
+  Delivery runs in the daemon of the member's machine (`apps/cli/src/daemon/agentRooms/`), so a room
+  may span machines without a coordinator and works with the app closed. The machine socket does
+  not carry KV writes, so the daemon keeps a lean user-scoped socket (`updates-lean-v1`) and
+  reconciles a room on each of its `kv-batch-update`s and every room it has a member in on each
+  (re)connect. A member mentioned with `@` by a message it may answer gets everything it hadn't read,
+  from others, in order with who said what, as one message to its thread in the room (opened the
+  first time in its folder as its agent, YOLO unless `permissionMode` says otherwise), sent with the
+  localId `room.<roomId>.<agentId>.<nonce8>` (URL-safe and under the relay's 100-character route
+  parameter, since readers look messages up by localId) through the canonical send path; a send
+  that failed is retried with the same localId, so it lands once. Over 15 unread messages, the newest
+  15 go in full, the 50 before as one line each (≤160 characters) and the rest only counted, with a
+  pointer to `sala_leer` (`room.read`, a member reads its room by seq range). A message shown in full
+  that answers another says which, quoting it in one line (≤160 characters; "your #N" when it is the
+  member's own); the daemon reads quoted messages outside the unread range for that. The other
+  members are not woken by a reply that doesn't mention them; it stays in the room's history, so
+  their next delivery (or `sala_leer`) includes it. A member mid-turn gets
+  nothing new: what arrives meanwhile is delivered together once that turn ends. The user's messages
+  without `@` go to no one. When a room turn is ready (`sendReadyWithPushNotification`, after the
+  transcript is flushed) the thread posts the turn's final assistant text as its reply (mentions
+  resolved by name, `@<userName>` sets `mentionsUser`), moves its marker to what the delivery read
+  through (messages that came during the turn stay unread) and clears the delivery, all in one
+  atomic write; the daemon finishes a turn from the thread's transcript when its runner ended
+  without doing so. An agent's mention wakes a member only when that member's `wakeByAgents` is true
+  (the app sets it, after the Consumer Terms 3.7 warning for Claude members; the CLI never decides
+  by provider) and fewer than 6 agent messages came in a row since the user's last one (the brake);
+  otherwise it waits for the user. `pausedAt` stops deliveries (running turns finish). The user gets
+  a push (the daemon's and runner's push channel, honoring `pushEnabled`) when a reply mentions them
+  and when a hand-off hits the brake. `room*` are not change families the relay knows, so writes mark
+  the `self` KV family (the native app's catch-up re-reads what it shows).
+
+`GET /v1/kv` has no cursor: a listing returns at most 1000 rows. Records are split so each listing
+stays small (profiles, tasks and presence on their own prefixes; memory per kind and the journal per
+day), and every client still reports a full listing as possibly incomplete instead of cutting it
+silently. A cursor on the route is a possible future improvement.
+
 ### Account and usage
 - `GET /v1/account/profile`
 - `GET /v1/account/settings`

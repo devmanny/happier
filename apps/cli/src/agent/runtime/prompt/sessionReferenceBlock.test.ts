@@ -112,7 +112,7 @@ describe('prompt finalization wiring', () => {
         const resolved = await resolveProviderPromptForDispatch({
             session: createSession({}),
             userText,
-            allowSeed: false,
+            allowTurnContext: false,
             localId: 'local-1',
             nowMs: 1,
             refreshMetadataBeforeRead: false,
@@ -128,7 +128,7 @@ describe('prompt finalization wiring', () => {
         const resolved = await resolveProviderPromptForDispatch({
             session: createSession({}),
             userText: 'hi',
-            allowSeed: false,
+            allowTurnContext: false,
             localId: 'local-1',
             nowMs: 1,
             refreshMetadataBeforeRead: false,
@@ -142,7 +142,7 @@ describe('prompt finalization wiring', () => {
         const resolved = await resolveProviderPromptForDispatch({
             session: createSession({}),
             userText: 'hi',
-            allowSeed: false,
+            allowTurnContext: false,
             localId: 'local-1',
             nowMs: 1,
             refreshMetadataBeforeRead: false,
@@ -165,7 +165,7 @@ describe('prompt finalization wiring', () => {
         const resolved = await resolveProviderPromptForDispatch({
             session: createSession({ replaySeedV1: { v: 1, seedText: 'SEED', sourceSessionId: 's', sourceCutoffSeqInclusive: 1, createdAtMs: 1 } }),
             userText: 'hello',
-            allowSeed: true,
+            allowTurnContext: true,
             localId: 'local-1',
             nowMs: 1,
             refreshMetadataBeforeRead: false,

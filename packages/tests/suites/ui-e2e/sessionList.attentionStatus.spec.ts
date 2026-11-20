@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type WebSocketRoute } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -46,7 +46,8 @@ const sessionListTestIds = {
   attentionPromotionModeTrigger: 'settings-session-attentionPromotionMode-trigger',
   workingPlacementModeTrigger: 'settings-session-workingPlacementMode-trigger',
   densityOption: (density: 'narrow' | 'cozy' | 'detailed') => `dropdown-option-${density}`,
-  placementOption: (placement: 'off' | 'global' | 'withinGroups') => `dropdown-option-${placement}`,
+  settingOption: (option: string) => `dropdown-option-${option}`,
+  backgroundWorkAttentionModeTrigger: 'settings-session-backgroundWorkAttentionMode-trigger',
   densityTrigger: 'settings-session-sessionListDensity-trigger',
   workingStatusAnimatedTextToggle: 'settings-session-workingStatusAnimatedText-toggle',
   workingStatusAnimatedTextItem: 'settings-session-workingStatusAnimatedText-item',
@@ -323,16 +324,16 @@ async function chooseSessionListDensity(params: Readonly<{
   await params.page.getByTestId(sessionListTestIds.densityOption(params.density)).click();
 }
 
-async function chooseSessionListPlacementMode(params: Readonly<{
+async function chooseSessionListSettingOption(params: Readonly<{
   page: Page;
   baseUrl: string;
   triggerTestId: string;
-  placement: 'off' | 'global' | 'withinGroups';
+  option: 'off' | 'global' | 'withinGroups' | 'keepWorking' | 'keepWorkingUnread' | 'showUnread';
 }>): Promise<void> {
   await gotoDomContentLoadedWithRetries(params.page, `${params.baseUrl}/settings/session?happier_hmr=0`, 180_000);
   await expect(params.page.getByTestId(params.triggerTestId)).toHaveCount(1, { timeout: 60_000 });
   await params.page.getByTestId(params.triggerTestId).click();
-  await params.page.getByTestId(sessionListTestIds.placementOption(params.placement)).click();
+  await params.page.getByTestId(sessionListTestIds.settingOption(params.option)).click();
 }
 
 async function disableWorkingStatusAnimatedText(params: Readonly<{
@@ -472,6 +473,49 @@ async function expectRowInSection(params: Parameters<typeof readRowInSection>[0]
 
 async function expectRowNotInSection(params: Parameters<typeof readRowInSection>[0]): Promise<void> {
   await expect.poll(() => readRowInSection(params), { timeout: 60_000 }).toBe(false);
+}
+
+async function publishRuntimeActivity(params: Readonly<{
+  socket: SocketCollector;
+  sessionId: string;
+  snapshot: Readonly<{ state: 'active' | 'idle'; activeCount: number }>;
+}>): Promise<void> {
+  const ack = await params.socket.emitWithAck<{ status?: string }>('session-runtime-activity-snapshot', {
+    sessionId: params.sessionId,
+    mutationId: `runtime-activity-${randomUUID()}`,
+    snapshot: params.snapshot,
+  });
+  if (ack?.status !== 'applied' && ack?.status !== 'unchanged') {
+    throw new Error(`Runtime activity snapshot was not applied (status=${String(ack?.status)})`);
+  }
+}
+
+async function publishPendingPermissionRequest(params: Readonly<{
+  baseUrl: string;
+  token: string;
+  socket: SocketCollector;
+  sessionId: string;
+}>): Promise<void> {
+  const current = await fetchSessionV2(params.baseUrl, params.token, params.sessionId);
+  const ack = await params.socket.emitWithAck<{ result?: string }>('update-state', {
+    sid: params.sessionId,
+    // Plain sessions carry agent state as JSON, the same shape the CLI publishes with its counts.
+    agentState: JSON.stringify({
+      requests: { 'e2e-permission': { tool: 'Bash', arguments: { command: 'ls' }, createdAt: Date.now() } },
+    }),
+    expectedVersion: current.agentStateVersion,
+    activitySummaryV1: { pendingPermissionRequestCount: 1, pendingUserActionRequestCount: 0 },
+  });
+  if (ack?.result !== 'success') {
+    throw new Error(`Pending permission request was not published (result=${String(ack?.result)})`);
+  }
+}
+
+function startPresenceKeepAlive(socket: SocketCollector, sessionId: string): () => void {
+  const timer = setInterval(() => {
+    socket.emit('session-alive', { sid: sessionId, time: Date.now(), thinking: false });
+  }, 10_000);
+  return () => clearInterval(timer);
 }
 
 test.describe('ui e2e: session list attention', () => {
@@ -621,11 +665,11 @@ test.describe('ui e2e: session list attention', () => {
       await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 300_000);
       await waitForInitialAppUi({ page, timeoutMs: 180_000 });
 
-      await chooseSessionListPlacementMode({
+      await chooseSessionListSettingOption({
         page,
         baseUrl: uiBaseUrl,
         triggerTestId: sessionListTestIds.workingPlacementModeTrigger,
-        placement: 'withinGroups',
+        option: 'withinGroups',
       });
       await disableWorkingStatusAnimatedText({ page, baseUrl: uiBaseUrl });
       await chooseSessionListDensity({ page, baseUrl: uiBaseUrl, density: 'cozy' });
@@ -685,17 +729,17 @@ test.describe('ui e2e: session list attention', () => {
       await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 300_000);
       await waitForInitialAppUi({ page, timeoutMs: 180_000 });
 
-      await chooseSessionListPlacementMode({
+      await chooseSessionListSettingOption({
         page,
         baseUrl: uiBaseUrl,
         triggerTestId: sessionListTestIds.attentionPromotionModeTrigger,
-        placement: 'global',
+        option: 'global',
       });
-      await chooseSessionListPlacementMode({
+      await chooseSessionListSettingOption({
         page,
         baseUrl: uiBaseUrl,
         triggerTestId: sessionListTestIds.workingPlacementModeTrigger,
-        placement: 'global',
+        option: 'global',
       });
       await chooseSessionListDensity({ page, baseUrl: uiBaseUrl, density: 'narrow' });
       await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
@@ -815,6 +859,247 @@ test.describe('ui e2e: session list attention', () => {
       throw appendBrowserDiagnostics(error, `${browserDiagnostics().replaceAll(token, '[redacted]')}\n${diagnostics}`);
     } finally {
       for (const publisher of runtimePublishers) publisher.close();
+    }
+  });
+
+  test('presents background replies through all three attention modes and returns to Working once read', async ({ page }) => {
+    test.setTimeout(240_000);
+    if (!server || !token || !uiBaseUrl) throw new Error('missing session list attention fixtures');
+
+    const session = await createPlainSession({
+      baseUrl: server.baseUrl,
+      token,
+      title: 'Background reply attention modes',
+    });
+    const browserDiagnostics = collectBrowserDiagnostics({ page });
+    let publisher: SocketCollector | null = null;
+    let stopKeepAlive: (() => void) | null = null;
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 300_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await chooseSessionListSettingOption({
+        page,
+        baseUrl: uiBaseUrl,
+        triggerTestId: sessionListTestIds.attentionPromotionModeTrigger,
+        option: 'global',
+      });
+      await chooseSessionListSettingOption({
+        page,
+        baseUrl: uiBaseUrl,
+        triggerTestId: sessionListTestIds.workingPlacementModeTrigger,
+        option: 'global',
+      });
+      await chooseSessionListDensity({ page, baseUrl: uiBaseUrl, density: 'cozy' });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await expect(row(page, session.id)).toHaveCount(1, { timeout: 120_000 });
+
+      publisher = await connectAuthenticatedMachinePublisher({
+        baseUrl: server.baseUrl,
+        token,
+        sessionId: session.id,
+        thinking: false,
+      });
+      stopKeepAlive = startPresenceKeepAlive(publisher, session.id);
+      await publishRuntimeActivity({ socket: publisher, sessionId: session.id, snapshot: { state: 'active', activeCount: 1 } });
+      await seedReadyMarker({ baseUrl: server.baseUrl, token, sessionId: session.id });
+      await updateSessionRuntimeStatus({
+        baseUrl: server.baseUrl,
+        token,
+        sessionId: session.id,
+        latestTurnStatus: 'completed',
+      });
+
+      for (const mode of ['keepWorking', 'keepWorkingUnread', 'showUnread'] as const) {
+        await chooseSessionListSettingOption({
+          page, baseUrl: uiBaseUrl,
+          triggerTestId: sessionListTestIds.backgroundWorkAttentionModeTrigger,
+          option: mode,
+        });
+        await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+        await seedReadyMarker({ baseUrl: server.baseUrl, token, sessionId: session.id });
+        await expectRowInSection({
+          page,
+          headerTestId: mode === 'showUnread' ? sessionListTestIds.attentionHeader : sessionListTestIds.workingHeader,
+          sessionId: session.id,
+        });
+        await expect(readySubtitle(page, session.id)).toHaveCount(0);
+        const spinner = page.getByTestId(`session-row-attention-indicator-spinner-${session.id}-secondary`);
+        if (mode === 'keepWorking') {
+          await expect(spinner).toHaveCount(1);
+          await expect(page.getByTestId(`session-row-unread-indicator-${session.id}-secondary`)).toHaveCount(0);
+          await expect(page.getByTestId(`session-row-unread-center-${session.id}-secondary`)).toHaveCount(1);
+          await row(page, session.id).screenshot({ path: test.info().outputPath('working-unread.png') });
+        } else {
+          await expect(spinner).toHaveCount(0);
+          await expect(page.getByTestId(`session-list-attention-indicator-${session.id}-secondary-unread`)).toHaveCount(1);
+        }
+        await row(page, session.id).click();
+        await expect(page).toHaveURL(new RegExp(`/session/${session.id}(?:\\?|$)`), { timeout: 90_000 });
+        await expectRowInSection({ page, headerTestId: sessionListTestIds.workingHeader, sessionId: session.id });
+        await expect(spinner).toHaveCount(1);
+        await expect(page.getByTestId(`session-row-unread-indicator-${session.id}-secondary`)).toHaveCount(0);
+        await expect(page.getByTestId(`session-row-unread-center-${session.id}-secondary`)).toHaveCount(0);
+        if (mode === 'keepWorking') await row(page, session.id).screenshot({ path: test.info().outputPath('working-read.png') });
+      }
+      // A new unread completed reply becomes ready only after reported work settles.
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await seedReadyMarker({ baseUrl: server.baseUrl, token, sessionId: session.id });
+      await publishRuntimeActivity({ socket: publisher, sessionId: session.id, snapshot: { state: 'idle', activeCount: 0 } });
+      await expectRowInSection({ page, headerTestId: sessionListTestIds.attentionHeader, sessionId: session.id });
+      await expect(readySubtitle(page, session.id)).toHaveCount(1);
+
+    } catch (error) {
+      throw appendBrowserDiagnostics(error, browserDiagnostics().replaceAll(token, '[redacted]'));
+    } finally {
+      stopKeepAlive?.();
+      publisher?.close();
+    }
+  });
+
+  test('keeps an approved permission settled when an old socket update arrives', async ({ page }) => {
+    test.setTimeout(360_000);
+    if (!server || !token || !uiBaseUrl) throw new Error('missing session list attention fixtures');
+
+    const session = await createPlainSession({ baseUrl: server.baseUrl, token, title: 'Settled permission e2e' });
+    const browserDiagnostics = collectBrowserDiagnostics({ page });
+    let publisher: SocketCollector | null = null;
+    let stopKeepAlive: (() => void) | null = null;
+    let pendingUpdate: Readonly<{ route: WebSocketRoute; packet: string }> | null = null;
+    const readPendingUpdate = () => pendingUpdate;
+    // Replay a real server packet at the transport boundary. The UI still runs its
+    // actual decoding, socket handler, batching, store and row subscriptions.
+    await page.routeWebSocket(url => url.pathname === '/v1/updates/', route => {
+      const upstream = route.connectToServer();
+      upstream.onMessage(message => {
+        if (typeof message === 'string' && message.startsWith('42')) {
+          let event: unknown;
+          try { event = JSON.parse(message.slice(2)); } catch { /* Other Socket.IO packets pass through. */ }
+          const data: unknown = Array.isArray(event) && event[0] === 'update' ? event[1] : null;
+          const body = data && typeof data === 'object' && 'body' in data ? data.body : null;
+          if (body && typeof body === 'object' && 'id' in body && body.id === session.id
+            && 'pendingPermissionRequestCount' in body && body.pendingPermissionRequestCount === 1) {
+            pendingUpdate = { route, packet: message };
+          }
+        }
+        route.send(message);
+      });
+    });
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await chooseSessionListDensity({ page, baseUrl: uiBaseUrl, density: 'cozy' });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await expect(row(page, session.id)).toHaveCount(1, { timeout: 120_000 });
+      publisher = await connectAuthenticatedMachinePublisher({ baseUrl: server.baseUrl, token, sessionId: session.id, thinking: false });
+      stopKeepAlive = startPresenceKeepAlive(publisher, session.id);
+      await publishRuntimeActivity({ socket: publisher, sessionId: session.id, snapshot: { state: 'active', activeCount: 1 } });
+      await publishPendingPermissionRequest({ baseUrl: server.baseUrl, token, socket: publisher, sessionId: session.id });
+      const permissionIndicator = page.getByTestId(`session-list-attention-indicator-${session.id}-secondary-permission_required`);
+      await expect(permissionIndicator).toHaveCount(1, { timeout: 60_000 });
+      await expect.poll(() => pendingUpdate !== null).toBe(true);
+      await row(page, session.id).click();
+      await expect(page).toHaveURL(new RegExp(`/session/${session.id}(?:\\?|$)`), { timeout: 90_000 });
+      const composerStatus = page.getByTestId('agent-input-connection-status-text');
+      await expect(composerStatus).toContainText(/permission required/i, { timeout: 60_000 });
+
+      const current = await fetchSessionV2(server.baseUrl, token, session.id);
+      const ack = await publisher.emitWithAck<{ result?: string }>('update-state', {
+        sid: session.id,
+        agentState: JSON.stringify({ requests: {}, completedRequests: {
+          'e2e-permission': { tool: 'Bash', arguments: { command: 'ls' }, status: 'approved', completedAt: Date.now() },
+        } }),
+        expectedVersion: current.agentStateVersion,
+        activitySummaryV1: { pendingPermissionRequestCount: 0, pendingUserActionRequestCount: 0 },
+      });
+      expect(ack?.result).toBe('success');
+      await expect(permissionIndicator).toHaveCount(0, { timeout: 60_000 });
+      await expect(composerStatus).not.toContainText(/permission required/i);
+      await expect(workingSubtitle(page, session.id)).toHaveCount(1);
+      const stale = readPendingUpdate();
+      if (!stale) throw new Error('Missing captured pending update');
+      stale.route.send(stale.packet);
+      // A subsequent real update provides an observable barrier after the replay.
+      await publishRuntimeActivity({ socket: publisher, sessionId: session.id, snapshot: { state: 'idle', activeCount: 0 } });
+      await expect(workingSubtitle(page, session.id)).toHaveCount(0, { timeout: 60_000 });
+      await expect(permissionIndicator).toHaveCount(0);
+      await expect(composerStatus).not.toContainText(/permission required/i);
+      await row(page, session.id).screenshot({ path: test.info().outputPath('permission-settled-after-stale-update.png') });
+    } catch (error) {
+      throw appendBrowserDiagnostics(error, browserDiagnostics().replaceAll(token, '[redacted]'));
+    } finally {
+      stopKeepAlive?.();
+      publisher?.close();
+    }
+  });
+
+  test('keeps a background request in attention past the runtime freshness window', async ({ page }) => {
+    test.setTimeout(360_000);
+    if (!server || !token || !uiBaseUrl) throw new Error('missing session list attention fixtures');
+
+    const session = await createPlainSession({
+      baseUrl: server.baseUrl,
+      token,
+      title: 'Waiting request e2e',
+    });
+    const browserDiagnostics = collectBrowserDiagnostics({ page });
+    let publisher: SocketCollector | null = null;
+    let stopKeepAlive: (() => void) | null = null;
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await chooseSessionListSettingOption({
+        page,
+        baseUrl: uiBaseUrl,
+        triggerTestId: sessionListTestIds.attentionPromotionModeTrigger,
+        option: 'global',
+      });
+      await chooseSessionListSettingOption({
+        page,
+        baseUrl: uiBaseUrl,
+        triggerTestId: sessionListTestIds.workingPlacementModeTrigger,
+        option: 'global',
+      });
+      await chooseSessionListDensity({ page, baseUrl: uiBaseUrl, density: 'cozy' });
+      await gotoDomContentLoadedWithRetries(page, `${uiBaseUrl}/?happier_hmr=0`, 180_000);
+      await waitForInitialAppUi({ page, timeoutMs: 180_000 });
+      await expect(row(page, session.id)).toHaveCount(1, { timeout: 120_000 });
+
+      publisher = await connectAuthenticatedMachinePublisher({
+        baseUrl: server.baseUrl,
+        token,
+        sessionId: session.id,
+        thinking: false,
+      });
+      stopKeepAlive = startPresenceKeepAlive(publisher, session.id);
+      // The foreground turn has ended; a background agent is still running and asks for permission.
+      await updateSessionRuntimeStatus({
+        baseUrl: server.baseUrl,
+        token,
+        sessionId: session.id,
+        latestTurnStatus: 'completed',
+      });
+      await publishRuntimeActivity({ socket: publisher, sessionId: session.id, snapshot: { state: 'active', activeCount: 1 } });
+      await publishPendingPermissionRequest({ baseUrl: server.baseUrl, token, socket: publisher, sessionId: session.id });
+
+      // No reload: the row was offline when the list loaded, so this also proves the live update
+      // brings it back online.
+      const permissionIndicator = page.getByTestId(`session-list-attention-indicator-${session.id}-secondary-permission_required`);
+      await expect(permissionIndicator).toHaveCount(1, { timeout: 60_000 });
+
+      // The request's observation instant is never refreshed while it waits; it must not age out.
+      await page.waitForTimeout(150_000);
+      await expect(permissionIndicator).toHaveCount(1);
+      await expectRowInSection({ page, headerTestId: sessionListTestIds.attentionHeader, sessionId: session.id });
+    } catch (error) {
+      throw appendBrowserDiagnostics(error, browserDiagnostics().replaceAll(token, '[redacted]'));
+    } finally {
+      stopKeepAlive?.();
+      publisher?.close();
     }
   });
 });

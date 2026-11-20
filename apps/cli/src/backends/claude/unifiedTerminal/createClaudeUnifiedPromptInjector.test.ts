@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { TerminalInputInjectionResult, TerminalPromptInput } from '@/agent/runtime/terminal/_types';
+import {
+  resolveTerminalPromptSubmissionFailureReason,
+  runTerminalPromptSubmission,
+} from '@/integrations/terminalHost/promptSubmitVerification';
+
+import { createClaudePromptSubmitVerificationPolicy } from './claudePromptSubmitVerification';
 import { createClaudeUnifiedPromptInjector } from './createClaudeUnifiedPromptInjector';
 
 describe('createClaudeUnifiedPromptInjector', () => {
@@ -683,5 +690,76 @@ describe('createClaudeUnifiedPromptInjector', () => {
       ).resolves.toMatchObject({ status: 'injected' });
       expect(composerDraftGuard).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('createClaudeUnifiedPromptInjector — delivery verification budget', () => {
+  // Incident cmwcg4h31 (11 nov 2026): the session-owned verifier never observed a pasted prompt
+  // and waited forever, holding the Pending row as "delivering" with no visible outcome. The host
+  // boundary below supplies the session lifetime like the real terminal wrapper and runs the real
+  // verifier and Claude policy over a screen that never shows the prompt.
+  function createNeverStagedHost(submitEnter: () => Promise<'success'>) {
+    const sessionLifetime = new AbortController();
+    const policy = createClaudePromptSubmitVerificationPolicy();
+    const injectUserPrompt = vi.fn(async (input: TerminalPromptInput): Promise<TerminalInputInjectionResult> => {
+      const submission = await runTerminalPromptSubmission({
+        promptText: input.text,
+        signal: input.signal ? AbortSignal.any([sessionLifetime.signal, input.signal]) : sessionLifetime.signal,
+        resolveDeliveryState: input.resolveDeliveryState,
+        verifyStagedBeforeSubmit: async ({ promptText }) => policy.isPromptStagedBeforeSubmit({
+          promptText,
+          screenText: '────────\n❯ \n────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+        }),
+        submitEnter,
+        verifyAfterSubmit: async () => false,
+        postSubmitSettleMs: 0,
+      });
+      if (submission.success) return { status: 'injected', at: 1, bytesWritten: input.text.length };
+      return {
+        status: 'failed',
+        reason: resolveTerminalPromptSubmissionFailureReason(submission.reason),
+        phase: submission.phase,
+        duplicateRisk: submission.duplicateRisk,
+        recoverable: true,
+      };
+    });
+    return { injectUserPrompt, sessionLifetime };
+  }
+
+  it('ends an unobservable delivery as an ambiguous failure after the session stall budget, without pressing Enter', async () => {
+    vi.useFakeTimers();
+    try {
+      const submitEnter = vi.fn(async () => 'success' as const);
+      const host = createNeverStagedHost(submitEnter);
+      const injector = createClaudeUnifiedPromptInjector({
+        inputInjection: { hostKind: 'tmux', injectUserPrompt: host.injectUserPrompt },
+        createNonce: () => 'nonce-budget',
+        deliveryVerificationBudgetMs: 135_000,
+      });
+      let settled: TerminalInputInjectionResult | 'pending' = 'pending';
+      const delivery = injector.injectPrompt({
+        message: 'a prompt the screen never shows',
+        origin: { kind: 'ui_pending' },
+        userMessageLocalIds: ['local-1'],
+      }).then((result) => { settled = result; });
+
+      await vi.advanceTimersByTimeAsync(134_000);
+      expect(settled).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      expect(settled).toEqual({
+        status: 'failed',
+        reason: 'verification_failed',
+        phase: 'after_write_before_enter',
+        duplicateRisk: 'possible',
+        recoverable: true,
+      });
+      expect(submitEnter).not.toHaveBeenCalled();
+      host.sessionLifetime.abort();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await delivery;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

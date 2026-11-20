@@ -258,6 +258,28 @@ function readNativeQueuedCommandConsumption(value: unknown): NativeQueuedCommand
   };
 }
 
+/**
+ * What one Claude transcript row says about prompt delivery, read with the same rules as live
+ * acceptance: a main-chain user prompt or a consumed `queued_command` is the prompt reaching the
+ * conversation; a native `queue-operation` is only Claude holding or releasing it.
+ */
+export type ClaudeUnifiedTranscriptPromptEvidence =
+  | Readonly<{ kind: 'consumed'; texts: readonly string[]; timestampMs: number | null }>
+  | Readonly<{ kind: 'native_queue'; operation: 'enqueue' | 'remove'; text: string; timestampMs: number }>;
+
+export function readClaudeUnifiedTranscriptPromptEvidence(row: unknown): ClaudeUnifiedTranscriptPromptEvidence | null {
+  const operation = readNativeQueuedCommandOperation(row);
+  if (operation) {
+    return { kind: 'native_queue', operation: operation.operation, text: operation.content, timestampMs: operation.timestampMs };
+  }
+  const consumption = readNativeQueuedCommandConsumption(row);
+  if (consumption) {
+    return { kind: 'consumed', texts: [consumption.prompt], timestampMs: consumption.transcriptTimestampMs };
+  }
+  const texts = readPromptTexts(row);
+  return texts.length > 0 ? { kind: 'consumed', texts, timestampMs: readMessageTimestampMs(row) } : null;
+}
+
 function promptTextsMatch(transcriptText: string, acceptedPrompt: AcceptedPrompt): boolean {
   const normalizedTranscriptText = normalizeClaudeUnifiedPromptIdentityText(transcriptText);
   if (normalizedTranscriptText === acceptedPrompt.normalizedText) return true;

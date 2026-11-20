@@ -21,11 +21,24 @@ This document captures the current low-level Claude implementation across the CL
 | Linked direct transcript source (`.claude/projects/...jsonl`) | `supported` | `apps/cli/src/backends/claude/session.ts`, `apps/cli/src/backends/claude/directSessions/listClaudeSessionCandidates.ts`, `apps/cli/src/backends/claude/directSessions/pageClaudeTranscript.ts`, `apps/cli/src/backends/claude/directSessions/readAfterClaudeTranscript.ts`, `apps/cli/src/backends/claude/directSessions/resolveClaudeDirectSessionFile.ts` | When transcript storage is `direct`, `session.ts` writes `directSessionV1`; browse/tail reads provider-owned JSONL directly and supports backward paging plus forward tail-follow. | Replace `directSessionV1` and Claude-specific file cursors with a shared transcript-source contract used by browse, takeover, and handoff. |
 | Sidechains, subagents, and team inbox | `partial` | `apps/cli/src/backends/claude/remote/sidechains/claudeTaskOutputSidechainImporter.ts`, `apps/cli/src/backends/claude/remote/sidechains/claudeRemoteSubagentFileCollector.ts`, `apps/cli/src/backends/claude/remote/teamInbox/claudeRemoteTeamInboxBridge.ts`, `apps/cli/src/backends/claude/utils/teamInbox/claudeTeamInboxCollector.ts`, `apps/ui/sources/sync/domains/session/participants/providers/claude/deriveClaudeTeamParticipants.ts`, `apps/ui/sources/components/tools/renderers/workflow/SubAgentRunView.tsx` | Remote mode has dedicated collectors for `Task` / `Agent` JSONL sidechains and team-inbox messages; UI then reconstructs team state, shutdown pruning, and run previews from normalized tool calls plus imported sidechain messages. | Centralize Claude sidechain/team normalization so CLI collectors and UI participant derivation stop re-encoding the same lifecycle rules. |
 
+In development source, Direct takeover preserves the current native config
+environment when the linked transcript store is the configured store, including
+an unset `CLAUDE_CONFIG_DIR`. A resolved transcript path alone does not select
+native credentials. Explicit native overrides retain their value, and links to a
+different store retain their pinned root. Existing-state handoff and bundle import
+use the same native environment-overlay owner for their target environment.
+These rules do not recover the original authentication environment of older links.
+
 In development source, the remote launcher records unexpected launch failures
 in the normal session file log, including failures before the SDK subprocess or
 its debug log exists. The entry includes redacted error text and the existing
 error disposition; user cancellation and owned teardown remain debug-only.
 Resume validation and provider identity preservation are unchanged.
+
+Development-source session discovery accepts `SessionStart` hooks and eventless
+SDK/offline discoveries. Other hook events, including `SessionEnd`, continue to
+reach lifecycle handling but cannot replace the active Claude resume identity,
+transcript path, or owned-session lineage during local/remote handoff.
 
 Development-source transcript ingestion and UI normalization share
 `providers.claude.isClaudeInternalEventType` from `@happier-dev/agents` for
@@ -105,7 +118,19 @@ activity, including nested SDK agents that outlive their launching agent.
 `SubagentStop` is progress evidence
 because Claude can veto that stop and continue working. Synchronous children
 finish on their tool results; asynchronous children finish on the provider's
-settled task evidence. Workflow correlation folds every tool block in a message,
+settled task evidence. Claude 2.1.302 reports an Agent `completed` each time it
+stops, including when it stops to wait on backgrounded work it still owns (SDK
+`task_started` rows carrying `parent_task_id`). That terminal leaves the Agent
+awaiting its children (a child Agent that is itself awaiting its own children still
+counts): the children keep their own activity, and only the Agent's
+own typed SDK `task_progress` after it wakes reactivates it until its next
+terminal. Hook `SubagentStop` progress cannot reactivate an awaiting Agent, so an
+Agent that never wakes cannot hold runtime activity open. A later stop or failure
+settles an awaiting Agent and prevents typed progress from reactivating it.
+Confirmed TaskOutput hooks retain the task's terminal status, while confirmed
+TaskStop hooks settle it as stopped. Neither remembers unknown task identities;
+a completed TaskOutput preserves the pending wake.
+Workflow correlation folds every tool block in a message,
 keeps each child's native task alias, and closes an implicit Agent activity group
 when all children settle. A successful native resume can reopen that group.
 A successful SendMessage `resumedAgentId` proves an asynchronous invocation,
@@ -153,6 +178,11 @@ the existing arbiter then releases the submitted head and admits the next prompt
 without resending the retired input or manufacturing provider acceptance. The API
 session client owns exact custody reconciliation and publishes the same Pending
 wake when local custody changes.
+
+The development-source Agent SDK and legacy remote runners also require exact
+native input acknowledgment before reporting acceptance. Their shared settlement
+owner and failed-startup replay retention are described in
+[Pending delivery](pending-delivery.md#ui-settlement-convergence-development).
 
 In development source, Unified Terminal publishes its exact-host stop capability
 as soon as the attachment is persisted, before metadata publication or provider

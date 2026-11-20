@@ -1,10 +1,22 @@
 import { chmodSync, mkdirSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { INSTALLABLE_KEYS } from '@happier-dev/protocol';
+import {
+  applyMessageSearchSwitch,
+  INSTALLABLE_KEYS,
+  isMessageSearchEnabled,
+  type MemorySearchCoverageV2,
+  type MessageSearchSetRequestV1,
+  type MessageSearchStatusV1,
+} from '@happier-dev/protocol';
 
 import type { Credentials } from '@/persistence';
-import { DEFAULT_MEMORY_SETTINGS, readMemorySettingsFromDisk, type MemorySettingsV1 } from '@/settings/memorySettings';
+import {
+  DEFAULT_MEMORY_SETTINGS,
+  readMemorySettingsFromDisk,
+  writeMemorySettingsToDisk,
+  type MemorySettingsV1,
+} from '@/settings/memorySettings';
 import { configuration } from '@/configuration';
 import { subscribeOptionalRuntimeInstallSuccess } from '@/installables/runtime/optionalRuntimeInstallables';
 import { subscribeActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
@@ -13,10 +25,11 @@ import { resolveMemoryIndexPaths } from './memoryIndexPaths';
 import { openSummaryShardIndexDb, type SummaryShardIndexDbHandle } from './summaryShardIndexDb';
 import { openDeepIndexDb, type DeepIndexDbHandle } from './deepIndex/deepIndexDb';
 import type { DecryptedTranscriptRow } from '@/session/replay/decryptTranscriptRows';
-import { fetchSessionById } from '@/session/transport/http/sessionsHttp';
+import { fetchSessionById, type RawSessionListRow } from '@/session/transport/http/sessionsHttp';
 import {
   resolveSessionEncryptionContextFromCredentials,
   resolveSessionStoredContentEncryptionMode,
+  tryDecryptSessionMetadata,
   type SessionEncryptionContext,
   type SessionStoredContentEncryptionMode,
 } from '@/session/transport/encryption/sessionEncryptionContext';
@@ -30,7 +43,10 @@ import { runMemoryHintsExecutionRun } from './hints/runMemoryHintsExecutionRun';
 import { commitMemorySystemRecords } from '@/session/systemRecords/memory/commitMemorySystemRecords';
 import { fetchMemorySummaryShardSystemRecords } from '@/session/systemRecords/memory/fetchMemorySystemRecords';
 import { logServerEndpointFailure } from '@/api/client/serverEndpointFailureLog';
-import { syncDeepIndexForSessionsOnce } from './deepIndex/syncDeepIndexForSessionsOnce';
+import { syncDeepIndexForSessionsOnce, type DeepIndexTranscriptPage } from './deepIndex/syncDeepIndexForSessionsOnce';
+import { selectDeepIndexWork } from './deepIndex/selectDeepIndexWork';
+import { readDeepIndexSessionMeta } from './deepIndex/deepIndexSessionMeta';
+import { readAccountIdFromToken } from '@/daemon/machineIdentity/resolveMachineRegistrationIdentity';
 import { resolveEmbeddingsProvider } from './deepIndex/embeddings/resolveEmbeddingsProvider';
 import {
   buildUnavailableMemoryEmbeddingsDiagnostics,
@@ -59,6 +75,12 @@ export type MemoryWorkerHandle = Readonly<{
   }>;
   getTier1DbPath: () => string | null;
   getDeepDbPath: () => string | null;
+  /** The open deep index, or null outside deep mode. Readers share the worker's connection. */
+  getDeepIndex: () => DeepIndexDbHandle | null;
+  getDeepIndexCoverage: () => MemorySearchCoverageV2;
+  /** Conversation search on this machine (`messageSearchSwitch.ts`). */
+  getMessageSearchStatus: () => Promise<MessageSearchStatusV1>;
+  setMessageSearch: (request: MessageSearchSetRequestV1) => Promise<MessageSearchStatusV1>;
 }>;
 
 function bestEffortChmod700(dir: string): void {
@@ -135,7 +157,7 @@ export async function startMemoryWorker(params: Readonly<{
   machineId: string;
   env?: NodeJS.ProcessEnv;
   deps?: Readonly<{
-    fetchDecryptedTranscriptPageAfterSeq: (args: Readonly<{ sessionId: string; afterSeq: number; limit: number }>) => Promise<DecryptedTranscriptRow[]>;
+    fetchDecryptedTranscriptPageAfterSeq: (args: Readonly<{ sessionId: string; afterSeq: number; limit: number }>) => Promise<DeepIndexTranscriptPage>;
     fetchCommittedSummaryShards?: (sessionId: string) => Promise<import('@happier-dev/protocol').SessionSummaryShardV1[]>;
   }>;
 }>): Promise<MemoryWorkerHandle> {
@@ -156,6 +178,12 @@ export async function startMemoryWorker(params: Readonly<{
   let inventoryBackfillPolicy: MemorySettingsV1['backfillPolicy'] = 'new_only';
   const inventorySeenSessionIds = new Set<string>();
   const candidateObservedSeqBySessionId = new Map<string, number>();
+  // Sessions whose head moved since the inventory last listed them: read before the backfill.
+  const deepPrioritySessionIds = new Set<string>();
+  let archivedInventoryCursor: string | null = null;
+  let archivedInventoryHasNext = true;
+  let inventoryPassComplete = false;
+  const accountId = readAccountIdFromToken(params.credentials.token) ?? 'unknown-account';
   const sessionCtxCache = new Map<string, SessionEncryptionContext>();
   const sessionModeCache = new Map<string, SessionStoredContentEncryptionMode>();
   let workerState: 'disabled' | 'idle' | 'inventorying' | 'indexing' | 'waiting' | 'backoff' | 'error' = 'idle';
@@ -265,18 +293,20 @@ export async function startMemoryWorker(params: Readonly<{
     ({
       fetchDecryptedTranscriptPageAfterSeq: async (
         args: Readonly<{ sessionId: string; afterSeq: number; limit: number }>,
-      ): Promise<DecryptedTranscriptRow[]> => {
+      ): Promise<DeepIndexTranscriptPage> => {
         try {
           let ctx = sessionCtxCache.get(args.sessionId);
           if (!ctx) {
             const raw = await fetchSessionById({ token: params.credentials.token, sessionId: args.sessionId });
-            if (!raw) return [];
+            if (!raw) return { rows: [], hasMore: false, lastSeq: null };
             ctx = resolveSessionEncryptionContextFromCredentials(params.credentials, raw);
             sessionCtxCache.set(args.sessionId, ctx);
             sessionModeCache.set(args.sessionId, resolveSessionStoredContentEncryptionMode(raw));
           }
 
-          const encrypted = await fetchEncryptedTranscriptMessagesPage({
+          // One request: with `user` among the roles the server also returns unclassified
+          // (pre-role) rows, and a server without role filtering returns every row.
+          const page = await fetchEncryptedTranscriptMessagesPage({
             token: params.credentials.token,
             sessionId: args.sessionId,
             afterSeq: args.afterSeq,
@@ -284,25 +314,19 @@ export async function startMemoryWorker(params: Readonly<{
             roles: ['user', 'agent'],
             scope: 'main',
           });
-
-          const legacy = await fetchEncryptedTranscriptMessagesPage({
-            token: params.credentials.token,
-            sessionId: args.sessionId,
-            afterSeq: args.afterSeq,
-            limit: args.limit,
-            scope: 'main',
-          });
-          const decrypted = decryptTranscriptRows({
-            ctx,
-            rows: [
-              ...encrypted.messages,
-              ...legacy.messages.filter(isLegacyUnclassifiedTranscriptRow),
-            ],
-          });
-          return decrypted;
+          const lastSeq = page.messages.reduce<number | null>((max, row) => {
+            const seq = typeof row.seq === 'number' && Number.isFinite(row.seq) ? Math.trunc(row.seq) : null;
+            return seq === null ? max : Math.max(max ?? seq, seq);
+          }, null);
+          return {
+            rows: decryptTranscriptRows({ ctx, rows: page.messages }),
+            hasMore: page.hasMore,
+            lastSeq,
+          };
         } catch (error) {
+          // Thrown, not read as an empty page: an empty final page would mark the session read.
           logMemoryWorkerServerEndpointFailure('transcript page', error);
-          return [];
+          throw error;
         }
       },
     } as const);
@@ -362,6 +386,50 @@ export async function startMemoryWorker(params: Readonly<{
     }
   };
 
+  /** What the session list says about each session: its head, title and agent, and its keys. */
+  const observeListedSessions = (rows: readonly RawSessionListRow[], options: Readonly<{ mostRecent: boolean }>): void => {
+    for (const row of rows) {
+      const id = typeof row.id === 'string' ? row.id.trim() : '';
+      if (!id) continue;
+      if (typeof row.seq === 'number' && Number.isFinite(row.seq)) {
+        const seq = Math.max(0, Math.trunc(row.seq));
+        const previous = candidateObservedSeqBySessionId.get(id);
+        if (options.mostRecent && settings.backfillPolicy !== 'new_only' && (previous === undefined || seq > previous)) {
+          deepPrioritySessionIds.add(id);
+        }
+        candidateObservedSeqBySessionId.set(id, seq);
+      }
+      if (settings.backfillPolicy !== 'new_only' && !inventorySeenSessionIds.has(id)) {
+        inventorySeenSessionIds.add(id);
+        candidateSessionIds.push(id);
+      }
+      try {
+        if (!sessionCtxCache.has(id)) {
+          sessionCtxCache.set(id, resolveSessionEncryptionContextFromCredentials(params.credentials, row));
+          sessionModeCache.set(id, resolveSessionStoredContentEncryptionMode(row));
+        }
+        deep?.upsertSessionMeta({
+          sessionId: id,
+          ...readDeepIndexSessionMeta(tryDecryptSessionMetadata({ credentials: params.credentials, rawSession: row })),
+        });
+      } catch (error) {
+        logger.debug('[memoryWorker] Session list row could not be read (best-effort)', {
+          sessionId: id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  };
+
+  /** A session the deep index has not read up to the head the session list reported. */
+  const deepSessionNeedsWork = (sessionId: string, nowMs: number, options: Readonly<{ includeBackoff: boolean }>): boolean => {
+    if (!tier1) return false;
+    const cursors = tier1.getSessionCursors({ sessionId, nowMs });
+    if (!options.includeBackoff && cursors.nextDeepEligibleAtMs > nowMs) return false;
+    const observed = candidateObservedSeqBySessionId.get(sessionId);
+    return observed === undefined || observed > cursors.lastDeepIndexedSeq;
+  };
+
   const stopLoop = (): void => {
     inventoryLoop?.stop();
     inventoryLoop = null;
@@ -377,6 +445,10 @@ export async function startMemoryWorker(params: Readonly<{
     inventoryBackfillPolicy = 'new_only';
     inventorySeenSessionIds.clear();
     candidateObservedSeqBySessionId.clear();
+    deepPrioritySessionIds.clear();
+    archivedInventoryCursor = null;
+    archivedInventoryHasNext = true;
+    inventoryPassComplete = false;
   };
 
   const stop = () => {
@@ -443,11 +515,11 @@ export async function startMemoryWorker(params: Readonly<{
       },
       now: () => Date.now(),
       fetchRecentDecryptedRows: async (sessionId) => hasCustomDeps
-        ? await deps.fetchDecryptedTranscriptPageAfterSeq({
+        ? (await deps.fetchDecryptedTranscriptPageAfterSeq({
           sessionId,
           afterSeq: 0,
           limit: configuration.memoryMaxTranscriptWindowMessages,
-        })
+        })).rows
         : await fetchSelectedDecryptedRowsForLightIndex(sessionId),
       fetchCommittedSummaryShards: async (sessionId) => {
         if (deps.fetchCommittedSummaryShards) {
@@ -519,6 +591,7 @@ export async function startMemoryWorker(params: Readonly<{
 
     await syncDeepIndexForSessionsOnce({
       sessionIds,
+      observedSeqBySessionId: candidateObservedSeqBySessionId,
       tier1,
       deep,
       settings: {
@@ -527,9 +600,6 @@ export async function startMemoryWorker(params: Readonly<{
         coveragePolicy: settings.coveragePolicy,
         contentPolicy: settings.contentPolicy,
         deep: {
-          maxChunkChars: settings.deep.maxChunkChars,
-          maxChunkMessages: settings.deep.maxChunkMessages,
-          minChunkMessages: settings.deep.minChunkMessages,
           includeAssistantAcpMessage: settings.deep.includeAssistantAcpMessage,
           failureBackoffBaseMs: settings.deep.failureBackoffBaseMs,
           failureBackoffMaxMs: settings.deep.failureBackoffMaxMs,
@@ -591,6 +661,10 @@ export async function startMemoryWorker(params: Readonly<{
       candidateCursor = 0;
       candidateAllowInitialBackfillSessionIds.clear();
       candidateObservedSeqBySessionId.clear();
+      deepPrioritySessionIds.clear();
+      archivedInventoryCursor = null;
+      archivedInventoryHasNext = true;
+      inventoryPassComplete = false;
     }
 
     if (!tier1) {
@@ -600,8 +674,9 @@ export async function startMemoryWorker(params: Readonly<{
 
     if (settings.indexMode === 'deep') {
       if (!deep) {
-        deep = openDeepIndexDb({ dbPath: paths.deepDbPath });
-        deep.init();
+        deep = openDeepIndexDb({ dbPath: paths.deepDbPath, accountId });
+        // A new, migrated or re-bound index is empty: its sessions are read again from the start.
+        if (deep.rebuilt) tier1.resetDeepIndexCursors();
       }
     } else if (deep) {
       try {
@@ -645,14 +720,11 @@ export async function startMemoryWorker(params: Readonly<{
               const enabledAtMs = Math.max(0, Math.trunc(settings.enabledAtMs ?? 0));
               candidateAllowInitialBackfillSessionIds.clear();
               candidateObservedSeqBySessionId.clear();
+              observeListedSessions(page.sessions, { mostRecent: true });
               candidateSessionIds = page.sessions
                 .map((session) => {
                   const id = typeof session.id === 'string' ? String(session.id).trim() : '';
                   if (!id) return null;
-                  const seq = typeof session.seq === 'number' && Number.isFinite(session.seq)
-                    ? Math.max(0, Math.trunc(session.seq))
-                    : 0;
-                  candidateObservedSeqBySessionId.set(id, seq);
                   if (enabledAtMs > 0 && readSessionCreatedAtMs(session) >= enabledAtMs) {
                     candidateAllowInitialBackfillSessionIds.add(id);
                   }
@@ -664,48 +736,55 @@ export async function startMemoryWorker(params: Readonly<{
               inventoryHasNext = true;
               inventorySeenSessionIds.clear();
               inventoryBackfillPolicy = settings.backfillPolicy;
+              inventoryPassComplete = true;
               workerState = 'idle';
               currentPhase = null;
               return;
             }
 
             candidateAllowInitialBackfillSessionIds.clear();
-            const cursor = inventoryHasNext ? inventoryCursor ?? undefined : undefined;
-            const page = await fetchSessionsPage({
-              token: params.credentials.token,
-              cursor,
-              activeOnly: false,
-              limit: settings.worker.sessionListPageLimit,
-            });
+            const listPage = async (cursor: string | null, archivedOnly: boolean) => {
+              const page = await fetchSessionsPage({
+                token: params.credentials.token,
+                ...(cursor ? { cursor } : {}),
+                activeOnly: false,
+                ...(archivedOnly ? { archivedOnly: true } : {}),
+                limit: settings.worker.sessionListPageLimit,
+              });
+              const selected = selectSessionsForBackfill({
+                sessions: page.sessions,
+                backfillPolicy: settings.backfillPolicy,
+                nowMs: Date.now(),
+              });
+              observeListedSessions(
+                page.sessions.filter((row) => selected.sessionIds.includes(row.id)),
+                { mostRecent: cursor === null && !archivedOnly },
+              );
+              return { page, selected };
+            };
 
-            const selected = selectSessionsForBackfill({
-              sessions: page.sessions,
-              backfillPolicy: settings.backfillPolicy,
-              nowMs: Date.now(),
-            });
-
-            for (const id of selected.sessionIds) {
-              if (inventorySeenSessionIds.has(id)) continue;
-              inventorySeenSessionIds.add(id);
-              const row = page.sessions.find((session) => session.id === id);
-              const seq = typeof row?.seq === 'number' && Number.isFinite(row.seq)
-                ? Math.max(0, Math.trunc(row.seq))
-                : 0;
-              candidateObservedSeqBySessionId.set(id, seq);
-              candidateSessionIds.push(id);
-            }
+            // The most recently active sessions, every refresh: their heads drive incremental indexing.
+            if (inventoryCursor !== null || !inventoryHasNext) await listPage(null, false);
 
             if (inventoryHasNext) {
-              if (selected.shouldStopPaging) {
+              const { page, selected } = await listPage(inventoryCursor, false);
+              if (selected.shouldStopPaging || !page.hasNext || !page.nextCursor) {
                 inventoryCursor = null;
                 inventoryHasNext = false;
               } else {
                 inventoryCursor = page.nextCursor;
-                inventoryHasNext = Boolean(page.hasNext);
               }
-            } else {
-              inventoryCursor = null;
+            } else if (archivedInventoryHasNext) {
+              // Archived sessions are listed separately; they rarely change, so one pass covers them.
+              const { page, selected } = await listPage(archivedInventoryCursor, true);
+              if (selected.shouldStopPaging || !page.hasNext || !page.nextCursor) {
+                archivedInventoryCursor = null;
+                archivedInventoryHasNext = false;
+              } else {
+                archivedInventoryCursor = page.nextCursor;
+              }
             }
+            inventoryPassComplete = !inventoryHasNext && !archivedInventoryHasNext;
             workerState = 'idle';
             currentPhase = null;
           },
@@ -737,16 +816,30 @@ export async function startMemoryWorker(params: Readonly<{
             const maxSessions = Math.max(1, Math.trunc(settings.worker.maxSessionsPerTick));
             const sessionIds: string[] = [];
             const allowInitialBackfillWhenUninitializedSessionIds: string[] = [];
-            for (let i = 0; i < maxSessions; i += 1) {
-              if (candidateSessionIds.length === 0) break;
-              const idx = candidateCursor % candidateSessionIds.length;
-              const id = candidateSessionIds[idx];
-              candidateCursor = (candidateCursor + 1) % candidateSessionIds.length;
-              if (!id) continue;
-              sessionIds.push(id);
-              currentSessionId = id;
-              if (candidateAllowInitialBackfillSessionIds.has(id)) {
-                allowInitialBackfillWhenUninitializedSessionIds.push(id);
+            if (settings.indexMode === 'deep' && deep) {
+              const nowMs = Date.now();
+              const selection = selectDeepIndexWork({
+                candidateIds: candidateSessionIds,
+                startIndex: candidateCursor,
+                priorityIds: [...deepPrioritySessionIds],
+                maxSessions,
+                needsWork: (id) => deepSessionNeedsWork(id, nowMs, { includeBackoff: false }),
+              });
+              candidateCursor = selection.nextStartIndex;
+              for (const id of selection.consumedPriorityIds) deepPrioritySessionIds.delete(id);
+              sessionIds.push(...selection.sessionIds);
+            } else {
+              for (let i = 0; i < maxSessions; i += 1) {
+                if (candidateSessionIds.length === 0) break;
+                const idx = candidateCursor % candidateSessionIds.length;
+                const id = candidateSessionIds[idx];
+                candidateCursor = (candidateCursor + 1) % candidateSessionIds.length;
+                if (!id) continue;
+                sessionIds.push(id);
+                currentSessionId = id;
+                if (candidateAllowInitialBackfillSessionIds.has(id)) {
+                  allowInitialBackfillWhenUninitializedSessionIds.push(id);
+                }
               }
             }
             currentSessionId = null;
@@ -844,6 +937,53 @@ export async function startMemoryWorker(params: Readonly<{
     await ensureSessionsUpToDate(selected.sessionIds);
   };
 
+  const getDeepIndexCoverage = (): MemorySearchCoverageV2 => {
+    const stats = deep?.getDeepIndexStats();
+    const nowMs = Date.now();
+    const pendingSessionCount = deep
+      ? candidateSessionIds.filter((id) => deepSessionNeedsWork(id, nowMs, { includeBackoff: true })).length
+      : 0;
+    return {
+      messageCount: stats?.deepChunkCount ?? 0,
+      sessionCount: stats?.searchableSessionCount ?? 0,
+      knownSessionCount: deep ? candidateSessionIds.length : 0,
+      pendingSessionCount,
+      backfillComplete: Boolean(deep) && inventoryPassComplete && pendingSessionCount === 0,
+    };
+  };
+
+  const readIndexBytes = async (): Promise<number | null> => {
+    let total: number | null = null;
+    for (const path of [paths.deepDbPath, `${paths.deepDbPath}-wal`]) {
+      const size = await stat(path).then((s) => s.size, () => null);
+      if (size !== null) total = (total ?? 0) + size;
+    }
+    return total;
+  };
+
+  const getMessageSearchStatus = async (): Promise<MessageSearchStatusV1> => {
+    const enabled = isMessageSearchEnabled(settings) && deep !== null;
+    const coverage = enabled ? getDeepIndexCoverage() : null;
+    return {
+      v: 1,
+      enabled,
+      state: !enabled ? 'off' : coverage?.backfillComplete ? 'ready' : 'indexing',
+      coverage,
+      indexBytes: await readIndexBytes(),
+    };
+  };
+
+  /** The one place conversation search is switched: settings on disk, then the running worker. */
+  const setMessageSearch = async (request: MessageSearchSetRequestV1): Promise<MessageSearchStatusV1> => {
+    const current = await readMemorySettingsFromDisk();
+    await writeMemorySettingsToDisk(applyMessageSearchSwitch(current, request.enabled));
+    await reloadSettings();
+    if (!request.enabled && request.deleteIndex && !settings.enabled) {
+      await rm(paths.memoryDir, { recursive: true, force: true });
+    }
+    return await getMessageSearchStatus();
+  };
+
   await reloadSettings();
 
   return {
@@ -861,5 +1001,9 @@ export async function startMemoryWorker(params: Readonly<{
     }),
     getTier1DbPath: () => (tier1 ? paths.tier1DbPath : null),
     getDeepDbPath: () => (deep ? paths.deepDbPath : null),
+    getDeepIndex: () => deep,
+    getDeepIndexCoverage,
+    getMessageSearchStatus,
+    setMessageSearch,
   };
 }

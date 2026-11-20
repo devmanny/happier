@@ -183,6 +183,25 @@ describe('summaryShardIndexDb', () => {
     }
   });
 
+  it('restarts every deep cursor when the deep index is rebuilt, keeping hint cursors', async () => {
+    const dir = await mkdtemp(join(os.tmpdir(), 'happier-memory-db-deep-reset-'));
+    try {
+      const db = openSummaryShardIndexDb({ dbPath: join(dir, 'memory.sqlite') });
+      db.init();
+      db.markDeepIndexSuccess({ sessionId: 'sess_1', seqTo: 50, nowMs: 1_000 });
+      db.markHintRunSuccess({ sessionId: 'sess_1', seqTo: 40, nowMs: 1_000 });
+      db.markDeepIndexFailure({ sessionId: 'sess_2', nowMs: 1_000, backoffBaseMs: 60_000, backoffMaxMs: 60_000 });
+
+      db.resetDeepIndexCursors();
+
+      expect(db.getSessionCursors({ sessionId: 'sess_1', nowMs: 2_000 })).toMatchObject({ lastDeepIndexedSeq: 0, lastHintedSeq: 40 });
+      expect(db.getSessionCursors({ sessionId: 'sess_2', nowMs: 2_000 })).toMatchObject({ consecutiveDeepFailures: 0, nextDeepEligibleAtMs: 0 });
+      db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('persists per-session index progress telemetry and aggregates queue status', async () => {
     const dir = await mkdtemp(join(os.tmpdir(), 'happier-memory-db-queue-'));
     try {

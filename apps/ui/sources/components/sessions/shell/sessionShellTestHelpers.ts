@@ -75,6 +75,8 @@ function resolveSessionItemTestListAttentionState(status: SessionStatus): Sessio
         case 'recoverable_unservable':
         case 'resuming':
             return 'quiet';
+        case 'archiving':
+            return 'thinking';
     }
 }
 

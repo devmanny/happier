@@ -21,6 +21,16 @@ describe('readDaemonServiceDefinitionLauncher', () => {
         stderrPath: '/tmp/err',
       }),
     })).toEqual(['/usr/local/bin/node', '/opt/happier/dist/index.mjs']);
+    // The macOS launcher only execs the CLI command; the CLI the service runs is what follows it.
+    expect(readDaemonServiceDefinitionLauncher({
+      platform: 'darwin',
+      contents: buildLaunchdPlistXml({
+        label: 'com.happier.cli.daemon.default',
+        programArgs: ['/Users/me/.happier/bin/happier-daemon-launcher', '/Users/me/.happier/bin/happier', 'daemon', 'start-sync'],
+        stdoutPath: '/tmp/out',
+        stderrPath: '/tmp/err',
+      }),
+    })).toEqual(['/Users/me/.happier/bin/happier']);
     expect(readDaemonServiceDefinitionLauncher({
       platform: 'win32',
       contents: renderWindowsScheduledTaskWrapperPs1({ programArgs: ['C:\\Users\\Jo "J"\\happier.exe', 'daemon', 'start-sync'] }),

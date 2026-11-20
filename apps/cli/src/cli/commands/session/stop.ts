@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 
 import type { Credentials } from '@/persistence';
-import { readCommandPositionals } from '@/cli/commands/shared/argvFlags';
+import { hasFlag, readCommandPositionals, readFlagValue } from '@/cli/commands/shared/argvFlags';
 import { wantsJson, printJsonEnvelope } from '@/cli/output/jsonEnvelope';
 import { createCliActionExecutorFromCredentials } from '@/session/actions/createCliActionExecutorFromCredentials';
 import { normalizeActionExecuteResult } from './shared/normalizeActionExecuteResult';
@@ -13,9 +13,11 @@ export async function cmdSessionStop(
   deps: Readonly<{ readCredentialsFn: () => Promise<Credentials | null> }>,
 ): Promise<void> {
   const json = wantsJson(argv);
-  const [idOrPrefix = ''] = readCommandPositionals(argv, { startIndex: 1 });
-  if (!idOrPrefix) {
-    throw new Error('Usage: happier session stop <session-id-or-prefix> [--json]');
+  const [idOrPrefix = ''] = readCommandPositionals(argv, { startIndex: 1, valueFlags: ['--reason'] });
+  // An automatic stop names its reason; the action input accepts only the closed set (`idle`).
+  const reason = readFlagValue(argv, '--reason');
+  if (!idOrPrefix || (hasFlag(argv, '--reason') && !reason)) {
+    throw new Error('Usage: happier session stop <session-id-or-prefix> [--reason idle] [--json]');
   }
 
   const credentials = await deps.readCredentialsFn();
@@ -31,7 +33,7 @@ export async function cmdSessionStop(
   const executor = createCliActionExecutorFromCredentials({ credentials });
   const actionRes = await executor.execute(
     'session.stop',
-    { sessionId: idOrPrefix },
+    { sessionId: idOrPrefix, ...(reason ? { reason } : {}) },
     { surface: 'cli', defaultSessionId: null },
   );
   const normalized = normalizeActionExecuteResult(actionRes as any);
@@ -59,13 +61,19 @@ export async function cmdSessionStop(
         sessionId: result.sessionId,
         stopped: result.stopped,
         ...(result.stopOutcome ? { stopOutcome: result.stopOutcome } : {}),
+        ...(result.sessionRest ? { sessionRest: result.sessionRest } : {}),
+        ...(result.sessionRestError ? { sessionRestError: result.sessionRestError } : {}),
       },
     });
     return;
   }
 
+  if (result.sessionRestError) {
+    console.log(chalk.yellow('!'), `session could not be marked as resting (${result.sessionRestError})`);
+  }
+
   if (result.stopped) {
-    console.log(chalk.green('✓'), 'session stopped');
+    console.log(chalk.green('✓'), result.sessionRest ? 'session stopped; resting' : 'session stopped');
     return;
   }
 
@@ -73,7 +81,7 @@ export async function cmdSessionStop(
   // this state it fell through to "stop could not be confirmed", which told the
   // user an already-stopped Session was indeterminate.
   if (result.stopOutcome?.status === 'already_stopped') {
-    console.log(chalk.green('✓'), 'session already stopped');
+    console.log(chalk.green('✓'), result.sessionRest ? 'session already stopped; resting' : 'session already stopped');
     return;
   }
 

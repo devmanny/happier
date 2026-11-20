@@ -2,6 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { accountSettingsParse } from '@happier-dev/protocol'
 
+const { notifyParentSessionInBackground } = vi.hoisted(() => ({
+  notifyParentSessionInBackground: vi.fn(),
+}))
+
+vi.mock('@/session/lineage/notifyParentSession', () => ({
+  notifyParentSessionInBackground,
+}))
+
 import { sendReadyWithPushNotification } from '@/agent/runtime/sendReadyWithPushNotification'
 import { setActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot'
 
@@ -14,6 +22,7 @@ function createSessionStub(sessionId = 'session-1') {
 
 describe('sendReadyWithPushNotification', () => {
   afterEach(() => {
+    notifyParentSessionInBackground.mockClear()
     setActiveAccountSettingsSnapshot({
       source: 'none',
       settings: accountSettingsParse({}),
@@ -43,6 +52,38 @@ describe('sendReadyWithPushNotification', () => {
     )
   })
 
+  it('tells the parent session the turn finished, with the same excerpt and turn identity', () => {
+    const session = createSessionStub('child-1')
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: { sendToAllDevices: vi.fn() },
+      waitingForCommandLabel: 'Codex',
+      logPrefix: '[Codex]',
+      assistantPreviewText: 'All green.',
+      turnKey: 'turn-7',
+    })
+
+    expect(notifyParentSessionInBackground).toHaveBeenCalledWith({
+      session,
+      event: { kind: 'turn_completed', assistantPreviewText: 'All green.', turnKey: 'turn-7' },
+    })
+  })
+
+  it('still emits ready and the parent notice when no push sender exists', () => {
+    const session = createSessionStub('child-2')
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: null,
+      waitingForCommandLabel: 'Claude',
+      logPrefix: '[Claude]',
+    })
+
+    expect(session.sendSessionEvent).toHaveBeenCalledWith({ type: 'ready' })
+    expect(notifyParentSessionInBackground).toHaveBeenCalledOnce()
+  })
+
   it('uses the latest assistant preview text when enabled', () => {
     const sendToAllDevices = vi.fn()
     const session = createSessionStub('session-123')
@@ -61,6 +102,30 @@ describe('sendReadyWithPushNotification', () => {
       'Review branch',
       'The branch is ready to review.',
       { sessionId: 'session-123' },
+    )
+  })
+
+  it('sends the raw reply as a clean preview with the agent as subtitle and its options', () => {
+    const sendToAllDevices = vi.fn()
+    const session = {
+      ...createSessionStub('session-9'),
+      getMetadataSnapshot: () => ({ agentIdentityV1: { v: 1, id: 'agent-1', name: 'Mateo', emoji: '🤖' } }),
+    }
+
+    sendReadyWithPushNotification({
+      session: session as any,
+      pushSender: { sendToAllDevices },
+      waitingForCommandLabel: 'Codex',
+      logPrefix: '[Codex]',
+      sessionTitle: 'Checkout',
+      assistantPreviewText: 'Ya está abierto.\n\n**No se realizó ningún cobro.**\n\nMateo 🤖\n<options>\n<option>Comprar</option>\n<option>Cancelar</option>\n</options>',
+      includeAssistantPreviewText: true,
+    })
+
+    expect(sendToAllDevices).toHaveBeenCalledWith(
+      'Checkout',
+      'Ya está abierto. No se realizó ningún cobro.',
+      { sessionId: 'session-9', subtitle: 'Mateo', options: ['Comprar', 'Cancelar'] },
     )
   })
 

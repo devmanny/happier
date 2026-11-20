@@ -1,0 +1,19 @@
+# Generate only after Apple grants the default-browser capability to this App ID.
+# The regular project.yml remains usable with the existing provisioning profiles.
+include: project.yml
+targets:
+  Happier:
+    supportedDestinations:REPLACE: [iOS]
+    info:
+      properties:
+        HappierBrowserRole: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmanny.happier.browser
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes: [http, https]
+    entitlements:
+      properties:
+        com.apple.developer.web-browser: true
+        # iOS ignores Universal Link claims from browser apps. Session links still
+        # work through the landing page's happier-native:// action.
+        com.apple.developer.associated-domains:REPLACE: []

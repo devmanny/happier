@@ -33,6 +33,9 @@ import {
     ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
     AcceptedPendingSettlementRequestV1Schema,
     AcceptedPendingSettlementResponseV1Schema,
+    NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+    NotReceivedPendingDeliveryRequestV1Schema,
+    NotReceivedPendingDeliveryResponseV1Schema,
     readPendingLocalId,
     ExecutionRunPublicStateSchema,
     SESSION_MESSAGE_NO_USER_ATTENTION_IMPACT,
@@ -56,7 +59,10 @@ import { publishSessionTurnUpdate } from "@/app/session/turns/publishSessionTurn
 import { publishSessionReadyProjectionUpdate } from "@/app/session/ready/publishSessionReadyProjectionUpdate";
 import { db } from "@/storage/db";
 import type { createSessionPublisherPresence, CurrentPublisherResult } from "@/app/presence/sessionPublisherPresence";
-import { coordinateAcceptedPendingSettlement } from "@/app/session/pending/acceptedPendingSettlementCoordinator";
+import {
+    coordinateAcceptedPendingSettlement,
+    coordinateNotReceivedPendingDelivery,
+} from "@/app/session/pending/acceptedPendingSettlementCoordinator";
 import {
     isTransactionAcquisitionUnavailableError,
     isTransactionDeadlineExceededError,
@@ -968,6 +974,74 @@ export function sessionUpdateHandler(
             logError(
                 { module: "websocket", event: ACCEPTED_PENDING_SETTLEMENT_EVENT_V1, err: error },
                 "Error in accepted pending settlement handler",
+            );
+            respond({ ok: false, error: "internal" });
+        }
+    });
+
+    // The session's current runner reports, from provider evidence, that a possibly-delivered row
+    // never reached its provider: only that publisher may return the row to its place in line.
+    socket.on(NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1, async (data: unknown, callback?: (response: unknown) => void) => {
+        const respond = (response: unknown) => {
+            callback?.(NotReceivedPendingDeliveryResponseV1Schema.parse(response));
+        };
+        try {
+            await receiveMessageLock.inLock(async () => {
+                const parsed = NotReceivedPendingDeliveryRequestV1Schema.safeParse(data);
+                if (!parsed.success || !canMutateSocketSession(connection, parsed.data.sessionId)) {
+                    respond({ ok: false, error: "invalid-params" });
+                    return;
+                }
+                const { sessionId, localId } = parsed.data;
+                const trusted = trustedTranscriptObservationPublisher;
+                if (
+                    connection.connectionType !== "session-scoped"
+                    || !trusted
+                    || !trusted.presence.runAsCurrentPublisher
+                    || trusted.binding.accountId !== userId
+                    || trusted.binding.sessionId !== sessionId
+                    || !await authorizeSessionRelayPublish({ socket, connection, userId, sessionId })
+                ) {
+                    respond({ ok: false, error: "forbidden" });
+                    return;
+                }
+                const current = await trusted.presence.runAsCurrentPublisher({
+                    socket,
+                    binding: trusted.binding,
+                    action: async (publisher) => await coordinateNotReceivedPendingDelivery({
+                        actorUserId: userId,
+                        sessionId,
+                        localId,
+                        trustedPublisherFence: { ...trusted.binding, committedFence: publisher.committedFence },
+                    }),
+                });
+                if (current.status !== "current") {
+                    respond({ ok: false, error: "forbidden" });
+                    return;
+                }
+                const result = current.value;
+                if (!result.ok) {
+                    respond(result.error === "transaction-unavailable"
+                        ? { ok: false, error: result.error, retryAfterMs: result.retryAfterMs }
+                        : { ok: false, error: result.error });
+                    return;
+                }
+                respond({
+                    ok: true,
+                    didRequeue: result.didRequeue,
+                    pendingCount: result.pendingCount,
+                    pendingBlockedCount: result.pendingBlockedCount,
+                    pendingVersion: result.pendingVersion,
+                });
+            });
+        } catch (error) {
+            if (isTransactionAcquisitionUnavailableError(error)) {
+                respond({ ok: false, error: "transaction-unavailable", retryAfterMs: PENDING_TRANSACTION_RETRY_AFTER_MS });
+                return;
+            }
+            logError(
+                { module: "websocket", event: NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1, err: error },
+                "Error in not-received pending delivery handler",
             );
             respond({ ok: false, error: "internal" });
         }

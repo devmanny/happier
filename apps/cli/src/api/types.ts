@@ -6,6 +6,8 @@ import type { ExecutionRunPublicState } from '@happier-dev/protocol'
 import type {
   AcpConfigOptionOverridesV1,
   AcceptedPendingSettlementRequestV1,
+  NotReceivedPendingDeliveryRequestV1,
+  NotReceivedPendingDeliveryResponseV1,
   AcceptedPendingSettlementResponseV1,
   AcpSessionModeOverrideV1,
   ConnectedServiceBindingsV1,
@@ -175,6 +177,10 @@ export interface ServerToClientEvents {
  * Socket events from client to server
  */
 export interface ClientToServerEvents {
+  'pending-delivery-not-received-v1': (
+    data: NotReceivedPendingDeliveryRequestV1,
+    cb?: (answer: NotReceivedPendingDeliveryResponseV1) => void,
+  ) => void
   'pending-delivery-accepted-v1': (
     data: AcceptedPendingSettlementRequestV1,
     cb?: (answer: AcceptedPendingSettlementResponseV1) => void,

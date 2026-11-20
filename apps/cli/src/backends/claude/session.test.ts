@@ -703,6 +703,34 @@ describe('Session', () => {
     }
   });
 
+  it.each([
+    { hook_event_name: 'SessionEnd' },
+    { hookEventName: 'SessionEnd' },
+    { hook_event_name: 'Stop' },
+    { hook_event_name: 'UserPromptSubmit' },
+  ])('keeps lifecycle hooks from replacing the native resume identity: %j', async (event) => {
+    const session = createSession(createSessionClientStub(), ['--resume', 'sess_reachable']);
+    const transcriptPath = '/tmp/sess_reachable.jsonl';
+    session.transcriptPath = transcriptPath;
+    const discoveredSessions: string[] = [];
+    session.addSessionFoundCallback((info) => discoveredSessions.push(info.sessionId));
+
+    try {
+      session.onSessionFound('sess_missing', {
+        ...event,
+        transcript_path: '/tmp/sess_missing.jsonl',
+      });
+      await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
+      session.consumeOneTimeFlags();
+
+      expect(session.sessionId).toBe('sess_reachable');
+      expect(session.transcriptPath).toBe(transcriptPath);
+      expect(discoveredSessions).toEqual([]);
+    } finally {
+      session.cleanup();
+    }
+  });
+
   it('preserves the established resume identity while a changed Claude session remains provisional', async () => {
     let metadata: Metadata = createMetadataStub({
       startedBy: 'daemon',
@@ -744,7 +772,7 @@ describe('Session', () => {
     });
 
     try {
-      session.onSessionFound('sess_missing', hookWithTranscript('/tmp/sess_missing.jsonl'));
+      session.onSessionFound('sess_missing', { ...hookWithTranscript('/tmp/sess_missing.jsonl'), hook_event_name: 'SessionStart' });
       await session.drainCriticalMetadataWrites({ timeoutMs: 500 });
 
       expect(metadata.claudeSessionId).toBe('sess_reachable');

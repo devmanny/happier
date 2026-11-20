@@ -484,6 +484,7 @@ describe('multiDaemon release ring scoping', () => {
     const { planDaemonServiceInstall } = await import('./service/plan');
     const writeServiceDefinition = (params: Readonly<{ targetMode: 'pinned' | 'default-following'; serverId: string; serverUrl: string }>) => {
       const plan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         channel: 'stable',
         targetMode: params.targetMode,

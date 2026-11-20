@@ -131,6 +131,7 @@ const setWorkspaceReviewCommentDraftIncludedSpy = vi.hoisted(() => vi.fn());
 const publishSessionAcpSessionModeOverrideToMetadataSpy = vi.hoisted(() => vi.fn(async () => {}));
 const publishSessionAcpConfigOptionOverrideToMetadataSpy = vi.hoisted(() => vi.fn(async () => {}));
 const modalAlertSpy = vi.hoisted(() => vi.fn());
+const modalConfirmSpy = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => false));
 const routerPushSpy = vi.hoisted(() => vi.fn());
 const chatListPropsSpy = vi.hoisted(() => vi.fn());
 const transcriptIdsState = vi.hoisted(() => ({ ids: ['m1'] as string[] }));
@@ -332,6 +333,7 @@ installSessionShellCommonModuleMocks({
     const { createModalModuleMock } = await import('@/dev/testkit/mocks/modal');
     const modalMock = createModalModuleMock();
     modalMock.spies.alert.mockImplementation((...args) => modalAlertSpy(...args));
+    modalMock.spies.confirm.mockImplementation((...args) => modalConfirmSpy(...args));
     return modalMock.module;
   },
   storage: async (importOriginal) => {
@@ -655,7 +657,7 @@ vi.mock('@/sync/domains/session/control/localControlSwitch', async (importOrigin
 const { createDeferred, createPendingMessageFixture, pressTestInstanceAsync, renderScreen, resetBrowserSessionDraftPersistenceForTest, standardCleanup } = await import('@/dev/testkit');
 const { existingSessionDraftSemanticValues } = await import('@/sync/domains/input/drafts/existingSessionDraftSemanticValues');
 const { deleteSessionDraft, getSessionDraftSnapshot } = await import('@/sync/ops/sessionDrafts/sessionDraftRepository');
-const { __resetConnectedServiceQuotaSnapshotStore } = await import('@/hooks/server/connectedServices/connectedServiceQuotaSnapshotStore');
+const { __resetConnectedServiceQuotaSnapshotStore } = await import('@/sync/domains/connectedServices/connectedServiceQuotaSnapshotStore');
 const { SessionView } = await import('./SessionView');
 
 describe('SessionView (direct sessions)', () => {
@@ -1188,6 +1190,8 @@ describe('SessionView (direct sessions)', () => {
     settingsState.current = {};
     settingByKeyState.current = {};
     modalAlertSpy.mockReset();
+    modalConfirmSpy.mockReset();
+    modalConfirmSpy.mockResolvedValue(false);
     routerPushSpy.mockReset();
     syncRefreshSessionMessagesSpy.mockReset();
     syncSubmitMessageSpy.mockReset();
@@ -1663,6 +1667,141 @@ describe('SessionView (direct sessions)', () => {
     });
     expect(getSessionRunnerRuntimeStatusSpy).toHaveBeenCalledTimes(2);
     expect(screen.findByTestId('session-staleRunner-version')).toBeNull();
+  });
+
+  function installBackgroundActivity(count: number) {
+    storageState.sessions.s1 = {
+      ...storageState.sessions.s1,
+      active: true,
+      presence: 'online',
+      thinking: false,
+      latestTurnStatus: 'completed',
+      activeAt: Date.now(),
+      runtimeActivityState: 'active',
+      runtimeActivityActiveCount: count,
+      runtimeActivityObservedAt: Date.now(),
+      runtimeActivityRevision: 1,
+    };
+  }
+
+  it('asks before a stale-runner restart stops background agents and sends nothing on cancel', async () => {
+    installStaleSessionRunnerStatus();
+    installBackgroundActivity(2);
+    modalConfirmSpy.mockResolvedValueOnce(false);
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    await settleDirectSessionView();
+
+    expect(modalConfirmSpy).toHaveBeenCalledTimes(1);
+    expect(modalConfirmSpy.mock.calls[0]?.[1]).toBe('session.runnerRestartBackgroundWork.body');
+    expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
+    expect(screen.findByTestId('session-staleRunner-version')).toBeTruthy();
+  });
+
+  it('sends the stale-runner restart only after the background-agent stop is confirmed', async () => {
+    installStaleSessionRunnerStatus();
+    installBackgroundActivity(1);
+    let confirmStop: (value: boolean) => void = () => {};
+    modalConfirmSpy.mockImplementationOnce(() => new Promise<boolean>((resolve) => { confirmStop = resolve; }));
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      confirmStop(true);
+    });
+    await settleDirectSessionView();
+
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledWith({
+      sessionId: 's1',
+      machineId: 'machine-1',
+      serverId: 'server-route-1',
+      expectedRunnerPid: 123,
+      expectedProcessCommandHash: 'hash-old',
+      expectedRunnerEntrypointIdentity: 'version:cli-old',
+    });
+  });
+
+  it.each([
+    ['stale-runner', 'foreground and background work coexist'],
+    ['MCP configuration', 'foreground and background work coexist'],
+    ['stale-runner', 'the activity observation is stale'],
+    ['MCP configuration', 'the activity observation is stale'],
+  ])('still asks before a %s restart when %s', async (entryPoint, activityCase) => {
+    if (entryPoint === 'stale-runner') installStaleSessionRunnerStatus();
+    else installMcpSelectionRestartRequired();
+    installBackgroundActivity(2);
+    storageState.sessions.s1 = activityCase === 'the activity observation is stale'
+      ? {
+        ...storageState.sessions.s1,
+        activeAt: 1,
+        runtimeActivityObservedAt: 1,
+      }
+      : {
+        ...storageState.sessions.s1,
+        latestTurnStatus: 'in_progress',
+        latestTurnStatusObservedAt: Date.now(),
+      };
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId(entryPoint === 'stale-runner'
+      ? 'session-staleRunner-version-restart'
+      : 'session.mcpSelectionRestartRequired.restart'));
+    await settleDirectSessionView();
+
+    expect(modalConfirmSpy).toHaveBeenCalledTimes(1);
+    expect(restartStaleSessionRunnerSpy).not.toHaveBeenCalled();
+    expect(restartSessionRunnerForConfigurationSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens one background-agent confirmation for repeated restart presses', async () => {
+    installStaleSessionRunnerStatus();
+    installBackgroundActivity(1);
+    let confirmStop: (value: boolean) => void = () => {};
+    modalConfirmSpy.mockImplementationOnce(() => new Promise<boolean>((resolve) => { confirmStop = resolve; }));
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    await act(async () => {
+      confirmStop(true);
+    });
+    await settleDirectSessionView();
+
+    expect(modalConfirmSpy).toHaveBeenCalledTimes(1);
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts the stale runner without asking when no background agents run', async () => {
+    installStaleSessionRunnerStatus();
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session-staleRunner-version-restart'));
+    await settleDirectSessionView();
+
+    expect(modalConfirmSpy).not.toHaveBeenCalled();
+    expect(restartStaleSessionRunnerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks before the MCP configuration restart stops background agents', async () => {
+    installMcpSelectionRestartRequired();
+    installBackgroundActivity(1);
+    modalConfirmSpy.mockResolvedValueOnce(false);
+
+    const screen = await renderSessionViewAndSettle({ routeServerId: 'server-route-1' });
+    await pressTestInstanceAsync(screen.findByTestId('session.mcpSelectionRestartRequired.restart'));
+    await settleDirectSessionView();
+
+    expect(modalConfirmSpy).toHaveBeenCalledTimes(1);
+    expect(restartSessionRunnerForConfigurationSpy).not.toHaveBeenCalled();
+
+    modalConfirmSpy.mockResolvedValueOnce(true);
+    await pressTestInstanceAsync(screen.findByTestId('session.mcpSelectionRestartRequired.restart'));
+    await settleDirectSessionView();
+
+    expect(restartSessionRunnerForConfigurationSpy).toHaveBeenCalledTimes(1);
   });
 
   it('keeps stale-runner restart disabled for view-only shared sessions', async () => {

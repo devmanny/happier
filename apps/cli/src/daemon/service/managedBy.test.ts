@@ -7,6 +7,7 @@ import { withTempDir } from '@/testkit/fs/tempDir';
 
 import { readInstalledDaemonServiceBundleId, readInstalledDaemonServiceManagedBy } from './discoverInstalledDaemonServiceEntries';
 import { previewDaemonServiceInstall } from './installer';
+import { resolveDaemonServiceDarwinLauncher } from './darwinDaemonLauncher';
 import { parseDaemonServiceBundleId, planDaemonServiceInstall } from './plan';
 
 /**
@@ -19,6 +20,7 @@ const platforms = ['linux', 'darwin', 'win32'] as const;
 
 function planPinned(params: Readonly<{ platform: (typeof platforms)[number]; homeDir: string; managedBy?: 'desktop' | null; bundleId?: string | null }>) {
   return planDaemonServiceInstall({
+    darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: params.platform, happierHomeDir: `${params.homeDir}/.happier` }),
     platform: params.platform,
     channel: 'stable',
     targetMode: 'pinned',
@@ -101,6 +103,7 @@ describe('daemon service management marker', () => {
     it('attributes a desktop default-following install too, and a terminal install (no bundle id) not at all', async () => {
       await withTempDir('happier-bundle-id-default-', async (homeDir) => {
         const plan = (bundleId: string | null) => planDaemonServiceInstall({
+          darwinLauncher: null,
           platform: 'darwin',
           channel: 'stable',
           targetMode: 'default-following',

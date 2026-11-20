@@ -59,6 +59,7 @@ export async function runCatalogDefinedAcpAgent(
       setThinking,
       getPermissionMode,
       memoryRecallGuidanceEnabled,
+      processEnv,
       pendingQueueDrainMaxPopPerWake,
       providerInputConsumer,
     }) => {
@@ -80,6 +81,7 @@ export async function runCatalogDefinedAcpAgent(
           enabled: memoryRecallGuidanceEnabled,
           machineId,
         },
+        processEnv,
         pendingQueueDrainMaxPopPerWake,
         providerInputConsumer,
         ...(sessionModelAdapter ?? {}),

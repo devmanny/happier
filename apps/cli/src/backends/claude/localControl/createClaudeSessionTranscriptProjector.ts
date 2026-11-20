@@ -17,8 +17,8 @@ import {
 } from '../workState/claudeGoalStatus';
 import type { ClaudeWorkflowActivitySource, ClaudeWorkflowActivityObservationContext } from '../workflows/claudeWorkflowActivitySource';
 import { filterWorkflowOwnedWorkStateItems } from '../workflows/claudeWorkflowOwnedWorkState';
-import { mapClaudeRateLimitEventToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
-import { surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
+import { mapClaudeRateLimitEventToQuotaEvidence, mapClaudeProviderFailureToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
+import { recordClaudeRateLimitQuotaEvidence, surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
   buildClaudeCompactBoundaryEventIdentity,
   buildClaudeCompactionCompletedEvent,
@@ -307,7 +307,13 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
         maybeAdoptEffectiveModel(message);
         maybeProjectWorkState(message);
         maybeEmitCompactionEvents(message);
-        const rateLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+        const quotaEvidence = mapClaudeRateLimitEventToQuotaEvidence(message);
+        if (quotaEvidence.length > 0) {
+          void recordClaudeRateLimitQuotaEvidence(params.session, quotaEvidence, params.logPrefix).catch(() => {
+            logger.infoFile(`${params.logPrefix} Failed to record Claude quota evidence`);
+          });
+        }
+        const rateLimitDetails = mapClaudeProviderFailureToUsageDetails(message);
         if (rateLimitDetails) surfaceRateLimit(rateLimitDetails);
       }
       if (isClaudeInternalTranscriptMessage(message)) {

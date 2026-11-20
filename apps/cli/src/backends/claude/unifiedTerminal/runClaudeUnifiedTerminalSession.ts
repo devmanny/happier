@@ -97,6 +97,7 @@ import {
 } from './dialogChoice/claudeUnifiedDialogChoiceScreenProbe';
 import type { ClaudeUnifiedDialogChoiceBroker } from './dialogChoice/claudeUnifiedDialogChoiceBroker';
 import { hasClaudeUnifiedVisibleDialog } from './tuiControls/dialogRegistry';
+import { isClaudeScreenReadyForInput, parseClaudeScreenState } from './tuiControls/screenState';
 import type {
   ClaudeUnifiedInputConsumer,
   ClaudeUnifiedInputArbiter,
@@ -217,6 +218,15 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   path: string;
   happySessionId?: string | null | undefined;
   sessionId?: string | null | undefined;
+  /**
+   * Resolves rows a replaced runner left `delivery_outcome_uncertain` once this runtime's terminal
+   * host is established: whether the saved predecessor host was confirmed dead, and the instant
+   * after which transcript rows belong to this runtime. Must not block startup.
+   */
+  recoverInheritedPendingDeliveries?: ((params: Readonly<{
+    predecessorConfirmedDead: boolean;
+    evidenceBeforeMs: number;
+  }>) => void) | undefined;
   /** Exact provider identity a newly launched native resume must prove before input is admitted. */
   expectedProviderResumeSessionId?: string | null | undefined;
   transcriptPath?: string | null | undefined;
@@ -300,6 +310,7 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
+  onQuotaEvidence?: ((windows: readonly NormalizedProviderUsageLimitDetailsV1[]) => void | Promise<void>) | undefined;
   onTerminalScreenObserved?: ((observation: ClaudeUnifiedTerminalScreenObservation) => void) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
@@ -556,6 +567,20 @@ const DEFAULT_RUNTIME_CONTROL_BLOCKED_INJECTION_RETRY_MS = 250;
 const DEFAULT_DIALOG_OWNERSHIP_GRACE_MS = 300;
 const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS = 45_000;
 const DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS = 3;
+
+/**
+ * The session's single stall budget: how long Claude may show no progress before the runner stops
+ * waiting silently and makes the state observable. The mid-turn stall probe escalates after this
+ * window, and one prompt write's delivery verification is bounded by the same window.
+ */
+function resolveTurnStallScreenProbeBudget(opts: Readonly<{
+  dialogTurnStallScreenProbeQuietMs?: number | undefined;
+  dialogTurnStallScreenProbeMaxAttempts?: number | undefined;
+}>): Readonly<{ quietMs: number; maxAttempts: number; windowMs: number }> {
+  const quietMs = opts.dialogTurnStallScreenProbeQuietMs ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS;
+  const maxAttempts = opts.dialogTurnStallScreenProbeMaxAttempts ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS;
+  return { quietMs, maxAttempts, windowMs: Math.max(0, quietMs) * Math.max(0, maxAttempts) };
+}
 // After a turn settles, evaluate the dialog registry on a bounded idle re-arm schedule (offsets in ms
 // from settle): the first two shots catch a queued-command dialog that renders a beat after Stop, and
 // the backoff tail keeps re-evaluating for ~a minute so a dialog rendering several seconds late is
@@ -696,26 +721,33 @@ type ExistingTerminalHostAttachment = Readonly<{
 async function readExistingTerminalHostAttachment(params: Readonly<{
   sessionId?: string | null | undefined;
   readAttachmentInfo: typeof readTerminalAttachmentInfo;
-}>): Promise<ExistingTerminalHostAttachment | null> {
+}>): Promise<Readonly<{
+  /** Whether any host is recorded for the session, recoverable or not. */
+  recorded: boolean;
+  existing: ExistingTerminalHostAttachment | null;
+}>> {
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId.trim() : '';
-  if (!sessionId) return null;
+  if (!sessionId) return { recorded: false, existing: null };
   const info = await params.readAttachmentInfo({
     happyHomeDir: configuration.happyHomeDir,
     sessionId,
   });
-  if (!info) return null;
+  if (!info) return { recorded: false, existing: null };
   // Borrowed terminals are tied to the live wrapper process and are never recovery candidates.
   // The current invocation may borrow its own verified foreground terminal below.
-  if (info.version === 3) return null;
+  if (info.version === 3) return { recorded: true, existing: null };
   const handle = info.version === 2
     ? info.handle
     : buildLegacyTerminalAttachmentHostHandle(info, configuration.happyHomeDir);
-  if (!handle) return null;
+  if (!handle) return { recorded: true, existing: null };
   return {
-    attachmentInfo: info,
-    handle,
-    terminal: info.terminal,
-    attachmentId: info.version === 2 ? info.attachmentId : null,
+    recorded: true,
+    existing: {
+      attachmentInfo: info,
+      handle,
+      terminal: info.terminal,
+      attachmentId: info.version === 2 ? info.attachmentId : null,
+    },
   };
 }
 
@@ -1041,10 +1073,17 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     maybeEmitClaudeUnifiedWindowsGuardTriggered(telemetry, hostResolution.reason);
     throw new ClaudeUnifiedTerminalHostUnavailableError(hostResolution.message);
   }
-  const savedTerminalHost = await readExistingTerminalHostAttachment({
+  // Transcript rows from here on are this runtime's own; earlier ones are the predecessor's.
+  const inheritedDeliveryEvidenceBeforeMs = Date.now();
+  const savedTerminalHostRecord = await readExistingTerminalHostAttachment({
     sessionId: opts.happySessionId,
     readAttachmentInfo: opts.readTerminalHostAttachmentInfo ?? readTerminalAttachmentInfo,
   });
+  const savedTerminalHost = savedTerminalHostRecord.existing;
+  // The attachment registry owns which host exists for this session and drops a record only once
+  // that host is confirmed dead or torn down (here, by the daemon before a Resume, or on stop).
+  // With no record at all, nothing a predecessor started can still act.
+  let predecessorHostConfirmedDead = !savedTerminalHostRecord.recorded;
   let existingTerminalHost = savedTerminalHost;
   if (existingTerminalHost && existingTerminalHost.handle.kind !== hostResolution.adapter.kind) {
     const attachedKind = existingTerminalHost.handle.kind;
@@ -1113,6 +1152,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         diagnostics: { reason, sessionName: existing.handle.sessionName, probeCount: proof.probeCount },
       });
     }
+    predecessorHostConfirmedDead = true;
     if (existing.attachmentId) {
       const endpointRetirement = await retireClaudeEndpointArtifactsForTerminalAttachment({
         happyHomeDir: configuration.happyHomeDir,
@@ -1442,6 +1482,10 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
     return;
   }
   const activeHandle = handle;
+  opts.recoverInheritedPendingDeliveries?.({
+    predecessorConfirmedDead: predecessorHostConfirmedDead,
+    evidenceBeforeMs: inheritedDeliveryEvidenceBeforeMs,
+  });
   const activeHookSubscription = hookSubscription ?? ensureHookSubscription();
   let borrowedHostRelease: Promise<void> | null = null;
   const releaseBorrowedTerminalHost = (
@@ -1910,7 +1954,12 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
           : undefined;
         let result: TerminalInputInjectionResult;
         try {
-          const sessionInput = { ...input, signal: terminalSubmissionSignal };
+          // The session lifetime always ends verification; an attempt-scoped signal (the injector's
+          // stall budget) may end it earlier, never later.
+          const sessionInput = {
+            ...input,
+            signal: input.signal ? AbortSignal.any([terminalSubmissionSignal, input.signal]) : terminalSubmissionSignal,
+          };
           result = adapterWriteBoundary
             ? await hostResolution.adapter.injectUserPrompt(activeHandle, sessionInput, adapterWriteBoundary)
             : await hostResolution.adapter.injectUserPrompt(activeHandle, sessionInput);
@@ -2019,6 +2068,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
       const captureInputStateForGuard = hostResolution.adapter.captureInputState;
       const promptInjector = createClaudeUnifiedPromptInjector<Mode>({
         inputInjection: hostInputInjection,
+        deliveryVerificationBudgetMs: resolveTurnStallScreenProbeBudget(opts).windowMs,
         beforeComposerDraftGuard: runBeforePromptInjectionGates,
         // A terminal-local slash command can replace the composer with a chooser without emitting
         // a Claude turn or hook. Observe that exact successful injection boundary so the single
@@ -2425,6 +2475,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               await opts.onReady?.();
             },
             onUsageLimitDetails: opts.onUsageLimitDetails,
+            onQuotaEvidence: opts.onQuotaEvidence,
             onRuntimeAuthFailureEvent: opts.onRuntimeAuthFailureEvent,
             onProviderPromptStarted: opts.onProviderPromptStarted,
             onProviderPromptSubmitMetadata: runtimeControlBridge
@@ -2451,12 +2502,18 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
             ...(dialogChoiceScreenProbe
               ? {
                   turnStallScreenProbe: {
-                    quietMs: opts.dialogTurnStallScreenProbeQuietMs
-                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS,
-                    maxAttempts: opts.dialogTurnStallScreenProbeMaxAttempts
-                      ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS,
+                    quietMs: resolveTurnStallScreenProbeBudget(opts).quietMs,
+                    maxAttempts: resolveTurnStallScreenProbeBudget(opts).maxAttempts,
                     onStalled: async () => {
                       await dialogChoiceScreenProbe?.probe();
+                    },
+                    isTurnEndedOnScreen: async () => {
+                      const captureInputState = hostResolution.adapter.captureInputState;
+                      if (!captureInputState) return false;
+                      const inputState = await captureInputState(activeHandle);
+                      return inputState.stable && isClaudeScreenReadyForInput(
+                        parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor }),
+                      );
                     },
                     onStarvation: () => {
                       // Mid-turn stall budget exhausted with the turn still active (e.g. an API-retry
@@ -2467,13 +2524,11 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                       // a silent "computing…". This is the mid-turn analog of the turn-end tail's
                       // one-shot starvation — ONE escalation discipline, never silent.
                       void dialogChoiceScreenProbe?.probe().catch(() => undefined);
-                      const quietMs = opts.dialogTurnStallScreenProbeQuietMs
-                        ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_QUIET_MS;
-                      const attempts = opts.dialogTurnStallScreenProbeMaxAttempts
-                        ?? DEFAULT_DIALOG_TURN_STALL_SCREEN_PROBE_MAX_ATTEMPTS;
+                      const stallBudget = resolveTurnStallScreenProbeBudget(opts);
+                      const attempts = stallBudget.maxAttempts;
                       emitClaudeUnifiedDialogTurnStallStarvation(telemetry, {
                         attempts,
-                        windowMs: Math.max(0, quietMs) * Math.max(0, attempts),
+                        windowMs: stallBudget.windowMs,
                       });
                       logger.warn('[unified]: mid-turn stall dialog probe budget exhausted with the turn still active', {
                         attempts,
@@ -2510,6 +2565,16 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                         shots: delays.length,
                       });
                     },
+                  },
+                }
+              : {}),
+            ...(hostResolution.adapter.captureInputState
+              ? {
+                  isTurnRunningOnScreen: async () => {
+                    const captureInputState = hostResolution.adapter.captureInputState;
+                    if (!captureInputState) return false;
+                    const inputState = await captureInputState(activeHandle);
+                    return parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor }).generating;
                   },
                 }
               : {}),

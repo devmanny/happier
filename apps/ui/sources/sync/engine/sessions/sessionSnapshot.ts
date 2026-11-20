@@ -20,6 +20,7 @@ import {
     type SessionListRenderableMetadata,
 } from '@/sync/domains/session/listing/sessionListRenderable';
 import { resolveSessionRuntimePresenceFields } from '@/sync/domains/session/attention/deriveSessionRuntimePresentationState';
+import { resolveSessionPresence } from '@/sync/domains/session/sessionLifecycleProjection';
 import type { SessionListCacheEntryV1 } from '@/sync/domains/state/warmCachePersistence';
 import { isSessionListCacheEntryMetadataUsable } from '@/sync/domains/state/warmCacheAdapters';
 import {
@@ -211,7 +212,7 @@ function buildHydratedSessionFromDecryptedRow(
         rollbackEligibleTurnStarts: (row as Record<string, unknown>).rollbackEligibleTurnStarts === undefined
             ? null
             : readRollbackEligibleTurnStarts((row as Record<string, unknown>).rollbackEligibleTurnStarts),
-        presence: row.active ? 'online' : row.activeAt,
+        presence: resolveSessionPresence(row),
     };
 }
 
@@ -254,12 +255,11 @@ function buildRenderableFromRowAndCache(
             hiddenSystemSession: cachedEntry.hiddenSystemSession === true,
         }
         : null;
-    const useMatchingCacheMetadata = metadataMatches && metadataFromCache != null;
-    const useExistingSessionMetadata = !useMatchingCacheMetadata && existingMetadataMatches;
-    const useCurrentRenderableMetadata =
-        !useMatchingCacheMetadata && !useExistingSessionMetadata && currentMetadataMatches;
+    // A compact cache may predate canonical identity projection even at the same
+    // metadata version. Prefer full metadata, which retains the runtime evidence.
+    const useExistingSessionMetadata = existingMetadataMatches;
     const staleCacheMetadataVersion = cachedEntry?.metadataVersion ?? row.metadataVersion;
-    const plainHydratedSession = !useMatchingCacheMetadata && !useExistingSessionMetadata && !useCurrentRenderableMetadata
+    const plainHydratedSession = !useExistingSessionMetadata
         ? buildPlainHydratedSessionFromRow(row)
         : null;
     const plainRenderable = plainHydratedSession?.metadata != null
@@ -269,10 +269,16 @@ function buildRenderableFromRowAndCache(
         return plainRenderable;
     }
     const usePlainRenderableMetadata =
-        !useMatchingCacheMetadata
-        && !useExistingSessionMetadata
-        && !useCurrentRenderableMetadata
+        !useExistingSessionMetadata
         && plainRenderable?.metadata != null;
+    const useCurrentRenderableMetadata =
+        !useExistingSessionMetadata && !usePlainRenderableMetadata && currentMetadataMatches;
+    const useMatchingCacheMetadata =
+        !useExistingSessionMetadata
+        && !usePlainRenderableMetadata
+        && !useCurrentRenderableMetadata
+        && metadataMatches
+        && metadataFromCache != null;
     const useStaleCacheMetadata =
         !useMatchingCacheMetadata
         && !useExistingSessionMetadata
@@ -374,7 +380,7 @@ function buildRenderableFromRowAndCache(
         metadata: renderableMetadata,
         thinking: runtimePresence.thinking,
         thinkingAt: runtimePresence.thinkingAt,
-        presence: row.active ? 'online' : row.activeAt,
+        presence: resolveSessionPresence(row),
         latestTurnId: row.latestTurnId ?? null,
         rollbackEligibleTurnStarts: rowRecord.rollbackEligibleTurnStarts === undefined
             ? null
@@ -813,11 +819,13 @@ function buildStaleHydratedSessionRenderablePatch(
     const shouldPatchPendingFlags =
         currentRenderable.agentStateVersion <= hydratedRenderable.agentStateVersion
         && (
-            typeof currentRenderable.hasPendingPermissionRequests !== 'boolean'
+            currentRenderable.agentStateVersion < hydratedRenderable.agentStateVersion
+            || typeof currentRenderable.hasPendingPermissionRequests !== 'boolean'
             || typeof currentRenderable.hasPendingUserActionRequests !== 'boolean'
         );
     if (shouldPatchPendingFlags) {
         patch.agentStateVersion = hydratedRenderable.agentStateVersion;
+        patch.pendingRequestObservedAt = hydratedRenderable.pendingRequestObservedAt ?? null;
         if (typeof hydratedRenderable.hasPendingPermissionRequests === 'boolean') {
             patch.hasPendingPermissionRequests = hydratedRenderable.hasPendingPermissionRequests;
         }

@@ -91,7 +91,11 @@ async function copyCliRuntimeTools(repoRoot: string, payloadDir: string, target:
   await unpackToolsModule.unpackTools({
     platformDir: resolveCliToolsPlatformDir(target),
     toolsDir: targetToolsDir,
-    tools: target.os === 'windows' ? ['ripgrep'] : ['ripgrep', 'zellij'],
+    tools: target.os === 'windows'
+      ? ['ripgrep']
+      : target.os === 'darwin'
+        ? ['ripgrep', 'zellij', 'happier-daemon-launcher']
+        : ['ripgrep', 'zellij'],
   });
   await rm(targetArchivesDir, { recursive: true, force: true });
 }

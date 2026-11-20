@@ -105,6 +105,8 @@ export function useSessionRowActionMenu(params: Readonly<{
     setContextMenuOpen: (open: boolean) => void;
     openTagsMenuFromContext: () => void;
     reminder?: SessionReminderPresentation | null;
+    /** The canonical archive flow already has this session's archive in flight. */
+    archiving?: boolean;
 }>): SessionRowActionMenuState {
     const target = params.target;
     const [reminderPresets, setReminderPresets] = useSettingMutable('sessionReminderPresetsV1');
@@ -418,6 +420,6 @@ export function useSessionRowActionMenu(params: Readonly<{
         handleMoreMenuSelect,
         contextMenuItems,
         handleContextMenuSelect,
-        mutatingSession: stoppingSession || archivingSession,
+        mutatingSession: stoppingSession || archivingSession || params.archiving === true,
     };
 }

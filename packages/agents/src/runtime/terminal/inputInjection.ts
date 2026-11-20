@@ -63,7 +63,17 @@ export type TerminalInputInjectionResult =
     }>
   | Readonly<{
       status: 'failed';
-      reason: 'pane_dead' | 'no_target' | 'host_unreachable' | 'verification_failed' | 'timeout' | 'invalid_prompt_text' | 'payload_too_large';
+      reason:
+        | 'pane_dead'
+        | 'no_target'
+        | 'host_unreachable'
+        | 'verification_failed'
+        | 'timeout'
+        | 'invalid_prompt_text'
+        | 'payload_too_large'
+        // Refused before any byte was written: the provider runs this command only as an
+        // interactive terminal panel, which a remote delivery can neither operate nor confirm.
+        | 'unsupported_command';
       phase: TerminalInjectionFailurePhase;
       duplicateRisk: TerminalInjectionDuplicateRisk;
       recoverable: boolean;

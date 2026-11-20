@@ -810,6 +810,34 @@ describe('registerMachineRpcHandlers', () => {
     }));
   });
 
+  it('passes a valid agent identity through and drops a malformed one', async () => {
+    const registered = new Map<string, (params: any) => Promise<any>>();
+    const rpcHandlerManager = {
+      registerHandler: (method: string, handler: (params: any) => Promise<any>) => {
+        registered.set(method, handler);
+      },
+    } as any;
+
+    const spawnSession = vi.fn(async () => ({ type: 'success', sessionId: 's1' } as const));
+    registerMachineRpcHandlers({
+      rpcHandlerManager,
+      handlers: {
+        spawnSession,
+        stopSession: async () => true,
+        requestShutdown: () => {},
+      },
+    });
+
+    const handler = registered.get(RPC_METHODS.SPAWN_HAPPY_SESSION)!;
+    await handler({ directory: '/tmp', agentIdentityV1: { v: 1, id: 'a1', name: 'Mateo', emoji: '🤖' } });
+    expect(spawnSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      agentIdentity: { v: 1, id: 'a1', name: 'Mateo', emoji: '🤖' },
+    }));
+
+    await handler({ directory: '/tmp', agentIdentityV1: { v: 1, id: 'a1', name: '  ' } });
+    expect((spawnSession.mock.calls.at(-1) as unknown[] | undefined)?.[0]).not.toHaveProperty('agentIdentity');
+  });
+
   it('passes canonical spawn fields through when spawning a session', async () => {
     const registered = new Map<string, (params: any) => Promise<any>>();
     const rpcHandlerManager = {
@@ -7482,6 +7510,10 @@ describe('registerMachineRpcHandlers', () => {
 	        }),
 	        getTier1DbPath: () => null,
 	        getDeepDbPath: () => null,
+	        getDeepIndex: () => null,
+	        getDeepIndexCoverage: () => ({ messageCount: 0, sessionCount: 0, knownSessionCount: 0, pendingSessionCount: 0, backfillComplete: false }),
+        getMessageSearchStatus: async () => ({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null }),
+        setMessageSearch: async () => ({ v: 1, enabled: false, state: 'off', coverage: null, indexBytes: null }),
 	      },
 	    });
 
@@ -7517,6 +7549,44 @@ describe('registerMachineRpcHandlers', () => {
     expect(registered.has((RPC_METHODS as any).DAEMON_DIRECT_SESSION_TRANSCRIPT_READ_AFTER)).toBe(true);
     expect(registered.has((RPC_METHODS as any).DAEMON_DIRECT_SESSION_TAKEOVER)).toBe(true);
     expect(registered.has((RPC_METHODS as any).DAEMON_DIRECT_SESSION_TAKEOVER_PERSIST)).toBe(true);
+  });
+
+  it('refuses an agent transition carrying any env key beyond the allowlist before anything is touched', async () => {
+    const registered = new Map<string, (params: unknown) => Promise<unknown>>();
+    const stopSession = vi.fn(async () => true);
+    const spawnSession = vi.fn(async () => ({ type: 'success', sessionId: 's1' } as const));
+    registerMachineRpcHandlers({
+      rpcHandlerManager: {
+        registerHandler: (method: string, handler: (params: unknown) => Promise<unknown>) => {
+          registered.set(method, handler);
+        },
+      } as any,
+      handlers: { spawnSession, stopSession: stopSession as never, requestShutdown: () => {} },
+    });
+    readCredentialsMock.mockResolvedValue(null);
+    const transition = registered.get(RPC_METHODS.SESSION_AGENT_TRANSITION)!;
+    const transitionRequest = (environmentVariables: Record<string, string>) => ({
+      v: 1,
+      sessionId: 'session-1',
+      expectedCurrentAgentId: 'codex',
+      selection: {
+        v: 1,
+        agentId: 'claude',
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' },
+        environmentVariables,
+      },
+      input: { text: 'keep going', localId: 'local-1', meta: {} },
+    });
+
+    await expect(transition(transitionRequest({ CLAUDE_CONFIG_DIR: '/tmp/a', PATH: '/evil' })))
+      .resolves.toEqual({ type: 'rejected', code: 'unsupported_operation', sourceEffect: 'none' });
+    await expect(transition(transitionRequest({ ANTHROPIC_API_KEY: 'sk-x' })))
+      .resolves.toEqual({ type: 'rejected', code: 'unsupported_operation', sourceEffect: 'none' });
+    // The allowlisted shape passes validation and only then meets the credential gate.
+    await expect(transition(transitionRequest({ CLAUDE_CONFIG_DIR: '/tmp/a' })))
+      .resolves.toEqual({ type: 'rejected', code: 'forbidden', sourceEffect: 'none' });
+    expect(stopSession).not.toHaveBeenCalled();
+    expect(spawnSession).not.toHaveBeenCalled();
   });
 
   it('registers session handoff handlers', async () => {

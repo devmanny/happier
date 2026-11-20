@@ -54,15 +54,22 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   throwIfAborted(signal);
 }
 
-async function sha256FileHex(file: Pick<InstallerFile, 'open'>, signal: AbortSignal): Promise<string> {
+async function sha256FileHex(
+  file: Pick<InstallerFile, 'open'>,
+  signal: AbortSignal,
+  onHashed?: (bytes: number) => void,
+): Promise<string> {
   const hash = sha256.create();
   const handle = file.open();
+  let hashed = 0;
   try {
     while (true) {
       throwIfAborted(signal);
       const chunk: Uint8Array = handle.readBytes(HASH_READ_CHUNK_BYTES);
       if (chunk.length === 0) break;
       hash.update(chunk);
+      hashed += chunk.length;
+      onHashed?.(hashed);
       // `readBytes` is synchronous; yield between chunks so hashing does not block the JS thread.
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -166,11 +173,15 @@ async function downloadAndVerifyFile(opts: {
   entry: ModelPackManifest['files'][number];
   signal: AbortSignal;
   onProgress?: (p: Progress) => void;
+  /** Bytes hashed by the current verification pass; a repeated pass starts again from 0. */
+  onVerifyProgress?: (bytes: number, source: 'existing' | 'downloaded') => void;
+  /** A file left on disk failed verification and is downloaded again. */
+  onExistingRejected?: () => void;
 }): Promise<void> {
   const file = getPackFile(opts.fs, opts.rootDir, opts.entry.path, { createParents: true });
   if (file.exists) {
     try {
-      const actual = await sha256FileHex(file, opts.signal);
+      const actual = await sha256FileHex(file, opts.signal, (bytes) => opts.onVerifyProgress?.(bytes, 'existing'));
       if (actual === opts.entry.sha256.toLowerCase()) return;
       file.delete();
     } catch (error) {
@@ -183,6 +194,7 @@ async function downloadAndVerifyFile(opts: {
         console.warn('[modelPacks] Failed to remove unverified model pack file', cleanupError);
       }
     }
+    opts.onExistingRejected?.();
   }
 
   try {
@@ -191,7 +203,7 @@ async function downloadAndVerifyFile(opts: {
       downloader: opts.downloader, url: opts.entry.url, fileUri: file.uri, signal: opts.signal, onProgress: opts.onProgress,
     });
 
-    const actual = await sha256FileHex(file, opts.signal);
+    const actual = await sha256FileHex(file, opts.signal, (bytes) => opts.onVerifyProgress?.(bytes, 'downloaded'));
     if (actual !== opts.entry.sha256.toLowerCase()) {
       throw new Error('model_pack_sha256_mismatch');
     }
@@ -212,11 +224,16 @@ export async function downloadManifestFiles(opts: {
   signal: AbortSignal;
   onProgress?: (p: ModelPackDownloadProgress) => void;
 }): Promise<void> {
-  const total = opts.manifest.files.reduce((acc, f) => acc + (Number.isFinite(f.sizeBytes) ? f.sizeBytes : 0), 0);
-  const filesTotal = opts.manifest.files.length;
+  const sizeOf = (f: ModelPackManifest['files'][number]) => (Number.isFinite(f.sizeBytes) ? f.sizeBytes : 0);
+  // Largest first: a pack's few big files dominate its transfer and verification time, so they start at
+  // once while the remaining workers drain the many small files, instead of starting alone at the end.
+  const files = [...opts.manifest.files].sort((a, b) => sizeOf(b) - sizeOf(a));
+  const total = files.reduce((acc, f) => acc + sizeOf(f), 0);
+  const filesTotal = files.length;
   let loadedTotal = 0;
+  let verifiedTotal = 0;
   let filesDone = 0;
-  const report = () => opts.onProgress?.({ loaded: loadedTotal, total, filesDone, filesTotal });
+  const report = () => opts.onProgress?.({ loaded: loadedTotal, total, verified: verifiedTotal, filesDone, filesTotal });
   throwIfAborted(opts.signal);
   const downloader = await import('expo-file-system/legacy');
   // The first fatal failure stops sibling transfers; the pack then reports that failure, not their aborts.
@@ -236,6 +253,13 @@ export async function downloadManifestFiles(opts: {
       loadedTotal += delta;
       return true;
     };
+    let verifiedThisFile = 0;
+    // Unlike transfer bytes, verification restarts from 0 when a stale file is rehashed after redownload.
+    const setVerified = (verified: number) => {
+      verifiedTotal += verified - verifiedThisFile;
+      verifiedThisFile = verified;
+    };
+    const clampToFile = (bytes: number) => (Number.isFinite(f.sizeBytes) ? Math.min(bytes, f.sizeBytes) : bytes);
     await downloadAndVerifyFile({
       downloader,
       fs: opts.fs,
@@ -244,18 +268,33 @@ export async function downloadManifestFiles(opts: {
       signal: pack.signal,
       // Native counts error-response bodies too; a failed attempt must not report beyond the asset.
       onProgress: (p) => {
-        if (advance(Number.isFinite(f.sizeBytes) ? Math.min(p.loaded, f.sizeBytes) : p.loaded)) report();
+        if (advance(clampToFile(p.loaded))) report();
+      },
+      onVerifyProgress: (bytes, source) => {
+        setVerified(clampToFile(bytes));
+        // Bytes an interrupted install left on disk are already present; checking them advances the
+        // transfer too, so resuming over a large kept file does not freeze the bar while it is hashed.
+        if (source === 'existing') advance(clampToFile(bytes));
+        report();
+      },
+      onExistingRejected: () => {
+        // The kept bytes turned out unusable; withdraw them so the redownload is not counted twice.
+        loadedTotal -= loadedThisFile;
+        loadedThisFile = 0;
+        setVerified(0);
+        report();
       },
     });
     // Verified files count fully, including ones already present from an interrupted install.
     advance(Number.isFinite(f.sizeBytes) ? f.sizeBytes : loadedThisFile);
+    setVerified(Number.isFinite(f.sizeBytes) ? f.sizeBytes : verifiedThisFile);
     filesDone += 1;
     report();
   };
 
   const worker = async () => {
-    while (!pack.signal.aborted && next < opts.manifest.files.length) {
-      const f = opts.manifest.files[next++]!;
+    while (!pack.signal.aborted && next < files.length) {
+      const f = files[next++]!;
       try {
         await installFile(f);
       } catch (error) {
@@ -266,7 +305,7 @@ export async function downloadManifestFiles(opts: {
   };
 
   try {
-    const workerCount = Math.min(MAX_PARALLEL_FILE_DOWNLOADS, opts.manifest.files.length);
+    const workerCount = Math.min(MAX_PARALLEL_FILE_DOWNLOADS, files.length);
     await Promise.all(Array.from({ length: workerCount }, worker));
   } finally {
     opts.signal.removeEventListener('abort', forwardAbort);

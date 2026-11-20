@@ -14,9 +14,21 @@
  */
 const CLAUDE_PASTED_CONTENT_MARKER_LINE = /^<\/?pasted_content id="[^"]*">$/;
 
+/**
+ * Inside the pasted block Claude escapes every quoted marker so the text cannot close its own
+ * block: `<pasted_content` becomes `<\pasted_content` and `</pasted_content` becomes
+ * `<\/pasted_content` (Claude Code 2.1.322 tmux probe, 11 nov 2026; live incident session
+ * cmvepv5n2621nnw01h6njbmwb, where a child-session notice quoting the marker never correlated and
+ * held the whole queue). It is undone before marker lines are dropped, so a quoted marker line reads
+ * the same on both sides. Claude also catches confusable spellings (homoglyphs, fillers); those are
+ * not undone, so a prompt quoting one still cannot correlate by text.
+ */
+const CLAUDE_PASTED_CONTENT_MARKER_ESCAPE = /<\\(?=\/?pasted_content)/g;
+
 export function normalizeClaudeUnifiedPromptIdentityText(value: string): string {
   return value
     .replace(/\r\n?/g, '\n')
+    .replace(CLAUDE_PASTED_CONTENT_MARKER_ESCAPE, '<')
     .split('\n')
     .map((line) => line.trimEnd())
     .filter((line) => !CLAUDE_PASTED_CONTENT_MARKER_LINE.test(line))

@@ -98,7 +98,10 @@ export async function runtimeFetchWithServerReachability(params: Readonly<{
         }
         return response;
     } catch (error) {
-        reportServerUnreachable(params.serverUrl, error);
+        // The caller owns intentional cancellation; it does not establish a reachability failure.
+        if (!params.init.signal?.aborted && !params.signal?.aborted) {
+            reportServerUnreachable(params.serverUrl, error);
+        }
         throw error;
     }
 }

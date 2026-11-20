@@ -80,10 +80,6 @@ const DEFAULT_MEMORY_HINTS_SETTINGS: MemoryHintsSettingsV1 = MemoryHintsSettings
 export const MemoryDeepSettingsV1Schema = z
   .object({
     recentDays: z.number().int().min(1).max(3650).default(30),
-    maxChunkChars: z.number().int().min(500).max(200_000).default(8_000),
-    targetChunkMessages: z.number().int().min(1).max(500).default(12),
-    maxChunkMessages: z.number().int().min(1).max(500).default(25),
-    minChunkMessages: z.number().int().min(1).max(500).default(1),
     includeAssistantAcpMessage: z.boolean().default(true),
     includeToolOutput: z.boolean().default(false),
     candidateLimit: z.number().int().min(1).max(10_000).default(200),

@@ -46,6 +46,22 @@ export interface ClaudeStatuslinePayload {
     fast_mode?: boolean;
     thinking?: { enabled?: boolean; [key: string]: unknown };
     effort?: { level?: string; [key: string]: unknown };
+    /**
+     * Subscription usage windows (Claude 2.1.322): present once a response carried the
+     * `anthropic-ratelimit-unified-*` headers, absent for API-key/Bedrock/Vertex sessions.
+     * `used_percentage` is 0-100; `resets_at` is unix epoch seconds.
+     */
+    rate_limits?: {
+        five_hour?: ClaudeStatuslineRateLimitWindow | null;
+        seven_day?: ClaudeStatuslineRateLimitWindow | null;
+        [key: string]: unknown;
+    };
+    [key: string]: unknown;
+}
+
+export interface ClaudeStatuslineRateLimitWindow {
+    used_percentage?: number;
+    resets_at?: number | string | null;
     [key: string]: unknown;
 }
 

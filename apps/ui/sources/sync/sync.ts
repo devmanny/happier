@@ -298,6 +298,7 @@ import { submitSessionUserMessage } from './domains/session/input/submitSessionU
 import type {
     SessionMessageCallerSurface,
     SessionSubmitPort,
+    SubmitSessionUserMessageResult,
 } from './domains/session/input/types';
 import type { SavedSecret } from './domains/settings/savedSecretTypes';
 import type { PermissionMode } from './domains/permissions/permissionTypes';
@@ -3244,7 +3245,7 @@ class Sync {
             callerSurface?: SessionMessageCallerSurface | null;
             forceImmediate?: boolean;
         }>,
-    ): Promise<void> {
+    ): Promise<SubmitSessionUserMessageResult> {
         let state = storage.getState();
         let session = state.sessions[sessionId] ?? null;
         if (!session) {
@@ -3295,6 +3296,7 @@ class Sync {
                 'Failed to submit message',
             );
         }
+        return result;
     }
 
     private async updateSessionMetadataWithRetry(

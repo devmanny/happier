@@ -5,6 +5,7 @@ import { resolveInstalledFirstPartyComponentPaths } from '@happier-dev/cli-commo
 
 import { withTempDir } from '@/testkit/fs/tempDir';
 import { previewDaemonServiceInstall } from './installer';
+import { resolveDaemonServiceDarwinLauncher } from './darwinDaemonLauncher';
 import { planDaemonServiceInstall } from './plan';
 
 describe('launchd install reloads a changed CLI definition', () => {
@@ -24,7 +25,11 @@ describe('launchd install reloads a changed CLI definition', () => {
         serverUrl: 'https://company.example.test', webappUrl: 'https://company.example.test',
         publicServerUrl: 'https://company.example.test', nodePath: '/npm/happier', entryPath: '',
       };
-      const installed = planDaemonServiceInstall(options).files[0]!;
+      // Installed by this same CLI, so it starts the daemon through the launcher the preview resolves.
+      const installed = planDaemonServiceInstall({
+        ...options,
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: 'darwin', happierHomeDir }),
+      }).files[0]!;
       mkdirSync(dirname(installed.path), { recursive: true });
       writeFileSync(installed.path, installed.content);
 

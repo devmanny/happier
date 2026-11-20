@@ -4,6 +4,7 @@ import type { DownloadResumable, DownloadOptions, DownloadProgressData } from 'e
 import { ensureModelPackInstalled, getModelPackInstallSummary, removeModelPack } from '@/voice/modelPacks/installer.native';
 import type { ModelPackManifest } from '@/voice/modelPacks/manifest';
 import { settleWithFakeClock, useInstallerFakeClock } from '@/voice/modelPacks/installerFakeClock.testHarness';
+import type { InstallerSherpaNative } from '@/voice/modelPacks/installer/nativeEngines.native';
 
 const nativeDownload = vi.hoisted(() => vi.fn<(
   url: string, uri: string, options?: DownloadOptions, onProgress?: (progress: DownloadProgressData) => void,
@@ -26,6 +27,8 @@ function createFs(files = new Map<string, Uint8Array>(), options: {
   openHandles?: Set<object>;
 } = {}) {
   const directories = new Set<string>();
+  // The OS backup flag belongs to a directory instance and disappears when that directory is deleted.
+  const backupExcludedDirectories = new Set<string>();
   function joinUri(parts: Array<string | { uri: string }>) {
     return parts.map((part) => (typeof part === 'string' ? part : part.uri).replace(/\/$/, '')).join('/');
   }
@@ -48,6 +51,7 @@ function createFs(files = new Map<string, Uint8Array>(), options: {
     }
     delete() {
       for (const dir of directories) if (dir === this.uri || dir.startsWith(`${this.uri}/`)) directories.delete(dir);
+      for (const dir of backupExcludedDirectories) if (dir === this.uri || dir.startsWith(`${this.uri}/`)) backupExcludedDirectories.delete(dir);
       for (const key of files.keys()) if (key.startsWith(`${this.uri}/`)) files.delete(key);
     }
   }
@@ -102,7 +106,7 @@ function createFs(files = new Map<string, Uint8Array>(), options: {
       };
     }
   }
-  return { Directory, File, Paths: { document: 'file:///docs/' }, files };
+  return { Directory, File, Paths: { document: 'file:///docs/' }, files, backupExcludedDirectories };
 }
 
 function useNativeDownloads(fs: ReturnType<typeof createFs>, data: (url: string) => Uint8Array, requested: string[] = [], transfer: {
@@ -197,6 +201,68 @@ describe('modelPacks installer (native)', () => {
       });
       expect(requested).toEqual(['https://example.com/downloaded.bin']);
       expect(Buffer.from(fs.files.get(`${PACK_URI}/downloaded.bin`) ?? []).equals(Buffer.from(downloaded))).toBe(true);
+    });
+
+    it('reports verification progress while a downloaded file is hashed', async () => {
+      const bytes = multiChunkBytes(3);
+      const fs = createFs();
+      useNativeDownloads(fs, () => bytes);
+      const progress: Array<{ verified: number; filesDone: number }> = [];
+      await ensureModelPackInstalled({
+        ...installOptions, signal: new AbortController().signal,
+        onProgress: (p) => progress.push({ verified: p.verified, filesDone: p.filesDone }),
+      }, {
+        fs, fetch: fetchManifest(manifest([
+          { path: 'model.onnx', url: 'https://example.com/model.onnx', sha256: await sha256Hex(bytes), sizeBytes: bytes.length },
+        ])),
+      });
+      expect(progress.some((p) => p.filesDone === 0 && p.verified > 0 && p.verified < bytes.length)).toBe(true);
+      expect(progress.at(-1)).toEqual({ verified: bytes.length, filesDone: 1 });
+    });
+
+    it('advances progress while checking files an interrupted install left on disk', async () => {
+      const kept = multiChunkBytes(4);
+      const stale = multiChunkBytes(5);
+      const fresh = multiChunkBytes(6);
+      const fs = createFs(new Map([[`${PACK_URI}/kept.bin`, kept], [`${PACK_URI}/stale.bin`, stale]]));
+      useNativeDownloads(fs, () => fresh);
+      const progress: Array<{ loaded: number; total: number; filesDone: number }> = [];
+      await ensureModelPackInstalled({
+        ...installOptions, signal: new AbortController().signal,
+        onProgress: (p) => progress.push({ loaded: p.loaded, total: p.total, filesDone: p.filesDone }),
+      }, {
+        fs, fetch: fetchManifest(manifest([
+          { path: 'kept.bin', url: 'https://example.com/kept.bin', sha256: await sha256Hex(kept), sizeBytes: kept.length },
+          { path: 'stale.bin', url: 'https://example.com/stale.bin', sha256: await sha256Hex(fresh), sizeBytes: fresh.length },
+        ])),
+      });
+      // Checking a kept file moves the bar instead of leaving it frozen until the whole file is hashed.
+      expect(progress.some((p) => p.filesDone === 0 && p.loaded > 0 && p.loaded < kept.length)).toBe(true);
+      // A rejected file's checked bytes are withdrawn, so its redownload is not counted twice.
+      expect(progress.every((p) => p.loaded <= p.total)).toBe(true);
+      expect(progress.at(-1)).toEqual({ loaded: kept.length + fresh.length, total: kept.length + fresh.length, filesDone: 2 });
+    });
+
+    it('starts the largest files first so they transfer alongside the small ones', async () => {
+      const small = new Uint8Array([1]);
+      const medium = new Uint8Array(16).fill(2);
+      const large = new Uint8Array(64).fill(3);
+      const byUrl = new Map([['https://example.com/large', large], ['https://example.com/medium', medium]]);
+      const fs = createFs();
+      const requested: string[] = [];
+      useNativeDownloads(fs, (url) => byUrl.get(url) ?? small, requested);
+      const smallEntries = await Promise.all(Array.from({ length: 8 }, async (_, i) => ({
+        path: `espeak-ng-data/f${i}`, url: `https://example.com/f${i}`, sha256: await sha256Hex(small), sizeBytes: small.length,
+      })));
+      await ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal }, {
+        fs, fetch: fetchManifest(manifest([
+          ...smallEntries,
+          { path: 'model.onnx', url: 'https://example.com/large', sha256: await sha256Hex(large), sizeBytes: large.length },
+          { path: 'voices.bin', url: 'https://example.com/medium', sha256: await sha256Hex(medium), sizeBytes: medium.length },
+        ])),
+      });
+      expect(requested.slice(0, 2)).toEqual(['https://example.com/large', 'https://example.com/medium']);
+      expect(requested).toHaveLength(10);
     });
 
     it('rejects and removes a downloaded file whose SHA-256 does not match', async () => {
@@ -351,7 +417,7 @@ describe('modelPacks installer (native)', () => {
       useInstallerFakeClock();
       const { bytes, manifest: remote } = await packOf(2);
       const fs = createFs();
-      const progress: Array<{ ratio: number; filesDone: number }> = [];
+      const progress: Array<{ ratio: number; verified: number; filesDone: number }> = [];
       // A 500 error page is far larger than a tiny espeak-ng asset.
       useNativeDownloads(fs, () => bytes, [], {
         status: (url) => (url === 'https://example.com/f0' ? 500 : 200),
@@ -359,12 +425,12 @@ describe('modelPacks installer (native)', () => {
       });
       await settleWithFakeClock(ensureModelPackInstalled({
         ...installOptions, signal: new AbortController().signal,
-        onProgress: (p) => progress.push({ ratio: p.loaded / p.total, filesDone: p.filesDone }),
+        onProgress: (p) => progress.push({ ratio: p.loaded / p.total, verified: p.verified, filesDone: p.filesDone }),
       }, { fs, fetch: fetchManifest(remote) }));
       expect(Math.max(...progress.map((p) => p.ratio))).toBe(1);
       // A retried attempt re-reporting bytes already counted adds no report of its own.
-      expect(new Set(progress.map((p) => `${p.ratio}:${p.filesDone}`)).size).toBe(progress.length);
-      expect(progress.at(-1)).toEqual({ ratio: 1, filesDone: 2 });
+      expect(new Set(progress.map((p) => `${p.ratio}:${p.verified}:${p.filesDone}`)).size).toBe(progress.length);
+      expect(progress.at(-1)).toEqual({ ratio: 1, verified: bytes.length * 2, filesDone: 2 });
     });
 
     it('removes update leftovers once a fresh install completes', async () => {
@@ -400,6 +466,88 @@ describe('modelPacks installer (native)', () => {
       expect(progress.map((p) => p.filesDone)).toEqual([...progress.map((p) => p.filesDone)].sort());
       expect(progress.at(-1)).toEqual({ filesDone: 3, filesTotal: 3 });
     });
+  });
+
+  describe('one install per pack', () => {
+    async function heldPack() {
+      const bytes = new Uint8Array([9, 8, 7]);
+      const sha256 = await sha256Hex(bytes);
+      const remote = manifest([0, 1].map((i) => ({
+        path: `f${i}`, url: `https://example.com/f${i}`, sha256, sizeBytes: bytes.length,
+      })));
+      const fs = createFs();
+      const requested: string[] = [];
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let started!: () => void;
+      const transferStarted = new Promise<void>((resolve) => { started = resolve; });
+      useNativeDownloads(fs, () => bytes, requested, { inFlight: async () => { started(); await held; } });
+      return { fs, remote, requested, release, transferStarted };
+    }
+
+    it('joins a second caller to the running install instead of downloading the pack twice', async () => {
+      const { fs, remote, requested, release, transferStarted } = await heldPack();
+      const firstProgress: number[] = [];
+      const secondProgress: number[] = [];
+      const first = ensureModelPackInstalled({
+        ...installOptions, signal: new AbortController().signal, onProgress: (p) => firstProgress.push(p.filesDone),
+      }, { fs, fetch: fetchManifest(remote) });
+      await transferStarted;
+      const second = ensureModelPackInstalled({
+        ...installOptions, signal: new AbortController().signal, onProgress: (p) => secondProgress.push(p.filesDone),
+      }, { fs, fetch: fetchManifest(remote) });
+      // Give an independent second install time to reach its own transfers while the first is held.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      const [a, b] = await Promise.all([first, second]);
+      expect(a).toEqual(b);
+      expect(requested.sort()).toEqual(['https://example.com/f0', 'https://example.com/f1']);
+      expect(firstProgress.at(-1)).toBe(2);
+      expect(secondProgress.at(-1)).toBe(2);
+      expect(fs.files.has(`${PACK_URI}/pack.json`)).toBe(true);
+    });
+
+    it('cancels the running install and waits for it to settle before removing the pack', async () => {
+      const { fs, remote, release, transferStarted } = await heldPack();
+      const install = ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal }, {
+        fs, fetch: fetchManifest(remote),
+      });
+      const outcome = install.then(() => 'installed', (error: Error) => error.message);
+      await transferStarted;
+      const removed = removeModelPack({ packId: 'example' }, { fs });
+      release();
+      await removed;
+      expect(await outcome).toBe('aborted');
+      expect([...fs.files.keys()].filter((uri) => uri.startsWith(`${PACK_URI}/`))).toEqual([]);
+    });
+  });
+
+  it('refuses to download a pack that does not fit in the free disk space', async () => {
+    const bytes = new Uint8Array(10);
+    const sha256 = await sha256Hex(bytes);
+    const fs = createFs(new Map([[`${PACK_URI}/a.bin`, bytes]]));
+    // 10 of the 30 bytes are already on disk, so 20 more are needed.
+    Object.assign(fs.Paths, { availableDiskSpace: 19 });
+    const requested: string[] = [];
+    useNativeDownloads(fs, () => bytes, requested);
+    const remote = manifest(['a.bin', 'b.bin', 'c.bin'].map((path) => ({
+      path, url: `https://example.com/${path}`, sha256, sizeBytes: bytes.length,
+    })));
+    await expect(ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal }, {
+      fs, fetch: fetchManifest(remote),
+    })).rejects.toMatchObject({ message: 'model_pack_insufficient_storage', requiredBytes: 20, availableBytes: 19 });
+    expect(requested).toEqual([]);
+
+    Object.assign(fs.Paths, { availableDiskSpace: 20 });
+    await ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal }, { fs, fetch: fetchManifest(remote) });
+    expect(requested.sort()).toEqual(['https://example.com/b.bin', 'https://example.com/c.bin']);
+  });
+
+  it('rejects a manifest published for a different model role', async () => {
+    const remote = { ...manifest([{ path: 'a.bin', url: 'https://example.com/a.bin', sha256: 'a'.repeat(64), sizeBytes: 1 }]), kind: 'stt_sherpa' as const };
+    await expect(ensureModelPackInstalled({ ...installOptions, kind: 'tts_sherpa', signal: new AbortController().signal }, {
+      fs: createFs(), fetch: fetchManifest(remote),
+    })).rejects.toThrow('model_pack_manifest_kind_mismatch');
   });
 
   it('rejects pack manifests that contain unsafe paths', async () => {
@@ -853,5 +1001,149 @@ describe('filesystem mutation failures', () => {
       override delete() { throw new Error('EACCES_directory_delete'); }
     }
     await expect(removeModelPack({ packId: 'example' }, { fs: { ...fs, Directory: UndeletableDirectory } })).rejects.toThrow('EACCES_directory_delete');
+  });
+});
+
+describe('native speech engine lifecycle', () => {
+  const PACK_PATH = '/docs/happier/voice/modelPacks/example';
+
+  // The sherpa native module is a platform boundary: it caches engines that hold the pack's model files.
+  function createSherpaNative(onRelease: () => void = () => {}, fs?: ReturnType<typeof createFs>) {
+    const released: string[] = [];
+    return {
+      released,
+      module: {
+        async release({ assetsDir }: { assetsDir: string }) { onRelease(); released.push(assetsDir); },
+        async excludeFromBackup({ path }: { path: string }) {
+          fs?.backupExcludedDirectories.add(`file://${path}`);
+        },
+      },
+    };
+  }
+
+  async function installSingleFilePack(fs: ReturnType<typeof createFs>, sherpaNative: InstallerSherpaNative) {
+    const bytes = new Uint8Array([7]);
+    useNativeDownloads(fs, () => bytes);
+    const files = [{ path: 'model.onnx', url: 'https://example.com/model.onnx', sha256: await sha256Hex(bytes), sizeBytes: 1 }];
+    await ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal }, {
+      fs, fetch: fetchManifest(manifest(files)), sherpaNative,
+    });
+  }
+
+  beforeEach(() => { nativeDownload.mockReset(); });
+
+  it('keeps an installed pack excluded from device backup when it is reused', async () => {
+    const fs = createFs();
+    const native = createSherpaNative(undefined, fs);
+    await installSingleFilePack(fs, native.module);
+    await ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal, mode: 'require_installed' }, {
+      fs, sherpaNative: native.module,
+    });
+    expect(fs.backupExcludedDirectories.has(PACK_URI)).toBe(true);
+  });
+
+  it('excludes a recreated pack directory after removing and reinstalling it', async () => {
+    const fs = createFs();
+    const native = createSherpaNative(undefined, fs);
+    await installSingleFilePack(fs, native.module);
+    expect(fs.backupExcludedDirectories.has(PACK_URI)).toBe(true);
+    await removeModelPack({ packId: 'example' }, { fs, sherpaNative: native.module });
+    expect(fs.backupExcludedDirectories.has(PACK_URI)).toBe(false);
+
+    await installSingleFilePack(fs, native.module);
+    expect(fs.backupExcludedDirectories.has(PACK_URI)).toBe(true);
+  });
+
+  it.each(['install', 'update'] as const)('excludes a recreated %s directory when retrying after cancellation', async (operation) => {
+    const fs = createFs();
+    const native = createSherpaNative(undefined, fs);
+    if (operation === 'update') await installSingleFilePack(fs, native.module);
+    const directoryUri = operation === 'update' ? 'file:///docs/happier/voice/modelPackUpdates/example' : PACK_URI;
+    const bytes = new Uint8Array([8]);
+    const remote = manifest([
+      { path: 'model.onnx', url: 'https://example.com/model.onnx?rev=2', sha256: await sha256Hex(bytes), sizeBytes: bytes.length },
+    ], 'v2');
+    const controller = new AbortController();
+    let excludedBeforeCancellation = false;
+    useNativeDownloads(fs, () => bytes, [], { inFlight: async () => {
+      excludedBeforeCancellation = fs.backupExcludedDirectories.has(directoryUri);
+      controller.abort();
+    } });
+    const options = { ...installOptions, ...(operation === 'update' ? { updatePolicy: 'manual_update_if_available' as const } : {}) };
+    await expect(ensureModelPackInstalled({ ...options, signal: controller.signal }, {
+      fs, fetch: fetchManifest(remote), sherpaNative: native.module,
+    })).rejects.toThrow('aborted');
+    expect(excludedBeforeCancellation).toBe(true);
+    expect(fs.backupExcludedDirectories.has(directoryUri)).toBe(false);
+
+    let excludedDuringRetry = false;
+    useNativeDownloads(fs, () => bytes, [], { inFlight: async () => {
+      excludedDuringRetry = fs.backupExcludedDirectories.has(directoryUri);
+    } });
+    await ensureModelPackInstalled({ ...options, signal: new AbortController().signal }, {
+      fs, fetch: fetchManifest(remote), sherpaNative: native.module,
+    });
+    expect(excludedDuringRetry).toBe(true);
+  });
+
+  it('still installs when the platform rejects the backup exclusion', async () => {
+    const fs = createFs();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await installSingleFilePack(fs, { excludeFromBackup: async () => { throw new Error('EPERM'); } });
+    expect((await getModelPackInstallSummary({ packId: 'example' }, { fs })).installed).toBe(true);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    warn.mockRestore();
+  });
+
+  it('unloads native engines before removing a pack', async () => {
+    const fs = createFs();
+    await installSingleFilePack(fs, {});
+    let filesPresentAtRelease = false;
+    const native = createSherpaNative(() => { filesPresentAtRelease = fs.files.has(`${PACK_URI}/model.onnx`); });
+    await removeModelPack({ packId: 'example' }, { fs, sherpaNative: native.module });
+    expect(native.released).toEqual([PACK_PATH]);
+    expect(filesPresentAtRelease).toBe(true);
+    expect(fs.files.has(`${PACK_URI}/model.onnx`)).toBe(false);
+  });
+
+  it.each(['remove', 'update'] as const)('preserves the installed pack when engine release rejects a %s', async (operation) => {
+    const fs = createFs();
+    await installSingleFilePack(fs, {});
+    const oldBytes = fs.files.get(`${PACK_URI}/model.onnx`);
+    const oldReceipt = fs.files.get(`${PACK_URI}/pack.json`);
+    const error = new Error('native_release_failed');
+    const sherpaNative = { release: async () => { throw error; } };
+    const next = new Uint8Array([8]);
+    useNativeDownloads(fs, () => next);
+    const mutation = operation === 'remove'
+      ? removeModelPack({ packId: 'example' }, { fs, sherpaNative })
+      : ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal, updatePolicy: 'manual_update_if_available' }, {
+        fs, sherpaNative, fetch: fetchManifest(manifest([
+          { path: 'model.onnx', url: 'https://example.com/model.onnx?rev=2', sha256: await sha256Hex(next), sizeBytes: 1 },
+        ], 'v2')),
+      });
+    await expect(mutation).rejects.toBe(error);
+    expect(fs.files.get(`${PACK_URI}/model.onnx`)).toEqual(oldBytes);
+    expect(fs.files.get(`${PACK_URI}/pack.json`)).toEqual(oldReceipt);
+  });
+
+  it('unloads native engines before an update swaps the pack files', async () => {
+    const fs = createFs();
+    await installSingleFilePack(fs, {});
+    const oldBytes = fs.files.get(`${PACK_URI}/model.onnx`);
+    let bytesAtRelease: Uint8Array | undefined;
+    const native = createSherpaNative(() => { bytesAtRelease = fs.files.get(`${PACK_URI}/model.onnx`); });
+    const next = new Uint8Array([8]);
+    useNativeDownloads(fs, () => next);
+    await ensureModelPackInstalled({ ...installOptions, signal: new AbortController().signal, updatePolicy: 'manual_update_if_available' }, {
+      fs,
+      fetch: fetchManifest(manifest([
+        { path: 'model.onnx', url: 'https://example.com/model.onnx?rev=2', sha256: await sha256Hex(next), sizeBytes: 1 },
+      ], 'v2')),
+      sherpaNative: native.module,
+    });
+    expect(native.released).toEqual([PACK_PATH]);
+    expect(bytesAtRelease).toEqual(oldBytes);
+    expect(fs.files.get(`${PACK_URI}/model.onnx`)).toEqual(next);
   });
 });

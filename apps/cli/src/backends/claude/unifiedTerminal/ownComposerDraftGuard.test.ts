@@ -480,3 +480,59 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(result.status).toBe('clear_failed');
   });
 });
+
+describe('clearOwnLeftoverComposerDraft: Claude feedback draft card (2.1.322, incident 2026-11-13)', () => {
+  // Live 2.1.322 captures: the card, the "Turn off Claude-drafted feedback?" follow-up that one
+  // Escape leaves behind, and the collapsed footer after a second Escape (drafts stay queued).
+  const card = readFixture('claude-2.1.322-feedback-draft-card.ansi');
+  const turnOffPrompt = readFixture('claude-2.1.322-feedback-draft-turnoff-prompt.ansi');
+  const collapsed = readFixture('claude-2.1.322-feedback-draft-collapsed.ansi');
+
+  it('dismisses the card with Escape before injection so a 0/1/2 prompt can never act on it', async () => {
+    const captures = [card, turnOffPrompt, collapsed];
+    const keys: string[] = [];
+    const waits: number[] = [];
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: captures.shift() ?? collapsed, cursor: { x: 2, y: 21 } }),
+      sendClearKey: async () => { keys.push('Escape'); },
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async (ms) => { waits.push(ms); },
+    });
+
+    expect(result).toMatchObject({ status: 'cleared', attempts: 2 });
+    expect(keys).toEqual(['Escape', 'Escape']);
+    // Claude ignores Escape on the card for 600ms after a turn ends; never let two presses land
+    // inside that window (a lone second Escape on an idle composer is a different gesture).
+    expect(waits.every((ms) => ms > 600)).toBe(true);
+    if (result.status !== 'cleared') throw new Error('unreachable');
+    expect(result.screen.feedbackDraftCardVisible).toBe(false);
+    expect(isClaudeScreenReadyForInput(result.screen)).toBe(true);
+  });
+
+  it('fails closed with a precise reason when the card survives the bounded dismissals', async () => {
+    const sendClearKey = vi.fn(async () => undefined);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: card, cursor: { x: 2, y: 21 } }),
+      sendClearKey,
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ status: 'blocked_non_input_state', blockedReason: 'feedback_draft_card' });
+    expect(sendClearKey).toHaveBeenCalledTimes(3);
+  });
+
+  it('never touches a user draft typed under the card', async () => {
+    const userDraftUnderCard = card.replace(/❯[ \u00a0]*(?=\r?\n[^❯]*$)/u, '❯ my own words');
+    expect(userDraftUnderCard).not.toBe(card);
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: userDraftUnderCard }),
+      sendClearKey: async () => {
+        throw new Error('must not press Escape over a user draft');
+      },
+      ownComposerTexts: ownLog(OWN_TEXT),
+      wait: async () => undefined,
+    });
+    expect(result.status).toBe('foreign_draft');
+  });
+});

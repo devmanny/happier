@@ -21,6 +21,8 @@ import {
   resolvePartialDownloadRemoveRow,
 } from '@/voice/settings/panels/modelPack/modelPackTransferRows';
 
+import { resolveKokoroNativeVoice } from '@/voice/kokoro/voices/resolveKokoroVoice';
+
 import { useLocalNeuralKokoroVoiceCatalog } from './useLocalNeuralKokoroVoiceCatalog.native';
 import { useNativeModelPackState } from '@/voice/settings/panels/modelPack/useNativeModelPackState.native';
 import { Icon } from '@/components/ui/icons/Icon';
@@ -34,7 +36,6 @@ export function LocalNeuralTtsSettings(props: {
   const { theme } = useUnistyles();
   const [openMenu, setOpenMenu] = React.useState<null | 'assetSet' | 'voiceId' | 'speed'>(null);
 
-  const effectiveVoiceId = props.cfgKokoro.voiceId ?? 'af_heart';
   const effectiveSpeed = props.cfgKokoro.speed ?? 1;
   const effectiveAssetSetId = resolveKokoroNativeModelPackId(props.cfgKokoro.assetId);
   const assetSets = React.useMemo(() => getKokoroNativeModelPackOptions(), []);
@@ -51,6 +52,11 @@ export function LocalNeuralTtsSettings(props: {
     });
 
   const voices = useLocalNeuralKokoroVoiceCatalog({ installSummary });
+  // Show the voice synthesis will actually use: the synced id may be unset or come from web.
+  const effectiveVoiceId =
+    resolveKokoroNativeVoice(installSummary?.manifest ?? null, props.cfgKokoro.voiceId)?.voiceId
+    ?? props.cfgKokoro.voiceId
+    ?? null;
 
   const previewController = React.useMemo(() => createVoicePlaybackController(), []);
   const [previewingVoiceId, setPreviewingVoiceId] = React.useState<string | null>(null);
@@ -227,7 +233,7 @@ export function LocalNeuralTtsSettings(props: {
         onOpenChange={(next) => setOpenMenu(next ? 'voiceId' : null)}
         variant="selectable"
         search={true}
-        selectedId={effectiveVoiceId}
+        selectedId={effectiveVoiceId ?? ''}
         showCategoryTitles={false}
         matchTriggerWidth={true}
         connectToTrigger={true}
@@ -237,7 +243,7 @@ export function LocalNeuralTtsSettings(props: {
           title: t('settingsVoice.local.kokoro.voice.title'),
           subtitle: t('settingsVoice.local.kokoro.voice.subtitleNative'),
           showSelectedSubtitle: false,
-          detailFormatter: () => effectiveVoiceId,
+          detailFormatter: () => effectiveVoiceId ?? t('settingsVoice.local.kokoro.common.default'),
         }}
         items={voices.map((v) => ({
           id: v.id,
