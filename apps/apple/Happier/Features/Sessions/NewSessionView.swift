@@ -11,6 +11,8 @@ enum NewChat {
 /// sending it starts the agent there (the daemon's `spawn-happy-session`).
 struct NewSessionView: View {
     let draft: NewSessionDraft?
+    /// One of your agents to start with (its card's "New Session with…"); else the last one chosen.
+    var preselectedAgentId: String?
     var onCreated: ((String) -> Void)?
     @Environment(HappierStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -55,8 +57,9 @@ struct NewSessionView: View {
     @State private var goalDraft: String?
     @State private var parentName: String
 
-    init(draft: NewSessionDraft? = nil, onCreated: ((String) -> Void)? = nil) {
+    init(draft: NewSessionDraft? = nil, preselectedAgentId: String? = nil, onCreated: ((String) -> Void)? = nil) {
         self.draft = draft
+        self.preselectedAgentId = preselectedAgentId
         self.onCreated = onCreated
         _machineId = State(initialValue: draft?.machineId)
         _directory = State(initialValue: draft?.directory ?? "")
@@ -222,7 +225,7 @@ struct NewSessionView: View {
             if store.accountSettings == nil { await store.refreshAccountSettings() }
             applyDefaultPermissionMode(for: agentId)
             await store.refreshAgentProfiles()
-            if workAgentId == nil, let last = store.agentProfile(id: lastWorkAgentId) { choose(last) }
+            if workAgentId == nil, let agent = store.agentProfile(id: preselectedAgentId ?? lastWorkAgentId) { choose(agent) }
         }
         .task(id: machineId) {
             guard let machineId else { return }
@@ -687,13 +690,14 @@ struct NewSessionView: View {
 /// Contextual creation uses the complete assistant while keeping the existing conversation in
 /// place. Cancel only dismisses this draft; sending follows the same creation path as New Session.
 struct NewSessionSheet: View {
-    let draft: NewSessionDraft
+    var draft: NewSessionDraft?
+    var preselectedAgentId: String?
     var onCreated: ((String) -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            NewSessionView(draft: draft) { sessionId in
+            NewSessionView(draft: draft, preselectedAgentId: preselectedAgentId) { sessionId in
                 dismiss()
                 onCreated?(sessionId)
             }

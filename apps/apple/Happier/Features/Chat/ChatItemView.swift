@@ -264,7 +264,12 @@ private struct EventRow: View {
 
     var body: some View {
         Group {
-            if event.kind == "runtime-config-outcome" {
+            if event.kind == "local-command" {
+                // A command run in Claude Code ("Model: Opus 5.5", "/mcp"): a system line, not a message.
+                Label(event.data["text"]?.stringValue ?? "", systemImage: "terminal")
+                    .lineLimit(2)
+                    .accessibilityLabel(Text("Command: \(event.data["text"]?.stringValue ?? "")"))
+            } else if event.kind == "runtime-config-outcome" {
                 // "Model changed to … · Effort High · 4:12 PM": when it changed.
                 Text("\(label) · \(event.createdAt, format: .dateTime.hour().minute())")
             } else {

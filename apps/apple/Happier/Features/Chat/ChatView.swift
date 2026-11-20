@@ -871,7 +871,7 @@ private extension ChatItem {
         case .userText(let message): message.text
         case .agentText(let message): message.text
         case .toolCall(let tool): tool.name
-        case .event(let event): event.kind
+        case .event(let event): event.summary
         }
         return String(text.prefix(60))
     }

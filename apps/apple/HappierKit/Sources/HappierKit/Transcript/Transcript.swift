@@ -203,9 +203,28 @@ private struct Builder {
             case .toolResult(let id, let content, let isError, let append, let structured):
                 addResult(id: id, content: content, isError: isError, append: append, structured: structured)
             case .event(let kind, let data):
+                // A command's model or effort line and the runner's own change line are one change.
+                let recent = items.indices.suffix(8)
+                if kind == LocalCommandLine.kind, recent.contains(where: { index in
+                    if case .event(let other) = items[index], other.kind == "runtime-config-outcome" { LocalCommandLine.repeats(data, outcome: other.data) } else { false }
+                }) { continue }
+                if kind == "runtime-config-outcome" {
+                    let repeated = recent.filter { index in
+                        if case .event(let other) = items[index], other.kind == LocalCommandLine.kind { LocalCommandLine.repeats(other.data, outcome: data) } else { false }
+                    }
+                    for index in repeated.reversed() { removeItem(at: index) }
+                }
                 items.append(.event(TranscriptEvent(id: itemId, kind: kind, data: data, createdAt: row.createdAt)))
             }
         }
+    }
+
+    /// Removes an item, keeping the indexes of the ones after it.
+    private mutating func removeItem(at index: Int) {
+        items.remove(at: index)
+        toolIndex = toolIndex.mapValues { $0 > index ? $0 - 1 : $0 }
+        segmentIndex = segmentIndex.mapValues { $0 > index ? $0 - 1 : $0 }
+        streamIndex = streamIndex.mapValues { $0 > index ? $0 - 1 : $0 }
     }
 
     private mutating func addText(_ text: String, thinking: Bool, itemId: String, createdAt: Date, seq: Int, meta: JSONValue?) {

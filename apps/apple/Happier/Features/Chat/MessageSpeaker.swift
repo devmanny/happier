@@ -44,7 +44,6 @@ final class MessageSpeaker: NSObject {
     @ObservationIgnored private var idle = AutoReadIdle()
     @ObservationIgnored private var idleTask: Task<Void, Never>?
     /// Set while auto read stops for being idle, so the Live Activity ends saying so.
-    @ObservationIgnored private var pausedForIdle = false
     #if os(iOS)
     @ObservationIgnored private var activity: Activity<ReadAloudAttributes>?
     @ObservationIgnored private var requestingActivity = false
@@ -157,16 +156,23 @@ final class MessageSpeaker: NSObject {
     /// message, silence keeps iOS from suspending it.
     func appMovedToBackground(_ background: Bool) {
         isInBackground = background
-        setKeepAlive(background && autoReadSessionId != nil)
+        let wasAsleep = idle.isAsleep
         noteIdle()
+        setKeepAlive(background && autoReadSessionId != nil && !idle.isAsleep)
+        // Back in front (from the Live Activity too): auto read wakes, keeps the connection again
+        // and reads what came in while it slept.
+        if wasAsleep, !idle.isAsleep, let sessionId = autoReadSessionId, let store = autoReadStore {
+            store.keepsConnectionInBackground = true
+            refreshActivity()
+            feed(sessionId, items: store.transcripts[sessionId]?.items ?? [], turnActive: store.sessions[sessionId]?.thinking ?? false)
+        }
     }
 
     /// Re-arms the idle stop after anything that changes whether there is something to read.
     private func noteIdle() {
-        guard let sessionId = autoReadSessionId else { return }
-        let state = AutoReadIdle.State(reading: speakingText != nil, waiting: queue.waiting,
-                                       turnActive: autoReadStore?.sessions[sessionId]?.thinking ?? false,
-                                       inBackground: isInBackground)
+        guard autoReadSessionId != nil else { return }
+        // The agent thinking or running tools isn't something to read: only messages count.
+        let state = AutoReadIdle.State(reading: speakingText != nil, waiting: queue.waiting, inBackground: isInBackground)
         let now = Date().timeIntervalSince1970
         idle.note(state, at: now)
         idleTask?.cancel()
@@ -179,19 +185,21 @@ final class MessageSpeaker: NSObject {
         }
     }
 
-    /// Ten minutes in the background with nothing to read: auto read turns off (the silent
-    /// keep-alive and the socket are released) and the Live Activity ends saying so.
+    /// Five minutes in the background with nothing new to read: auto read goes to sleep. The
+    /// silent keep-alive stops, the connection goes back to the ordinary background (suspended),
+    /// and the Live Activity says it's paused; it wakes when the app comes back to the front.
     private func pauseIfIdle() {
-        guard let sessionId = autoReadSessionId, let store = autoReadStore,
-              idle.shouldPause(at: Date().timeIntervalSince1970) else { return }
-        pausedForIdle = true
-        toggleAutoRead(sessionId, store: store)
-        pausedForIdle = false
+        guard autoReadSessionId != nil, let store = autoReadStore,
+              idle.sleepIfDue(at: Date().timeIntervalSince1970) else { return }
+        setKeepAlive(false)
+        store.keepsConnectionInBackground = false
+        refreshActivity()
     }
 
     /// The conversation changed: its newly completed agent messages join the queue.
     func feed(_ sessionId: String, items: [ChatItem], turnActive: Bool) {
-        guard autoReadSessionId == sessionId, var cursor = autoReadCursor else { return }
+        // Asleep, what arrives waits: it's read on waking.
+        guard autoReadSessionId == sessionId, !idle.isAsleep, var cursor = autoReadCursor else { return }
         let changes = cursor.take(items, turnActive: turnActive, recording: !recordingOwners.isEmpty)
         autoReadCursor = cursor
         defer {
@@ -498,16 +506,18 @@ final class MessageSpeaker: NSObject {
                 self.activity = nil
                 // ActivityKit's handles are safe to use from any task.
                 nonisolated(unsafe) let ending = activity
-                if pausedForIdle {
-                    // Stays on the Lock Screen a while so it's clear why reading stopped.
-                    let paused = ActivityContent(state: ReadAloudAttributes.ContentState(
-                        title: String(localized: "Auto-read paused"),
-                        snippet: String(localized: "Nothing new to read for 10 minutes."),
-                        isSpeaking: false, isPaused: false, waiting: 0, autoRead: false), staleDate: nil)
-                    Task { await ending.end(paused, dismissalPolicy: .after(.now.addingTimeInterval(30 * 60))) }
-                } else {
-                    Task { await ending.end(nil, dismissalPolicy: .immediate) }
-                }
+                Task { await ending.end(nil, dismissalPolicy: .immediate) }
+            }
+            return
+        }
+        if idle.isAsleep {
+            let asleep = ActivityContent(state: ReadAloudAttributes.ContentState(
+                title: String(localized: "Auto-read paused"),
+                snippet: String(localized: "Nothing new to read for 5 minutes. Open Happier to resume."),
+                isSpeaking: false, isPaused: true, waiting: 0, autoRead: true), staleDate: nil)
+            if let activity {
+                nonisolated(unsafe) let current = activity
+                Task { await current.update(asleep) }
             }
             return
         }

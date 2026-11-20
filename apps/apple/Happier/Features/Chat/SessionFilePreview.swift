@@ -59,34 +59,29 @@ struct SessionFilePreview: ViewModifier {
             .environment(\.openURL, routes.openURL)
             .onAppear {
                 routes.request = { requested = $0 }
-                routes.webPage = { webLink = $0 }
-            }
-            // Keep ShareLink alive while its system picker is presented. A confirmation
-            // dialog dismisses its actions as soon as one is chosen.
-            .popover(isPresented: linkPresented, attachmentAnchor: .point(.center), arrowEdge: .top) {
-                if let url = webLink {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Link Options").font(.headline)
-                            Spacer()
-                            Button("Cancel", systemImage: "xmark", role: .cancel) { webLink = nil }
-                                .labelStyle(.iconOnly)
-                                .buttonStyle(.plain)
-                        }
-                        Text(url.host() ?? url.absoluteString).font(.caption).foregroundStyle(.secondary)
-                        linkActions(url)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .padding(20)
-                    .frame(width: 300)
-                    .fixedSize(horizontal: false, vertical: true)
-                    #if os(iOS)
-                    .presentationCompactAdaptation(.sheet)
-                    .presentationDetents([.medium])
-                    #endif
+                #if os(macOS)
+                // The Mac's own menu, where the click was.
+                routes.webPage = { url in
+                    LinkMenu.show(url, openInHappier: { openInHappier(url) }, copy: { copy(url) })
                 }
+                #else
+                routes.webPage = { webLink = $0 }
+                #endif
             }
+            #if os(iOS)
+            // The system's action sheet (a popover on iPad), titled with the link's site.
+            .confirmationDialog(webLink.map(Self.site) ?? "", isPresented: linkPresented, titleVisibility: .visible,
+                                presenting: webLink) { url in
+                Button("Open in Happier") { openInHappier(url) }
+                Button("Open in Browser") { BrowserModel.openInDefaultBrowser(url) }
+                Button("Copy Link") { copy(url) }
+                    .accessibilityIdentifier("copy-conversation-link")
+                // The share sheet comes once this dialog has gone: shown from it, it closed with it.
+                Button("Share…") { SystemShare.present(url) }
+                    .accessibilityIdentifier("share-conversation-link")
+                Button("Cancel", role: .cancel) {}
+            }
+            #endif
             .modifier(BrowserSheet(shown: $browserSheet))
             .quickLookPreview($lookingAt, in: previewFiles)
             .sheet(item: $document) { document in
@@ -156,32 +151,19 @@ struct SessionFilePreview: ViewModifier {
         Binding(get: { webLink != nil }, set: { if !$0 { webLink = nil } })
     }
 
-    @ViewBuilder private func linkActions(_ url: URL) -> some View {
-        Button {
-            webLink = nil
-            browser.show(url, forSession: sessionId)
-            BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
-        } label: {
-            Label("Happier Browser", systemImage: "safari").frame(maxWidth: .infinity, alignment: .leading)
-        }
-        Button {
-            webLink = nil
-            BrowserModel.openInDefaultBrowser(url)
-        } label: {
-            Label("Default Browser", systemImage: "arrow.up.forward.app").frame(maxWidth: .infinity, alignment: .leading)
-        }
-        Button {
-            MessageClipboard.copy(url.absoluteString)
-            webLink = nil
-            AppHaptics.success()
-        } label: {
-            Label("Copy Link", systemImage: "doc.on.doc").frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityIdentifier("copy-conversation-link")
-        ShareLink(item: url) {
-            Label("Share…", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityIdentifier("share-conversation-link")
+    private func openInHappier(_ url: URL) {
+        browser.show(url, forSession: sessionId)
+        BrowserModel.present(openWindow: openWindow, multipleWindows: supportsMultipleWindows, sheet: $browserSheet)
+    }
+
+    private func copy(_ url: URL) {
+        MessageClipboard.copy(url.absoluteString)
+        AppHaptics.success()
+    }
+
+    static func site(_ url: URL) -> String {
+        guard let host = url.host() else { return url.absoluteString }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 
     /// Keep the source alongside its formatted copy: Quick Look displays either, and the
