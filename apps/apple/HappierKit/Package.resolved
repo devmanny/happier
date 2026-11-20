@@ -1,5 +1,5 @@
 {
-  "originHash" : "fd893deea76c8ae494edb346d23e286eb62666cd2f0dd65f3a5c48a69a406dfb",
+  "originHash" : "d595d88bc4b6ae4cce9575e5ffdcbe387ce3520e04a78c1dd080d2f1254bb38f",
   "pins" : [
     {
       "identity" : "swift-sodium",
