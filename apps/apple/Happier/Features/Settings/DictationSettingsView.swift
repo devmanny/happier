@@ -123,7 +123,8 @@ private struct DictationDiagnosticsSection: View {
                         LabeledContent("Whisper Passes", value: String(localized: "\(take.whisperPasses) · slowest \(Self.seconds(slowest))"))
                     }
                     if let loudest = take.loudestLevel, let background = take.backgroundLevel {
-                        // Whisper reads only speech 12 dB above the room: with less it heard none.
+                        // Whisper reads only speech 12 dB above the room or louder than -35 dB
+                        // (`DictationSpeech`): with less it heard none.
                         LabeledContent("Voice · Room", value: "\(Self.decibels(loudest)) · \(Self.decibels(background))")
                     }
                     LabeledContent("Device", value: Self.device(take))

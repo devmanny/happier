@@ -42,6 +42,22 @@ struct WhisperDictationTests {
         #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 16) == 0)
     }
 
+    @Test func speakingAtOnceIsSpeechFromTheFirstWords() {
+        // Talking the moment the mic opens: a second of words with no quiet before them. The
+        // take's quietest tenth is the voice itself, yet it is speech, and live passes start.
+        let take = frames([(-28, 2), (-24, 3), (-32, 1), (-26, 2), (-30, 2)])
+        #expect(DictationSpeech.speechEnd(frameLevels: take) == 10)
+        #expect(DictationSpeech.speechSeconds(frameLevels: take, from: 0) == 1)
+    }
+
+    @Test func aLoudButSteadyRoomIsNotSpeech() {
+        // A car or a café: steady noise, louder than a quiet room, with nothing said.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-45, 40)])) == nil)
+        // Words over it still count, after it and from the first instant alike.
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-45, 10), (-28, 20), (-45, 20)])) == 34)
+        #expect(DictationSpeech.speechEnd(frameLevels: frames([(-28, 20), (-45, 20)])) == 24)
+    }
+
     @Test func quietSpeechStillCounts() {
         // A soft voice far from the microphone: loud only relative to the room.
         let take = frames([(-70, 10), (-50, 20), (-70, 10)])

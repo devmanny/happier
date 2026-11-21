@@ -11,11 +11,17 @@ public enum DictationSpeech {
     /// Speech is sustained: even "sí" or "no" said softly is 0.3 s loud; a tap or a rustle on the
     /// phone is 0.2 s at most (measured on synthetic voices and noise bursts over room noise).
     private static let minimumSpeechFrames = 3
+    /// Sound this loud is a voice at the phone whatever the room. Without it, words said the moment
+    /// the mic opens had no quiet before them to measure the room by: the take's quietest tenth was
+    /// the voice itself, nothing counted as speech, and the first words waited 4–5 s for a pause
+    /// (measured with Whisper on Spanish clips). A steady room this loud would drown the voice anyway.
+    private static let voiceLevel: Float = -35
 
     /// How many of the take's frames (loudness in dBFS, `frameSeconds` each) to transcribe, or nil
     /// when nothing in it is speech. Speech is 12 dB above the take's own background (its quietest
-    /// tenth), so a soft voice in a quiet room counts and steady room noise does not, and lasts
-    /// `minimumSpeechFrames`, so a short noise doesn't.
+    /// tenth), or louder than `voiceLevel`, so a soft voice in a quiet room counts, words from the
+    /// first instant count, and steady room noise does not; and it lasts `minimumSpeechFrames`, so
+    /// a short noise doesn't.
     public static func speechEnd(frameLevels levels: [Float]) -> Int? {
         guard let last = speechFrames(frameLevels: levels).last else { return nil }
         return min(levels.count, last + 1 + marginFrames)
@@ -29,7 +35,7 @@ public enum DictationSpeech {
     /// The frames that are speech: loud, in runs of at least `minimumSpeechFrames`.
     private static func speechFrames(frameLevels levels: [Float]) -> [Int] {
         guard let background = background(frameLevels: levels) else { return [] }
-        let threshold = max(background + 12, -55)
+        let threshold = min(max(background + 12, -55), voiceLevel)
         var frames: [Int] = []
         var run: [Int] = []
         for (index, level) in levels.enumerated() {
