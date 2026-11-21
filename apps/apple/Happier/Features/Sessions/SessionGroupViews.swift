@@ -1,8 +1,9 @@
 import HappierKit
 import SwiftUI
 
-/// A session row's "Move to Group": the user's groups (its own checked) and a new one, then taking
-/// it out of its group. Groups are the account's (`SessionGroup`), the same on every device.
+/// A session row's "Move to Group": the user's groups (the one it's in checked) and a new one, then
+/// taking it out of a group it's in of its own accord (one listed under a session in a group goes
+/// with that session). Groups are the account's (`SessionGroup`), the same on every device.
 struct SessionGroupMenu: View {
     let session: Session
     let store: HappierStore
@@ -10,10 +11,11 @@ struct SessionGroupMenu: View {
     let newGroup: () -> Void
 
     var body: some View {
-        let current = store.sessionGroupIds[session.id]
+        let current = store.groupId(of: session.id)
         Menu {
             ForEach(store.sessionGroups) { group in
                 Button {
+                    guard current != group.id else { return }
                     AppHaptics.selection()
                     Task { await store.moveToGroup(session.id, group.id) }
                 } label: {
@@ -34,7 +36,7 @@ struct SessionGroupMenu: View {
             Label("Move to Group", systemImage: "rectangle.stack")
         }
         .accessibilityIdentifier("session-move-to-group")
-        if current != nil {
+        if store.isGroupedOnItsOwn(session.id) {
             Button("Remove from Group", systemImage: "rectangle.stack.badge.minus") {
                 AppHaptics.selection()
                 Task { await store.moveToGroup(session.id, nil) }

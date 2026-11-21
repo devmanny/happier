@@ -114,6 +114,8 @@ public actor SessionSnapshotStore {
 public enum SessionChanges {
     public struct Page: Equatable, Sendable {
         public let sessionIds: [String]
+        /// Another device changed groups or pins (`kind: account` rows of the session organization).
+        public let organizationChanged: Bool
         public let nextCursor: Int?
         /// Entries of every kind, to tell a full page from the last one.
         public let count: Int
@@ -126,6 +128,9 @@ public enum SessionChanges {
             guard change["kind"]?.stringValue == "session", let id = change["entityId"]?.stringValue, seen.insert(id).inserted else { return nil }
             return id
         }
-        return Page(sessionIds: ids, nextCursor: response["nextCursor"]?.intValue, count: changes.count)
+        let organization = changes.contains { change in
+            change["kind"]?.stringValue == "account" && change["hint"]?["sessionOrganization"]?.boolValue == true
+        }
+        return Page(sessionIds: ids, organizationChanged: organization, nextCursor: response["nextCursor"]?.intValue, count: changes.count)
     }
 }

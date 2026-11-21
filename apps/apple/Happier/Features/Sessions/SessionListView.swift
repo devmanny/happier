@@ -419,7 +419,7 @@ struct SessionListView: View {
         CollapsibleListSection(verbatim: section.group.name, key: "group.\(section.id)", count: Self.flatten(section.nodes).count, drawer: isDrawer) {
             if section.nodes.isEmpty {
                 // Still listed, so it can be renamed or deleted.
-                Text("No sessions. Move one here from its menu.")
+                Text(section.pinned > 0 ? "Its sessions are pinned, so they're in Pinned." : "No sessions. Move one here from its menu.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .listRowSeparator(.hidden)

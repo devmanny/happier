@@ -11,6 +11,31 @@ private final class OrganizationServer: @unchecked Sendable {
     private var log: [String] = []
     var foldersEnabled = true
     var plainAccount = false
+    /// Sessions the relay no longer has: moving one answers 404.
+    var goneSessions: Set<String> = []
+    private var holding = false
+    private var heldCount = 0
+    private let held = DispatchSemaphore(value: 0)
+
+    /// Moves (`PUT folder-assignments`) wait until `release` while held.
+    func holdMoves() { lock.withLock { holding = true } }
+    var heldMoves: Int { lock.withLock { heldCount } }
+    func release() {
+        let count = lock.withLock { () -> Int in
+            holding = false
+            return heldCount
+        }
+        for _ in 0..<count { held.signal() }
+    }
+    /// Whether the request waits for `release`; then `wait` returns once it does.
+    func holds(_ request: URLRequest) -> Bool {
+        lock.withLock { () -> Bool in
+            guard holding, request.httpMethod == "PUT" else { return false }
+            heldCount += 1
+            return true
+        }
+    }
+    func wait() { held.wait() }
 
     /// Each request as "METHOD path", in order.
     var requests: [String] { lock.withLock { log } }
@@ -57,6 +82,7 @@ private final class OrganizationServer: @unchecked Sendable {
                 return (200, ["folder": .object(folder)])
             case ("PUT", _) where path.hasPrefix("/v2/session-organization/folder-assignments/"):
                 let sessionId = String(path.dropFirst("/v2/session-organization/folder-assignments/".count))
+                if goneSessions.contains(sessionId) { return (404, ["error": "session-not-found"]) }
                 guard let json = try? JSONValue.parse(body), let target = json["folderId"] else { return (400, ["error": "invalid-params"]) }
                 if let folderId = target.stringValue {
                     guard folders[folderId] != nil else { return (400, ["error": "invalid-session-folder-assignment"]) }
@@ -96,6 +122,15 @@ private final class OrganizationURLProtocol: URLProtocol, @unchecked Sendable {
                 body.append(contentsOf: bytes.prefix(count))
             }
         }
+        guard let server = Self.server, server.holds(request) else { return finish(body) }
+        // Answered later, without blocking the session's other requests.
+        DispatchQueue.global().async { [self] in
+            server.wait()
+            finish(body)
+        }
+    }
+
+    private func finish(_ body: Data) {
         let (status, json) = Self.server?.respond(request, body) ?? (500, [:])
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -251,6 +286,135 @@ private final class OrganizationURLProtocol: URLProtocol, @unchecked Sendable {
         await store.moveToGroup("s1", "g-radar")
         #expect(store.sessionGroupIds.isEmpty)
         #expect(store.lastError != nil)
+        // And the list reads the groups again: that one is gone.
+        #expect(store.sessionGroups.isEmpty)
+    }
+
+    @Test func aListReadWhileAMoveIsSentDoesNotTakeItBack() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]))
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.holdMoves()
+
+        let move = Task { await store.moveToGroup("s1", "g-radar") }
+        while server.heldMoves == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        // A session list sync reads the organization before the relay has the move.
+        await store.refreshSessionOrganization()
+        #expect(store.sessionGroupIds == ["s1": "g-radar"])
+
+        server.release()
+        await move.value
+        #expect(store.sessionGroupIds == ["s1": "g-radar"])
+        #expect(server.group(of: "s1") == "g-radar")
+    }
+
+    @Test func aNewGroupStaysWhenOnlyTheMoveIntoItFails() async throws {
+        let server = OrganizationServer()
+        server.goneSessions = ["gone"]
+        let store = store(server)
+        await store.refreshSessionOrganization()
+
+        await store.moveToNewGroup("gone", named: "Radar")
+
+        // The relay made the group; only the session stays where it was.
+        let group = try #require(store.sessionGroups.first)
+        #expect(store.sessionGroups.map(\.name) == ["Radar"])
+        #expect(server.folder(group.id) != nil)
+        #expect(store.sessionGroupIds.isEmpty)
+        #expect(store.lastError != nil)
+    }
+
+    @Test func renamingAGroupDeletedOnAnotherDeviceDoesNotBringItBack() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]))
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.remove(folder: "g-radar")
+
+        await store.renameGroup("g-radar", to: "Radar 2")
+
+        #expect(server.folder("g-radar") == nil)
+        #expect(store.sessionGroups.isEmpty)
+    }
+
+    /// A plain session row; `parent` is the session it was started from.
+    private func session(_ id: String, parent: String? = nil) throws -> Session {
+        var metadata: [String: JSONValue] = ["name": "t", "path": "/a"]
+        if let parent { metadata["spawnedBySessionV1"] = ["parentSessionId": .string(parent)] }
+        return try Session(row: ["id": .string(id), "encryptionMode": "plain", "metadata": .string(String(decoding: try JSONValue.object(metadata).encoded(), as: UTF8.self)),
+                                 "metadataVersion": 1, "active": true, "updatedAt": 1], keys: nil)
+    }
+
+    /// `store`, with the relay taking every metadata write.
+    private func nestingStore(_ server: OrganizationServer, sessions: [Session]) -> HappierStore {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OrganizationURLProtocol.self]
+        OrganizationURLProtocol.server = server
+        let api = HappierAPI(server: URL(string: "https://groups.invalid")!, token: "t", session: URLSession(configuration: configuration))
+        let store = HappierStore(server: URL(string: "https://groups.invalid")!)
+        store.installForTesting(api: api, keys: keys, snapshotDirectory: FileManager.default.temporaryDirectory.appending(path: "groups-\(UUID().uuidString)")) { event, payload in
+            guard event == "update-metadata" else { return [] }
+            return [["result": "success", "version": 2, "metadata": payload["metadata"] ?? .null]]
+        }
+        for session in sessions { store.sessions[session.id] = session }
+        return store
+    }
+
+    @Test func aSessionPutInsideAnotherGoesWithIt() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]), assigned: ["s1"])
+        let store = nestingStore(server, sessions: [try session("p"), try session("s1")])
+        await store.refreshSessionOrganization()
+
+        await store.nest("s1", under: "p")
+
+        // Listed under "p" now, outside the group.
+        #expect(store.sessions["s1"]?.parentSessionId == "p")
+        #expect(store.sessionGroupIds.isEmpty)
+        #expect(server.group(of: "s1") == nil)
+    }
+
+    @Test func aSessionPutInsideAnotherOfItsGroupFollowsItFromThen() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]), assigned: ["p", "s1"])
+        let store = nestingStore(server, sessions: [try session("p"), try session("s1")])
+        await store.refreshSessionOrganization()
+
+        await store.nest("s1", under: "p")
+
+        // Still in Radar through "p", and out of it when "p" leaves.
+        #expect(store.sessionGroupIds == ["p": "g-radar"])
+        #expect(store.groupId(of: "s1") == "g-radar")
+        #expect(server.group(of: "s1") == nil)
+    }
+
+    @Test func aSubSessionOfAnArchivedSessionIsNotInItsGroup() async throws {
+        let server = OrganizationServer()
+        // "p" was archived: the relay keeps its group, the list no longer has it.
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]), assigned: ["p"])
+        let store = nestingStore(server, sessions: [try session("c", parent: "p")])
+        await store.refreshSessionOrganization()
+
+        #expect(store.groupId(of: "c") == nil)
+        #expect(!store.isGroupedOnItsOwn("c"))
+    }
+
+    @Test func aSessionTakenOutOfAnotherStaysInTheGroupItWasListedIn() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]), assigned: ["p"])
+        let store = nestingStore(server, sessions: [try session("p"), try session("c", parent: "p")])
+        await store.refreshSessionOrganization()
+        // Listed in the group under "p", without a group of its own.
+        #expect(store.groupId(of: "c") == "g-radar")
+        #expect(!store.isGroupedOnItsOwn("c"))
+
+        await store.nest("c", under: nil)
+
+        #expect(store.sessions["c"]?.parentSessionId == nil)
+        #expect(store.sessionGroupIds["c"] == "g-radar")
+        #expect(server.group(of: "c") == "g-radar")
+        #expect(store.isGroupedOnItsOwn("c"))
     }
 }
 
@@ -292,10 +456,36 @@ private final class OrganizationURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(ids(groups.pinned) == ["pinnedRadar"])
         #expect(groups.grouped.map(\.group.id) == ["g-radar", "g-empty", "g-kelpi"])
         #expect(ids(groups.grouped[0].nodes) == ["radarOld(radarChild)", "radarRun"])
+        #expect(groups.grouped.map(\.pinned) == [1, 0, 0])
         #expect(groups.grouped[1].nodes.isEmpty)
         #expect(ids(groups.grouped[2].nodes) == ["elsewhere"])
         #expect(ids(groups.active) == ["run"])
         #expect(groups.stopped.isEmpty && groups.resting.isEmpty)
+    }
+
+    @Test func aSubSessionPutInTheGroupItIsListedInKeepsItsPlace() throws {
+        let sessions = [
+            try session("top", at: 10),
+            try session("middle", at: 20, parent: "top"),
+            try session("bottom", at: 30, parent: "middle"),
+            try session("pinned", at: 40),
+            try session("underPinned", at: 50, parent: "pinned"),
+        ]
+        // "bottom" is in Radar as "middle" is, through "top"; "underPinned" is, but "pinned" is in Pinned.
+        let groups = SessionSidebar.groups(sessions, pinned: ["pinned"], groups: [group("g-radar", "Radar")],
+                                           groupIds: ["top": "g-radar", "bottom": "g-radar", "underPinned": "g-radar"])
+        #expect(ids(groups.grouped[0].nodes) == ["underPinned", "top(middle(bottom))"])
+        #expect(ids(groups.pinned) == ["pinned"])
+    }
+
+    @Test func aSubSessionOfASessionNotListedGoesByItsOwnGroup() throws {
+        // "gone" (archived, in Radar) isn't listed: "orphan" is a top row, "grandchild" in Radar.
+        let sessions = [try session("orphan", active: true, at: 10, parent: "gone"),
+                        try session("grandchild", active: true, at: 20, parent: "orphan")]
+        let groups = SessionSidebar.groups(sessions, pinned: [], groups: [group("g-radar", "Radar")],
+                                           groupIds: ["gone": "g-radar", "grandchild": "g-radar"])
+        #expect(ids(groups.grouped[0].nodes) == ["grandchild"])
+        #expect(ids(groups.active) == ["orphan"])
     }
 
     @Test func aSessionInAGroupNoLongerListedIsInTheList() throws {

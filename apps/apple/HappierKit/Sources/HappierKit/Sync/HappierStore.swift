@@ -1210,6 +1210,9 @@ public final class HappierStore {
         sessionGroupsAvailable = false
         checkedGroupsFeature = false
         organizationIsPlain = nil
+        // Changes still being sent belong to the account being left (`changeOrganization`).
+        organizationWrites = 0
+        organizationStale = false
         deleteRequest = nil
         deletedSessionIds = []
         accountSettings = nil
@@ -1464,9 +1467,11 @@ public final class HappierStore {
         let pageSize = 500 // `/v2/changes` maximum
         var after = cursor
         var ids: [String] = []
+        var organizationChanged = false
         while true {
             guard let response = try await api.changes(after: after, limit: pageSize) else { return nil }
             let page = SessionChanges.page(response)
+            organizationChanged = organizationChanged || page.organizationChanged
             ids += page.sessionIds.filter { !ids.contains($0) }
             if ids.count * 2 > max(sessions.count, 1) { return nil }
             let next = page.nextCursor ?? after
@@ -1478,6 +1483,9 @@ public final class HappierStore {
         }
         guard !ids.isEmpty else {
             snapshotCursor = after
+            // Groups and pins another device changed: the relay records them apart from sessions
+            // (`kind: account`); with sessions changed too, `didUpdateSessions` reads them.
+            if organizationChanged { Task { await refreshSessionOrganization() } }
             return 0
         }
         // Up to four at a time, well inside the session-detail rate limit.
@@ -1574,6 +1582,8 @@ public final class HappierStore {
 
     public func appDidBecomeActive() {
         inBackground = false
+        // Groups changed on another device come with no socket event: read them as the app comes to the front.
+        if phase == .ready, syncTask != nil { Task { await refreshSessionOrganization() } }
         guard phase == .ready, syncTask == nil else { return }
         syncTask = Task { await runSync() }
     }
@@ -3034,32 +3044,50 @@ public final class HappierStore {
 
     /// The user's groups, in list order (`SessionGroup.ordered`).
     public private(set) var sessionGroups: [SessionGroup] = []
-    /// Each grouped session's group.
+    /// Each session put in a group, and that group (a sub-session not in this map is listed with
+    /// the session it was started from: `listedGroupId(of:)`).
     public private(set) var sessionGroupIds: [String: String] = [:]
     /// Whether the relay keeps groups (`sessions.folders`); groups aren't offered until it says so.
     public private(set) var sessionGroupsAvailable = false
     @ObservationIgnored private var checkedGroupsFeature = false
     /// Whether group names are written plain (a plain account); asked once, when first needed.
     @ObservationIgnored private var organizationIsPlain: Bool?
-    /// Counts this device's changes to pins and groups: a snapshot asked for before one of them
-    /// would put back what it changed, so it's dropped (the next refresh comes with the next sync).
+    /// Bumped as each change to pins or groups starts and ends; with `organizationWrites` it tells a
+    /// snapshot that may predate one of them (it would put back what the change did), which is then
+    /// not shown, and the organization is read again once no change is under way.
     @ObservationIgnored private var organizationEdits = 0
+    @ObservationIgnored private var organizationWrites = 0
+    @ObservationIgnored private var organizationStale = false
 
-    /// Pins and groups, from the account's session organization (with every session list sync).
+    /// Pins and groups, from the account's session organization: with every session list sync,
+    /// when another device changed them (`/v2/changes`), and when the app comes to the front.
     func refreshSessionOrganization() async {
-        guard let api else { return }
+        guard let api, let snapshots else { return }
         if !checkedGroupsFeature {
             do {
-                sessionGroupsAvailable = SessionOrganization.groupsEnabled(features: try await api.features())
+                let available = SessionOrganization.groupsEnabled(features: try await api.features())
+                // Signed out or onto another relay meanwhile: not this account's answer.
+                guard self.snapshots === snapshots else { return }
+                sessionGroupsAvailable = available
                 checkedGroupsFeature = true
             } catch {
                 logBackground(error, "relay features")
             }
         }
-        let edits = organizationEdits
         do {
-            let organization = SessionOrganization(snapshot: try await api.sessionOrganization(), machineKey: keys?.content.secretKey)
-            guard edits == organizationEdits else { return }
+            var organization: SessionOrganization
+            repeat {
+                let edits = organizationEdits
+                organization = SessionOrganization(snapshot: try await api.sessionOrganization(), machineKey: keys?.content.secretKey)
+                guard self.snapshots === snapshots else { return }
+                // A change still being sent reads the organization again once it's done.
+                guard organizationWrites == 0 else {
+                    organizationStale = true
+                    return
+                }
+                if edits == organizationEdits { break }
+            } while true
+            organizationStale = false
             if pinnedSessionIds != organization.pinnedIds { pinnedSessionIds = organization.pinnedIds }
             let groups = sessionGroupsAvailable ? organization.groups : []
             let groupIds = sessionGroupsAvailable ? organization.groupIds : [:]
@@ -3070,54 +3098,94 @@ public final class HappierStore {
         }
     }
 
-    public func sessionGroup(of sessionId: String) -> SessionGroup? {
-        sessionGroupIds[sessionId].flatMap { id in sessionGroups.first { $0.id == id } }
+    /// A change to pins or groups: shown at once by `apply`, sent by `send`; if the relay refuses,
+    /// `undo` takes back only this change (others made meanwhile stay), and the organization is read
+    /// again once nothing else is being sent.
+    private func changeOrganization(apply: () -> Void, send: () async throws -> Void, undo: () -> Void) async {
+        let account = snapshots
+        organizationWrites += 1
+        organizationEdits += 1
+        apply()
+        do {
+            try await send()
+        } catch {
+            // Signed out or onto another relay meanwhile: nothing here is this change's any more.
+            guard snapshots === account else { return }
+            undo()
+            organizationStale = true
+            report(error)
+        }
+        guard snapshots === account else { return }
+        organizationWrites -= 1
+        organizationEdits += 1
+        if organizationWrites == 0, organizationStale { await refreshSessionOrganization() }
     }
 
-    /// Makes a group named `name` and puts the session in it; shown at once, taken back if the
-    /// relay refuses.
+    /// The group whose section lists the session's row (`SessionGroup.listedGroupId`).
+    public func listedGroupId(of sessionId: String) -> String? {
+        // A parent not in the list (archived) doesn't hold its sub-sessions there.
+        SessionGroup.listedGroupId(of: sessionId, groupIds: sessionGroupIds, pinned: Set(pinnedSessionIds)) { [sessions] id in
+            sessions[id]?.parentSessionId.flatMap { sessions[$0].map { $0.archivedAt == nil } == true ? $0 : nil }
+        }
+    }
+
+    /// The group the session is in: its own, or the one it's listed in under the session it was started from.
+    public func groupId(of sessionId: String) -> String? {
+        sessionGroupIds[sessionId] ?? listedGroupId(of: sessionId)
+    }
+
+    /// Whether the session is in a group of its own accord, not only by being listed under a session in it.
+    public func isGroupedOnItsOwn(_ sessionId: String) -> Bool {
+        guard let group = sessionGroupIds[sessionId] else { return false }
+        return group != sessions[sessionId]?.parentSessionId.flatMap { listedGroupId(of: $0) }
+    }
+
+    /// Makes a group named `name` and puts the session in it.
     public func moveToNewGroup(_ sessionId: String, named name: String) async {
         guard let api, sessionGroupsAvailable, let name = SessionGroup.cleanName(name) else { return }
         let group = SessionGroup.new(named: name)
-        let previous = (sessionGroups, sessionGroupIds)
-        organizationEdits += 1
-        sessionGroups = SessionGroup.ordered(sessionGroups + [group])
-        sessionGroupIds[sessionId] = group.id
-        do {
+        let before = sessionGroupIds[sessionId]
+        await changeOrganization {
+            sessionGroups = SessionGroup.ordered(sessionGroups + [group])
+            sessionGroupIds[sessionId] = group.id
+        } send: {
             try await api.saveSessionFolder(group.request(display: try await groupDisplay(group)))
             try await api.setSessionFolder(sessionId, folderId: group.id)
-        } catch {
-            (sessionGroups, sessionGroupIds) = previous
-            report(error)
+        } undo: {
+            // If the relay made the group before refusing the move, reading it again lists it.
+            sessionGroups.removeAll { $0.id == group.id }
+            if sessionGroupIds[sessionId] == group.id { sessionGroupIds[sessionId] = before }
         }
     }
 
     /// Puts the session in a group, or takes it out of its group with nil.
     public func moveToGroup(_ sessionId: String, _ groupId: String?) async {
         guard let api, sessionGroupIds[sessionId] != groupId else { return }
-        let previous = sessionGroupIds
-        organizationEdits += 1
-        sessionGroupIds[sessionId] = groupId
-        do {
+        let before = sessionGroupIds[sessionId]
+        await changeOrganization {
+            sessionGroupIds[sessionId] = groupId
+        } send: {
             try await api.setSessionFolder(sessionId, folderId: groupId)
-        } catch {
-            sessionGroupIds = previous
-            report(error)
+        } undo: {
+            if sessionGroupIds[sessionId] == groupId { sessionGroupIds[sessionId] = before }
         }
     }
 
     public func renameGroup(_ groupId: String, to name: String) async {
-        guard let api, let name = SessionGroup.cleanName(name), let group = sessionGroups.first(where: { $0.id == groupId }),
-              name != group.ownName else { return }
+        guard let api, let name = SessionGroup.cleanName(name) else { return }
+        // A rename writes the whole group back: read what the relay has first, so one deleted or
+        // changed on another device isn't brought back as this device last saw it.
+        await refreshSessionOrganization()
+        guard let group = sessionGroups.first(where: { $0.id == groupId }), name != group.ownName else { return }
         let renamed = group.renamed(name)
-        let previous = sessionGroups
-        organizationEdits += 1
-        sessionGroups = SessionGroup.ordered(sessionGroups.map { $0.id == groupId ? renamed : $0 })
-        do {
+        await changeOrganization {
+            sessionGroups = SessionGroup.ordered(sessionGroups.map { $0.id == groupId ? renamed : $0 })
+        } send: {
             try await api.saveSessionFolder(renamed.request(display: try await groupDisplay(renamed)))
-        } catch {
-            sessionGroups = previous
-            report(error)
+        } undo: {
+            if sessionGroups.contains(where: { $0.id == groupId && $0.ownName == name }) {
+                sessionGroups = SessionGroup.ordered(sessionGroups.map { $0.id == groupId ? group : $0 })
+            }
         }
     }
 
@@ -3131,15 +3199,28 @@ public final class HappierStore {
             guard !inside.isSubset(of: deleted) else { break }
             deleted.formUnion(inside)
         }
-        let previous = (sessionGroups, sessionGroupIds)
-        organizationEdits += 1
-        sessionGroups.removeAll { deleted.contains($0.id) }
-        for (sessionId, id) in sessionGroupIds where deleted.contains(id) { sessionGroupIds[sessionId] = group.parentId }
-        do {
+        let removedGroups = sessionGroups.filter { deleted.contains($0.id) }
+        let moved = sessionGroupIds.filter { deleted.contains($0.value) }
+        await changeOrganization {
+            sessionGroups.removeAll { deleted.contains($0.id) }
+            for sessionId in moved.keys { sessionGroupIds[sessionId] = group.parentId }
+        } send: {
             try await api.deleteSessionFolder(groupId)
-        } catch {
-            (sessionGroups, sessionGroupIds) = previous
-            report(error)
+        } undo: {
+            let listed = Set(sessionGroups.map(\.id))
+            sessionGroups = SessionGroup.ordered(sessionGroups + removedGroups.filter { !listed.contains($0.id) })
+            for (sessionId, id) in moved where sessionGroupIds[sessionId] == group.parentId { sessionGroupIds[sessionId] = id }
+        }
+    }
+
+    /// After `nest`, so the list shows the move: a session put inside another one goes with it,
+    /// leaving a group of its own (even the same one, so it keeps following it); one taken out
+    /// stays in the group it was listed in.
+    private func keepGroupAfterNesting(_ sessionId: String, under parentId: String?, listedBefore: String?) async {
+        if parentId != nil {
+            await moveToGroup(sessionId, nil)
+        } else if sessionGroupIds[sessionId] == nil, let listedBefore {
+            await moveToGroup(sessionId, listedBefore)
         }
     }
 
@@ -3160,14 +3241,12 @@ public final class HappierStore {
     /// Pins or unpins right away; reverts if the server refuses.
     public func setPinned(_ sessionId: String, _ pinned: Bool) async {
         guard let api, isPinned(sessionId) != pinned else { return }
-        let previous = pinnedSessionIds
-        organizationEdits += 1
-        if pinned { pinnedSessionIds.append(sessionId) } else { pinnedSessionIds.removeAll { $0 == sessionId } }
-        do {
+        await changeOrganization {
+            if pinned { pinnedSessionIds.append(sessionId) } else { pinnedSessionIds.removeAll { $0 == sessionId } }
+        } send: {
             try await api.setSessionPin(sessionId, pinned: pinned)
-        } catch {
-            pinnedSessionIds = previous
-            report(error)
+        } undo: {
+            if pinned { pinnedSessionIds.removeAll { $0 == sessionId } } else if !isPinned(sessionId) { pinnedSessionIds.append(sessionId) }
         }
     }
 
@@ -3333,7 +3412,10 @@ public final class HappierStore {
     /// nesting changes; the sessions keep their folders and conversations.
     public func nest(_ sessionId: String, under parentId: String?) async {
         if let parentId, !canNest(sessionId, under: parentId) { return }
+        let listedBefore = listedGroupId(of: sessionId)
         await editMetadata(sessionId) { MetadataEdit.setListParent(parentId, in: $0, now: $1) }
+        guard let session = sessions[sessionId], session.parentSessionId == parentId else { return }
+        await keepGroupAfterNesting(sessionId, under: parentId, listedBefore: listedBefore)
     }
 
     /// The normal creation path has successfully started the parent. Keep the target's place in
@@ -3346,6 +3428,8 @@ public final class HappierStore {
         let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
         await editMetadata(parentId) { MetadataEdit.setTitle(name.isEmpty ? group.suggestedTitle : name, in: $0, now: $1) }
         if let grandparent = targetSession.parentSessionId { await nest(parentId, under: grandparent) }
+        // The new session goes where the target was listed: in its group, if it was in one.
+        if let target = groupId(of: group.targetId), listedGroupId(of: parentId) != target { await moveToGroup(parentId, target) }
         await nest(group.targetId, under: parentId)
         await nest(group.draggedId, under: parentId)
     }

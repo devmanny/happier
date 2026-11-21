@@ -76,6 +76,21 @@ public struct SessionGroup: Identifiable, Equatable, Sendable {
         return ["t": "encrypted", "c": .string(try AccountScopedBlob.seal(.object(payload), kind: .sessionOrganizationDisplay, machineKey: machineKey))]
     }
 
+    /// The group whose section lists a session's row: its own group, or else the one of the session
+    /// it's listed under (`parent`), up the family; none for a pinned one, listed in Pinned.
+    static func listedGroupId(of sessionId: String, groupIds: [String: String], pinned: Set<String>,
+                              parent: (String) -> String?) -> String? {
+        var current = sessionId
+        var seen: Set<String> = []
+        while seen.insert(current).inserted {
+            if pinned.contains(current) { return nil }
+            if let group = groupIds[current] { return group }
+            guard let next = parent(current) else { return nil }
+            current = next
+        }
+        return nil
+    }
+
     /// Groups in list order: each followed by the ones inside it, siblings by their sort key, then
     /// name, then id (`tree.ts`); inner ones are listed with the names of the ones they're in.
     static func ordered(_ groups: [SessionGroup]) -> [SessionGroup] {

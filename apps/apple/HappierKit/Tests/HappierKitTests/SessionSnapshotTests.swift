@@ -116,5 +116,19 @@ import Testing
         #expect(parsed.sessionIds == ["s1", "s2"])
         #expect(parsed.nextCursor == 13)
         #expect(parsed.count == 3)
+        #expect(!parsed.organizationChanged)
+    }
+
+    @Test func readsWhenGroupsOrPinsChangedFromAChangesPage() {
+        // A group renamed or deleted on another device: an account row, no session row.
+        let groups: JSONValue = ["changes": [
+            ["cursor": 21, "kind": "account", "entityId": "session-organization", "changedAt": 1,
+             "hint": ["sessionOrganization": true, "scope": "folders", "folderIds": ["g1"]]],
+        ], "nextCursor": 21]
+        let parsed = SessionChanges.page(groups)
+        #expect(parsed.organizationChanged)
+        #expect(parsed.sessionIds.isEmpty)
+        let settings: JSONValue = ["changes": [["cursor": 22, "kind": "account", "entityId": "settings", "changedAt": 1, "hint": .null]], "nextCursor": 22]
+        #expect(!SessionChanges.page(settings).organizationChanged)
     }
 }

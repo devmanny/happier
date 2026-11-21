@@ -21,6 +21,8 @@ public enum SessionSidebar {
     public struct GroupSection: Identifiable {
         public let group: SessionGroup
         public let nodes: [SessionTreeNode<Session>]
+        /// Its sessions listed in Pinned instead.
+        public let pinned: Int
         public var id: String { group.id }
     }
 
@@ -34,7 +36,8 @@ public enum SessionSidebar {
     /// With `recentSince`, a family not running whose latest activity is that recent goes to
     /// `recent` instead of its group; without it, `resting` and `stopped` hold them all.
     /// A session in one of `groups` (`groupIds`) is listed in its group instead, whatever its
-    /// state, unless pinned; a sub-session goes with its parent unless put in another group.
+    /// state, unless pinned; a sub-session goes with its parent (`SessionGroup.listedGroupId`) unless
+    /// put in another group.
     public static func groups(_ sessions: [Session], pinned: [String], groups: [SessionGroup] = [], groupIds: [String: String] = [:],
                               date: (Session) -> Date = \.sortDate, recentSince: Date? = nil,
                               shows: (Session) -> Bool = { _ in true }) -> Groups {
@@ -42,10 +45,15 @@ public enum SessionSidebar {
         let known = Set(groups.map(\.id))
         let groupIds = groupIds.filter { known.contains($0.value) }
         let sessions = sessions.filter { pinnedSet.contains($0.id) || shows($0) }
+        let parents = Dictionary(sessions.map { ($0.id, $0.parentSessionId) }, uniquingKeysWith: { first, _ in first })
         let roots = SessionTree.build(sessions, parent: { session in
-            if pinnedSet.contains(session.id) { return nil }
-            if let group = groupIds[session.id], group != session.parentSessionId.flatMap({ groupIds[$0] }) { return nil }
-            return session.parentSessionId
+            guard !pinnedSet.contains(session.id), let parentId = session.parentSessionId else { return nil }
+            if let group = groupIds[session.id],
+               group != SessionGroup.listedGroupId(of: parentId, groupIds: groupIds, pinned: pinnedSet,
+                                                   parent: { id in parents[id].flatMap { $0 }.flatMap { parents[$0] != nil ? $0 : nil } }) {
+                return nil
+            }
+            return parentId
         }, date: date)
         let unpinned = roots.filter { !pinnedSet.contains($0.id) }
         let byGroup = Dictionary(grouping: unpinned.filter { groupIds[$0.id] != nil }) { groupIds[$0.id]! }
@@ -54,8 +62,11 @@ public enum SessionSidebar {
         let recent = recentSince.map { since in notRunning.filter { latest($0, date: date) >= since } } ?? []
         let recentIds = Set(recent.map(\.id))
         let older = notRunning.filter { !recentIds.contains($0.id) }
-        return Groups(pinned: roots.filter { pinnedSet.contains($0.id) },
-                      grouped: groups.map { GroupSection(group: $0, nodes: byGroup[$0.id] ?? []) },
+        let pinnedRoots = roots.filter { pinnedSet.contains($0.id) }
+        return Groups(pinned: pinnedRoots,
+                      grouped: groups.map { group in
+                          GroupSection(group: group, nodes: byGroup[group.id] ?? [], pinned: pinnedRoots.count { groupIds[$0.id] == group.id })
+                      },
                       active: ungrouped.filter(isRunning), recent: recent,
                       resting: older.filter(\.item.isResting), stopped: older.filter { !$0.item.isResting })
     }
