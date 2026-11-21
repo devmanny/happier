@@ -9,9 +9,15 @@ import {
     buildAcpSessionModeOverrideV1,
     buildModelOverrideV1,
     readSessionMcpSelectionV1FromMetadata,
+    type BackendTargetRefV1,
     type SessionAttachMetadataIdentityPolicy,
 } from '@happier-dev/protocol';
 import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
+import {
+    describeBackendTarget,
+    resolveSessionRuntimeBackendConflict,
+} from '@/daemon/spawn/existingSessionBackendTargetAdmission';
+import { resolveSessionPersistedRuntimeIdentity } from '@/daemon/sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 
 export type PermissionModeOverride = {
     mode: PermissionMode;
@@ -19,6 +25,22 @@ export type PermissionModeOverride = {
 };
 
 export type StartupMergeMode = 'start' | 'attach';
+
+/**
+ * A runtime tried to attach to a Session that names another Agent, without an identity
+ * replacement (incident 2026-11-17). Not retryable: the runner must exit before it takes input.
+ */
+export class SessionAttachRuntimeIdentityConflictError extends Error {
+    readonly retryable = false;
+
+    constructor(
+        readonly sessionBackendTarget: BackendTargetRefV1,
+        readonly runtimeBackendTarget: BackendTargetRefV1,
+    ) {
+        super(`This session now runs ${describeBackendTarget(sessionBackendTarget)}; a ${describeBackendTarget(runtimeBackendTarget)} runtime cannot serve it.`);
+        this.name = 'SessionAttachRuntimeIdentityConflictError';
+    }
+}
 
 function shouldPreserveCurrentIdentityOnAttach(
     policy: SessionAttachMetadataIdentityPolicy | null | undefined,
@@ -292,6 +314,16 @@ export function mergeSessionMetadataForStartup(opts: {
         // process (often in a different working directory), and should not overwrite the session's
         // canonical workspace and host info.
         if (shouldPreserveCurrentIdentityOnAttach(opts.attachMetadataIdentityPolicy)) {
+            // Preserving the Session's identity is only sound for a runtime of the Agent it names;
+            // otherwise the runtime would serve the Session as an Agent it is not.
+            const runtimeBackendTarget = resolveSessionPersistedRuntimeIdentity(opts.next)?.backendTarget;
+            const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+                sessionMetadata: opts.current,
+                backendTarget: runtimeBackendTarget,
+            });
+            if (sessionBackendTarget && runtimeBackendTarget) {
+                throw new SessionAttachRuntimeIdentityConflictError(sessionBackendTarget, runtimeBackendTarget);
+            }
             const stableKeys: Array<keyof Metadata> = [
                 'path',
                 'host',

@@ -2,6 +2,11 @@ export type RunnerTerminationReason =
   | Readonly<{ kind: 'exit'; code: number }>
   | Readonly<{ kind: 'signal'; signal: NodeJS.Signals }>
   | Readonly<{ kind: 'killSession' }>
+  /**
+   * The Session now names another Agent than this runner runs (an Agent switch whose cutover
+   * committed after the runner attached): the runner stops so the Session's Agent can serve it.
+   */
+  | Readonly<{ kind: 'sessionAgentConflict' }>
   | Readonly<{ kind: 'unhandledRejection'; reason?: unknown }>
   | Readonly<{ kind: 'uncaughtException'; error?: unknown }>;
 
@@ -38,6 +43,10 @@ export function computeRunnerTerminationOutcome(reason: RunnerTerminationReason)
 
   if (reason.kind === 'killSession') {
     return { exitCode: 0, terminationReason: 'Killed by user' };
+  }
+
+  if (reason.kind === 'sessionAgentConflict') {
+    return { exitCode: 0, terminationReason: 'Session now runs another Agent' };
   }
 
   if (reason.kind === 'signal') {

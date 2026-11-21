@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  doesPendingDeliveryHoldLaterRowsV1,
   isPendingDeliveryProviderEffectPossibleV1,
   isPendingDeliveryStatusTransitionAllowedV1,
   normalizePendingDeliveryStatusV1,
@@ -12,6 +13,17 @@ import {
 } from './pendingDeliveryStatusV1';
 
 describe('pending delivery status v1 contract', () => {
+  it('lets later rows pass only a blocked row the agent may already have', () => {
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'blocked', reason: 'delivery_outcome_uncertain' })).toBe(false);
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'blocked', reason: 'ambiguous_terminal_delivery' })).toBe(false);
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'blocked', reason: 'unknown' })).toBe(false);
+    // A pre-effect block, an in-flight claim and an ordinary queued row keep their place ahead.
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'blocked', reason: 'steering_unavailable' })).toBe(true);
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'delivering' })).toBe(true);
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'external_handoff' })).toBe(true);
+    expect(doesPendingDeliveryHoldLaterRowsV1({ status: 'queued' })).toBe(true);
+  });
+
   it.each([
     [
       'queued row',

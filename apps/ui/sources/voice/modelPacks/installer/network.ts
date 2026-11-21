@@ -1,11 +1,14 @@
 import { parseModelPackManifest, type ModelPackManifest } from '@/voice/modelPacks/manifest';
 
+import { ModelPackInstallCancelledError } from './errors';
+
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new Error('aborted');
 }
 
 /** A cancelled signal does not make a storage/cleanup failure an expected abort. */
 export function isModelPackCancellation(error: unknown, signal: AbortSignal): boolean {
+  if (error instanceof ModelPackInstallCancelledError) return true;
   return signal.aborted && error instanceof Error && (error.message === 'aborted' || error.name === 'AbortError');
 }
 

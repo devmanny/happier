@@ -1,6 +1,7 @@
 import { type AgentId, getBuiltInAcpConfig } from '@happier-dev/agents';
 
 import type { AcpBackendOptions, AcpPermissionHandler } from '@/agent/acp/AcpBackend';
+import { HAPPIER_SESSION_ID_ENV_KEY, withCurrentHappierSessionId } from '@/agent/runtime/session/currentSessionIdEnv';
 import type { PermissionMode } from '@/api/types';
 import { createAcpBackend } from '@/agent/acp/createAcpBackend';
 import type { AgentBackend, AgentFactoryOptions, AgentSessionOpenOptions, McpServerConfig, SessionId, StartSessionResult } from '@/agent/core';
@@ -9,6 +10,7 @@ import { resolveAcpCatalogTransportHandler } from './transport/resolveAcpCatalog
 
 export type CatalogDefinedAcpBackendOptions = AgentFactoryOptions & Readonly<{
   mcpServers?: Record<string, McpServerConfig>;
+  happierSessionId?: string;
   permissionHandler?: AcpPermissionHandler;
   permissionMode?: PermissionMode;
   getPermissionMode?: () => PermissionMode | null | undefined;
@@ -16,6 +18,8 @@ export type CatalogDefinedAcpBackendOptions = AgentFactoryOptions & Readonly<{
   unsetEnv?: AcpBackendOptions['unsetEnv'];
   isAuthenticationSetupFailure?: AcpBackendOptions['isAuthenticationSetupFailure'];
   sessionModelAdapter?: AcpBackendOptions['sessionModelAdapter'];
+  initializeClientCapabilitiesMeta?: AcpBackendOptions['initializeClientCapabilitiesMeta'];
+  extensionHandlers?: AcpBackendOptions['extensionHandlers'];
   launch?: Readonly<{ command: string; args: readonly string[] }>;
 }>;
 
@@ -30,20 +34,23 @@ export function createCatalogDefinedAcpBackend(
   const launch = options.launch
     ?? requireProviderCliLaunchSpec(agentId, { processEnv: { ...process.env, ...options.env } });
 
+  const env = { ...options.env, NODE_ENV: 'production', DEBUG: '' };
   const backend: AgentBackend = createAcpBackend({
     agentName: agentId,
     cwd: options.cwd,
     command: launch.command,
     args: options.launch ? [...launch.args] : [...launch.args, ...config.launcher.args],
-    env: {
-      ...options.env,
-      NODE_ENV: 'production',
-      DEBUG: '',
-    },
+    env: options.happierSessionId !== undefined
+      ? withCurrentHappierSessionId(env, options.happierSessionId)
+      : env,
     prepareProcessLaunch: options.prepareProcessLaunch,
-    unsetEnv: options.unsetEnv,
+    unsetEnv: options.happierSessionId !== undefined
+      ? [...(options.unsetEnv ?? []), HAPPIER_SESSION_ID_ENV_KEY]
+      : options.unsetEnv,
     isAuthenticationSetupFailure: options.isAuthenticationSetupFailure,
     sessionModelAdapter: options.sessionModelAdapter,
+    initializeClientCapabilitiesMeta: options.initializeClientCapabilitiesMeta,
+    extensionHandlers: options.extensionHandlers,
     sessionModesEnabled: config.supportsModes !== 'no',
     mcpServers: config.mcpServers === 'drop' ? undefined : options.mcpServers,
     permissionHandler: options.permissionHandler,
@@ -86,14 +93,8 @@ export function createCatalogDefinedAcpBackend(
     ): Promise<StartSessionResult> => applyMode(await loadSession(sessionId, openOptions));
   }
 
-  if (typeof backend.loadSessionWithReplayCapture === 'function') {
-    const loadSessionWithReplayCapture = backend.loadSessionWithReplayCapture.bind(backend);
-    configurable.loadSessionWithReplayCapture = async (sessionId: SessionId) => {
-      const result = await loadSessionWithReplayCapture(sessionId);
-      await applyPermissionMode(result.sessionId);
-      return result;
-    };
-  }
+  // ACP replay capture delegates to this same wrapped loadSession. Applying the
+  // mode again around capture would send a second provider configuration write.
 
   return backend;
 }

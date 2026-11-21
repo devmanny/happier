@@ -61,6 +61,10 @@ import {
   type SessionRunnerRuntimeStateV1,
   type SessionRunnerStatusGetRequestV1,
   type SpawnSessionNonceResolution,
+  MessageSearchSetRequestV1Schema,
+  MessageSearchStatusV1Schema,
+  type MessageSearchSetRequestV1,
+  type MessageSearchStatusV1,
 } from '@happier-dev/protocol';
 import {
   StopSessionResultSchema,
@@ -960,6 +964,18 @@ export async function getDaemonSessionRunnerStatus(
     throw new Error('Invalid daemon session runner status response');
   }
   return parsed.data;
+}
+
+/** `happier search`: conversation search on the running daemon; null when no daemon (or memory worker) answers. */
+export async function requestDaemonMessageSearchStatus(): Promise<MessageSearchStatusV1 | null> {
+  const parsed = MessageSearchStatusV1Schema.safeParse(await daemonPost('/memory/message-search/status', {}));
+  return parsed.success ? parsed.data : null;
+}
+
+export async function requestDaemonMessageSearchSet(request: MessageSearchSetRequestV1): Promise<MessageSearchStatusV1 | null> {
+  const body = MessageSearchSetRequestV1Schema.parse(request);
+  const parsed = MessageSearchStatusV1Schema.safeParse(await daemonPost('/memory/message-search/set', body));
+  return parsed.success ? parsed.data : null;
 }
 
 export async function stopDaemonHttp(params: { stopSessions?: boolean } = {}): Promise<void> {

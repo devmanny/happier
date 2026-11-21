@@ -56,6 +56,7 @@ import {
   prepareAgentNativeReturnStrictResume,
 } from '@/session/agentTransition/agentNativeReturn';
 import { withCurrentHappierSessionId } from '@/agent/runtime/session/currentSessionIdEnv';
+import type { ProviderTurnCompletionResult } from './providerPromptSubmission';
 
 type RuntimeForLoop = {
   beginTurn: () => void;
@@ -77,7 +78,7 @@ type RuntimeForLoop = {
       onProviderPromptAccepted?: () => void;
     }>,
   ) => Promise<void>;
-  flushTurn: () => void | Promise<void>;
+  flushTurn: () => void | ProviderTurnCompletionResult | Promise<void | ProviderTurnCompletionResult>;
   reset: () => Promise<void>;
   getSessionId: () => string | null;
   cancel: () => Promise<void>;
@@ -619,6 +620,7 @@ export async function runStandardAcpProvider(
     process,
     exit: (code) => process.exit(code),
     sessionExitReport: { sessionId: session.sessionId },
+    parentNoticeSession: session,
     onTerminationRequested: () => {
       session.beginRuntimeTermination?.();
       void closeProviderInputAdmission();
@@ -652,10 +654,12 @@ export async function runStandardAcpProvider(
         pushSender: api.push(),
         waitingForCommandLabel: config.waitingForCommandLabel,
         logPrefix: config.uiLogPrefix,
+        turnKey: context?.turnToken ?? null,
         sessionTitle: getSessionNotificationTitle(session.getMetadataSnapshot?.bind(session) ?? null),
         assistantPreviewText: resolveReadyNotificationAssistantText({
           includeMessageText: includeAssistantPreviewText,
           explicitAssistantText: turnAssistantPreviewTracker.getPreview(),
+          turnResult: context?.turnResult,
           session,
           turnToken: context?.turnToken ?? null,
           startSeqExclusive: context?.startSeqExclusive ?? null,

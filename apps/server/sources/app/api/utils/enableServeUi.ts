@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { UiConfig } from "@/app/api/uiConfig";
-import { extname, isAbsolute, relative, resolve } from "node:path";
+import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { warn } from "@/utils/logging/log";
 import { createReadStream, existsSync } from "node:fs";
@@ -62,8 +62,12 @@ async function selectPrecompressedSidecar(
     return null;
 }
 
-function setUiFileHeaders(reply: any, ext: string): void {
-    if (ext === '.html') {
+function setUiFileHeaders(reply: any, relPath: string): void {
+    const ext = extname(relPath).toLowerCase();
+    if (relPath === '.well-known/apple-app-site-association') {
+        reply.header('content-type', 'application/json; charset=utf-8');
+        reply.header('cache-control', 'no-cache');
+    } else if (ext === '.html') {
         reply.header('content-type', 'text/html; charset=utf-8');
         reply.header('cache-control', 'no-cache');
     } else if (ext === '.js') {
@@ -112,6 +116,9 @@ function setUiFileHeaders(reply: any, ext: string): void {
         reply.header('content-type', 'application/octet-stream');
         reply.header('cache-control', 'public, max-age=31536000, immutable');
     }
+    // The standalone native landing assets have stable names, unlike Metro's
+    // fingerprinted bundles. Revalidate them so a shared link gets current code.
+    if (relPath.startsWith('native/')) reply.header('cache-control', 'no-cache');
 }
 
 export function enableServeUi(app: AnyFastifyInstance, ui: UiConfig) {
@@ -138,10 +145,9 @@ export function enableServeUi(app: AnyFastifyInstance, ui: UiConfig) {
         if (!originalInfo) {
             return reply.code(404).send({ error: 'Not found' });
         }
-        const ext = extname(candidate).toLowerCase();
         const sidecar = await selectPrecompressedSidecar(candidate, request);
 
-        setUiFileHeaders(reply, ext);
+        setUiFileHeaders(reply, relative(root, candidate).split(sep).join('/'));
         reply.header('vary', 'Accept-Encoding');
         if (sidecar) {
             reply.header('content-encoding', sidecar.encoding);

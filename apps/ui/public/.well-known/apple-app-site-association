@@ -3,9 +3,25 @@
     "details": [
       {
         "appIDs": [
+          "DPF7ZLTLN2.com.devmanny.happier"
+        ],
+        "components": [
+          {
+            "/": "/native/*",
+            "comment": "Open Happier Native session links"
+          }
+        ]
+      },
+      {
+        "appIDs": [
           "L86V3EF623.dev.happier.app"
         ],
         "components": [
+          {
+            "/": "/native/*",
+            "exclude": true,
+            "comment": "Native opening links belong to Happier Native"
+          },
           {
             "/": "*",
             "comment": "Matches all routes"

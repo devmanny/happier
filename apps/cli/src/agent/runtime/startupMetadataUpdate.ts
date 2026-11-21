@@ -2,9 +2,14 @@ import type { Metadata, PermissionMode } from '@/api/types';
 import { logger } from '@/ui/logger';
 import type { SessionAttachMetadataIdentityPolicy } from '@happier-dev/protocol';
 import { readNonBlankSessionControlIdentifier } from '@/agent/runtime/sessionControlIdentifiers';
+import {
+  bindSessionClientToRuntimeAgent,
+  type RuntimeAgentBindableSession,
+} from '@/agent/runtime/sessionRuntimeAgentBinding';
 
 import {
   mergeSessionMetadataForStartup,
+  SessionAttachRuntimeIdentityConflictError,
   type AcpSessionModeOverride as MergeAcpSessionModeOverride,
   type ModelOverride as MergeModelOverride,
   type PermissionModeOverride as MergePermissionModeOverride,
@@ -45,7 +50,9 @@ export function buildModelOverride(opts: {
 }
 
 export function applyStartupMetadataUpdateToSession(opts: {
-  session: { updateMetadata: (updater: (current: Metadata) => Metadata) => Promise<void> | void };
+  session: RuntimeAgentBindableSession & {
+    updateMetadata: (updater: (current: Metadata) => Metadata) => Promise<void> | void;
+  };
   next: Metadata;
   nowMs?: number;
   permissionModeOverride: PermissionModeOverride;
@@ -71,11 +78,20 @@ export function applyStartupMetadataUpdateToSession(opts: {
         mode: opts.mode ?? 'start',
       }),
     );
-    return Promise.resolve(result).catch((error) => {
+    // Bound once the write settles (never before, so an identity-replacing attach's own write lands
+    // first), whatever its outcome: a runtime whose write failed still serves the Session. A refused
+    // attach is not bound; its runner exits.
+    return Promise.resolve(result).then(() => {
+      bindSessionClientToRuntimeAgent(opts.session, opts.next);
+    }, (error) => {
+      if (error instanceof SessionAttachRuntimeIdentityConflictError) throw error;
       logger.debug('[startupMetadata] Failed to update session metadata (apply_startup_metadata_update) (non-fatal)', error);
+      bindSessionClientToRuntimeAgent(opts.session, opts.next);
     });
   } catch (error) {
+    if (error instanceof SessionAttachRuntimeIdentityConflictError) return Promise.reject(error);
     logger.debug('[startupMetadata] Failed to update session metadata (apply_startup_metadata_update) (non-fatal)', error);
+    bindSessionClientToRuntimeAgent(opts.session, opts.next);
     return Promise.resolve();
   }
 }

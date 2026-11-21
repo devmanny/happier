@@ -28,7 +28,7 @@ import {
 import { redactBugReportSensitiveText } from '@happier-dev/protocol';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 import type {
   AgentBackend,
   AgentMessage,
@@ -39,6 +39,8 @@ import type {
   AgentPromptPayload,
 } from '../core';
 import { logger } from '@/ui/logger';
+import { resolveFilesystemAccessPolicy } from '@/rpc/handlers/fileSystem/accessPolicy/filesystemAccessPolicy';
+import { prepareFilesystemPathAuthorizer } from '@/rpc/handlers/fileSystem/accessPolicy/filesystemPathAuthorization';
 import { delay } from '@/utils/time';
 import { createSubprocessStderrAppender, type BoundedTextFileAppender } from '@/agent/runtime/subprocessArtifacts';
 import { createAcpStderrLogSummarizer } from './diagnostics/summarizeAcpStderrForLogs';
@@ -122,6 +124,7 @@ import type {
   AcpClientConnectionHandlers,
   AcpExtensionHandlerContext,
   AcpExtensionRegistration,
+  AcpProviderInitiatedTurnEvent,
 } from './connection/types';
 import {
   buildUnknownAcpSessionUpdateDiagnostic,
@@ -397,6 +400,12 @@ export type SessionModelState = {
 };
 
 export type AcpSessionModelAdapter = Readonly<{
+  /**
+   * Provider config-option ids that carry a Happier canonical control under another name, keyed
+   * by the canonical id. Advertised options read as the canonical id; writes go out under the
+   * provider's id.
+   */
+  configOptionIds?: Readonly<Record<string, string>>;
   projectModelId?: (params: Readonly<{
     modelId: string;
     modelState: Readonly<SessionModelState> | null;
@@ -530,7 +539,7 @@ function isTruthyEnv(value: string | undefined): boolean {
 export function isAcpFsEnabled(): boolean {
   // Default ON: ACP agents that support the `fs` capability will route file reads/writes
   // through the client (Happier). This is the only reliable way for Happier to enforce
-  // workspace boundaries for ACP backends.
+  // configured filesystem access policy for ACP backends.
   const raw = process.env.HAPPIER_ACP_FS;
   if (raw === undefined) return true;
   return isTruthyEnv(raw);
@@ -574,79 +583,37 @@ export function createAcpClientFsMethods(params: {
   cwd: string;
   permissionHandler?: AcpPermissionHandler;
 }): Pick<AcpClientConnectionHandlers, 'readTextFile' | 'writeTextFile'> {
-  const rootResolved = resolve(params.cwd);
-  const rootRealPromise = fs.realpath(rootResolved).catch(() => rootResolved);
-
-  const isWithinRoot = (root: string, target: string): boolean => {
-    const rel = relative(root, target);
-    return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
+  // Use host policy, not provider-supplied environment overrides. cwd only anchors relative paths.
+  const accessPolicy = resolveFilesystemAccessPolicy();
+  const authorizer = prepareFilesystemPathAuthorizer({ defaultDirectory: params.cwd, accessPolicy });
+  const permissionDenied = (path: string, message: string): RequestError => (
+    RequestError.internalError({ code: 'EACCES', path }, message)
+  );
+  const authorizePath = async (path: string): Promise<string> => {
+    const result = await (await authorizer)(path);
+    if (!result.valid) {
+      if (!path || path.includes('\0')) {
+        throw RequestError.invalidParams({ path }, result.error);
+      }
+      throw permissionDenied(path, `Permission denied: ${result.error}`);
+    }
+    return result.resolvedPath;
   };
 
-  const isWithinAnyRoot = (roots: string[], target: string): boolean => {
-    for (const root of roots) {
-      if (isWithinRoot(root, target)) return true;
+  const filesystemError = (error: unknown, path: string): unknown => {
+    const code = asRecord(error)?.code;
+    if (code === 'ENOENT') return RequestError.resourceNotFound(path);
+    if (code === 'EACCES' || code === 'EPERM') {
+      return permissionDenied(path, `Permission denied for filesystem access: ${path}`);
     }
-    return false;
-  };
-
-  const assertWithinCwd = async (targetPath: string, opts: { kind: 'read' | 'write' }): Promise<void> => {
-    const targetResolved = resolve(targetPath);
-    if (!isWithinRoot(rootResolved, targetResolved)) {
-      throw new Error(`Permission denied for ${opts.kind}TextFile (path traversal)`);
-    }
-
-    const rootReal = await rootRealPromise;
-    // `realpath()` can normalize the same directory into different spellings on some platforms
-    // (for example: Windows mapped drive letters vs UNC paths). Treat both spellings as valid roots.
-    const roots = rootReal === rootResolved ? [rootResolved] : [rootResolved, rootReal];
-    const resolveExistingAncestorRealPath = async (startPath: string): Promise<string> => {
-      let candidate = startPath;
-      while (true) {
-        const candidateReal = await fs.realpath(candidate).catch((error) => {
-          const errno = (error as NodeJS.ErrnoException | undefined)?.code;
-          if (errno === 'ENOENT') return null;
-          throw new Error(`Permission denied for ${opts.kind}TextFile (cannot resolve path)`);
-        });
-        if (candidateReal) return candidateReal;
-        const parent = dirname(candidate);
-        if (parent === candidate) {
-          throw new Error(`Permission denied for ${opts.kind}TextFile (cannot resolve path)`);
-        }
-        candidate = parent;
-      }
-    };
-
-    if (opts.kind === 'read') {
-      const targetReal = await fs.realpath(targetResolved).catch((error) => {
-        const errno = (error as NodeJS.ErrnoException | undefined)?.code;
-        if (errno === 'ENOENT') return targetResolved;
-        throw new Error(`Permission denied for ${opts.kind}TextFile (cannot resolve path)`);
-      });
-      if (!isWithinAnyRoot(roots, targetReal)) {
-        throw new Error(`Permission denied for ${opts.kind}TextFile (path traversal)`);
-      }
-      return;
-    }
-
-    const targetReal = await fs.realpath(targetResolved).catch((error) => {
-      const errno = (error as NodeJS.ErrnoException | undefined)?.code;
-      if (errno === 'ENOENT') return null;
-      throw new Error(`Permission denied for ${opts.kind}TextFile (cannot resolve path)`);
-    });
-    if (targetReal && !isWithinAnyRoot(roots, targetReal)) {
-      throw new Error(`Permission denied for ${opts.kind}TextFile (path traversal)`);
-    }
-
-    const existingAncestorReal = await resolveExistingAncestorRealPath(dirname(targetResolved));
-    if (!isWithinAnyRoot(roots, existingAncestorReal)) {
-      throw new Error(`Permission denied for ${opts.kind}TextFile (path traversal)`);
-    }
+    return error;
   };
 
   const readTextFile: NonNullable<AcpClientConnectionHandlers['readTextFile']> = async (req) => {
-    const targetPath = isAbsolute(req.path) ? resolve(req.path) : resolve(rootResolved, req.path);
-    await assertWithinCwd(targetPath, { kind: 'read' });
-    const full = await fs.readFile(targetPath, 'utf8');
+    const targetPath = await authorizePath(req.path);
+    const full = await fs.readFile(targetPath, 'utf8').catch((error: unknown) => {
+      throw filesystemError(error, targetPath);
+    });
     const line = typeof req.line === 'number' ? req.line : null;
     const limit = typeof req.limit === 'number' ? req.limit : null;
 
@@ -664,8 +631,7 @@ export function createAcpClientFsMethods(params: {
   };
 
   const writeTextFile: NonNullable<AcpClientConnectionHandlers['writeTextFile']> = async (req) => {
-    const targetPath = isAbsolute(req.path) ? resolve(req.path) : resolve(rootResolved, req.path);
-    await assertWithinCwd(targetPath, { kind: 'write' });
+    const targetPath = await authorizePath(req.path);
     const reqRecord = asRecord(req) ?? {};
     const meta = asRecord(reqRecord._meta) ?? {};
     const toolCallId = typeof meta.toolCallId === 'string' ? meta.toolCallId : `acp-fs-write:${randomUUID()}`;
@@ -682,12 +648,16 @@ export function createAcpClientFsMethods(params: {
         result.decision === 'approved_execpolicy_amendment';
 
       if (!approved) {
-        throw new Error(`Permission denied for writeTextFile (${toolCallId})`);
+        throw permissionDenied(targetPath, `Permission denied for writeTextFile (${toolCallId})`);
       }
     }
 
-    await fs.mkdir(dirname(targetPath), { recursive: true });
-    await fs.writeFile(targetPath, req.content, 'utf8');
+    try {
+      await fs.mkdir(dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, req.content, 'utf8');
+    } catch (error) {
+      throw filesystemError(error, targetPath);
+    }
     return {};
   };
 
@@ -876,6 +846,9 @@ export class AcpBackend implements AgentBackend {
   private acpSessionId: string | null = null;
   private negotiatedSessionCapabilities: NegotiatedAcpSessionCapabilities = NO_NEGOTIATED_ACP_SESSION_CAPABILITIES;
   private negotiatedSessionLoadSupport: boolean | null = null;
+  private negotiatedAgentCapabilitiesMeta: Readonly<Record<string, unknown>> | undefined;
+  private providerInitiatedTurn: Readonly<{ turnId: string; generation: number }> | null = null;
+  private readonly retiredProviderTurnIds = new Set<string>();
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
   private replayCapture: AcpReplayCapture | null = null;
@@ -1073,6 +1046,9 @@ export class AcpBackend implements AgentBackend {
     this.acpSessionId = null;
     this.negotiatedSessionCapabilities = NO_NEGOTIATED_ACP_SESSION_CAPABILITIES;
     this.negotiatedSessionLoadSupport = null;
+    this.negotiatedAgentCapabilitiesMeta = undefined;
+    this.retireProviderInitiatedTurn();
+    this.retiredProviderTurnIds.clear();
 
     connection?.close();
 
@@ -1145,6 +1121,8 @@ export class AcpBackend implements AgentBackend {
       sessionId: this.acpSessionId,
       signal: AbortSignal.any([sdkSignal, this.extensionAbortController.signal]),
       agentName: this.options.agentName,
+      agentCapabilitiesMeta: this.negotiatedAgentCapabilitiesMeta,
+      providerInitiatedTurn: { apply: event => this.applyProviderInitiatedTurn(event) },
       turnId: resolveAcpPlanTurnId(this.turnGeneration),
       plans: this.plans,
       toolCalls: this.toolCalls,
@@ -1187,6 +1165,9 @@ export class AcpBackend implements AgentBackend {
     }
 
     this.negotiatedSessionLoadSupport = null;
+    this.negotiatedAgentCapabilitiesMeta = undefined;
+    this.retireProviderInitiatedTurn();
+    this.retiredProviderTurnIds.clear();
 
     this.recentStderrSummaries.length = 0;
     this.lastProcessExitDetail = null;
@@ -1750,6 +1731,7 @@ export class AcpBackend implements AgentBackend {
     logger.debug(`[AcpBackend] Initialize completed`);
     const initResponseRecord = asRecord(initResponse);
     const agentCapabilities = asRecord(initResponseRecord?.agentCapabilities);
+    this.negotiatedAgentCapabilitiesMeta = asRecord(agentCapabilities?._meta) ?? undefined;
     const negotiatedSessionLoadSupport = agentCapabilities?.loadSession === true;
     const negotiatedSessionCapabilities = readAcpNegotiatedSessionCapabilities(agentCapabilities);
     this.negotiatedSessionCapabilities = negotiatedSessionCapabilities;
@@ -2190,7 +2172,7 @@ export class AcpBackend implements AgentBackend {
     };
   }
 
-  private async handleSessionUpdate(params: SessionNotification): Promise<void> {
+  private async handleSessionUpdate(params: unknown, providerTurnId?: string): Promise<void> {
     const raw = asRecord(params) ?? {};
     const updateCandidates: unknown[] = [];
 
@@ -2250,7 +2232,14 @@ export class AcpBackend implements AgentBackend {
       }
     }
 
-    const processableUpdateCandidates = this.filterPromptTurnUpdatesByDispatch(updateCandidates);
+    // Only an explicitly admitted, still-current extension may bypass the ordinary
+    // session/update dispatch guard. Untagged late updates retain their existing filter.
+    const processableUpdateCandidates = providerTurnId !== undefined
+      && this.providerInitiatedTurn?.turnId === providerTurnId
+      && this.providerInitiatedTurn.generation === this.turnGeneration
+      && !this.isCurrentTurnGenerationClosed()
+      ? updateCandidates
+      : this.filterPromptTurnUpdatesByDispatch(updateCandidates);
 
     if (processableUpdateCandidates.length === 0) {
       logger.debug('[AcpBackend] Dropping prompt-turn session/update outside an active dispatched generation');
@@ -2706,9 +2695,24 @@ export class AcpBackend implements AgentBackend {
 
   private normalizeSupportedSessionConfigOptions(raw: ReadonlyArray<unknown>): SessionConfigOption[] {
     const options = normalizeSessionConfigOptions(raw);
-    return this.options.sessionModesEnabled === false
+    const supported = this.options.sessionModesEnabled === false
       ? options.filter((option) => !isAcpModeConfigOptionLike(option))
       : options;
+    if (!this.options.sessionModelAdapter?.configOptionIds) return supported;
+    return supported.map((option) => {
+      const canonicalId = this.canonicalConfigOptionId(option.id);
+      return canonicalId === option.id ? option : { ...option, id: canonicalId };
+    });
+  }
+
+  private canonicalConfigOptionId(configId: string): string {
+    const ids = this.options.sessionModelAdapter?.configOptionIds ?? {};
+    return Object.keys(ids).find((canonicalId) => ids[canonicalId] === configId) ?? configId;
+  }
+
+  private providerConfigOptionId(configId: string): string {
+    const ids = this.options.sessionModelAdapter?.configOptionIds;
+    return ids && Object.hasOwn(ids, configId) ? ids[configId]! : configId;
   }
 
   private seedSessionConfigOptionsFromSessionResponse(sessionResponse: unknown): void {
@@ -2749,7 +2753,8 @@ export class AcpBackend implements AgentBackend {
       throw new Error('Session ID does not match the active ACP session');
     }
 
-    const normalizedConfigId = readNonBlankSessionControlIdentifier(configId) ?? '';
+    // A provider's own id for a canonical control (written by older clients) reads as the canonical id.
+    const normalizedConfigId = this.canonicalConfigOptionId(readNonBlankSessionControlIdentifier(configId) ?? '');
     if (!normalizedConfigId) {
       throw new Error('Config ID is required');
     }
@@ -2794,16 +2799,17 @@ export class AcpBackend implements AgentBackend {
       return;
     }
 
+    const providerConfigId = this.providerConfigOptionId(normalizedConfigId);
     const request: SetSessionConfigOptionRequest = typeof normalizedValueId === 'boolean'
       ? {
           sessionId: normalizedSessionId,
-          configId: normalizedConfigId,
+          configId: providerConfigId,
           type: 'boolean',
           value: normalizedValueId,
         }
       : {
           sessionId: normalizedSessionId,
-          configId: normalizedConfigId,
+          configId: providerConfigId,
           value: normalizedValueId,
         };
 
@@ -2895,7 +2901,80 @@ export class AcpBackend implements AgentBackend {
     this.responseCompletionTimeoutRejecter = null;
   }
 
+  private beginResponseTurn(): number {
+    this.emit({ type: 'status', status: 'running' });
+    const turnGeneration = this.turnGeneration + 1;
+    this.turnGeneration = turnGeneration;
+    this.closedTurnGeneration = null;
+    this.promptCompletionSettlement = null;
+    this.dispatchedPromptTurnGeneration = null;
+    this.pendingTurnOutcome = null;
+    this.lastTurnOutcome = null;
+    this.pendingPromptResponseTurnGeneration = null;
+    this.idleStatusDeferredUntilPromptResponse = false;
+    this.permissionFlushTurnGeneration = null;
+    this.waitingForResponse = true;
+    this.responseCompletionError = null;
+    this.sawSessionUpdateSincePrompt = false;
+    this.sawAssistantMessageSincePrompt = false;
+    this.firstSessionUpdateSincePromptResolver = null;
+    this.clearResponseCompletionTimeout();
+    this.resetExtensionAbortControllerForTurn();
+    if (this.postPromptCompletionIdleTimeout) {
+      clearTimeout(this.postPromptCompletionIdleTimeout);
+      this.postPromptCompletionIdleTimeout = null;
+    }
+    if (this.postIdleWithoutAssistantMessageTimeout) {
+      clearTimeout(this.postIdleWithoutAssistantMessageTimeout);
+      this.postIdleWithoutAssistantMessageTimeout = null;
+    }
+    return turnGeneration;
+  }
+
+  private retireProviderInitiatedTurn(): void {
+    if (this.providerInitiatedTurn) {
+      this.retiredProviderTurnIds.add(this.providerInitiatedTurn.turnId);
+      this.providerInitiatedTurn = null;
+    }
+  }
+
+  private async applyProviderInitiatedTurn(event: AcpProviderInitiatedTurnEvent): Promise<void> {
+    if (this.disposed || event.sessionId !== this.acpSessionId) return;
+    if (event.event === 'started') {
+      if (this.retiredProviderTurnIds.has(event.turnId) || this.providerInitiatedTurn) return;
+      // A dispatched user RPC can be queued behind this provider turn. Keep its
+      // generation/waiter and finish only once that RPC has settled as well.
+      const generation = this.waitingForResponse && !this.isCurrentTurnGenerationClosed()
+        ? this.turnGeneration
+        : this.beginResponseTurn();
+      this.providerInitiatedTurn = { turnId: event.turnId, generation };
+      return;
+    }
+    if (this.providerInitiatedTurn?.turnId !== event.turnId
+      || this.providerInitiatedTurn.generation !== this.turnGeneration
+      || this.isCurrentTurnGenerationClosed()) return;
+    if (event.event === 'update') {
+      await this.handleSessionUpdate({ sessionId: event.sessionId, update: event.update }, event.turnId);
+      return;
+    }
+    this.retireProviderInitiatedTurn();
+    if (this.pendingPromptResponseTurnGeneration === this.turnGeneration) {
+      this.clearActiveToolCallStateForTerminalTurn('provider-initiated turn ended');
+      // Segment boundary without an idle: the queued user request still owns the waiter.
+      if (event.error) this.emit({ type: 'event', name: 'provider-initiated-turn-error', payload: { error: event.error } });
+      this.emit({ type: 'status', status: 'running' });
+      return;
+    }
+    if (event.error) {
+      this.failPendingResponseWait(new Error(event.error));
+      this.emit({ type: 'status', status: 'error', detail: event.error });
+      return;
+    }
+    this.finalizeTurnOutcome(mapStopReasonToAcpTurnOutcome(event.stopReason));
+  }
+
   private closeCurrentTurnGeneration(): void {
+    this.retireProviderInitiatedTurn();
     this.closedTurnGeneration = this.turnGeneration;
     if (this.dispatchedPromptTurnGeneration === this.turnGeneration) {
       this.dispatchedPromptTurnGeneration = null;
@@ -2950,7 +3029,7 @@ export class AcpBackend implements AgentBackend {
     this.waitingForResponse = false;
 
     if (outcome.kind !== 'timed_out') {
-      this.emit({ type: 'status', status: 'idle' });
+      this.emit({ type: 'status', status: 'idle', turnFinished: true });
     }
 
     if (this.idleResolver) {
@@ -3166,32 +3245,12 @@ export class AcpBackend implements AgentBackend {
       logger.debug('[AcpBackend] Prompt contains change_title instruction - will auto-approve first "other" tool call if it matches pattern');
     }
 
-    this.emit({ type: 'status', status: 'running' });
-    const turnGeneration = this.turnGeneration + 1;
-    this.turnGeneration = turnGeneration;
-    this.closedTurnGeneration = null;
-    this.promptCompletionSettlement = null;
-    this.dispatchedPromptTurnGeneration = null;
-    this.pendingTurnOutcome = null;
-    this.lastTurnOutcome = null;
-    this.pendingPromptResponseTurnGeneration = null;
-    this.idleStatusDeferredUntilPromptResponse = false;
-    this.permissionFlushTurnGeneration = null;
-    this.waitingForResponse = true;
-    this.responseCompletionError = null;
-    this.sawSessionUpdateSincePrompt = false;
-    this.sawAssistantMessageSincePrompt = false;
-    this.firstSessionUpdateSincePromptResolver = null;
-    this.clearResponseCompletionTimeout();
-    this.resetExtensionAbortControllerForTurn();
-    if (this.postPromptCompletionIdleTimeout) {
-      clearTimeout(this.postPromptCompletionIdleTimeout);
-      this.postPromptCompletionIdleTimeout = null;
-    }
-    if (this.postIdleWithoutAssistantMessageTimeout) {
-      clearTimeout(this.postIdleWithoutAssistantMessageTimeout);
-      this.postIdleWithoutAssistantMessageTimeout = null;
-    }
+    const turnGeneration = this.providerInitiatedTurn && !this.isCurrentTurnGenerationClosed()
+      ? this.turnGeneration
+      : this.beginResponseTurn();
+    // Latch before asynchronous prompt preparation: a provider turn can end while
+    // this user request is being prepared or waiting to be written to the peer.
+    this.pendingPromptResponseTurnGeneration = turnGeneration;
 
     type PromptErrorDisposition =
       | 'failed'
@@ -3254,6 +3313,9 @@ export class AcpBackend implements AgentBackend {
           : {}),
       };
 
+      // PromptResponse.usage is per turn. Keep one identity across retries of this
+      // request, while allowing subsequent prompts to contribute distinct reports.
+      const promptUsageKey = `acp-prompt-usage:${randomUUID()}`;
       const emitPromptUsage = (promptResponse: PromptResponse | unknown): void => {
         const promptResponseRecord =
           promptResponse && typeof promptResponse === 'object'
@@ -3275,7 +3337,7 @@ export class AcpBackend implements AgentBackend {
           if (!projected) return;
           this.emit({
             type: 'token-count',
-            key: 'acp-prompt-usage',
+            key: promptUsageKey,
             tokens: projected.tokens,
             ...(projected.cost ? { cost: projected.cost } : {}),
             ...(projected.modelId ? { modelId: projected.modelId } : {}),
@@ -3318,7 +3380,7 @@ export class AcpBackend implements AgentBackend {
 
         this.emit({
           type: 'token-count',
-          key: 'acp-prompt-usage',
+          key: promptUsageKey,
           tokens,
           ...(modelId ? { modelId } : null),
           source: 'acp-prompt-usage',
@@ -3820,7 +3882,7 @@ export class AcpBackend implements AgentBackend {
       this.postIdleWithoutAssistantMessageTimeout = null;
     }
     this.clearResponseCompletionTimeout();
-    this.emit({ type: 'status', status: 'idle' });
+    this.emit({ type: 'status', status: 'idle', turnFinished: this.waitingForResponse ? true : undefined });
     this.clearActiveToolCallStateForTerminalTurn('idle finalization');
     this.closeCurrentTurnGeneration();
     // Avoid races where the idle signal arrives before `waitForResponseComplete()` starts waiting.
@@ -3834,6 +3896,7 @@ export class AcpBackend implements AgentBackend {
   }
 
   private emitIdleStatus(): void {
+    if (this.providerInitiatedTurn) return;
     if (
       this.waitingForResponse &&
       this.pendingPromptResponseTurnGeneration === this.turnGeneration

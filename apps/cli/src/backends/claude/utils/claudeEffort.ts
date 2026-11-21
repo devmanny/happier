@@ -153,8 +153,8 @@ function resolveBestSupportedClaudeEffort(
 /**
  * Tiers carried on the session mode, but only when they belong to `modelId`.
  *
- * A launch can override the model (`--model` in `claudeArgs`), and one model's reported tiers must
- * never gate another model's effort or ultracode.
+ * The tiers can lag a model change, and one model's reported tiers must never gate another model's
+ * effort or ultracode.
  */
 export function resolveModeEffortLevelsForModel(
     mode: Readonly<{ modelEffortLevels?: readonly string[]; modelEffortLevelsModelId?: string | null }>,

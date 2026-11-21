@@ -49,6 +49,35 @@ describe('buildClaudeAgentSdkHooks', () => {
     });
   });
 
+  it('warns the model before a file edit another thread holds, without deciding the permission', async () => {
+    const beforeFileEdit = vi.fn(async (path: string) => path.endsWith('Composer.swift') ? 'Mateo is editing Composer.swift for 4 min.' : null);
+    const canCallTool = vi.fn(async (): Promise<PermissionResult> => ({ behavior: 'deny', message: 'denied' }));
+    const { hooks } = buildClaudeAgentSdkHooks({
+      cwd: '/tmp/project',
+      claudeConfigDir: null,
+      getMode: () => ({ permissionMode: 'bypassPermissions' }),
+      onSessionFound: () => {},
+      onSessionHook: () => {},
+      canCallTool,
+      beforeFileEdit,
+    });
+    const preToolUse = hooks.PreToolUse as Array<{ matcher: string; hooks: Array<(input: unknown, id?: string, opts?: unknown) => Promise<any>> }>;
+    const editHook = preToolUse.find((entry) => entry.matcher.split('|').includes('Edit'))!;
+    expect(editHook.matcher.split('|').sort()).toEqual(['Edit', 'MultiEdit', 'NotebookEdit', 'Write']);
+
+    const warned = await editHook.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: 'apps/Composer.swift' } });
+    expect(beforeFileEdit).toHaveBeenCalledWith('/tmp/project/apps/Composer.swift');
+    expect(warned.hookSpecificOutput).toEqual({
+      hookEventName: 'PreToolUse',
+      additionalContext: expect.stringContaining('Mateo is editing Composer.swift'),
+    });
+    expect(warned.hookSpecificOutput).not.toHaveProperty('permissionDecision');
+
+    const quiet = await editHook.hooks[0]!({ tool_name: 'NotebookEdit', tool_input: { notebook_path: '/tmp/project/a.ipynb' } });
+    expect(quiet).toEqual({ continue: true });
+    expect(canCallTool).not.toHaveBeenCalled();
+  });
+
   it('registers direct Runtime Activity hooks and forwards their exact inputs', async () => {
     const onSessionHook = vi.fn();
     const { hooks } = buildClaudeAgentSdkHooks({

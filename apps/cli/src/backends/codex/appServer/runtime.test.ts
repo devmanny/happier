@@ -11,6 +11,8 @@ import {
 } from '@happier-dev/agents';
 import {
     buildConnectedServiceCredentialRecord,
+    buildUsageLimitIssueFingerprint,
+    type SessionRuntimeIssueV1,
     SESSION_MEDIA_MESSAGE_MAX_ENTRIES_V1,
     SessionMediaMessageMetaEnvelopeV1Schema,
     SESSION_USAGE_LIMIT_RECOVERY_METADATA_KEY,
@@ -2840,6 +2842,56 @@ describe('createCodexAppServerRuntime', () => {
         const turnStart = requestLog.find((entry: { method: string }) => entry.method === 'turn/start') as { params?: Record<string, unknown> } | undefined;
         expect(turnStart?.params).not.toHaveProperty('sandboxPolicy');
         expect(turnStart?.params).not.toHaveProperty('approvalPolicy');
+    });
+
+    // A queued message drained as the next turn follows this one with no `ready` between them (the
+    // session never went idle), so the turn's own end in the transcript is what tells where it ended.
+    it('commits a completed turn\'s end to the transcript before a queued message is drained as the next turn', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-turn-end-before-drain-');
+        // The relay's transcript, in the order it acknowledges rows.
+        const transcript: string[] = [];
+        const sendAgentMessageCommitted = vi.fn(async (_provider: string, body: ACPMessageData) => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            transcript.push(`agent:${body.type}`);
+        });
+        const inputConsumer = createSessionProviderInputConsumer({
+            messageQueue: new MessageQueue2<{ id: string }>(() => 'hash'),
+            session: {
+                materializeNextPendingMessageSafely: async () => {
+                    transcript.push('user');
+                    return { type: 'materialized' as const, localId: 'queued-next-turn', seq: 99, content: null };
+                },
+                waitForPendingEligibilityUpdate: async () => false,
+            },
+        });
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: {
+                updateMetadata: vi.fn(),
+                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                sendAgentMessage: vi.fn(),
+                sendAgentMessageCommitted,
+                sendCodexMessage: vi.fn(),
+                sendSessionEvent: vi.fn(),
+            } as any,
+            permissionMode: 'read-only',
+        });
+
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('hello-world');
+        // What the Codex finalizer (`runCodex`) does once the turn settled: flush it, then drain.
+        await runtime.flushTurn();
+        expect(await inputConsumer.drainPending({ reason: 'codex-finalizer', logPrefix: '[codex]' }))
+            .toMatchObject({ materialized: 1 });
+
+        expect(sendAgentMessageCommitted).toHaveBeenCalledWith(
+            'codex',
+            { type: 'task_complete', id: 'turn-hello-world' },
+            expect.objectContaining({ localId: expect.any(String) }),
+        );
+        expect(transcript.filter((entry) => entry === 'agent:task_complete' || entry === 'user'))
+            .toEqual(['agent:task_complete', 'user']);
     });
 
     it.each([
@@ -8435,6 +8487,40 @@ describe('createCodexAppServerRuntime', () => {
         );
     });
 
+    it('records a model or effort change once the turn that applies it started, and only then', async () => {
+        const { root } = await createRuntimeFixture('happier-codex-app-server-runtime-config-change-line-');
+        const sendSessionEvent = vi.fn();
+        const runtime = createCodexAppServerRuntime({
+            directory: root,
+            onThinkingChange: vi.fn(),
+            session: { updateMetadata: vi.fn(), sendSessionEvent } as any,
+        });
+
+        await runtime.setSessionModel('gpt-5.4');
+        await runtime.setSessionConfigOption('reasoning_effort', 'medium');
+        await runtime.startOrLoad({});
+        await runtime.sendPrompt('first');
+        const configLines = () => sendSessionEvent.mock.calls.map(([event]) => event).filter((event) => event?.type === 'runtime-config-outcome');
+        // The first turn is the baseline, not a change.
+        expect(configLines()).toEqual([]);
+
+        await runtime.setSessionModel('gpt-5.5');
+        await runtime.setSessionConfigOption('reasoning_effort', 'high');
+        await runtime.sendPrompt('second');
+        expect(configLines()).toEqual([expect.objectContaining({
+            type: 'runtime-config-outcome', provider: 'codex', runtime: 'codex-app-server', status: 'applied',
+            message: 'Model changed to gpt-5.5 · Effort High',
+            changes: [
+                { key: 'model', previous: 'gpt-5.4', effective: 'gpt-5.5' },
+                { key: 'reasoningEffort', previous: 'medium', effective: 'high' },
+            ],
+        })]);
+
+        await runtime.sendPrompt('third');
+        expect(configLines()).toHaveLength(1);
+        await runtime.reset();
+    });
+
     it('keeps Fast service tier for the first turn even when thread/start responds with serviceTier: null', async () => {
         const { root, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-thread-start-fast-persist-');
 
@@ -8847,6 +8933,55 @@ describe('createCodexAppServerRuntime', () => {
         }));
     });
 
+    it('reports the canonical failed-turn fingerprint to group recovery and admits the next failed turn', async () => {
+        const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-canonical-failure-witness-');
+        const failedIssues: SessionRuntimeIssueV1[] = [];
+        let releaseFailureWrite: () => void = () => {};
+        const pendingFailureWrite = new Promise<void>((resolve) => { releaseFailureWrite = resolve; });
+        const sessionTurnLifecycle = createSessionTurnLifecycle({
+            sessionId: 'canonical-failure-session',
+            enqueueSessionTurn: async (mutation) => {
+                if (mutation.action === 'fail' && mutation.issue) {
+                    failedIssues.push(mutation.issue);
+                    if (failedIssues.length === 1) await pendingFailureWrite;
+                }
+            },
+        });
+        const reports: Array<Parameters<NonNullable<Parameters<typeof createCodexAppServerRuntime>[0]['onUsageLimitGroupRecovery']>>[0]> = [];
+        const runtime = createCodexAppServerRuntime({
+            directory: root, processEnv: createCodexAppServerProcessEnv(fakeAppServer), onThinkingChange: () => {},
+            initialConnectedServiceRuntimeIdentity: { serviceId: 'openai-codex', activeAccountId: 'provider-user',
+                profileId: 'primary', groupId: 'pool', generation: 1, credentialFingerprint: 'sha256:account1',
+                source: 'spawn_selection', accountLabel: null },
+            onUsageLimitGroupRecovery: async (report) => {
+                reports.push(report);
+                return { handled: false, report: null, statusCode: null, statusMessage: null };
+            },
+            session: { sessionId: 'canonical-failure-session', updateMetadata: async () => {}, sessionTurnLifecycle,
+                sendCodexMessage: () => {}, sendSessionEvent: () => {} } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
+        });
+        try {
+            await runtime.startOrLoad({});
+            for (let turn = 0; turn < 2; turn += 1) {
+                const failed = runtime.sendPrompt(turn === 0 ? 'usage-limit-structured' : 'usage-limit-after-mid-turn-auth-apply');
+                const expected = failed.catch(error => error as unknown);
+                if (turn === 0) {
+                    await waitForCondition(() => failedIssues.length === 1, { timeoutMs: 1_000, intervalMs: 1, label: 'accepted canonical failed-turn issue' });
+                    // Recovery consumes the accepted failure even while its durable publication is held.
+                    await waitForCondition(() => reports.length === 1, { timeoutMs: 1_000, intervalMs: 1, label: 'canonical failed-turn recovery report before durable write' });
+                    releaseFailureWrite();
+                }
+                await expect(failed).rejects.toMatchObject({ runtimeAuthClassification: { kind: 'usage_limit' } });
+                const issue = failedIssues[turn];
+                if (!issue) throw new Error('Missing canonical failed-turn issue');
+                const fingerprint = buildUsageLimitIssueFingerprint(issue);
+                if (turn === 0) expect(reports[0]?.classification).toMatchObject({ runtimeIssueFingerprint: fingerprint });
+                expect(await expected).toMatchObject({ runtimeAuthClassification: { runtimeIssueFingerprint: fingerprint } });
+            }
+            expect(buildUsageLimitIssueFingerprint(failedIssues[1]!)).not.toBe(buildUsageLimitIssueFingerprint(failedIssues[0]!));
+        } finally { releaseFailureWrite(); await runtime.reset(); }
+    });
+
     it('carries selected Codex group context on app-server usage-limit failures', async () => {
         const { root, fakeAppServer } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-limit-group-');
         const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
@@ -8957,7 +9092,10 @@ describe('createCodexAppServerRuntime', () => {
             session: {
                 sessionId: 'session-plan-incompatible-group',
                 updateMetadata: vi.fn(),
-                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                sessionTurnLifecycle: createSessionTurnLifecycle({
+                    sessionId: 'session-plan-incompatible-group',
+                    enqueueSessionTurn: async () => {},
+                }),
                 sendCodexMessage: vi.fn(),
                 sendSessionEvent: vi.fn(),
             } as unknown as Parameters<typeof createCodexAppServerRuntime>[0]['session'],
@@ -9332,7 +9470,13 @@ describe('createCodexAppServerRuntime', () => {
                 },
             },
         });
-        const sessionTurnLifecycle = createSessionTurnLifecycleTestDouble();
+        const failedIssues: SessionRuntimeIssueV1[] = [];
+        const sessionTurnLifecycle = createSessionTurnLifecycle({
+            sessionId: 'session-stale-env-group',
+            enqueueSessionTurn: async (mutation) => {
+                if (mutation.action === 'fail' && mutation.issue) failedIssues.push(mutation.issue);
+            },
+        });
         let metadata: Metadata = {
             path: root,
             host: 'test-host',
@@ -9419,18 +9563,16 @@ describe('createCodexAppServerRuntime', () => {
                     failingAccessTokenFingerprint: 'sha256:deadbeef',
                 },
             });
-            expect(sessionTurnLifecycle.failTurn).toHaveBeenCalledWith(expect.objectContaining({
+            expect(failedIssues).toContainEqual(expect.objectContaining({
                 provider: 'codex',
-                issue: expect.objectContaining({
-                    source: 'usage_limit',
-                    usageLimit: expect.objectContaining({
-                        recoverability: 'switch_account',
-                        connectedService: {
-                            serviceId: 'openai-codex',
-                            profileId: 'backup',
-                            groupId: 'happier',
-                        },
-                    }),
+                source: 'usage_limit',
+                usageLimit: expect.objectContaining({
+                    recoverability: 'switch_account',
+                    connectedService: {
+                        serviceId: 'openai-codex',
+                        profileId: 'backup',
+                        groupId: 'happier',
+                    },
                 }),
             }));
             expect(onRateLimitSnapshot).toHaveBeenCalledWith({
@@ -10276,7 +10418,7 @@ describe('createCodexAppServerRuntime', () => {
         }
     });
 
-    it('arms usage-limit recovery from the latest issue before probing on check-now', async () => {
+    it.each([false, true])('arms usage-limit recovery from the latest issue before probing on check-now (older wait=%s)', async (olderWait) => {
         const { root, fakeAppServer, requestLogPath } = await createRuntimeFixture('happier-codex-app-server-runtime-usage-check-now-');
         const codexHome = join(root, 'codex-home');
         await mkdir(codexHome, { recursive: true });
@@ -10300,6 +10442,13 @@ describe('createCodexAppServerRuntime', () => {
             happyHomeDir: join(root, '.happier'),
             happyLibDir: join(root, '.happier', 'lib'),
             happyToolsDir: join(root, '.happier', 'tools'),
+            ...(olderWait ? { sessionUsageLimitRecoveryV1: {
+                v: 1 as const, status: 'waiting' as const,
+                issueFingerprint: 'usage-limit:codex:old-turn:1:no-reset', armedAtMs: 1,
+                resetAtMs: null, nextCheckAtMs: null, attemptCount: 3, maxAttempts: 3,
+                lastProbeError: null, resumePromptMode: 'standard' as const,
+                selectedAuth: { kind: 'native' as const, serviceId: 'openai-codex' as const },
+            } } : {}),
         };
         const updateMetadata = vi.fn(async (handler: (current: Metadata) => Metadata) => {
             metadata = handler(metadata);
@@ -10864,7 +11013,10 @@ describe('createCodexAppServerRuntime', () => {
             session: {
                 sessionId: 'session-usage-probe-token-invalid-unhandled',
                 updateMetadata: vi.fn(async (handler: (current: Metadata) => Metadata) => { metadata = handler(metadata); }),
-                sessionTurnLifecycle: createSessionTurnLifecycleTestDouble(),
+                sessionTurnLifecycle: createSessionTurnLifecycle({
+                    sessionId: 'session-usage-probe-token-invalid-unhandled',
+                    enqueueSessionTurn: async () => {},
+                }),
                 getMetadataSnapshot: () => metadata,
                 sendCodexMessage: vi.fn(),
                 sendSessionEvent: vi.fn(),

@@ -576,6 +576,12 @@ jobs:
       - name: Enable Corepack (Yarn)
         uses: ./.github/actions/enable-corepack-yarn
 
+      - name: Install Linux system dependencies (Tauri)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-tauri-linux-dependencies
+        with:
+          bundled-webkit: 'true'
+
       - name: Install trusted finalizer dependencies
         env:
           YARN_PRODUCTION: "false"
@@ -592,10 +598,6 @@ jobs:
           RUSTUP_MAX_RETRIES: "10"
         with:
           targets: ${{ matrix.tauri_target }}
-
-      - name: Install Linux system dependencies (Tauri)
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/install-tauri-linux-dependencies
 
       - name: Download desktop candidate
         if: ${{ matrix.artifact_id == '' }}

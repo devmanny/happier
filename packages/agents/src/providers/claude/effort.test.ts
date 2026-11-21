@@ -15,6 +15,9 @@ describe('claude effort support', () => {
     expect(resolveClaudeEffortLevelsForModelId('claude-opus-5-5')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     expect(resolveClaudeDefaultEffortLevelForModelId('claude-opus-5-5')).toBe('medium');
     expect(isClaudeUltracodeSupportedModelId('claude-fable-5-1')).toBe(true);
+    expect(resolveClaudeEffortLevelsForModelId('claude-fable-5-2')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(resolveClaudeDefaultEffortLevelForModelId('claude-fable-5-2')).toBe('high');
+    expect(isClaudeUltracodeSupportedModelId('claude-fable-5-2')).toBe(true);
     expect(isClaudeUltracodeSupportedModelId('claude-opus-5-5')).toBe(true);
   });
   it('marks Fable 5 as effort+max capable with xhigh support and high default effort', () => {

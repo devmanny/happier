@@ -61,6 +61,8 @@ export default defineConfig({
         ],
         exclude: [...configDefaults.exclude, ...resolveVitestFeatureTestExcludeGlobs(process.env)],
         globalSetup: ['./src/test-setup.integration.ts'],
+        // Never the real user's LaunchAgent/systemd unit, Happier home or service manager.
+        setupFiles: ['./src/testkit/realUserIsolation.setup.ts'],
         coverage: {
             provider: 'v8',
             reporter: ['text', 'json', 'html'],

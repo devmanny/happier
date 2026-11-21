@@ -1,6 +1,8 @@
 import { log } from "@/utils/logging/log";
 import {
+    requeueNotReceivedPendingDelivery,
     resolveAcceptedPendingDelivery,
+    type RequeueNotReceivedPendingDeliveryResult,
     type ResolveAcceptedPendingDeliveryResult,
 } from "@/app/session/pending/pendingMessageService";
 import type { TrustedPendingPublisherFence } from "@/app/session/pending/pendingPublisherAuthority";
@@ -93,6 +95,41 @@ export async function coordinateAcceptedPendingSettlement(params: Readonly<{
         log(
             { module: "accepted-pending-settlement", level: "warn", sessionId: params.sessionId, localId: params.localId },
             "accepted pending settlement committed but publication failed",
+            error,
+        );
+    }
+    return result;
+}
+
+/**
+ * Runs one current-publisher not-received requeue transaction and publishes the Pending change,
+ * so every client sees the row back in line. Publication loss converges like accepted settlement.
+ */
+export async function coordinateNotReceivedPendingDelivery(params: Readonly<{
+    actorUserId: string;
+    sessionId: string;
+    localId: string;
+    trustedPublisherFence: TrustedPendingPublisherFence;
+}>): Promise<RequeueNotReceivedPendingDeliveryResult> {
+    const result = await requeueNotReceivedPendingDelivery(params);
+    if (!result.ok || !result.didRequeue) return result;
+    try {
+        await emitPendingChanged({
+            sessionId: params.sessionId,
+            changedByAccountId: params.actorUserId,
+            pendingCount: result.pendingCount,
+            pendingBlockedCount: result.pendingBlockedCount,
+            pendingVersion: result.pendingVersion,
+            participantCursors: result.participantCursors,
+        });
+        await publishPendingMutationBadgeRefresh({
+            badgeAttentionChanged: result.badgeAttentionChanged,
+            participantCursors: result.participantCursors,
+        });
+    } catch (error) {
+        log(
+            { module: "not-received-pending-delivery", level: "warn", sessionId: params.sessionId, localId: params.localId },
+            "not-received pending requeue committed but publication failed",
             error,
         );
     }

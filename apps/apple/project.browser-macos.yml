@@ -1,0 +1,29 @@
+# Signing requires Apple's separate macOS browser passkey approval for this App ID.
+# The regular project.yml keeps using the existing macOS provisioning configuration.
+include: project.yml
+targets:
+  Happier:
+    supportedDestinations:REPLACE: [macOS]
+    info:
+      properties:
+        HappierBrowserRole: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmanny.happier.browser
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes: [http, https]
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: $(DERIVED_FILE_DIR)/Happier-browser-macOS.entitlements
+    preBuildScripts:
+      # Keep the canonical Mac permissions, including its platform-specific push
+      # and app-group values. Only this build variant adds the managed capability.
+      - name: Prepare macOS browser entitlements
+        script: |
+          set -eu
+          /usr/bin/plutil -convert xml1 -o "$SCRIPT_OUTPUT_FILE_0" "$SCRIPT_INPUT_FILE_0"
+          /usr/libexec/PlistBuddy -c 'Add :com.apple.developer.web-browser.public-key-credential bool true' "$SCRIPT_OUTPUT_FILE_0"
+        inputFiles:
+          - $(SRCROOT)/Happier/Resources/Happier-macOS.entitlements
+        outputFiles:
+          - $(DERIVED_FILE_DIR)/Happier-browser-macOS.entitlements
+        showEnvVars: false

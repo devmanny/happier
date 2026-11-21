@@ -160,10 +160,6 @@ export function deriveSessionRuntimePresentationState(
     const freshProviderRuntimeActivity = runtimeActivityState === 'active';
     const working = freshInProgress || freshThinking;
     const backgroundActive = !working && freshProviderRuntimeActivity;
-    const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
-    const hasFreshPendingRequest =
-        pendingRequestObservedAt !== null
-        && isFreshTimestamp(pendingRequestObservedAt, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS);
     const activityState: SessionRuntimeActivityPresentationState = working
         ? 'working'
         : backgroundActive
@@ -185,14 +181,16 @@ export function deriveSessionRuntimePresentationState(
         activityState,
         runtimeProjectionInProgress: freshInProgress,
         runtimeActivelyWorking,
+        // Keep an outstanding request visible until its count clears or its owning runtime is no
+        // longer live. `pendingRequestObservedAt` need not advance while a request waits, so its age
+        // is not settlement evidence. Updated CLIs retain and retry exact settlement intents;
+        // older producers can leave an unresolved count after a failed cancellation write.
         freshPermissionRequired:
             input.hasPendingPermissionRequests === true
-            && isLiveRuntime
-            && (working || hasFreshPendingRequest),
+            && isLiveRuntime,
         freshActionRequired:
             input.hasPendingUserActionRequests === true
-            && isLiveRuntime
-            && (working || hasFreshPendingRequest),
+            && isLiveRuntime,
     };
 }
 
@@ -262,10 +260,6 @@ export function readSessionRuntimePresentationFreshnessTimestamps(
         const witnesses = readSessionRuntimeObservationTimestamps(input)
             .filter((timestamp) => isFreshTimestamp(timestamp, nowMs, SESSION_RUNTIME_STATUS_STALE_SIGNAL_MS));
         if (witnesses.length > 0) timestamps.push(Math.max(...witnesses));
-    }
-    if (runtimeStatus.freshPermissionRequired || runtimeStatus.freshActionRequired) {
-        const pendingRequestObservedAt = normalizeRuntimeStatusTimestamp(input.pendingRequestObservedAt);
-        if (pendingRequestObservedAt !== null) timestamps.push(pendingRequestObservedAt);
     }
     return timestamps;
 }

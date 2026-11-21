@@ -6,7 +6,12 @@ import { fetchAndApplyMachines, type MachineDataKeyCacheEntry } from '@/sync/eng
 import { fetchAndApplySessions } from '@/sync/engine/sessions/sessionSnapshot';
 import { resolveUiClientEncryptionRequirement } from '@/sync/domains/settings/clientEncryptionRequirement';
 import { getEffectiveServerSelectionFromRawSettings } from '@/sync/domains/server/selection/serverSelectionResolution';
-import { listServerProfiles, resolveServerProfileScopeId, type ServerProfile } from '@/sync/domains/server/serverProfiles';
+import {
+    areServerProfileIdentifiersEquivalent,
+    listServerProfiles,
+    resolveServerProfileScopeId,
+    type ServerProfile,
+} from '@/sync/domains/server/serverProfiles';
 import {
     listServerProfileScopeIds,
     normalizeServerSelectionSettingsForProfileScopeIds,
@@ -15,7 +20,7 @@ import {
 import { getActiveServerSnapshot, subscribeActiveServer } from '@/sync/domains/server/serverRuntime';
 import { buildSessionListViewData, type SessionListViewItem } from '@/sync/domains/session/listing/sessionListViewData';
 import { storage } from '@/sync/domains/state/storageStore';
-import { setServerSessionListCache } from '@/sync/store/sessionListCache';
+import { clearServerSessionListCache, setServerSessionListCache } from '@/sync/store/sessionListCache';
 import type { Machine, Session } from '@/sync/domains/state/storageTypes';
 import type { Settings } from '@/sync/domains/settings/settings';
 import { canonicalizeServerUrl } from '@/sync/domains/server/url/serverUrlCanonical';
@@ -150,14 +155,11 @@ async function getOrCreateEncryption(entry: ManagedConcurrentServer): Promise<En
 }
 
 function updateConcurrentSessionListCache(serverId: string, sessionListViewData: SessionListViewItem[] | null): void {
-    storage.setState((state) => ({
-        ...state,
-        sessionListViewDataByServerId: setServerSessionListCache(
-            state.sessionListViewDataByServerId,
-            serverId,
-            sessionListViewData,
-        ),
-    }));
+    storage.setState((state) => {
+        const next = setServerSessionListCache(state.sessionListViewDataByServerId, serverId, sessionListViewData);
+        if (next === state.sessionListViewDataByServerId) return state;
+        return { ...state, sessionListViewDataByServerId: next };
+    });
 }
 
 function updateConcurrentMachineListCache(input: {
@@ -208,16 +210,10 @@ function updateConcurrentMachineListCache(input: {
 }
 
 function clearConcurrentSessionListCache(serverIdRaw: string): void {
-    const serverId = String(serverIdRaw ?? '').trim();
-    if (!serverId) return;
     storage.setState((state) => {
-        if (!(serverId in state.sessionListViewDataByServerId)) return state;
-        const next = { ...state.sessionListViewDataByServerId };
-        delete next[serverId];
-        return {
-            ...state,
-            sessionListViewDataByServerId: next,
-        };
+        const next = clearServerSessionListCache(state.sessionListViewDataByServerId, serverIdRaw);
+        if (next === state.sessionListViewDataByServerId) return state;
+        return { ...state, sessionListViewDataByServerId: next };
     });
 }
 
@@ -467,11 +463,7 @@ async function reconcileConcurrentServers(): Promise<void> {
     const settings = storage.getState().settings;
     const targets = resolveConcurrentTargets({
         activeServerId,
-        profiles: profiles.map((profile) => ({
-            id: profile.id,
-            serverUrl: profile.serverUrl,
-            name: profile.name,
-        })),
+        profiles,
         settings: {
             serverSelectionGroups: Array.isArray(settings.serverSelectionGroups)
                 ? (settings.serverSelectionGroups as any)
@@ -492,7 +484,11 @@ async function reconcileConcurrentServers(): Promise<void> {
     for (const existingId of Array.from(managedServers.keys())) {
         if (!desiredById.has(existingId)) {
             stopManagedServer(existingId);
-            clearConcurrentSessionListCache(existingId);
+            // Identity discovery replaces the connection's captured id, not the Home's warm snapshot.
+            if (!areServerProfileIdentifiersEquivalent(activeServerId, existingId)
+                && !targets.some((target) => areServerProfileIdentifiersEquivalent(target.id, existingId))) {
+                clearConcurrentSessionListCache(existingId);
+            }
             clearConcurrentMachineListCache(existingId);
         }
     }

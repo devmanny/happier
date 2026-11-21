@@ -33,8 +33,10 @@ export const DaemonFilesystemListDirectoryRequestSchema = z.object({
   path: z.string().min(1),
   includeFiles: z.boolean().optional(),
   maxEntries: z.number().int().positive().nullable().optional(),
+  /** Case-insensitive name filter applied before `maxEntries`, so search reaches every child. */
+  query: z.string().optional(),
 }).passthrough();
-export type DaemonFilesystemListDirectoryRequest = z.infer<typeof DaemonFilesystemListDirectoryRequestSchema>;
+export type DaemonFilesystemListDirectoryRequest =z.infer<typeof DaemonFilesystemListDirectoryRequestSchema>;
 
 export const DaemonFilesystemListDirectoryResponseSchema = z.discriminatedUnion('ok', [
   z.object({

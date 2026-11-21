@@ -17,6 +17,13 @@ import {
   resolveClaudeScreenInFlightSteerVeto,
 } from './tuiControls/screenState';
 import { classifyClaudeOwnComposerDraft } from './ownComposerDraftClassification';
+import { MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS } from './ownComposerDraftGuard';
+import {
+  captureComposerClearKeyEffect,
+  createClaudeComposerClearKeyLedger,
+  isSecondComposerClearEscapeWarranted,
+  type ClaudeComposerClearKeyLedger,
+} from './tuiControls/composerClearKeys';
 import type { EnhancedMode } from '../loop';
 import { mapToClaudeMode } from '../utils/permissionMode';
 
@@ -26,9 +33,6 @@ const DEFAULT_DRAFT_CLEAR_SETTLE_MS = 250;
 // One bounded escalation per starvation episode after this many consecutive `user_draft` vetoes
 // (the arbiter's fallback wake retries every ~15s; 4 vetoes ≈ a minute of starvation).
 const DEFAULT_USER_DRAFT_ESCALATION_THRESHOLD = 4;
-// Same bounded semantics as the slash-control leftover clear (lane U): one Escape can leave the
-// draft text behind, so allow a second press before giving up.
-const MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS = 2;
 
 export type ClaudeUnifiedSteerUnavailableTeeReason = 'unsafe_window' | 'user_terminal_draft';
 export type ClaudeUnifiedSteerAvailabilitySnapshot = Readonly<{
@@ -110,6 +114,11 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    * leftovers, bounded to {@link MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS} per evaluation.
    */
   clearOwnLeftoverDraft?: (() => Promise<void>) | undefined;
+  /**
+   * The pane's session-scoped clear-key ledger, shared with the idle draft guard. Without it the
+   * outstanding-key bound holds only within one evaluation.
+   */
+  clearKeys?: ClaudeComposerClearKeyLedger | undefined;
   draftClearSettleMs?: number | undefined;
   /** Consecutive `user_draft` vetoes before the single starvation escalation (default 4). */
   userDraftEscalationThreshold?: number | undefined;
@@ -169,6 +178,8 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
   }
 
   function observeScreen(screenState: ClaudeScreenState, batch?: ClaudeUnifiedPromptBatch<Mode>): void {
+    // Any repaint this evaluator reads acknowledges clear keys still outstanding on the pane.
+    opts.clearKeys?.observe(screenState.text);
     opts.onScreenObserved?.({
       screenState,
       userMessageLocalIds: batch?.userMessageLocalIds ?? [],
@@ -271,7 +282,8 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    * starve a steered prompt behind a composer draft forever.
    *
    * - An OWN leftover (exact match against texts we wrote) on a NON-generating screen is cleared
-   *   with the same bounded-Escape semantics as the slash-control leftover clear (lane U); a
+   *   with at most two Escapes, the second only on the shared composer-clear evidence rule
+   *   (tuiControls/composerClearKeys.ts) and every one through the pane's clear-key ledger; a
    *   genuine user draft is NEVER touched, and nothing is cleared while generating (Escape would
    *   interrupt the running turn).
    * - A persisting draft escalates ONCE per episode after the bounded veto threshold: the honest
@@ -312,21 +324,38 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
     }
 
     if (ownLeftover && opts.clearOwnLeftoverDraft && captureInputState && !current.generating) {
+      const clearKeys = opts.clearKeys
+        ?? createClaudeComposerClearKeyLedger({ stallBudgetMs: Number.POSITIVE_INFINITY });
+      clearKeys.observe(current.text);
       for (let attempt = 0; attempt < MAX_OWN_LEFTOVER_DRAFT_CLEAR_ATTEMPTS; attempt += 1) {
+        // Earlier Escapes the screen has not shown yet may still be queued in a stalled Claude.
+        if (!clearKeys.mayPress()) break;
+        const pressedOn = current;
+        clearKeys.recordPress(pressedOn.text);
         try {
           await opts.clearOwnLeftoverDraft();
         } catch {
           break;
         }
-        await wait(draftClearSettleMs);
-        let recaptured: Awaited<ReturnType<NonNullable<typeof captureInputState>>>;
-        try {
-          recaptured = await captureInputState(opts.handle);
-        } catch {
-          break;
-        }
-        currentRawText = recaptured.currentInput;
-        current = parseClaudeScreenState(recaptured.currentInput, { cursor: recaptured.cursor });
+        const recaptured = await captureComposerClearKeyEffect({
+          pressedFrameText: pressedOn.text,
+          capture: async () => {
+            try {
+              const inputState = await captureInputState(opts.handle);
+              const parsed = parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor });
+              clearKeys.observe(parsed.text);
+              return { rawText: inputState.currentInput, screen: parsed };
+            } catch {
+              return null;
+            }
+          },
+          frameTextOf: (result) => result?.screen.text ?? null,
+          wait,
+          settleMs: draftClearSettleMs,
+        });
+        if (!recaptured) break;
+        currentRawText = recaptured.rawText;
+        current = recaptured.screen;
         observeScreen(current, batch);
         emitClaudeUnifiedSteerDecision(opts.telemetry, {
           decision: 'own_draft_clear_attempted',
@@ -362,6 +391,8 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
           return { steer: false, reason: 'capture_style_unavailable' };
         }
         if (!ownLeftover) break;
+        // Same evidence rule as the idle guard and the user-authorized clear (Rewind hazard).
+        if (!isSecondComposerClearEscapeWarranted(pressedOn, current)) break;
       }
     }
 

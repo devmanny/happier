@@ -169,6 +169,22 @@ describe('buildCachedSessionListRowModel', () => {
     // within a group keeps the row's group, session and snapshot exactly as they
     // were, so a signature that ignores the reason hands back the row the person
     // just changed.
+    it('updates a cached background row when unread presentation preference changes', () => {
+        const cache = createSessionListRowModelsCache();
+        const item = createSessionItem(createRenderable('background-unread', {
+            active: true, activeAt: NOW_MS, hasUnreadMessages: true, lastViewedSessionSeq: 1,
+            runtimeActivityState: 'active', runtimeActivityActiveCount: 1,
+            runtimeActivityObservedAt: NOW_MS, runtimeActivityRevision: 1,
+        }));
+        const adjacency = { isFirst: true, isLast: true, isSingle: true };
+        const input = { item, snapshot: EMPTY_ROW_STATE, adjacency, cache };
+        const initial = buildCachedSessionListRowModel({ ...input, settings: createSettings({ backgroundWorkAttentionMode: 'keepWorking' }) });
+        const changed = buildCachedSessionListRowModel({ ...input, settings: createSettings({ backgroundWorkAttentionMode: 'keepWorkingUnread' }) });
+        expect(initial.attention.rowState).toBe('working');
+        expect(changed.attention.rowState).toBe('unread');
+        expect(changed.hasUnreadMessages).toBe(true);
+    });
+
     it('rebuilds a row when its attention placement reason changes', () => {
         const cache = createSessionListRowModelsCache();
         const session = createRenderable('s1');

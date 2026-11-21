@@ -3,6 +3,7 @@ import { randomKeyNaked } from "@/utils/keys/randomKeyNaked";
 import { eventRouter, buildKVBatchUpdateUpdate } from "@/app/events/eventRouter";
 import * as privacyKit from "privacy-kit";
 import { markAccountChanged } from "@/app/changes/markAccountChanged";
+import { accountKvChangeFamily } from "@happier-dev/protocol/changes";
 import { isPublicAccountScopedKvKey } from "./reservedAccountScopedKvRow";
 import { mutateAccountScopedKvRowsInTx } from "./accountScopedKv";
 
@@ -84,8 +85,17 @@ export async function kvMutate(
         }));
 
         const uniqueKeys = Array.from(new Set(mutations.map((m) => m.key)));
-        const hint = uniqueKeys.length <= 50 ? { keys: uniqueKeys } : { full: true };
-        const cursor = await markAccountChanged(tx, { accountId: ctx.uid, kind: 'kv', entityId: 'self', hint });
+        // One change row per key family (see `accountKvChangeFamily`).
+        const byFamily = new Map<string, string[]>();
+        for (const key of uniqueKeys) {
+            const family = accountKvChangeFamily(key);
+            byFamily.set(family, [...(byFamily.get(family) ?? []), key]);
+        }
+        let cursor = 0;
+        for (const [family, keys] of byFamily) {
+            const hint = keys.length <= 50 ? { keys } : { full: true };
+            cursor = await markAccountChanged(tx, { accountId: ctx.uid, kind: 'kv', entityId: family, hint });
+        }
 
         // Send single bundled notification for all changes
         afterTx(tx, async () => {

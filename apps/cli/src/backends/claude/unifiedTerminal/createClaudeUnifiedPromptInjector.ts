@@ -10,12 +10,14 @@ import { prepareTerminalPromptTextForInjection } from '@/agent/runtime/terminal/
 import {
   TERMINAL_INPUT_QUIET_PERIOD_MS,
 } from '@/agent/runtime/terminal/injection/arbiter';
+import { logger } from '@/ui/logger';
 
 import type {
   ClaudeUnifiedPromptBatch,
   ClaudeUnifiedPromptInjectionOptions,
   ClaudeUnifiedPromptInjector,
 } from './_types';
+import type { ClaudePromptStagingObservations } from './claudePromptSubmitVerification';
 import type { ClaudeUnifiedTelemetrySink } from './telemetry';
 import { emitClaudeUnifiedInjectionDraftGuard, emitClaudeUnifiedInjectionOutcome } from './telemetry';
 
@@ -113,6 +115,24 @@ function resolveDraftGuardBlocker(
   }
 }
 
+type DeliveryVerificationBudget = Readonly<{
+  signal: AbortSignal;
+  expired: () => boolean;
+  dispose: () => void;
+}>;
+
+function startDeliveryVerificationBudget(budgetMs: number | undefined): DeliveryVerificationBudget | null {
+  if (budgetMs === undefined || !Number.isFinite(budgetMs) || budgetMs <= 0) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('claude-unified-delivery-verification-budget'), Math.trunc(budgetMs));
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    expired: () => controller.signal.aborted,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
 export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly<{
   inputInjection: TerminalInputInjectionV1;
   createNonce?: (() => string) | undefined;
@@ -141,6 +161,19 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
   onDraftGuardStarvation?: ((info: ClaudeUnifiedDraftGuardStarvationInfo) => void) | undefined;
   onDraftGuardClear?: (() => void) | undefined;
   isCanonicalTurnActive?: (() => boolean) | undefined;
+  /**
+   * Session-owned bound for one write's staging and consumption verification. Under the session
+   * lifetime the terminal verifier otherwise waits forever when Claude never shows or consumes the
+   * prompt (incident cmwcg4h31), holding the Pending row as "delivering" with no visible outcome.
+   * When the budget expires the attempt ends as the verifier's ambiguous failure: Pending recovery
+   * owns it (never an automatic replay) and later provider evidence still settles it.
+   */
+  deliveryVerificationBudgetMs?: number | undefined;
+  /**
+   * The terminal verifier's view of the composer during this write. Its last kind (never text)
+   * goes into the stall-budget warning, so a write that never staged says what Claude showed.
+   */
+  stagingObservations?: ClaudePromptStagingObservations | undefined;
 }>): ClaudeUnifiedPromptInjector<Mode> {
   const createNonce = opts.createNonce ?? randomUUID;
   const nowMs = opts.nowMs ?? Date.now;
@@ -295,10 +328,15 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
             blocker: resolveDraftGuardBlocker(guard) ?? undefined,
           };
         }
-        if (guard.status === 'no_draft' || guard.status === 'cleared') {
+        // Wake Pending only when this pass ends a draft deferral episode or removed an own leftover.
+        // A clean pass with nothing deferred has nothing to wake, and the host write below can
+        // still defer (pane not quiet yet): an unconditional wake re-ran the paused pump at once,
+        // a busy loop of guard passes and server reads that bypassed the host's quiet retry.
+        const endsDraftGuardEpisode = draftGuardDeferralStartedAtMs !== null;
+        resetDraftGuardDeferralEpisode();
+        if (guard.status === 'cleared' || (guard.status === 'no_draft' && endsDraftGuardEpisode)) {
           opts.onDraftGuardClear?.();
         }
-        resetDraftGuardDeferralEpisode();
       }
 
       const input = {
@@ -320,7 +358,25 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
           timeoutMs: writeBudget.timeoutMs,
         },
       } as const;
-      const result = await opts.inputInjection.injectUserPrompt(input);
+      const verificationBudget = startDeliveryVerificationBudget(opts.deliveryVerificationBudgetMs);
+      opts.stagingObservations?.reset();
+      let result: TerminalInputInjectionResult;
+      try {
+        result = await opts.inputInjection.injectUserPrompt(
+          verificationBudget ? { ...input, signal: verificationBudget.signal } : input,
+        );
+      } finally {
+        verificationBudget?.dispose();
+      }
+      if (verificationBudget?.expired() && result.status === 'failed') {
+        logger.warn('[unified]: prompt delivery was not observed within the session stall budget; handing it to Pending recovery', {
+          budgetMs: opts.deliveryVerificationBudgetMs,
+          reason: result.reason,
+          phase: result.phase,
+          lastStagingObservation: opts.stagingObservations?.readLastKind() ?? 'none',
+          localIdCount: batch.userMessageLocalIds?.length ?? 0,
+        });
+      }
       if (opts.telemetry) {
         emitClaudeUnifiedInjectionOutcome(opts.telemetry, {
           result,

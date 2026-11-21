@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Fastify from 'fastify';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -26,6 +26,31 @@ async function withApp(run: (app: ReturnType<typeof Fastify>) => Promise<void>) 
 }
 
 describe('enableServeUi (mountRoot)', () => {
+  it('serves the app association as revalidatable JSON and revalidates unversioned native landing assets', async () => {
+    await withTempDir('happier-ui-native-links-', async (dir) => {
+      await mkdir(join(dir, '.well-known'));
+      await mkdir(join(dir, 'native'));
+      const association = { applinks: { details: [] } };
+      await writeFile(join(dir, '.well-known/apple-app-site-association'), JSON.stringify(association));
+      await writeFile(join(dir, 'native/landing.js'), 'export const landing = true;');
+      await writeFile(join(dir, 'bundle.123.js'), 'console.log("bundle");');
+      await withApp(async (app) => {
+        enableServeUi(app, { dir, prefix: '/', mountRoot: true, required: false });
+        const res = await app.inject('/.well-known/apple-app-site-association');
+        expect(res.statusCode).toBe(200);
+        expect(res.headers['content-type']).toMatch(/^application\/json/);
+        expect(res.headers['cache-control']).toBe('no-cache');
+        expect(res.json()).toEqual(association);
+        const landing = await app.inject('/native/landing.js');
+        expect(landing.statusCode).toBe(200);
+        expect(landing.headers['content-type']).toMatch(/^text\/javascript/);
+        expect(landing.headers['cache-control']).toBe('no-cache');
+        const bundle = await app.inject('/bundle.123.js');
+        expect(bundle.headers['cache-control']).toContain('immutable');
+      });
+    });
+  });
+
   it('serves an opaque no-store deployment identity and stays silent when it is absent', async () => {
     await withTempDir('happier-ui-deployment-', async (dir) => {
       await writeFile(join(dir, 'index.html'), '<!doctype html><html><body>ok</body></html>\n', 'utf-8');

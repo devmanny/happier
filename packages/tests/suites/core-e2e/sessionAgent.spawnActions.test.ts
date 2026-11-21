@@ -1,15 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import axios from 'axios';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import Fastify from 'fastify';
 import {
   accountSettingsParse,
   buildAcpConfigOptionOverridesV1,
   type AccountSettings,
   type ConnectedServiceBindingsV1,
   type SessionMcpSelectionV1,
+  type V2SessionByIdResponse,
 } from '@happier-dev/protocol';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { SOCKET_RPC_EVENTS } from '@happier-dev/protocol/socketRpc';
@@ -20,30 +21,21 @@ import type { Metadata } from '../../../../apps/cli/src/api/types';
 import { decodeBase64, decrypt, encodeBase64, encrypt } from '../../../../apps/cli/src/api/encryption';
 import { SpawnDaemonSessionRequestSchema, type SpawnDaemonSessionRequest } from '../../../../apps/cli/src/rpc/handlers/spawnSessionOptionsContract';
 import { createApiSessionSocketStub } from '../../../../apps/cli/src/testkit/backends/apiSessionSocketHarness';
+import { createSessionRecordFixture } from '../../../../apps/cli/src/testkit/backends/sessionFixtures';
+import { installAxiosFastifyAdapter } from '../../../../apps/cli/src/testkit/http/axiosAdapter';
 import { resolveServerHttpBaseUrl } from '../../../../apps/cli/src/api/client/serverHttpBaseUrl';
-import type { AccountMachineInventoryRow } from '../../../../apps/cli/src/api/machine/fetchAccountMachines';
 
 const {
-  axiosGet,
-  fetchSessionById,
   resolveDaemonSpawnSessionByNonce,
   spawnDaemonSession,
   spawnMachineSession,
   io,
-  updateSessionMetadataWithRetry,
 } = vi.hoisted(() => ({
-  axiosGet: vi.fn<(url: string) => Promise<{ status: number; data: { machine: AccountMachineInventoryRow } }>>(),
-  fetchSessionById: vi.fn(),
   resolveDaemonSpawnSessionByNonce: vi.fn(),
   spawnDaemonSession: vi.fn(),
   spawnMachineSession: vi.fn<(request: SpawnDaemonSessionRequest) => { type: 'success'; sessionId: string }>(),
   io: vi.fn(),
-  updateSessionMetadataWithRetry: vi.fn(),
 }));
-
-// HTTP is a network boundary, like the Socket.IO transport below. Keep the
-// real machine row parser, encryption selection and legacy cryptography beneath it.
-vi.mock('axios', () => ({ default: { get: axiosGet } }));
 
 vi.mock('socket.io-client', async (importOriginal) => ({
   ...await importOriginal<typeof import('socket.io-client')>(),
@@ -53,18 +45,6 @@ vi.mock('socket.io-client', async (importOriginal) => ({
 vi.mock('../../../../apps/cli/src/daemon/controlClient', () => ({
   resolveDaemonSpawnSessionByNonce,
   spawnDaemonSession,
-}));
-
-vi.mock('../../../../apps/cli/src/session/transport/http/sessionsHttp', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../../apps/cli/src/session/transport/http/sessionsHttp')>();
-  return {
-    ...actual,
-    fetchSessionById,
-  };
-});
-
-vi.mock('../../../../apps/cli/src/session/metadata/updateSessionMetadataWithRetry', () => ({
-  updateSessionMetadataWithRetry,
 }));
 
 const run = createRunDirs({ runLabel: 'core' });
@@ -84,25 +64,6 @@ function createCredentials() {
       type: 'legacy' as const,
       secret: new Uint8Array(32).fill(7),
     },
-  };
-}
-
-function createSessionRow(sessionId: string, metadata: Record<string, unknown>) {
-  const now = Date.now();
-  return {
-    id: sessionId,
-    active: true,
-    activeAt: now,
-    createdAt: now,
-    updatedAt: now,
-    metadata,
-    agentState: null,
-    path: typeof metadata.path === 'string' ? metadata.path : null,
-    host: typeof metadata.host === 'string' ? metadata.host : null,
-    machineId: typeof metadata.machineId === 'string' ? metadata.machineId : null,
-    pendingCount: 0,
-    share: null,
-    encryptionMode: 'plain',
   };
 }
 
@@ -136,31 +97,56 @@ async function createSessionAgentMcpScenario(params?: Readonly<{
     ...(params?.parentMetadata ?? {}),
   };
   const childSessionId = `sess_child_${randomUUID()}`;
+  const childSession = createSessionRecordFixture({
+    id: childSessionId,
+    encryptionMode: 'plain',
+    metadata: JSON.stringify({ path: workspaceDir, host: 'test-host', machineId: 'machine-local', flavor: 'claude' }),
+  });
 
-  fetchSessionById.mockImplementation(async (_args: unknown) => createSessionRow(childSessionId, {
-    path: workspaceDir,
-    host: 'test-host',
-    machineId: 'machine-local',
-    flavor: 'claude',
-  }));
+  const relay = Fastify();
+  relay.addHook('onRequest', async (request) => {
+    expect(request.headers.authorization).toBe(`Bearer ${createCredentials().token}`);
+  });
+  relay.get('/v1/machines/machine-local', async () => {
+    return { machine: { id: 'machine-local', dataEncryptionKey: null } };
+  });
+  relay.get(`/v2/sessions/${childSessionId}`, async () => ({ session: childSession } satisfies V2SessionByIdResponse));
+  relay.patch<{ Body: { metadata: { ciphertext: string; expectedVersion: number } } }>(`/v2/sessions/${childSessionId}`, async (request) => {
+    const update = request.body.metadata;
+    if (update.expectedVersion !== childSession.metadataVersion) {
+      return { success: false, error: 'version-mismatch', metadata: { version: childSession.metadataVersion, value: childSession.metadata } };
+    }
+    childSession.metadata = update.ciphertext;
+    childSession.metadataVersion += 1;
+    return { success: true, metadata: { version: childSession.metadataVersion } };
+  });
+  await relay.ready();
+  // Keep published-key selection and RPC crypto real beneath the HTTP boundary.
+  const restoreHttp = installAxiosFastifyAdapter({ app: relay, origin: new URL(resolveServerHttpBaseUrl()).origin });
+
   spawnMachineSession.mockReturnValue({ type: 'success', sessionId: childSessionId });
-  io.mockImplementation(() => createApiSessionSocketStub({
-    emit: (event, args) => {
-      if (event !== SOCKET_RPC_EVENTS.CALL) return;
-      // Socket.IO is the network boundary; keep real RPC encryption and dispatch beneath it.
-      const [payload, acknowledge] = args as [
-        { method: string; params: string },
-        (response: { ok: true; result: string }) => void,
-      ];
-      expect(payload.method).toBe(`machine-local:${RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE}`);
-      const key = createCredentials().encryption.secret;
-      const request = SpawnDaemonSessionRequestSchema.parse(decrypt(key, 'legacy', decodeBase64(payload.params, 'base64')));
-      const result = spawnMachineSession(request);
-      acknowledge({ ok: true, result: encodeBase64(encrypt(key, 'legacy', result)) });
-    },
-  }));
+  io.mockImplementation((_url: unknown, options?: { auth?: { clientType?: unknown } }) => {
+    if (options?.auth?.clientType === 'session-scoped') {
+      // Exercise the real metadata writer through its supported HTTP transport.
+      return createApiSessionSocketStub({ onConnect: (socket) => socket.trigger('connect_error', new Error('Session socket unavailable')) });
+    }
+    return createApiSessionSocketStub({
+      emit: (event, args) => {
+        if (event !== SOCKET_RPC_EVENTS.CALL) return;
+        // Socket.IO is the network boundary; keep real RPC encryption and dispatch beneath it.
+        const [payload, acknowledge] = args as [
+          { method: string; params: string },
+          (response: { ok: true; result: string }) => void,
+        ];
+        expect(payload.method).toBe(`machine-local:${RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE}`);
+        const key = createCredentials().encryption.secret;
+        const request = SpawnDaemonSessionRequestSchema.parse(decrypt(key, 'legacy', decodeBase64(payload.params, 'base64')));
+        const result = spawnMachineSession(request);
+        acknowledge({ ok: true, result: encodeBase64(encrypt(key, 'legacy', result)) });
+      },
+    });
+  });
   resolveDaemonSpawnSessionByNonce.mockResolvedValue({ status: 'unsupported' });
-  updateSessionMetadataWithRetry.mockResolvedValue({ ok: true });
 
   const { RpcHandlerManager } = await import('../../../../apps/cli/src/api/rpc/RpcHandlerManager');
   const { startHappyServer } = await import('../../../../apps/cli/src/mcp/startHappyServer');
@@ -206,41 +192,22 @@ async function createSessionAgentMcpScenario(params?: Readonly<{
     parentSessionId,
     server,
     workspaceDir,
+    getChildMetadata: () => JSON.parse(childSession.metadata) as Record<string, unknown>,
     async close() {
       await client.close?.();
       server.stop();
+      restoreHttp();
+      await relay.close();
     },
   };
 }
 
 describe('core e2e: session-agent spawn actions', () => {
   beforeEach(() => {
-    axiosGet.mockReset();
-    axiosGet.mockImplementation(async (url) => {
-      if (url !== `${resolveServerHttpBaseUrl()}/v1/machines/machine-local`) {
-        throw new Error(`Unexpected HTTP request: ${url}`);
-      }
-      const machine = { id: 'machine-local', dataEncryptionKey: null } satisfies AccountMachineInventoryRow;
-      return { status: 200, data: { machine } };
-    });
-    fetchSessionById.mockReset();
     resolveDaemonSpawnSessionByNonce.mockReset();
     spawnDaemonSession.mockReset();
     spawnMachineSession.mockReset();
     io.mockReset();
-    updateSessionMetadataWithRetry.mockReset();
-    const realGet = axios.get.bind(axios);
-    // Machine lookup is the remote HTTP boundary; localhost MCP transport stays real.
-    vi.spyOn(axios, 'get').mockImplementation(async (url, config) => {
-      if (String(url).endsWith('/v1/machines/machine-local')) {
-        return { status: 200, data: { machine: { id: 'machine-local', dataEncryptionKey: null } } };
-      }
-      return realGet(url, config);
-    });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
   });
 
   it('exposes session.spawn_new to session agents, honors Off settings, and forwards rich inherited spawn options', async () => {
@@ -365,6 +332,9 @@ describe('core e2e: session-agent spawn actions', () => {
           text: 'Use explicit rich options.',
           localId: expect.stringMatching(/^spawn-first:/),
         },
+      }));
+      expect(scenario.getChildMetadata()).toEqual(expect.objectContaining({
+        summary: expect.objectContaining({ text: 'Rich child' }),
       }));
 
       const spawnCallsBeforeEscalation = spawnMachineSession.mock.calls.length;

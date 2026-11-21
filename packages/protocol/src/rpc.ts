@@ -19,6 +19,9 @@ export const RPC_METHODS = {
   DAEMON_SERVER_WORK_STATUS: 'daemon.serverWork.status',
   DAEMON_MEMORY_SETTINGS_GET: 'daemon.memory.settings.get',
   DAEMON_MEMORY_SETTINGS_SET: 'daemon.memory.settings.set',
+  /** Conversation search on this machine (`memory/messageSearchSwitch.ts`). */
+  DAEMON_MEMORY_MESSAGE_SEARCH_STATUS: 'daemon.memory.messageSearch.status',
+  DAEMON_MEMORY_MESSAGE_SEARCH_SET: 'daemon.memory.messageSearch.set',
   DAEMON_MCP_SERVERS_TEST: 'daemon.mcpServers.test',
   DAEMON_MCP_SERVERS_DETECT: 'daemon.mcpServers.detect',
   DAEMON_MCP_SERVERS_PREVIEW: 'daemon.mcpServers.preview',

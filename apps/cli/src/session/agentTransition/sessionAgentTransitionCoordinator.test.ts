@@ -11,7 +11,7 @@ import {
   readAcpConfiguredBackendV1FromMetadata,
   type SessionStopOutcome,
 } from '@happier-dev/protocol';
-import type { SessionAgentTransitionRequestV1 } from '@happier-dev/protocol';
+import { SPAWN_SESSION_ERROR_CODES, type SessionAgentTransitionRequestV1 } from '@happier-dev/protocol';
 
 /**
  * Coordinator contract tests.
@@ -1426,14 +1426,36 @@ describe('runSessionAgentTransition', () => {
       expect(mocks.enqueuePendingQueueV2MessageViaHttp.mock.calls[0]?.[0].body.localId).toBe(LOCAL_ID);
     });
 
-    it('does not re-activate a target that is already running, and never calls that target_start_failed', async () => {
-      // The likeliest reconcile is a retry after an invocation that fully
-      // succeeded and lost only its answer — so the target is already RUNNING.
-      // `requestInactiveSessionResume` has no active guard of its own: it goes
-      // straight to the machine SPAWN RPC. Issuing that against a live runtime
-      // is a lifecycle action nobody asked for, and a daemon that refuses turns
-      // a completed transition into a false `target_start_failed`, whose
-      // recovery tells the user to start a target that is already up.
+    it.each([
+      { daemon: 'adopts the running target', resumed: { ok: true } as const, expected: { type: 'accepted', localId: LOCAL_ID } },
+      {
+        daemon: 'refuses a running runtime for another Agent',
+        resumed: {
+          ok: false,
+          code: 'resume_failed',
+          message: "This session's runtime is claude, but the session now runs codex.",
+          spawnErrorCode: SPAWN_SESSION_ERROR_CODES.SESSION_RUNTIME_AGENT_CONFLICT,
+        } as const,
+        expected: { type: 'partially_applied', applied: 'current_view_committed', code: 'target_start_failed' },
+      },
+      {
+        // A daemon that cannot check the runtime (fence, restart, transport) says nothing about
+        // which Agent runs it; the running target is not reported as one that failed to start.
+        daemon: 'cannot verify the running target',
+        resumed: { ok: false, code: 'resume_failed', message: 'The existing session runtime could not be verified.' } as const,
+        expected: { type: 'accepted', localId: LOCAL_ID },
+      },
+      {
+        daemon: 'is unreachable',
+        resumed: { ok: false, code: 'timeout', message: 'Machine RPC timed out' } as const,
+        expected: { type: 'accepted', localId: LOCAL_ID },
+      },
+    ])('asks the machine to confirm an already-running target, and reports target_start_failed only when its daemon $daemon', async ({ resumed, expected }) => {
+      // The likeliest reconcile is a retry after an invocation that fully succeeded and lost only
+      // its answer, so the target is already RUNNING. `active` does not say WHICH Agent runs it
+      // (incident 2026-11-17: a stale Claude runner served the Session switched to Codex). The
+      // machine's spawn owner adopts a running runtime idempotently and refuses one for an Agent
+      // the Session no longer names.
       primeAlreadyTargeted();
       mocks.findTranscriptEncryptedMessageByLocalIdV2.mockResolvedValue(dividerLookup(matchingDivider));
       mocks.fetchSessionByIdCompat.mockResolvedValue(
@@ -1442,16 +1464,12 @@ describe('runSessionAgentTransition', () => {
           { active: true },
         ),
       );
-      mocks.requestInactiveSessionResume.mockResolvedValue({
-        ok: false,
-        code: 'unsupported',
-        message: 'Session is already active',
-      });
+      mocks.requestInactiveSessionResume.mockResolvedValue(resumed);
 
       const result = await runSessionAgentTransition({ credentials, request: request() });
 
-      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
-      expect(mocks.requestInactiveSessionResume).not.toHaveBeenCalled();
+      expect(mocks.requestInactiveSessionResume).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject(expected);
     });
 
     it('reports the committed depth with divider_unavailable when no divider row exists', async () => {
@@ -1819,6 +1837,169 @@ describe('runSessionAgentTransition', () => {
       expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
       expect(readSeedSource()).not.toHaveProperty('returningAgentLastSeenSeq');
       expect(readCommittedTargetView().claudeSessionId).toBeUndefined();
+    });
+  });
+
+  describe('user-defined agent identity', () => {
+    const JULIAN = { v: 1 as const, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Architect for Manny.' };
+    const TOMAS = { v: 1 as const, id: 'tomas', name: 'Tomás', emoji: '🤖', description: 'Works the Nomada account.' };
+
+    function committedView(): Record<string, unknown> {
+      const cutover = mocks.commitSessionAgentTransitionCutover.mock.calls.at(-1)?.[0];
+      return JSON.parse(cutover.currentView.metadataCiphertext) as Record<string, unknown>;
+    }
+
+    function julianClaudeSource(): Record<string, unknown> {
+      return sourceMetadata({
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+    }
+
+    it('makes a Codex agent session the selected Claude agent, with its config dir, and resumes it as that agent', async () => {
+      primeHappyPath(sourceMetadata({
+        flavor: 'codex', claudeSessionId: undefined, claudeTranscriptPath: undefined, codexSessionId: 'codex-native-1',
+        agentIdentityV1: { v: 1, id: 'mateo', name: 'Mateo', emoji: '🤖' },
+      }));
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          expectedCurrentAgentId: 'codex',
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(committedView()).toMatchObject({
+        flavor: 'claude',
+        agentIdentityV1: JULIAN,
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0]).toMatchObject({
+        agentIdentity: JULIAN,
+        metadata: { nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' } },
+      });
+    });
+
+    it('switches one Claude agent to another instead of calling it the same target, starting a fresh conversation', async () => {
+      primeHappyPath(julianClaudeSource());
+      // Julián's own Claude conversation lives in his config dir; Tomás must not resume it.
+      mocks.readAgentNativeResumeRecord.mockResolvedValue({
+        identity: { v: 1, vendorResumeId: 'claude-native-1' },
+        departureSeqInclusive: 55,
+      });
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: TOMAS,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      const written = committedView();
+      expect(written).toMatchObject({
+        flavor: 'claude',
+        agentIdentityV1: { id: 'tomas', name: 'Tomás' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-b' },
+      });
+      expect(written.claudeSessionId).toBeUndefined();
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toEqual(TOMAS);
+    });
+
+    it('turns a Codex agent session into bare Codex on the same provider', async () => {
+      primeHappyPath(sourceMetadata({
+        flavor: 'codex', claudeSessionId: undefined, claudeTranscriptPath: undefined, codexSessionId: 'codex-native-1',
+        agentIdentityV1: { v: 1, id: 'mateo', name: 'Mateo', emoji: '🤖' },
+      }));
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({ expectedCurrentAgentId: 'codex', selection: { v: 1, agentId: 'codex', agentIdentityV1: null } }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      expect(committedView()).toMatchObject({ flavor: 'codex' });
+      expect(committedView()).not.toHaveProperty('agentIdentityV1');
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toBeUndefined();
+    });
+
+    it('turns bare Claude into a Claude agent on the same provider', async () => {
+      primeHappyPath();
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      expect(mocks.requestSessionStop).toHaveBeenCalledTimes(1);
+      expect(committedView()).toMatchObject({
+        agentIdentityV1: { id: 'julian' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      });
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toEqual(JULIAN);
+    });
+
+    it('still rejects the same agent identity on the same provider and dir without stopping anything', async () => {
+      primeHappyPath(julianClaudeSource());
+      mocks.findTranscriptEncryptedMessageByLocalIdV2.mockResolvedValue({ type: 'not_found' });
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({
+          selection: {
+            v: 1, agentId: 'claude', agentIdentityV1: JULIAN,
+            environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+          },
+        }),
+      });
+
+      expect(result).toEqual({ type: 'rejected', code: 'same_target', sourceEffect: 'none' });
+      expect(mocks.requestSessionStop).not.toHaveBeenCalled();
+    });
+
+    it('turns an agent session into the bare provider: no identity, no config dir', async () => {
+      primeHappyPath(julianClaudeSource());
+
+      const result = await runSessionAgentTransition({
+        credentials,
+        request: request({ selection: { v: 1, agentId: 'codex', agentIdentityV1: null } }),
+      });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      const written = committedView();
+      expect(written).not.toHaveProperty('agentIdentityV1');
+      expect(written).not.toHaveProperty('nativeAgentEnvironmentV1');
+      const resumed = mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0];
+      expect(resumed.agentIdentity).toBeUndefined();
+      expect(resumed.metadata).not.toHaveProperty('nativeAgentEnvironmentV1');
+    });
+
+    it('drops the source config dir on a released-shape transition and leaves the identity as it was', async () => {
+      primeHappyPath(julianClaudeSource());
+
+      const result = await runSessionAgentTransition({ credentials, request: request() });
+
+      expect(result).toEqual({ type: 'accepted', localId: LOCAL_ID });
+      const written = committedView();
+      expect(written).not.toHaveProperty('nativeAgentEnvironmentV1');
+      expect(written.agentIdentityV1).toEqual({ v: 1, id: 'julian', name: 'Julián', emoji: '🤖' });
+      expect(mocks.requestInactiveSessionResume.mock.calls.at(-1)?.[0].agentIdentity).toBeUndefined();
     });
   });
 });

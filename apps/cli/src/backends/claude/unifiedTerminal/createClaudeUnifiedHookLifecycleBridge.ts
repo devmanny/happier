@@ -18,7 +18,8 @@ import type { createClaudeProviderRuntimeActivityAdapter } from '../providerActi
 import { isClaudeRuntimeAuthFailureEvidence } from '../connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
 import { containsDefinitiveClaudeOAuthRevocationEvidence } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
-  mapClaudeRateLimitEventToUsageDetails,
+  mapClaudeProviderFailureToUsageDetails,
+  mapClaudeRateLimitEventToQuotaEvidence,
   mapClaudeStopFailureHookToUsageDetails,
   type NormalizedProviderUsageLimitDetailsV1,
 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
@@ -64,6 +65,13 @@ export type ClaudeUnifiedTurnStallScreenProbe = Readonly<{
   quietMs: number;
   maxAttempts?: number | undefined;
   onStalled: () => void | Promise<void>;
+  /**
+   * Reads whether Claude's TUI shows its idle interactive prompt (no spinner, dialog, draft or
+   * queued banner). After a full quiet window with no hook or transcript progress, that screen is
+   * turn-end evidence like a Stop hook: the hook was lost or no turn was ever running, and keeping
+   * the turn open holds every queued message behind it.
+   */
+  isTurnEndedOnScreen?: (() => Promise<boolean>) | undefined;
   /**
    * Fired ONCE per stall episode when the bounded `maxAttempts` budget exhausts while the turn is
    * still active-but-stuck (e.g. an API-retry loop that never reaches turn-terminal). Without it the
@@ -142,6 +150,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onThinkingChange?: ((thinking: boolean) => void) | undefined;
   onReady?: (() => void | Promise<void>) | undefined;
   onUsageLimitDetails?: ((details: NormalizedProviderUsageLimitDetailsV1) => void | Promise<void>) | undefined;
+  onQuotaEvidence?: ((windows: readonly NormalizedProviderUsageLimitDetailsV1[]) => void | Promise<void>) | undefined;
   onRuntimeAuthFailureEvent?: ((error: unknown) => void | Promise<void>) | undefined;
   onProviderPromptStarted?: (() => void | Promise<void>) | undefined;
   /**
@@ -172,6 +181,12 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   onSessionEnd?: ((event: ClaudeUnifiedSessionEndEvent) => void | Promise<void>) | undefined;
   turnStallScreenProbe?: ClaudeUnifiedTurnStallScreenProbe | undefined;
   turnEndScreenProbe?: ClaudeUnifiedTurnEndScreenProbe | undefined;
+  /**
+   * Reads whether Claude's TUI shows a running turn (its spinner) when this bridge starts. A runner
+   * that attaches to a live terminal mid-turn never sees that turn's UserPromptSubmit; without this
+   * read the session reads idle until the next tool call or result lands in the transcript.
+   */
+  isTurnRunningOnScreen?: (() => Promise<boolean>) | undefined;
   runtimeActivityAdapter?: ReturnType<typeof createClaudeProviderRuntimeActivityAdapter> | null | undefined;
   providerActivityLedger?: ReturnType<typeof createClaudeProviderActivityLedger> | undefined;
 }>): ClaudeUnifiedHookLifecycleBridge {
@@ -183,6 +198,9 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   let turnStallTimer: NodeJS.Timeout | null = null;
   let turnStallActive = false;
   let turnStallAttempts = 0;
+  // Bumped on every hook/transcript progress event so a screen read that started before progress
+  // cannot settle the turn that progress proved alive.
+  let turnStallProgressEpoch = 0;
   let turnStallProbeInFlight = false;
   let turnStallEscalated = false;
   let turnEndProbeTimer: NodeJS.Timeout | null = null;
@@ -193,6 +211,9 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
   let terminalSideEffects: Promise<void> = Promise.resolve();
   let anonymousPermissionBlockCount = 0;
   let nativeResumeContinuationPending = false;
+  // Bumped on every lifecycle transition so a start-time screen read that a hook or transcript row
+  // overtook cannot reopen the turn that evidence already settled.
+  let lifecycleTransitionEpoch = 0;
   const pendingPermissionRequestIds = new Set<string>();
 
   const clearQuietDrainTimer = (): void => {
@@ -247,7 +268,8 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (disposed || !turnStallActive || turnStallProbeInFlight) return;
       turnStallAttempts += 1;
       turnStallProbeInFlight = true;
-      Promise.resolve(probe.onStalled())
+      settleStalledTurnIfScreenIsIdle(probe)
+        .then((settled) => (settled ? undefined : probe.onStalled()))
         .catch((error) => {
           logger.debug('[unified]: Claude unified terminal turn-stall screen probe failed', error);
         })
@@ -259,8 +281,29 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     turnStallTimer.unref?.();
   };
 
+  const settleStalledTurnIfScreenIsIdle = async (probe: ClaudeUnifiedTurnStallScreenProbe): Promise<boolean> => {
+    if (!probe.isTurnEndedOnScreen) return false;
+    const progressEpoch = turnStallProgressEpoch;
+    let turnEndedOnScreen = false;
+    try {
+      turnEndedOnScreen = await probe.isTurnEndedOnScreen();
+    } catch (error) {
+      logger.debug('[unified]: Claude unified terminal turn-stall idle screen read failed', error);
+    }
+    if (!turnEndedOnScreen || disposed || !turnStallActive || progressEpoch !== turnStallProgressEpoch) {
+      return false;
+    }
+    logger.warn('[unified]: settling a stalled turn: Claude shows its idle prompt without a turn-end signal', {
+      quietMs: turnStallProbeQuietMs(),
+      attempt: turnStallAttempts,
+    });
+    lifecycle?.observe({ type: 'completion_candidate', providerTurnId: null, source: 'claude_screen_idle_prompt' });
+    return true;
+  };
+
   const noteTurnStallProgress = (): void => {
     if (!opts.turnStallScreenProbe || !turnStallActive) return;
+    turnStallProgressEpoch += 1;
     turnStallAttempts = 0;
     turnStallEscalated = false;
     scheduleTurnStallProbe();
@@ -543,12 +586,28 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
     settleIdleAfterTerminalEffects();
   };
 
+  const openTurnRunningOnScreenAtStart = (): void => {
+    const readTurnRunningOnScreen = opts.isTurnRunningOnScreen;
+    if (!readTurnRunningOnScreen) return;
+    const epoch = lifecycleTransitionEpoch;
+    void readTurnRunningOnScreen().then((running) => {
+      const activeLifecycle = lifecycle;
+      if (!running || disposed || !activeLifecycle || epoch !== lifecycleTransitionEpoch) return;
+      if (activeLifecycle.snapshot().active) return;
+      logger.infoFile('[unified]: Claude is mid-turn on screen as this runner starts observing; opening the turn');
+      activeLifecycle.observe({ type: 'turn_started', providerTurnId: null, source: 'claude_screen_running_at_start' });
+    }).catch((error) => {
+      logger.debug('[unified]: Claude unified terminal start-time running-turn screen read failed', error);
+    });
+  };
+
   return {
     start() {
       if (disposed || unsubscribe) return;
       lifecycle = createLocalTurnLifecycleController({
         completionQuiescenceMs: opts.completionQuiescenceMs,
         onStateChange: (snapshot, event) => {
+          lifecycleTransitionEpoch += 1;
           if (snapshot.active && !snapshot.terminal) {
             nativeResumeContinuationPending = false;
             // A new turn is active — the turn-stall probe now covers it, so cancel any pending
@@ -674,6 +733,7 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
         }
         tracker?.observeHook(data);
       }) ?? null;
+      openTurnRunningOnScreenAtStart();
     },
     observeTranscript(message) {
       noteTurnStallProgress();
@@ -683,7 +743,11 @@ export function createClaudeUnifiedHookLifecycleBridge(opts: Readonly<{
       if (isClaudeRuntimeAuthFailureEvidence(message)) {
         chainTerminalSideEffect('runtime-auth', () => opts.onRuntimeAuthFailureEvent?.(message));
       }
-      const usageLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+      const quotaEvidence = mapClaudeRateLimitEventToQuotaEvidence(message);
+      if (quotaEvidence.length > 0) {
+        chainTerminalSideEffect('quota-evidence', () => opts.onQuotaEvidence?.(quotaEvidence));
+      }
+      const usageLimitDetails = mapClaudeProviderFailureToUsageDetails(message);
       if (usageLimitDetails) {
         chainTerminalSideEffect('usage-limit', () => opts.onUsageLimitDetails?.(usageLimitDetails));
       }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { deriveBoxPublicKeyFromSeed, sealEncryptedDataKeyEnvelopeV1 } from '@happier-dev/protocol';
 
@@ -146,6 +146,35 @@ describe('resolveEffectiveCodingPromptText', () => {
     expect(out).toContain('If the user asks you to remember or find something from past conversations');
     expect(out).toContain('use `memory_search` first');
     expect(out).toContain('use `memory_get_window`');
+  });
+
+  it('tells the model which agent it is when the session was started as one, even without the shared base', async () => {
+    vi.stubEnv('HAPPIER_AGENT_IDENTITY_JSON', JSON.stringify({ v: 1, id: 'a1', name: 'Mateo', emoji: '🤖', description: 'Firma como Mateo 🤖.' }));
+    try {
+      for (const baseOverride of ['BASE', null]) {
+        const out = await resolveEffectiveCodingPromptText({
+          credentials: createCredentials(),
+          settings: {},
+          profileId: null,
+          baseOverride,
+          providerId: 'codex',
+          fetchPromptArtifactRecord: async () => null,
+        });
+        expect(out).toContain('Mateo 🤖');
+        expect(out).toContain('Firma como Mateo 🤖.');
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    const plain = await resolveEffectiveCodingPromptText({
+      credentials: createCredentials(),
+      settings: {},
+      profileId: null,
+      baseOverride: 'BASE',
+      fetchPromptArtifactRecord: async () => null,
+    });
+    expect(plain).not.toContain('Agent identity');
   });
 
   it('does not append repository tool-execution policy to Codex prompts', async () => {

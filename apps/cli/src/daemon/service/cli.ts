@@ -41,6 +41,7 @@ import {
   type DaemonServicePlannedCommand,
   type DaemonServiceTargetMode,
 } from './plan';
+import { resolveDaemonServiceDarwinLauncher } from './darwinDaemonLauncher';
 import { resolveDaemonServicePaths, type DaemonServiceCliRuntime, type DaemonServiceInstallationSnapshot, type DaemonServiceInventoryEntry, type DaemonServiceListEntry } from './paths';
 import { collectWindowsServiceLaunchDiagnostics } from './collectWindowsServiceLaunchDiagnostics';
 import { commandExistsInPath } from './commandExistsInPath';
@@ -1029,6 +1030,7 @@ export async function resolveDaemonServiceListEntries(
     publicServerUrl: runtime.publicServerUrl,
     nodePath: expectedDefaultRuntimeTarget.nodePath,
     entryPath: expectedDefaultRuntimeTarget.entryPath,
+    darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
   });
   const expectedDefaultFile = buildExpectedDefaultPlan('at-login').files[0] ?? null;
   if (!expectedDefaultFile) {
@@ -1589,6 +1591,10 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
       publicServerUrl: installRuntime.publicServerUrl,
       nodePath: installRuntime.nodePath,
       entryPath: installRuntime.entryPath,
+      darwinLauncher: resolveDaemonServiceDarwinLauncher({
+        platform: installRuntime.platform,
+        happierHomeDir: installRuntime.happierHomeDir,
+      }),
     });
     const shouldKickstartCurrentDarwinInstall = installRuntime.platform === 'darwin'
       && ownership.kind !== 'none'
@@ -1998,6 +2004,7 @@ export async function runDaemonServiceCliCommand(params: Readonly<{
           publicServerUrl: runtime.publicServerUrl,
           nodePath: runtime.nodePath,
           entryPath: runtime.entryPath,
+          darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         });
         const expectedFile = expectedPlan.files[0];
         if (expectedFile) {

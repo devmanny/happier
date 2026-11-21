@@ -7,6 +7,24 @@ import {
 import { ClaudeUnifiedTerminalInjectionFailureError } from './terminalInjectionFailureError';
 
 describe('resolveClaudeUnifiedPendingDeliveryBlock', () => {
+  it('blocks a refused interactive-only command as an unsupported action with no provider effect', () => {
+    const error = Object.assign(new Error('Claude unified terminal prompt injection failed'), {
+      code: 'claude_unified_terminal_injection_failed',
+      failureState: 'failed_terminal',
+      reason: 'unsupported_command',
+      phase: 'before_write',
+      duplicateRisk: 'none',
+      recoverable: true,
+      userMessageLocalIds: ['pending-local-panel'],
+    });
+
+    expect(resolveClaudeUnifiedPendingDeliveryBlock(error)).toEqual({
+      localIds: ['pending-local-panel'],
+      reason: 'unsupported_action',
+      providerEffect: 'none',
+    });
+  });
+
   it('does not create pending-delivery authority from elapsed provider-acceptance time', () => {
     const error = Object.assign(new Error('Claude unified terminal prompt submission could not be confirmed'), {
       code: 'claude_unified_terminal_injection_failed',

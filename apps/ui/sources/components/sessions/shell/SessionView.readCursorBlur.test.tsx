@@ -46,7 +46,7 @@ function getStorageStateForTest() {
         sessions: { s1: sessionState.current },
         settings: {},
         localSettings: {},
-        sessionListViewDataByServerId: {},
+        sessionListRenderables: {}, sessionListViewDataByServerId: {},
     };
 }
 

@@ -26,6 +26,7 @@ describe('CLI command-surface manifest', () => {
       'attach',
       'session',
       'resume',
+      'search',
     ]);
 
     for (const entry of entries) {

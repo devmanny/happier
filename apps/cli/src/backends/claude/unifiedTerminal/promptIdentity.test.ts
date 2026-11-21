@@ -23,6 +23,18 @@ describe('normalizeClaudeUnifiedPromptIdentityText', () => {
       .toBe(normalizeClaudeUnifiedPromptIdentityText(injected));
   });
 
+  it('reads a pasted prompt that quotes the paste markers as the text Happier injected', () => {
+    // Claude Code 2.1.322 (tmux probe, 11 nov 2026; incident cmvepv5n2, a child-session notice that
+    // quoted the marker stayed "delivering"): Claude escapes quoted markers inside the pasted block.
+    const injected = 'it arrives wrapped in `<pasted_content>`\nand ends at `</pasted_content>`.\n</pasted_content id="abcd">';
+    const recordedByProvider = `\n\n${PASTE_OPEN}\n`
+      + 'it arrives wrapped in `<\\pasted_content>`\nand ends at `<\\/pasted_content>`.\n<\\/pasted_content id="abcd">'
+      + `\n${PASTE_CLOSE}\n`;
+
+    expect(normalizeClaudeUnifiedPromptIdentityText(recordedByProvider))
+      .toBe(normalizeClaudeUnifiedPromptIdentityText(injected));
+  });
+
   it('keeps marker-looking prose that is not a standalone paste marker', () => {
     const prompt = `explain ${PASTE_OPEN} in the parser`;
 

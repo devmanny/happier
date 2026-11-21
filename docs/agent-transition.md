@@ -137,6 +137,114 @@ configured operation therefore disables only configured continuation; built-in
 batch/single inspection keeps its released shape. This adapter may retire once
 those strict peers are unsupported.
 
+### User-defined agent identity (development)
+
+A selection may also name who the Session works as. `agentIdentityV1` is the
+existing `AgentIdentityV1` shape (absent: identity unchanged, the released
+behaviour; object: the Session becomes that agent; `null`: no agent).
+`environmentVariables` is a closed allowlist, currently `{ CLAUDE_CONFIG_DIR }`
+(non-empty, at most 4096 characters). Any other key fails the strict selection
+schema, so the daemon answers `rejected / unsupported_operation` before any
+effect. Daemons advertise support with
+`tool.sessionAgentTransition.supportsAgentIdentity`. Older daemons reject both
+fields up front for the same strict-schema reason.
+
+- Same target: provider, identity id and allowlisted environment must all match
+  the committed metadata (`selectionKeepsSessionAgentIdentity`, which both
+  inspection and the coordinator use). A released-shape selection still
+  compares only the backend target. A same-provider identity retry is told
+  apart from a no-op by this operation's own divider.
+- The cutover projection writes or deletes `metadata.agentIdentityV1`, with the
+  description included. On every transition it replaces
+  `nativeAgentEnvironmentV1` with the selection's environment, or removes it.
+  This includes released-shape transitions, so a Claude config dir never
+  follows the Session to another provider or agent.
+- An identity-carrying target never takes a native return. It starts fresh with
+  the full replay, because the local record does not name the provider directory
+  the earlier conversation lives in.
+- Resume: `buildInactiveSessionResumeSpawnOptions` uses an explicit identity
+  when the caller has one. Otherwise it uses the identity recorded in metadata,
+  so every resumer (pending-input activation, transition, message send) starts
+  the same agent. The spawn RPC forwards it as `agentIdentityV1`, which becomes
+  `HAPPIER_AGENT_IDENTITY_JSON`. This covers the pending-input activation, which
+  can start the target before the transition's own resume does. The respawn
+  descriptor seals it
+  (`sealedAgentIdentity`) so a runner relaunched after a daemon restart keeps
+  it. Descriptors without the field still read.
+- Backend admission: one rule
+  (`resolveSessionRuntimeBackendConflict` in
+  `apps/cli/src/daemon/spawn/existingSessionBackendTargetAdmission.ts`) — a
+  runtime serves an existing Session only as the Agent its persisted current
+  view names (`resolveSessionPersistedRuntimeIdentity`), never the Agent a
+  (possibly stale) request names. Its consumers:
+  - Launch options (`resolveExistingSessionLaunchOptions`, same module), used
+    by the daemon launch, the already-running refresh and the respawn. A request
+    that names no Agent runs the Session's Agent. A request that names another
+    Agent (an automation's stored target, a client view or exited runner from
+    before a switch) is retargeted: rebuilt from the persisted Session like a
+    cold resume (`buildInactiveSessionResumeSpawnOptions`), so the old Agent's
+    resume id, model and provider environment never carry over; only its
+    execution authorization, spawn nonce and prompt carriers survive. It runs at
+    the Session's persisted placement, however the request spelled its
+    directory. A request for another machine than the Session's (or a Session
+    without a persisted path) is refused as a placement problem
+    (`INVALID_REQUEST`), never as an Agent conflict. An explicit
+    `replace_with_runtime_identity` attach (handoff) keeps its Agent.
+  - Daemon spawn owner (`startDaemon`). Rejoining a pending launch and adopting
+    a live runner compare the tracked runner with the Session's current view: a
+    stale request still reaches the right runner (adopted, its Pending queue
+    woken), a runner for another Agent is refused, and a tracked runner's
+    recorded Agent is never set to one that contradicts the Session. Refusals
+    carry their own spawn error code, `SESSION_RUNTIME_AGENT_CONFLICT`.
+    Requests for different Agents never share an in-flight coalescer key: the
+    key is read before the launch is retargeted, so a launch decided before a
+    switch would otherwise answer a request made after it.
+  - Runner attach (`mergeSessionMetadataForStartup`, used by every provider's
+    attach). A runtime whose Agent contradicts the Session it attaches to under a
+    preserved identity throws `SessionAttachRuntimeIdentityConflictError`
+    (not retryable) before it commits daemon-carried first input or binds its
+    Pending consumer, and before a daemon-started runner or a terminal-started
+    Claude reports to the daemon. It runs inside the metadata CAS, so a cutover
+    committed after the runner's snapshot still stops it.
+  - Runner lifetime (`ApiSessionClient.bindRuntimeBackendTarget`). Every client
+    a runner serves its Session through is bound to the runner's own Agent
+    (`bindSessionClientToRuntimeAgent`): after its startup write settles,
+    whatever the outcome, when the attach could not read the Session's
+    snapshot, for a fresh Session, and for a client an offline reconnection
+    swaps in. On every metadata update and before every Pending
+    materialization, a Session that names another Agent (a cutover that
+    committed after the runtime attached) fences Pending and stops the runner
+    through its own termination path (`requestRunnerTermination`, reason
+    `sessionAgentConflict`, exit code 0), before it takes the new Agent's
+    input. A stop requested before the runner registered its termination
+    handlers waits for that registration, so it is graceful whatever the
+    ordering; no OS signal is involved. The parent of a spawned child is not
+    told "the child stopped, send it a message to resume it" for this stop:
+    its next message reaches the Agent the Session now names.
+
+  Incident 2026-11-17: a `session send` resume fired in the stop → cutover
+  window launched the departing Claude; the Codex resume rejoined that launch
+  and reported `accepted`, and the Claude runner kept the Codex identity. Now a
+  request read after the cutover is retargeted to Codex; a Claude launch already
+  in flight exits at attach once the cutover is visible, or, if it attached
+  first, when the cutover's metadata update reaches it; and while it is tracked
+  the target's resume is refused, so the switch reports `target_start_failed`
+  rather than running the wrong Agent. Known limits: an unknown identity on
+  either side admits (a runner whose own metadata names no Agent stays unbound;
+  a runner that cannot read the Session's snapshot attaches without the attach
+  check, and only its lifetime guard stops it once its client learns the
+  Session's current view); the lifetime guard relies on that view reaching the
+  runner before it materializes the target's input (the cutover's metadata
+  update arrives on the same session socket in commit order, but a Pending read
+  over HTTP is not fenced by the server). A failed identity-replacing (handoff)
+  startup write leaves the Session naming its previous Agent, so a cross-Agent
+  handoff runner whose write failed stops rather than serving it.
+- Known limit: an old client returning to Claude after Claude → Codex sends no
+  environment. The Session resumes without its previous `CLAUDE_CONFIG_DIR`, so
+  the native conversation is found only if that dir's `projects` folder is
+  shared with the default one (e.g. `~/.claude-tomas/projects` symlinked to
+  `~/.claude/projects`).
+
 ## Flow
 
 Numbered stages match the section comments in the coordinator.
@@ -206,7 +314,13 @@ target; a failure after admission is `target_start_failed`, never a silent drop.
 **7.5 Reconciliation.** A retry that finds the Session already naming the target
 runs `reconcileAlreadyTargetedSession`, sharing the same activation/admission
 implementation. Only a request that *also* expected the target is a genuine
-`same_target` no-op.
+`same_target` no-op. Activation asks the Session's machine for its runtime even
+when the row is `active`: `active` does not say which Agent runs it, and the
+spawn owner adopts a running runtime of the target without a new launch, or
+refuses one for another Agent with `SESSION_RUNTIME_AGENT_CONFLICT`. On an active
+row only that refusal reports `target_start_failed`; a daemon that could not
+check the runtime (fence, restart, transport, timeout) leaves the result
+`accepted`, and the client reads the runtime from canonical state.
 
 ### Result arms
 

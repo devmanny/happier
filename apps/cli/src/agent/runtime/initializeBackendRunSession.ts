@@ -7,6 +7,7 @@ import type { AgentState, Metadata, Session } from '@/api/types'
 import {
   type SessionAttachMetadataIdentityPolicy,
 } from '@happier-dev/protocol'
+import { bindSessionClientToRuntimeAgent } from '@/agent/runtime/sessionRuntimeAgentBinding'
 import { setupOfflineReconnection } from '@/api/offline/setupOfflineReconnection'
 import { createBaseSessionForAttach } from '@/agent/runtime/createBaseSessionForAttach'
 import {
@@ -354,6 +355,7 @@ export async function initializeBackendRunSession(
       await opts.onAttachMetadataSnapshotReady?.(snapshot, session)
     } else {
       opts.onAttachMetadataSnapshotMissing?.(snapshotError)
+      bindSessionClientToRuntimeAgent(session, opts.metadata)
     }
 
     primeAgentStateForUiFn(session, opts.uiLogPrefix)
@@ -405,6 +407,7 @@ export async function initializeBackendRunSession(
     onNotify: opts.offlineNotify,
     onSessionSwap: async (newSession) => {
       await preparedRuntimeActivity.attachSession(newSession)
+      bindSessionClientToRuntimeAgent(newSession, opts.metadata)
       if (opts.onSessionSwap) {
         try {
           await Promise.resolve(opts.onSessionSwap(newSession)).catch(() => {})
@@ -428,6 +431,8 @@ export async function initializeBackendRunSession(
   })
 
   await preparedRuntimeActivity.attachSession(session)
+  // A fresh Session was created with the runner's own metadata; its client is bound like any other.
+  bindSessionClientToRuntimeAgent(session, opts.metadata)
 
   primeAgentStateForUiFn(session, opts.uiLogPrefix)
   if (reportedSessionId) {

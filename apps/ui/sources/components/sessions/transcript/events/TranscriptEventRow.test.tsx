@@ -587,6 +587,20 @@ describe('TranscriptEventRow', () => {
         expect(serialized).not.toContain('unsupported_service');
     });
 
+    it('explains a restart policy refusal in the transcript', async () => {
+        const event = parseProtocolValidAgentEvent({
+            type: 'connected-service-account-switch-attempt',
+            ok: false,
+            action: 'restart_requested',
+            errorCode: 'restart_disallowed_by_execution_policy',
+        });
+        const screen = await renderScreen(<TranscriptEventRow event={event} />);
+
+        expect(JSON.stringify(screen.tree.toJSON())).toContain(
+            t('connectedServices.authSwitch.errors.restartDisallowedByExecutionPolicy'),
+        );
+    });
+
     it('uses explicit failed outcome fields before legacy successful switch-attempt actions', async () => {
         const event = parseProtocolValidAgentEvent({
             type: 'connected-service-account-switch-attempt',
@@ -606,7 +620,7 @@ describe('TranscriptEventRow', () => {
 
         const serialized = JSON.stringify(screen.tree.toJSON());
         expect(screen.findByProps({ testID: 'transcript-event-connected-service-account-switch-attempt' })).toBeTruthy();
-        expect(serialized).toContain(t('connectedServices.authSwitch.switchFailed'));
+        expect(serialized).toContain(t('connectedServices.authSwitch.errors.hotApplyFailed'));
         expect(serialized).toContain('hot_apply_failed');
         expect(serialized).not.toContain(t('connectedServices.authSwitch.confirmAction'));
     });

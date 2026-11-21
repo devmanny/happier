@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   AcpConfigOptionOverridesV1Schema,
+  buildBackendTargetKey,
   readAgentRuntimeDescriptorV1,
   SessionMcpSelectionV1Schema,
   SPAWN_SESSION_ERROR_CODES,
@@ -168,12 +169,19 @@ export function computeDaemonSpawnRequestKey(options: SpawnSessionOptions): Daem
   if (existingSessionId) {
     const serializationKey = `existing:${existingSessionId}`;
     const executionAuthorization = options.executionAuthorization;
+    // An exact request already fingerprints its backend; an unauthorized one must still never
+    // join the in-flight result of a request for another Agent on the same Session. The key is read
+    // from the request before its launch is retargeted to the Session's Agent, so a launch decided
+    // before an Agent switch would otherwise answer a request made after it; split, the later
+    // request runs its own admission once the earlier one settles.
     const requestKey = executionAuthorization
       ? `:request:${sha256Hex(stableJsonStringify({
         executionAuthorization,
         spawnSemantics: buildSpawnSemanticFingerprint(options),
       }))}`
-      : '';
+      : options.backendTarget
+        ? `:target:${buildBackendTargetKey(options.backendTarget)}`
+        : '';
     return {
       kind: 'existing',
       key: `${serializationKey}${requestKey}`,

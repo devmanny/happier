@@ -376,6 +376,48 @@ describe('createClaudeUnifiedInputArbiter', () => {
     expect(onInjectionFailure).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['mid-turn steer', 'running', 'steer', '/mcp'],
+    ['idle new turn', 'idle', 'send', '/mcp'],
+  ] as const)('refuses a panel-only slash command before writing it (%s) and keeps delivering later input', async (_label, turnState, pendingProviderAction, panelMessage) => {
+    // Claude Code 2.1.322 opens `/mcp` as an interactive panel, even mid-turn, and writes no
+    // transcript row on open, Esc or the next prompt (incident cmw9m36zc, 11 nov 2026), so its
+    // delivery could never be accepted and every later row waited behind it.
+    const injectedTexts: string[] = [];
+    const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
+    const arbiter = createClaudeUnifiedInputArbiter({
+      nowMs: () => 10_000,
+      quietPeriodMs: 0,
+      injectPrompt: vi.fn(async (batch) => {
+        injectedTexts.push(batch.message);
+        return { status: 'injected' as const, at: 10_000, bytesWritten: batch.message.length };
+      }),
+      evaluateInFlightSteer: async () => ({ steer: true, turnLikelyEnded: false }),
+      resolvePromptDeliveryState: (batch) => (injectedTexts.includes(batch.message) ? 'accepted' : 'pending'),
+      onInjectionFailure,
+    });
+
+    arbiter.observeLifecycle({ type: 'turn_state', state: turnState, observedAtMs: 10_000 });
+    arbiter.observeLifecycle({ type: 'output', observedAtMs: 10_000 });
+    await arbiter.enqueueUiMessage({
+      message: panelMessage, origin: { kind: 'ui_pending' }, userMessageLocalIds: ['panel-row'], pendingProviderAction,
+    });
+    await arbiter.enqueueUiMessage({
+      message: 'later prompt', origin: { kind: 'ui_pending' }, userMessageLocalIds: ['later-row'], pendingProviderAction,
+    });
+    await arbiter.drainWhenSafe();
+
+    expect(onInjectionFailure).toHaveBeenCalledTimes(1);
+    expect(onInjectionFailure).toHaveBeenCalledWith(expect.objectContaining({
+      failureState: 'failed_terminal',
+      batch: expect.objectContaining({ userMessageLocalIds: ['panel-row'] }),
+      result: expect.objectContaining({ reason: 'unsupported_command', phase: 'before_write', duplicateRisk: 'none' }),
+    }));
+    expect(injectedTexts).toEqual(['later prompt']);
+
+    await arbiter.dispose();
+  });
+
   it('keeps an ambiguous after-enter attempt available for later exact provider acceptance', async () => {
     const acceptedLocalIds: string[] = [];
     const onInjectionFailure = vi.fn(async () => ({ action: 'claimed_pending_delivery' as const }));
@@ -827,5 +869,35 @@ describe('createClaudeUnifiedInputArbiter', () => {
     }), expect.objectContaining({ resolveDeliveryState: expect.any(Function) }));
     expect(onInjectionFailure).not.toHaveBeenCalled();
     await arbiter.dispose();
+  });
+
+  // Characterization (passes on arrival): the user-authorized Clear Terminal Draft relies on this
+  // wake to re-deliver the held batch itself; clients must not Retry the blocked row.
+  it('notifyTerminalComposerCleared re-drives a draft-deferred head batch immediately', async () => {
+    vi.useFakeTimers();
+    const injectPrompt = vi.fn()
+      .mockResolvedValueOnce({ status: 'deferred' as const, reason: 'user_typing', retryAfterMs: 30_000 })
+      .mockResolvedValue({ status: 'injected' as const, at: 0, bytesWritten: 10 });
+    const arbiter = createClaudeUnifiedInputArbiter({ quietPeriodMs: 0, injectPrompt });
+    try {
+      arbiter.observeLifecycle({ type: 'turn_state', state: 'idle' });
+      arbiter.observeLifecycle({ type: 'output' });
+      await arbiter.enqueueUiMessage({
+        message: 'held batch', origin: { kind: 'ui_pending' }, userMessageLocalIds: ['blocked-row'],
+      });
+      await arbiter.drainWhenSafe();
+      expect(injectPrompt).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(injectPrompt).toHaveBeenCalledTimes(1);
+
+      arbiter.notifyTerminalComposerCleared();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(injectPrompt).toHaveBeenCalledTimes(2);
+      expect(injectPrompt.mock.calls[1]?.[0]).toMatchObject({ userMessageLocalIds: ['blocked-row'] });
+    } finally {
+      await arbiter.dispose();
+      vi.useRealTimers();
+    }
   });
 });

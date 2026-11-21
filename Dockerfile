@@ -289,6 +289,9 @@ RUN yarn workspace @happier-dev/release-runtime postinstall:real
 RUN yarn workspace @happier-dev/cli-common postinstall:real
 RUN yarn workspace @happier-dev/server postinstall:real
 RUN yarn workspace @happier-dev/server build
+# Preserve generated/native outputs while dropping build and validation-only dependencies.
+RUN --mount=type=cache,target=/tmp/.yarn-cache,sharing=locked \
+    yarn-install-with-retry --production=true --ignore-scripts --frozen-lockfile --ignore-engines --network-timeout 600000 --prefer-offline --non-interactive
 
 FROM node:${NODE_VERSION} AS server
 WORKDIR /repo

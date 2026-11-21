@@ -1,6 +1,7 @@
 import {
     FeaturesResponseSchema,
     PENDING_INPUT_PROTOCOL_VERSION_V1,
+    PENDING_INPUT_PROTOCOL_VERSION_V3,
     SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
 } from '@happier-dev/protocol';
 
@@ -26,6 +27,8 @@ export type SessionSyncPendingInputServerContractResult = Readonly<{
     mode: SessionSyncPendingInputServerContractMode;
     runtimeActivity: RuntimeActivityServerContract;
     pendingInput: PendingInputServerContract;
+    /** Pending Input v3: the server returns a provider-proven undelivered row to its place in line. */
+    pendingInputRequeuesNotReceived?: true;
     sessionConnectionEpoch: number;
     socket: ProbeSocket;
 }>;
@@ -39,6 +42,7 @@ type ContractProbe = Readonly<{
 type CapabilitySelection = Readonly<{
     runtimeActivity: RuntimeActivityServerContract;
     pendingInput: PendingInputServerContract;
+    pendingInputRequeuesNotReceived?: true;
 }>;
 
 const INDETERMINATE: CapabilitySelection = Object.freeze({
@@ -79,6 +83,9 @@ export function resolveSessionServerCapabilities(raw: unknown): CapabilitySelect
             && pendingInputVersion >= PENDING_INPUT_PROTOCOL_VERSION_V1
                 ? 'v1'
                 : 'unsupported',
+        ...(typeof pendingInputVersion === 'number' && pendingInputVersion >= PENDING_INPUT_PROTOCOL_VERSION_V3
+            ? { pendingInputRequeuesNotReceived: true as const }
+            : {}),
     };
 }
 

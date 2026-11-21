@@ -372,24 +372,28 @@ function buildReattachResult(params: Readonly<{
   disconnectedTerminalHostCandidates?: ReadonlyArray<DisconnectedTerminalHostCandidate>;
   unresolvedTerminalHostSessionIds?: ReadonlyArray<string>;
 }>): ReattachTrackedSessionsFromMarkersResult {
+  // A dead marker describes a session only while no live runner serves it. Once one does (a planned
+  // restart's successor adopting the same terminal host, or any recovered owner), the dead marker is
+  // neither an orphan to end, nor a disconnected host to supervise, nor topology to repair.
+  const isServedLive = (sessionId: string): boolean => params.recoveredLiveSessionIds.has(sessionId);
   const orphanedDeadDaemonSessions = Array.from(
     new Map(
       params.orphanedDeadDaemonSessions
-        .filter((session) => !params.recoveredLiveSessionIds.has(session.sessionId))
+        .filter((session) => !isServedLive(session.sessionId))
         .map((session) => [`${session.sessionId}\u0000${session.activeTurnId ?? ''}`, session] as const),
     ).values(),
   );
+  const disconnectedTerminalHostCandidates = (params.disconnectedTerminalHostCandidates ?? [])
+    .filter((candidate) => !isServedLive(candidate.sessionId));
+  const unresolvedTerminalHostSessionIds = Array.from(new Set(params.unresolvedTerminalHostSessionIds ?? []))
+    .filter((sessionId) => !isServedLive(sessionId));
   return {
     orphanedDeadDaemonSessions,
     ...(params.recoveredLiveSessionIds.size > 0
       ? { recoveredLiveSessionIds: Array.from(params.recoveredLiveSessionIds).sort() }
       : {}),
-    ...(params.disconnectedTerminalHostCandidates?.length
-      ? { disconnectedTerminalHostCandidates: params.disconnectedTerminalHostCandidates }
-      : {}),
-    ...(params.unresolvedTerminalHostSessionIds?.length
-      ? { unresolvedTerminalHostSessionIds: Array.from(new Set(params.unresolvedTerminalHostSessionIds)) }
-      : {}),
+    ...(disconnectedTerminalHostCandidates.length > 0 ? { disconnectedTerminalHostCandidates } : {}),
+    ...(unresolvedTerminalHostSessionIds.length > 0 ? { unresolvedTerminalHostSessionIds } : {}),
     connectedServiceRestartIntents: [],
   };
 }

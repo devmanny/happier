@@ -35,6 +35,30 @@ function rawSession(metadata: Record<string, unknown>, overrides: Record<string,
 }
 
 describe('evaluateSessionContinuationTargetSupport', () => {
+  it('treats a different agent identity or config dir on the same provider as a real transition', () => {
+    const julianMetadata = {
+      agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' },
+      nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/a' },
+    };
+    const support = (selection: Record<string, unknown>, sourceMetadata: Record<string, unknown>) =>
+      evaluateSessionContinuationTargetSupport({
+        selection: { v: 1, agentId: 'claude', ...selection } as never,
+        sourceAgentId: 'claude',
+        sourceMetadata,
+      }).type;
+
+    expect(support({ agentIdentityV1: { v: 1, id: 'tomas', name: 'Tomás' }, environmentVariables: { CLAUDE_CONFIG_DIR: '/b' } }, julianMetadata))
+      .toBe('supported');
+    expect(support({ agentIdentityV1: null }, julianMetadata)).toBe('supported');
+    expect(support({ agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' } }, {})).toBe('supported');
+    expect(support({ agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' }, environmentVariables: { CLAUDE_CONFIG_DIR: '/b' } }, julianMetadata))
+      .toBe('supported');
+    expect(support({ agentIdentityV1: { v: 1, id: 'julian', name: 'Julián' }, environmentVariables: { CLAUDE_CONFIG_DIR: '/a' } }, julianMetadata))
+      .toBe('unsupported');
+    // A released-shape selection names only the provider.
+    expect(support({}, julianMetadata)).toBe('unsupported');
+  });
+
   it('distinguishes two configured targets sharing one executable', () => {
     const settings = { acpCatalogSettingsV1: { v: 2, backends: ['a', 'b'].map((id) => ({
       id, name: id, title: id, command: 'harmless-acp', args: ['--configuration', id], env: {}, createdAt: 1, updatedAt: 1,

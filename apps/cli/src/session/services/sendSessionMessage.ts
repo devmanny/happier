@@ -5,7 +5,7 @@ import {
   resolveMetadataStringOverrideV1,
 } from '@happier-dev/agents';
 import { SESSION_RPC_METHODS } from '@happier-dev/protocol/rpc';
-import { readPendingLocalId, type PendingRequestedActionV1 } from '@happier-dev/protocol';
+import { readPendingLocalId, SessionMessageV1Schema, type PendingRequestedActionV1 } from '@happier-dev/protocol';
 
 import { fetchEncryptedTranscriptPageAfterSeq } from '@/api/session/fetchEncryptedTranscriptWindow';
 import {
@@ -35,6 +35,8 @@ import {
   detectSessionTurnLifecycleEvent,
   isSessionTurnCompletionProof,
 } from '@/session/shared/sessionTurnLifecycle';
+
+import { normalizeCurrentHappierSessionId } from '@/agent/runtime/session/currentSessionIdEnv';
 
 import { resolveSessionTransportContext } from './resolveSessionTransportContext';
 import { requestInactiveSessionResume } from './requestInactiveSessionResume';
@@ -79,7 +81,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.trunc(ms))));
 }
 
-function decryptTranscriptRowContent(params: Readonly<{
+export function decryptTranscriptRowContent(params: Readonly<{
   content: { t: 'encrypted'; c: string } | { t: 'plain'; v: unknown };
   ctx: SessionEncryptionContext;
 }>): unknown | null {
@@ -96,7 +98,7 @@ function decryptTranscriptRowContent(params: Readonly<{
   }
 }
 
-function isAssistantTurnCompletionProof(value: unknown): boolean {
+export function isAssistantTurnCompletionProof(value: unknown): boolean {
   if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
     return false;
   }
@@ -151,7 +153,7 @@ function formatStructuredTurnFailureMessage(
   return `Current turn failed${suffix}`;
 }
 
-function readAssistantTurnFailure(value: unknown): string | null {
+export function readAssistantTurnFailure(value: unknown): string | null {
   if (!value || isMemoryArtifactDecryptedRow(value) || isSessionUserMessage(value)) {
     return null;
   }
@@ -397,6 +399,8 @@ export async function sendSessionMessage(params: Readonly<{
   credentials: Credentials;
   idOrPrefix: string;
   message: string;
+  /** Known calling session, supplied by the session context owner, never the target or message text. */
+  senderSessionId?: string | null;
   wait: boolean;
   timeoutMs: number;
   localId?: string;
@@ -456,6 +460,7 @@ export async function sendSessionMessage(params: Readonly<{
   if (params.canAdmit && !(await params.canAdmit({ rawSession: sessionTarget.rawSession, metadata: asRecord(decryptedMetadata) }))) {
     return { ok: true, sessionId, localId, waited: false, suppressed: true };
   }
+  const senderSessionId = normalizeCurrentHappierSessionId(params.senderSessionId);
   const admission = await admitSessionUserMessageToPendingQueue({
     credentials: params.credentials,
     sessionId,
@@ -463,6 +468,10 @@ export async function sendSessionMessage(params: Readonly<{
     ctx: sessionTarget.ctx,
     localId,
     text: params.message,
+    ...(senderSessionId ? { meta: { happier: {
+      kind: 'session_message.v1',
+      payload: SessionMessageV1Schema.parse({ senderSessionId, targetSessionId: sessionId }),
+    } } } : {}),
     permissionIntent,
     modelId,
     requestedAction: resolveSessionUserMessageRequestedAction({

@@ -10,6 +10,19 @@ describe('registerHappierMcpBridgeTools', () => {
     delete process.env.HAPPIER_ACTIONS_SETTINGS_V1;
   });
 
+  it('leaves current-session fields optional so the session server can fill them', async () => {
+    const { registerHappierMcpBridgeTools } = await import('./registerHappierMcpBridgeTools');
+    const calls: any[] = [];
+    registerHappierMcpBridgeTools({
+      registerTool: (name: string, definition: any) => { calls.push({ name, definition }); },
+    } as any, { callHttpTool: async () => ({ content: [], isError: false }) });
+
+    for (const name of ['quien_esta_aqui', 'session_goal_get']) {
+      const schema = calls.find((c) => c.name === name)?.definition.inputSchema;
+      expect(schema?.safeParse({}).success, name).toBe(true);
+    }
+  });
+
   it('registers only the currently enabled Happier MCP tools and forwards calls', async () => {
     process.env.HAPPIER_ACTIONS_SETTINGS_V1 = JSON.stringify({
       v: 1,
@@ -35,7 +48,8 @@ describe('registerHappierMcpBridgeTools', () => {
     });
 
     const names = calls.map((c) => c.name);
-    expect(names).toEqual(listBuiltInHappierTools({ surface: 'session_agent' }).map((tool) => tool.name));
+    expect(names.slice(0, listBuiltInHappierTools({ surface: 'session_agent' }).length))
+      .toEqual(listBuiltInHappierTools({ surface: 'session_agent' }).map((tool) => tool.name));
     expect(names).toContain('change_title');
     expect(names).not.toContain('happier__change_title');
     expect(names).not.toContain('happy__change_title');
@@ -77,5 +91,28 @@ describe('registerHappierMcpBridgeTools', () => {
       },
       extra,
     });
+  });
+  it('exposes the integrated browser tools and forwards their results unchanged', async () => {
+    const { registerHappierMcpBridgeTools } = await import('./registerHappierMcpBridgeTools');
+    const calls: any[] = [];
+    const screenshot = {
+      content: [{ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' }, { type: 'text', text: '{"ok":true}' }],
+    };
+    const forwarded: any[] = [];
+    registerHappierMcpBridgeTools({ registerTool: (name: string, definition: any, handler: any) => calls.push({ name, definition, handler }) } as any, {
+      callHttpTool: async (name: string, args: unknown) => {
+        forwarded.push({ name, args });
+        return screenshot;
+      },
+    });
+
+    const names = calls.map((c) => c.name);
+    for (const name of ['browser_navigate', 'browser_screenshot', 'browser_snapshot', 'browser_click', 'browser_type',
+      'browser_scroll', 'browser_evaluate', 'browser_wait', 'browser_tabs']) {
+      expect(names).toContain(name);
+    }
+    const tool = calls.find((c) => c.name === 'browser_screenshot');
+    await expect(tool.handler({ fullPage: true })).resolves.toEqual(screenshot);
+    expect(forwarded).toEqual([{ name: 'browser_screenshot', args: { fullPage: true } }]);
   });
 });

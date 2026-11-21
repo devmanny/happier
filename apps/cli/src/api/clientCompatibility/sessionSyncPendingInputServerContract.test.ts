@@ -60,6 +60,18 @@ describe('session server capability selection', () => {
         });
     });
 
+    it('recognizes a server that returns provider-proven undelivered rows to their place (Pending Input v3)', () => {
+        expect(resolveSessionServerCapabilities(features({ runtimeActivity: 2, pendingInput: 3 }))).toEqual({
+            runtimeActivity: 'v2',
+            pendingInput: 'v1',
+            pendingInputRequeuesNotReceived: true,
+        });
+        expect(resolveSessionServerCapabilities(features({ runtimeActivity: 2, pendingInput: 2 }))).toEqual({
+            runtimeActivity: 'v2',
+            pendingInput: 'v1',
+        });
+    });
+
     it('recognizes the immutable released v0.2.1 fallback', () => {
         expect(resolveSessionServerCapabilities(releasedServerV021Features)).toEqual({
             runtimeActivity: 'legacy',

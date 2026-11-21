@@ -166,6 +166,65 @@ describe('createClaudeOwnComposerTextLog (lane X, incident cmq8y3nlx user_draft 
     expect(log.matches('[Pasted text #1]')).toBe(false);
   });
 
+  describe('drafts made of whole recorded prompts pasted back to back (Pending blocked incident, 2026-11-16)', () => {
+    // A stalled TUI painted an earlier own paste and a later Send Again paste together; the short
+    // concatenation was classified foreign, so it was never cleared and blocked every later send.
+    const first = 'I signed in, but I do not see the Beta organizations.';
+    const urlPrompt = `https://example.test/dashboard ${first}`;
+
+    function logWithBothPrompts() {
+      const log = createClaudeOwnComposerTextLog();
+      log.record(first);
+      log.record(urlPrompt);
+      return log;
+    }
+
+    it('matches two or more complete recorded entries with nothing or only whitespace between them', () => {
+      const log = logWithBothPrompts();
+
+      expect(log.matches(`${first}${urlPrompt}`)).toBe(true);
+      expect(log.matches(`${first} ${urlPrompt}`)).toBe(true);
+      expect(log.matches(`${first}\n${urlPrompt}`)).toBe(true);
+      expect(log.matches(`${first}${first}${urlPrompt}`)).toBe(true);
+      expect(log.matches(`${first}${first}`)).toBe(true);
+    });
+
+    it('matches the concatenation when the TUI soft-wraps it across rows', () => {
+      const log = logWithBothPrompts();
+      const wrapped = `${first}https://example.test/dashboard I signed in, but I do\nnot see the Beta organizations.`;
+
+      expect(log.matches(wrapped)).toBe(true);
+    });
+
+    it('never matches partial entries, truncated entries, or any extra user text', () => {
+      const log = logWithBothPrompts();
+
+      expect(log.matches(`${first} d`)).toBe(false);
+      expect(log.matches(`${first}${urlPrompt} d`)).toBe(false);
+      expect(log.matches(`${first} and also my own words`)).toBe(false);
+      expect(log.matches(`my own words ${first}`)).toBe(false);
+      expect(log.matches(`${first.slice(0, 20)}${urlPrompt}`)).toBe(false);
+      expect(log.matches(`${first}${urlPrompt.slice(0, -4)}`)).toBe(false);
+      expect(log.matches(`${first}${urlPrompt.slice(8)}`)).toBe(false);
+      expect(log.matches(`${first}, ${urlPrompt}`)).toBe(false);
+    });
+
+    it('never matches short replies typed together, even when each one was sent before', () => {
+      // The log also holds transcript-seeded and controller-typed entries. Short ones carry no
+      // identity: a user at the Mac typing "sí dale" is writing, not looking at our residue.
+      const log = logWithBothPrompts();
+      for (const reply of ['sí', 'dale', 'ok', 'gracias', 'commit', 'push', '1', '2']) log.record(reply);
+
+      for (const draft of [
+        'sí dale', 'sídale', 'ok gracias', 'commit push', 'sí sí', 'okok', '12', '21 1',
+        `${first} ok`, `ok ${first}`, `${first}\nsí`,
+      ]) {
+        expect(log.matches(draft), draft).toBe(false);
+      }
+      expect(log.matches(`${first}\n${urlPrompt}`)).toBe(true);
+    });
+  });
+
   it('is bounded: oldest entries are evicted beyond the limit', () => {
     const log = createClaudeOwnComposerTextLog({ limit: 2 });
     log.record('one');

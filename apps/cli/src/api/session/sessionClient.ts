@@ -14,7 +14,10 @@ import {
     projectSessionMetadataForWire,
     readPendingLocalId,
     redactBugReportSensitiveText,
+    type BackendTargetRefV1,
 } from '@happier-dev/protocol';
+import { resolveSessionRuntimeBackendConflict } from '@/daemon/spawn/existingSessionBackendTargetAdmission';
+import { requestRunnerTermination } from '@/agent/runtime/runnerTerminationRequest';
 import { inferAgentIdFromSessionMetadata } from '@happier-dev/agents';
 import { configuration } from '@/configuration';
 import type { RawJSONLines } from '@/backends/claude/types';
@@ -169,6 +172,7 @@ import {
     SessionRuntimeActivityCloseAckSchema,
     SessionRuntimeActivityCloseRequestSchema,
     SessionTranscriptObservationProvenanceV1Schema,
+    doesPendingDeliveryHoldLaterRowsV1,
 } from '@happier-dev/protocol';
 import {
     readSessionRuntimeActivityProjectionBoundary,
@@ -209,6 +213,9 @@ import {
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
+    listPendingQueueV2RowsFromServer,
+    sendPendingQueueV2DeliveryAsNew,
+    requeueNotReceivedPendingQueueV2Delivery,
     materializeNextPendingQueueV2Message,
     blockPendingQueueV2Delivery,
     PendingQueueAcceptedSettlementError,
@@ -216,6 +223,7 @@ import {
     isAcceptedPendingQueueV2DeliveryNotFound,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedAction,
     type PendingMaterializationDeliveryState,
     type PendingQueueDeliveryBlockedReason,
     type PendingQueueMaterializedMessage,
@@ -298,6 +306,7 @@ import { updateAgentStateBestEffort, updateMetadataBestEffort, type AgentStateWr
 import { readCliClientUpgradeRequired } from '@/api/clientCompatibility/cliClientCompatibility';
 import { normalizeAgentPromptPayload } from '@/agent/core/AgentPromptPayload';
 import type {
+    InheritedUncertainPendingDelivery,
     MaterializeNextPendingOptions,
     MaterializeNextPendingResult,
     PendingMaterializationDiagnosticPhase,
@@ -309,6 +318,7 @@ import {
 } from './committedUserMessageSeqTracker';
 import {
     createSessionMutationOutbox,
+    SessionMutationJournalAdmissionBlockedError,
     type RuntimeActivitySnapshotTail,
     type SessionMutationOutbox,
 } from './mutations/createSessionMutationOutbox';
@@ -331,7 +341,6 @@ import {
 import {
     applyKnownPendingQueueState,
     countMaterializablePendingRows,
-    derivePendingQueueStateAfterMaterializeResult,
     readKnownPendingQueueState,
     UNKNOWN_PENDING_QUEUE_STATE,
     type KnownPendingQueueState,
@@ -605,6 +614,7 @@ export class ApiSessionClient extends EventEmitter {
     private sessionPermissionRpcRouter: SessionPermissionRpcRouter | null = null;
     private executionRunPermissionHandler: CodexLikePermissionHandler | null = null;
     private readonly rpcLifecycleRegistrations: RpcLifecycleRegistration[] = [];
+    private executionRunLifecycleRegistration: RpcLifecycleRegistration | null = null;
     private agentStateLock = new AsyncLock();
     private requestSettlementAdmissionLock = new AsyncLock();
     private metadataLock = new AsyncLock();
@@ -645,6 +655,8 @@ export class ApiSessionClient extends EventEmitter {
     // Generic reversible provider-path blocks retain identity so exact late provider evidence can
     // still settle the row. A proven pre-provider lifecycle failure retires it after durable block.
     private readonly serverBlockedCanonicalPendingDeliveryLocalIds = new Set<string>();
+    /** One automatic requeue per row per runner process; a row blocked again waits for the user. */
+    private readonly disposedRuntimePendingHeadRequeueAttemptedLocalIds = new Set<string>();
     // The provider can report a precise rejection while a terminal turn observer reports only
     // ambiguity. Serialize those writes per exact claim so a later weaker report observes the
     // already-settled claim instead of overwriting the durable reason.
@@ -700,6 +712,8 @@ export class ApiSessionClient extends EventEmitter {
     private closed = false;
     private readonly metadataWaitAbortController = new AbortController();
     private runtimeTerminationStarted = false;
+    /** The Agent this client's runtime runs (`bindSessionClientToRuntimeAgent`); null for a non-runner client. */
+    private runtimeBackendTarget: BackendTargetRefV1 | null = null;
     private snapshotSyncInFlight: Promise<boolean> | null = null;
     private readonly toolCallCanonicalNameByProviderAndId = new Map<string, { rawToolName: string; canonicalToolName: string }>();
     private readonly permissionToolCallRawInputByProviderAndId = new Map<string, unknown>();
@@ -853,6 +867,11 @@ export class ApiSessionClient extends EventEmitter {
         );
     }
 
+    subscribeToSessionConnectionState(listener: (state: ManagedConnectionState) => void): () => void {
+        this.on(SESSION_CONNECTION_STATE_EVENT, listener);
+        return () => { this.off(SESSION_CONNECTION_STATE_EVENT, listener); };
+    }
+
     private isSessionSocketOnlineForAckWrite(): boolean {
         return (this.socket as Socket<ServerToClientEvents, ClientToServerEvents> | undefined)?.connected === true
             || this.currentConnectionState.phase === 'online';
@@ -964,6 +983,7 @@ export class ApiSessionClient extends EventEmitter {
             };
 	        this.metadata = normalizeSessionMetadataForRead(session.metadata);
 	        this.metadataVersion = session.metadataVersion;
+            this.on('metadata-updated', () => this.exitIfSessionNamesAnotherAgent());
             this.sessionSocketMachineId = resolveSessionSocketMachineIdForBootstrap(session.metadata);
             this.agentState = session.agentState;
 	        this.agentStateVersion = session.agentStateVersion;
@@ -1127,6 +1147,8 @@ export class ApiSessionClient extends EventEmitter {
         // Always register execution-run RPC methods so callers never see "RPC method not available".
         // Feature gating is enforced inside the handler implementations.
         const streamedTranscriptSession = {
+            subscribeToSessionConnectionState: (listener: (state: ManagedConnectionState) => void) =>
+                this.subscribeToSessionConnectionState(listener),
             enqueueAgentMessageCommitted: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; meta?: Record<string, unknown>; provenance: SessionTranscriptObservationProvenanceV1 }) =>
                 this.enqueueAgentMessageCommitted(provider, body, opts),
             sendAgentMessageCommitted: (provider: ACPProvider, body: ACPMessageData, opts: { localId: string; meta?: Record<string, unknown> }) =>
@@ -1141,7 +1163,7 @@ export class ApiSessionClient extends EventEmitter {
             getEphemeralStreamConnectionEpoch: () => this.getEphemeralStreamConnectionEpoch(),
         };
 
-        registerExecutionRunHandlers(this.rpcHandlerManager, {
+        this.executionRunLifecycleRegistration = registerExecutionRunHandlers(this.rpcHandlerManager, {
             sessionId: this.sessionId,
             cwd: this.resolveWorkingDirectory(),
             resolveCwd: () => this.resolveWorkingDirectory(),
@@ -1200,6 +1222,8 @@ export class ApiSessionClient extends EventEmitter {
                 return context.settings ?? null;
             },
         });
+
+        this.rpcLifecycleRegistrations.push(this.executionRunLifecycleRegistration);
 
         registerEphemeralTaskHandlers(this.rpcHandlerManager, {
           workingDirectory: this.resolveWorkingDirectory(),
@@ -3384,6 +3408,8 @@ export class ApiSessionClient extends EventEmitter {
             }
             this.markAgentQueueEchoSuppressedLocalId(localId);
             this.markAgentQueueDeliveredLocalId(localId);
+            // Features that answer a specific message (a room delivery) learn it reached this runner.
+            this.emit('provider-input-delivered', { localId });
         }
         const deliveryInfo: SessionUserMessageDeliveryInfo = {
             seq: typeof message?.seq === 'number' && Number.isFinite(message.seq) ? message.seq : null,
@@ -4168,16 +4194,27 @@ export class ApiSessionClient extends EventEmitter {
         };
     }
 
-    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+    private reportClaudeSessionMessageUsage(body: RawJSONLines): void {
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
             try {
-                this.sendUsageData(body.message.usage, body.message.model);
+                // Claude can split one API response into several transcript records.
+                // The provider response ID, unlike the JSONL UUID, identifies the usage snapshot.
+                const responseId = readNonBlankOpaqueIdentifier(body.message.id);
+                const messageKey = buildClaudeJsonlMessageKey(body);
+                if (!responseId && !messageKey) return;
+                const reportKey = responseId
+                    ? `claude-response:${responseId}`
+                    : `claude-message:${messageKey}`;
+                this.sendUsageData(body.message.usage, body.message.model, reportKey);
             } catch (error) {
                 logger.debug('[SOCKET] Failed to send usage data:', serializeAxiosErrorForLog(error));
             }
         }
+    }
 
+    private applyClaudeSessionMessageAuxiliaryEffects(body: RawJSONLines): void {
+        this.reportClaudeSessionMessageUsage(body);
         // Update metadata with summary if this is a summary message
         if (body.type === 'summary' && 'summary' in body && 'leafUuid' in body) {
             updateMetadataBestEffort(
@@ -4277,7 +4314,7 @@ export class ApiSessionClient extends EventEmitter {
         requireExactCommitLocalId(localId);
 
         this.logSendWhileDisconnected('Claude session message', { type: body.type });
-        return await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+        const result = await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
             sessionId: this.sessionId,
             localId,
             content: this.buildOutboundSessionMessagePayload(content),
@@ -4287,6 +4324,8 @@ export class ApiSessionClient extends EventEmitter {
             updatedAt: opts.updatedAt ?? opts.createdAt,
             provenance: opts.provenance,
         }));
+        this.reportClaudeSessionMessageUsage(body);
+        return result;
     }
 
     recordClaudeJsonlMessageConsumed(body: RawJSONLines, meta?: Record<string, unknown>): void {
@@ -4704,6 +4743,20 @@ export class ApiSessionClient extends EventEmitter {
     ): Promise<void> {
         const content = this.buildUserTextMessageContent(text, opts.meta);
         const payload = this.buildOutboundSessionMessagePayload(content);
+        if (opts.provenance !== undefined) {
+            const result = await this.sessionMutationOutbox.enqueueTranscriptMessage(createTranscriptMessageAppendMutation({
+                sessionId: this.sessionId,
+                localId: opts.localId,
+                content: payload,
+                sidechainId: null,
+                messageRole: 'user',
+                provenance: opts.provenance,
+            }));
+            if (!result.persisted) {
+                throw new SessionMutationJournalAdmissionBlockedError(new Error('Session transcript journal is closed'));
+            }
+            return;
+        }
         await this.enqueueMessageCommit('required', {
             operation: 'user-message-commit',
             details: {
@@ -4882,8 +4935,17 @@ export class ApiSessionClient extends EventEmitter {
     async sendAgentMessageCommitted(
         provider: ACPProvider,
         body: ACPMessageData,
-        opts: { localId: string; meta?: Record<string, unknown> },
+        opts: { localId: string; meta?: Record<string, unknown>; provenance?: SessionTranscriptObservationProvenanceV1 },
     ): Promise<void> {
+        // Explicit observation provenance opts into durable journal custody. Callers without
+        // provenance retain the required remote-acknowledgement contract below.
+        if (opts.provenance !== undefined) {
+            const result = await this.enqueueAgentMessageCommitted(provider, body, { ...opts, provenance: opts.provenance });
+            if (!result.persisted) {
+                throw new SessionMutationJournalAdmissionBlockedError(new Error('Session transcript journal is closed'));
+            }
+            return;
+        }
         const { normalizedBody, content, localId, sidechainId } = this.prepareAcpAgentMessage({
             provider,
             body,
@@ -5192,6 +5254,11 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send a ping message to keep the connection alive
      */
+    /** Latest presence this client published (thinking = a turn is in progress). */
+    getSessionPresenceSnapshot(): SessionPresenceSnapshot {
+        return this.latestSessionPresence;
+    }
+
     keepAlive(thinking: boolean, mode: SessionAliveMode) {
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);
@@ -5383,7 +5450,7 @@ export class ApiSessionClient extends EventEmitter {
     /**
      * Send usage data to the server
      */
-    sendUsageData(usage: Usage, model?: string) {
+    sendUsageData(usage: Usage, model?: string, key = 'claude-session') {
         // Calculate total tokens
         const totalTokens = usage.input_tokens + usage.output_tokens + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
 
@@ -5391,7 +5458,7 @@ export class ApiSessionClient extends EventEmitter {
 
         // Transform Claude usage format to backend expected format
         const usageReport = {
-            key: 'claude-session',
+            key,
             sessionId: this.sessionId,
             tokens: {
                 total: totalTokens,
@@ -5595,6 +5662,107 @@ export class ApiSessionClient extends EventEmitter {
             reason: outcome.reason,
             providerEffect: 'none',
         });
+    }
+
+    /**
+     * Rows a replaced runner left `blocked / delivery_outcome_uncertain`, decoded, in server order.
+     * The server writes that state when this runner registered while they were `delivering`, so
+     * this runner holds no custody for them; only provider-owned evidence can decide them.
+     */
+    async listInheritedUncertainPendingDeliveries(): Promise<InheritedUncertainPendingDelivery[]> {
+        if (this.closed) return [];
+        const request = () => listPendingQueueV2RowsFromServer({ token: this.token, sessionId: this.sessionId });
+        const supervisor = this.sessionConnectionSupervisor;
+        const rows = supervisor
+            ? await runSupervisedRequest({ supervisor, requireAuth: true, requireOnline: false, request })
+            : await request();
+        const inherited: InheritedUncertainPendingDelivery[] = [];
+        const earlierQueuedLocalIds: string[] = [];
+        for (const row of rows) {
+            if (row.deliveryStatus.status === 'discarded') continue;
+            if (row.deliveryStatus.status === 'blocked' && row.deliveryStatus.reason === 'delivery_outcome_uncertain') {
+                inherited.push({
+                    localId: row.localId,
+                    createdAt: row.createdAt,
+                    requestedAction: row.requestedAction,
+                    message: this.readPendingQueueUserMessage({
+                        id: null,
+                        seq: null,
+                        localId: row.localId,
+                        messageRole: row.messageRole,
+                        content: row.content,
+                        createdAt: row.createdAt,
+                        updatedAt: null,
+                    }),
+                    earlierQueuedLocalIds: [...earlierQueuedLocalIds],
+                });
+            }
+            earlierQueuedLocalIds.push(row.localId);
+        }
+        return inherited;
+    }
+
+    /**
+     * Settles an inherited row the provider proved it accepted through the ordinary accepted
+     * settlement: the row is adopted as accepted custody for that one operation. A settlement the
+     * server does not commit releases the adoption, so the row stays blocked for its owner and
+     * never holds this runner's queue.
+     */
+    async settleInheritedPendingDeliveryAccepted(localId: string): Promise<boolean> {
+        const exactLocalId = readPendingLocalId(localId);
+        // A row this runner claimed itself is already settled by its live provider evidence.
+        if (!exactLocalId || this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return false;
+        const authority = this.captureAcceptedCanonicalPendingDeliveryOperationAuthority();
+        if (!authority) return false;
+        this.canonicalPendingDeliveryByLocalId.set(exactLocalId, { state: { mode: 'provider', unresolved: true } });
+        this.serverBlockedCanonicalPendingDeliveryLocalIds.add(exactLocalId);
+        this.providerInputTerminalOutcomeByLocalId.set(exactLocalId, 'accepted');
+        const resolution = this.resolveAcceptedCanonicalPendingDelivery(exactLocalId, authority);
+        this.trackAcceptedCanonicalPendingDeliveryResolution(exactLocalId, resolution);
+        await resolution.catch(() => undefined);
+        // A committed settlement clears the adopted custody; anything left means it did not commit.
+        if (!this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return true;
+        this.clearCanonicalPendingDeliveryLocalState(exactLocalId);
+        this.acceptedProviderInputLocalIds.delete(exactLocalId);
+        return false;
+    }
+
+    /**
+     * Delivers an inherited row the provider proved it never received once more. A Pending Input v3
+     * server returns that exact row to its place in line, by this runner's publisher authority;
+     * an older one only offers the effect-possible resolution that queues a copy as a new message.
+     */
+    async redeliverInheritedPendingDelivery(localId: string): Promise<boolean> {
+        const exactLocalId = readPendingLocalId(localId);
+        if (!exactLocalId || this.closed || this.canonicalPendingDeliveryByLocalId.has(exactLocalId)) return false;
+        let result: { pendingQueueState?: KnownPendingQueueState };
+        if (this.sessionSyncPendingInputServerContract?.pendingInputRequeuesNotReceived === true) {
+            const authority = this.captureAcceptedCanonicalPendingDeliveryOperationAuthority();
+            if (!authority) return false;
+            result = await requeueNotReceivedPendingQueueV2Delivery({
+                socket: authority.socket,
+                sessionId: this.sessionId,
+                localId: exactLocalId,
+            });
+        } else {
+            const request = () => sendPendingQueueV2DeliveryAsNew({
+                token: this.token,
+                sessionId: this.sessionId,
+                localId: exactLocalId,
+            });
+            const supervisor = this.sessionConnectionSupervisor;
+            result = supervisor
+                ? await runSupervisedRequest({ supervisor, purpose: 'durable_write', requireAuth: true, requireOnline: false, request })
+                : await request();
+        }
+        if (result.pendingQueueState) {
+            this.applyPendingQueueState(result.pendingQueueState, { emit: true });
+        } else if (!this.closed) {
+            this.pendingWakeSeq += 1;
+            this.emit('metadata-updated');
+            this.emitPendingEligibilityUpdated();
+        }
+        return true;
     }
 
     hasPendingProviderInputAcceptance(localId: string): boolean {
@@ -6004,6 +6172,7 @@ export class ApiSessionClient extends EventEmitter {
 
     async close() {
         logger.debug('[API] socket.close() called');
+        this.startExecutionRunDisposal();
         this.executionRunPermissionHandler?.reset();
         this.executionRunPermissionHandler = null;
         this.pendingInputReadinessAbortController?.abort();
@@ -6077,11 +6246,52 @@ export class ApiSessionClient extends EventEmitter {
         this.emit('local-closed');
     }
 
+    /**
+     * Binds this client to the Agent its runtime runs. From then on the runtime serves the Session
+     * only while the Session's persisted current view names that Agent
+     * (`resolveSessionRuntimeBackendConflict`): on every metadata update and before every Pending
+     * materialization a Session that names another Agent (an Agent switch whose cutover committed
+     * after this runtime attached) stops the runtime before it takes the new Agent's input.
+     */
+    bindRuntimeBackendTarget(backendTarget: BackendTargetRefV1): void {
+        this.runtimeBackendTarget = backendTarget;
+        this.exitIfSessionNamesAnotherAgent();
+    }
+
+    private exitIfSessionNamesAnotherAgent(): void {
+        if (this.closed || this.runtimeTerminationStarted) return;
+        const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+            sessionMetadata: this.metadata,
+            backendTarget: this.runtimeBackendTarget,
+        });
+        if (!sessionBackendTarget) return;
+        logger.warn('[API] Stopping a runtime whose Session now names another Agent', {
+            sessionId: this.sessionId,
+            runtimeBackendTarget: this.runtimeBackendTarget,
+            sessionBackendTarget,
+        });
+        this.beginRuntimeTermination();
+        // The runner's own graceful stop path; honored at registration if the cutover reached this
+        // runtime before the runner registered its termination handlers.
+        requestRunnerTermination({ kind: 'sessionAgentConflict' });
+    }
+
     beginRuntimeTermination(): void {
         if (this.runtimeTerminationStarted) return;
         this.runtimeTerminationStarted = true;
         this.providerInputOutcomeProducerGeneration += 1;
         this.acceptedCanonicalPendingDeliveryOperationAbortController.abort();
+        this.startExecutionRunDisposal();
+    }
+
+    private startExecutionRunDisposal(): void {
+        // Child processes must not wait behind parent provider or transport shutdown.
+        // The retained registration joins this same idempotent disposal during close().
+        void this.executionRunLifecycleRegistration?.dispose().catch((error: unknown) => {
+            logger.infoFile('[API] Failed to dispose execution runs', {
+                error: serializeAxiosErrorForLog(error),
+            });
+        });
     }
 
     hasRuntimeTerminationStarted(): boolean {
@@ -6358,6 +6568,7 @@ export class ApiSessionClient extends EventEmitter {
         didMaterialize: boolean;
         result: MaterializeNextPendingResult;
     }> {
+        this.exitIfSessionNamesAnotherAgent();
         if (this.closed || this.runtimeTerminationStarted) {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
         }
@@ -6515,13 +6726,10 @@ export class ApiSessionClient extends EventEmitter {
                 },
             };
         }
-        const pendingStateUpdate = derivePendingQueueStateAfterMaterializeResult({
-            current: this.pendingQueueState,
-            didMaterialize: materializeResult.didMaterialize,
-            authoritativeState: materializeResult.pendingQueueState ?? null,
-        });
-        if (pendingStateUpdate.state.known) {
-            this.applyPendingQueueState(pendingStateUpdate.state);
+        // Released-server acknowledgements omit the projection. Its post-commit hint may
+        // already be applied, so only the server can advance these counters and version.
+        if (materializeResult.pendingQueueState) {
+            this.applyPendingQueueState(materializeResult.pendingQueueState);
         }
         if (this.closed || this.runtimeTerminationStarted) {
             return { didMaterialize: false, result: { type: 'retryable_transport' } };
@@ -6547,6 +6755,16 @@ export class ApiSessionClient extends EventEmitter {
                 return { didMaterialize: false, result: { type: 'deferred', reason: 'pending_version_mismatch' } };
             }
             if (materializeResult.deferredReason === 'waiting_for_predecessor') {
+                const requeued = await this.requeuePendingQueueHeadBlockedByDisposedRuntime();
+                if (requeued) {
+                    return await this.runMaterializeNextPendingMessageInner({
+                        ...opts,
+                        // The requeue advanced the pending version this attempt was fenced on.
+                        ...(opts.expectedPendingVersion !== undefined
+                            ? { expectedPendingVersion: requeued.pendingQueueState?.pendingVersion }
+                            : {}),
+                    });
+                }
                 return { didMaterialize: false, result: { type: 'deferred', reason: 'waiting_for_predecessor' } };
             }
             if (materializeResult.deferredReason === 'waiting_for_foreground_turn') {
@@ -6839,6 +7057,80 @@ export class ApiSessionClient extends EventEmitter {
             onDiagnosticPhase: opts.onDiagnosticPhase,
         });
         return inner.result;
+    }
+
+    /**
+     * A row a previous runtime blocked as `runtime_disposed_before_delivery` was never handed to a
+     * provider, yet as FIFO head it holds every later row until someone retries it. Put it back in
+     * line once with the user's own retry operation, keeping its requested action and position.
+     * Any other blocked reason, a row this process claimed, and a row already retried by this
+     * process are left for the user. Returns null when nothing was requeued.
+     */
+    private async requeuePendingQueueHeadBlockedByDisposedRuntime(): Promise<{
+        pendingQueueState?: KnownPendingQueueState;
+    } | null> {
+        if (this.closed || this.runtimeTerminationStarted) return null;
+        const supervisor = this.sessionConnectionSupervisor;
+        let localId: string | null = null;
+        try {
+            const listRows = () => listPendingQueueV2RowsFromServer({ token: this.token, sessionId: this.sessionId });
+            const rows = supervisor
+                ? await runSupervisedRequest({ supervisor, requireAuth: true, requireOnline: false, request: listRows })
+                : await listRows();
+            // Same head the server's FIFO uses: the first queued row that still holds later rows.
+            const head = rows.find((row) => (
+                row.deliveryStatus.status !== 'discarded'
+                && doesPendingDeliveryHoldLaterRowsV1(row.deliveryStatus)
+            ));
+            if (
+                !head
+                || head.deliveryStatus.status !== 'blocked'
+                || head.deliveryStatus.reason !== 'runtime_disposed_before_delivery'
+                || head.requestedAction === null
+                || this.canonicalPendingDeliveryByLocalId.has(head.localId)
+                || this.disposedRuntimePendingHeadRequeueAttemptedLocalIds.has(head.localId)
+                || this.closed
+                || this.runtimeTerminationStarted
+            ) {
+                return null;
+            }
+            localId = head.localId;
+            const requestedAction = head.requestedAction;
+            // Recorded before the write: an uncertain outcome is never replayed.
+            this.disposedRuntimePendingHeadRequeueAttemptedLocalIds.add(localId);
+            const requeue = () => updatePendingQueueV2RequestedAction({
+                token: this.token,
+                sessionId: this.sessionId,
+                localId: head.localId,
+                requestedAction,
+            });
+            const result = supervisor
+                ? await runSupervisedRequest({
+                    supervisor,
+                    purpose: 'durable_write',
+                    requireAuth: true,
+                    requireOnline: false,
+                    request: requeue,
+                })
+                : await requeue();
+            if (result.pendingQueueState) {
+                this.applyPendingQueueState(result.pendingQueueState);
+            }
+            logger.infoFile('[pendingQueue] requeued pending row blocked by a disposed previous runtime', {
+                sessionId: this.sessionId,
+                localId,
+                requestedAction: requestedAction.kind,
+                pendingVersion: result.pendingQueueState?.pendingVersion ?? null,
+            });
+            return result.pendingQueueState ? { pendingQueueState: result.pendingQueueState } : {};
+        } catch (error) {
+            logger.infoFile('[pendingQueue] requeue of pending row blocked by a disposed previous runtime failed', {
+                sessionId: this.sessionId,
+                localId,
+                error: serializeOutboundError(error),
+            });
+            return null;
+        }
     }
 
     /**

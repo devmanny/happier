@@ -186,6 +186,37 @@ describe('sessionRunnerRespawnDescriptor', () => {
     expect(buildSpawnSessionOptionsFromRespawnDescriptorV1(descriptor!).terminal).toEqual(options.terminal);
   });
 
+  it('persists the agent identity sealed, restores it, and still reads descriptors written before it', () => {
+    const credentials = {
+      token: 't',
+      encryption: { type: 'legacy', secret: new Uint8Array(32).fill(5) },
+    } satisfies Credentials;
+    const agentIdentity = { v: 1 as const, id: 'tomas', name: 'Tomás', emoji: '🤖', description: 'Works the Nomada account.' };
+    const descriptor = buildSessionRunnerRespawnDescriptorV1FromSpawnOptions({
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+      agentIdentity,
+    } satisfies SpawnSessionOptions, {
+      encryptionMaterial: credentials.encryption,
+      randomBytes: (length: number) => new Uint8Array(length).fill(2),
+    });
+
+    expect(descriptor).toHaveProperty('sealedAgentIdentity.format', 'account_scoped_v1');
+    // Who the agent is stays inside the ciphertext, like the environment does.
+    expect(JSON.stringify(descriptor)).not.toContain('Tomás');
+    const persisted = SessionRunnerRespawnDescriptorV1Schema.parse(JSON.parse(JSON.stringify(descriptor)));
+    expect(buildSpawnSessionOptionsFromRespawnDescriptorV1(persisted, { encryptionMaterial: credentials.encryption }).agentIdentity)
+      .toEqual(agentIdentity);
+
+    const older = SessionRunnerRespawnDescriptorV1Schema.parse({
+      version: 1,
+      directory: '/tmp/repo',
+      backendTarget: { kind: 'builtInAgent', agentId: 'claude' },
+    });
+    expect(buildSpawnSessionOptionsFromRespawnDescriptorV1(older, { encryptionMaterial: credentials.encryption }))
+      .not.toHaveProperty('agentIdentity');
+  });
+
   it('tolerates newer persisted respawn fields while preserving known ones', () => {
     const parsed = SessionRunnerRespawnDescriptorV1Schema.safeParse({
       version: 1,

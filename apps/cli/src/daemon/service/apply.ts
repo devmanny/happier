@@ -10,6 +10,7 @@ import {
 
 import type { DaemonServiceInstallPlan, DaemonServiceUninstallPlan, DaemonServicePlannedCommand } from './plan';
 import { commandExistsInPath } from './commandExistsInPath';
+import { installDarwinDaemonLauncherIfMissing } from './darwinDaemonLauncher';
 import { readPositiveIntEnv } from '@/utils/readPositiveIntEnv';
 
 export type DaemonServiceCommandFailureMode = 'best-effort' | 'strict';
@@ -180,6 +181,10 @@ export async function applyDaemonServiceInstallPlan(
 ): Promise<void> {
   if (options.runCommands !== false) {
     assertDaemonServiceCommandsAvailable(plan.commands);
+  }
+  // The definition starts the launcher, so it must exist before the definition is written.
+  if (plan.darwinLauncherInstall) {
+    await installDarwinDaemonLauncherIfMissing(plan.darwinLauncherInstall);
   }
   for (const file of plan.files) {
     await mkdir(dirname(file.path), { recursive: true });

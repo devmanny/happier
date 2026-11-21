@@ -67,6 +67,27 @@ describe('runDaemonServiceCommands', () => {
     });
   });
 
+  it('installs the darwin launcher before writing the definition that starts it', async () => {
+    await withTempDir('happier-service-darwin-launcher-', async (dir) => {
+      const { applyDaemonServiceInstallPlan } = await import('./apply');
+      const sourcePath = join(dir, 'payload-launcher');
+      const launcherPath = join(dir, 'home', 'bin', 'happier-daemon-launcher');
+      const definition = join(dir, 'LaunchAgents', 'com.happier.cli.daemon.default.plist');
+      writeFileSync(sourcePath, 'launcher');
+
+      await applyDaemonServiceInstallPlan({
+        platform: 'darwin',
+        files: [{ path: definition, content: `<string>${launcherPath}</string>`, mode: 0o644 }],
+        commands: [],
+        darwinLauncherInstall: { path: launcherPath, sourcePath },
+      }, { runCommands: false });
+
+      expect(readFileSync(launcherPath, 'utf8')).toBe('launcher');
+      expect(statSync(launcherPath).mode & 0o777).toBe(0o755);
+      expect(readFileSync(definition, 'utf8')).toContain(launcherPath);
+    });
+  });
+
   it('ignores missing launchctl bootout cleanup failures in strict mode', async () => {
     const { runDaemonServiceCommands } = await import('./apply');
 

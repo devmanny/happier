@@ -9,6 +9,7 @@ import { handleBugReportCliCommand } from './commands/bugReport';
 import { handleCapabilitiesCliCommand } from './commands/capabilities';
 import { handleConnectCliCommand } from './commands/connect';
 import { handleDaemonCliCommand } from './commands/daemon';
+import { handleDiagnosticsCliCommand } from './commands/diagnostics';
 import { handleDoctorCliCommand } from './commands/doctor';
 import { handleHerdrCliCommand } from './commands/herdr';
 import { handleInstallCliCommand } from './commands/install';
@@ -16,6 +17,7 @@ import { handleLogoutCliCommand } from './commands/logout';
 import { handleMachineCliCommand } from './commands/machine';
 import { handleMcpCliCommand } from './commands/mcp';
 import { handleNotifyCliCommand } from './commands/notify';
+import { handleSearchCliCommand } from './commands/search';
 import { handleProfilesCliCommand } from './commands/profiles';
 import { handlePluginsCompatibilityCliCommand } from './commands/pluginsCompatibility';
 import { handleRelayCliCommand } from './commands/relay';
@@ -65,6 +67,7 @@ export const commandRegistry: Readonly<Record<string, CommandHandler>> = {
   bridge: handleMcpCliCommand,
   connect: handleConnectCliCommand,
   daemon: handleDaemonCliCommand,
+  diagnostics: handleDiagnosticsCliCommand,
   doctor: handleDoctorCliCommand,
   herdr: handleHerdrCliCommand,
   install: handleInstallCliCommand,
@@ -77,6 +80,7 @@ export const commandRegistry: Readonly<Record<string, CommandHandler>> = {
   profiles: handleProfilesCliCommand,
   relay: handleRelayCliCommand,
   resume: handleResumeCliCommand,
+  search: handleSearchCliCommand,
   service: handleServiceCliCommand,
   session: handleSessionCliCommand,
   // Backwards-compatible plural alias; keep the singular command canonical in help.

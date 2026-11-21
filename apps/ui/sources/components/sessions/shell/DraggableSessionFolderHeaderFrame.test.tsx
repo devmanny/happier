@@ -39,6 +39,7 @@ async function renderHeader(dragKey = 'folder:folder-1') {
     const resolved: UseSessionInlineDragResolvedDrop = {
         result: { instruction: { kind: 'idle' }, visual: { kind: 'none' } },
         geometry: { kind: 'none' },
+        destinationKey: null,
     };
     const onDragStart = vi.fn();
     const onDropResult = vi.fn();

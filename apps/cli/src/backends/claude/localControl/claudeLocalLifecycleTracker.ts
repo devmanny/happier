@@ -16,11 +16,12 @@ import {
   readClaudeSessionHookProviderTaskActivity,
   type ClaudeProviderTaskActivity,
 } from '../providerActivity/createClaudeProviderActivityLedger';
-import { readClaudeTranscriptTurnSignal } from './readClaudeTranscriptTurnSignal';
+import { isClaudeMainChainToolProgress, readClaudeTranscriptTurnSignal } from './readClaudeTranscriptTurnSignal';
 import {
   isClaudeTranscriptTaskNotification,
 } from './readClaudeTranscriptProviderActivity';
 import type { createClaudeProviderRuntimeActivityAdapter } from '../providerActivity/createClaudeProviderRuntimeActivityAdapter';
+import { logger } from '@/ui/logger';
 
 function readNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -218,7 +219,19 @@ export function createClaudeLocalLifecycleTracker(opts: Readonly<{
           }
         }
       }
-      observe(readClaudeTranscriptTurnSignal(message));
+      const signal = readClaudeTranscriptTurnSignal(message);
+      if (signal) {
+        observe(signal);
+        return;
+      }
+      if (
+        isClaudeMainChainToolProgress(message)
+        && (message as Readonly<Record<string, unknown>>).isReplay !== true
+        && !opts.lifecycle.snapshot().active
+      ) {
+        logger.infoFile('[claude-lifecycle]: tool progress without an open turn; opening the running turn');
+        observe({ type: 'turn_started', providerTurnId: null, source: 'claude_transcript_tool_progress' });
+      }
     },
     observeLiveProviderActivityRow(message: unknown, expectedSessionId: string): void {
       observeProviderActivity(message, expectedSessionId);

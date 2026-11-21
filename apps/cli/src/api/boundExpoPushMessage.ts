@@ -1,4 +1,5 @@
 import type { ExpoPushMessage } from 'expo-server-sdk';
+import { truncatePlainTextAtWordBoundary } from '@happier-dev/protocol';
 
 // Expo documents a 4096-byte native payload ceiling. This preflight bounds the
 // complete outbound Expo JSON, including routing data; Expo's subsequent native
@@ -11,7 +12,8 @@ export function boundExpoPushMessage(message: ExpoPushMessage): ExpoPushMessage 
 
     const bounded = { ...message };
     // Preserve identifiers and actions exactly. Shorten only presentation text,
-    // retaining the beginning of the body where request formatters put the action.
+    // retaining the beginning of the body where request formatters put the action,
+    // cut at a word boundary.
     for (const field of ['body', 'subtitle', 'title'] as const) {
         const original = bounded[field];
         if (!original) continue;
@@ -27,7 +29,8 @@ export function boundExpoPushMessage(message: ExpoPushMessage): ExpoPushMessage 
             if (byteLength(bounded) <= MAX_EXPO_MESSAGE_BYTES) low = middle;
             else high = middle - 1;
         }
-        bounded[field] = points.slice(0, low).join('') + '…';
+        // `low` code points plus the ellipsis fit; a word-boundary cut within that is shorter still.
+        bounded[field] = truncatePlainTextAtWordBoundary(original, low + 1);
         return bounded;
     }
 

@@ -125,6 +125,16 @@ For the full user-facing MCP guide in Happier, see:
 
 - [MCP servers](/extending/mcp-servers)
 
+## Interrupting a turn and stopping a session
+
+With the App Server backend, **Stop run** in the main session composer requests interruption of the active Codex turn and keeps the session available for your next message.
+
+Codex manages shell commands separately from the turn. A command can remain running after interruption, even when you interrupt before its first tool response. This behavior is present in Codex CLI 0.163.0-alpha.10.2: its [native command lifecycle](https://github.com/openai/codex/blob/4ebc485ca321243727539187169425fcf972f2c4/codex-rs/core/src/unified_exec/process_manager.rs#L605-L656) retains the process before waiting for output. The session returning to **online** indicates that the agent is no longer working on that turn; it does not confirm that every command has exited.
+
+To stop the whole Happier session, open its action menu and choose **Stop session**. This uses the session shutdown path instead of turn interruption. Session history remains available, and you can resume when the session supports it. For the CLI equivalent, see [CLI sessions](/apps/cli-sessions).
+
+If a particular command must stop, verify its exit on the machine running it. Detached processes or work submitted to another service may need separate termination. Neither control undoes effects a command has already completed.
+
 ## Codex ACP installables behavior
 
 Codex ACP depends on a machine-local **Codex ACP** installable.

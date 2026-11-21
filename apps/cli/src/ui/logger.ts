@@ -470,6 +470,12 @@ class Logger {
     this.logToFile(`[${this.localTimezoneTimestamp()}]`, `[WARN] ${message}`, ...args)
   }
 
+  /** File-only warning: for agent-session paths, where console output would land in the provider terminal. */
+  warnFile(message: string, ...args: unknown[]): void {
+    if (!this.warnFileEnabled) return
+    this.logToFile(`[${this.localTimezoneTimestamp()}]`, `[WARN] ${message}`, ...args)
+  }
+
   /**
    * Persist an unhandled CLI failure before a detached runner exits. This deliberately
    * records only sanitized Error text: enumerable fields can contain argv or environment

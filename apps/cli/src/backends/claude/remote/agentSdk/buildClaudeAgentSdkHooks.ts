@@ -1,10 +1,12 @@
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { getProjectPath } from '@/backends/claude/utils/path';
 import type { EnhancedMode } from '@/backends/claude/loop';
 import type { PermissionResult } from '@/backends/claude/sdk/types';
 import { buildClaudePermissionHookResponse } from '@/backends/claude/utils/buildClaudePermissionHookResponse';
 import { resolveClaudePermissionHookTimeoutSeconds } from '@/backends/claude/utils/permissionHookTimeout';
+
+const FILE_EDIT_TOOL_NAMES = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'] as const;
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
@@ -40,6 +42,11 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
       decisionReason?: string | null;
     },
   ) => Promise<PermissionResult>;
+  /**
+   * Presence check before Claude edits a file: returns a warning when another thread holds it.
+   * Advisory only — it never decides the permission, so it also runs in bypass (yolo) mode.
+   */
+  beforeFileEdit?: (filePath: string) => Promise<string | null>;
 }>): Readonly<{
   hooks: Record<string, unknown>;
 }> {
@@ -69,6 +76,28 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
       });
       return buildClaudePermissionHookResponse({ hookEventName, toolInput, decision: result });
     };
+  const beforeFileEdit = params.beforeFileEdit;
+  const fileEditHook = beforeFileEdit
+    ? [{
+        matcher: FILE_EDIT_TOOL_NAMES.join('|'),
+        hooks: [async (input: unknown) => {
+          const toolInput = readRecord(readRecord(input).tool_input ?? readRecord(input).toolInput);
+          const rawPath = readString(toolInput.file_path) ?? readString(toolInput.notebook_path);
+          if (!rawPath) return { continue: true };
+          const filePath = isAbsolute(rawPath) ? rawPath : resolve(params.cwd, rawPath);
+          const warning = await beforeFileEdit(filePath).catch(() => null);
+          if (!warning) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              additionalContext: `Heads-up from Happier (advisory, nothing is locked): ${warning} `
+                + 'Coordinate with that thread, wait, or work on something else before changing this file.',
+            },
+          };
+        }],
+      }]
+    : [];
   const hooks = {
     SessionStart: [
       {
@@ -119,7 +148,7 @@ export function buildClaudeAgentSdkHooks(params: Readonly<{
       matcher: 'AskUserQuestion',
       hooks: [buildPermissionHook('PreToolUse')],
       timeout: permissionHookTimeoutSeconds,
-    }],
+    }, ...fileEditHook],
   };
 
   return { hooks };

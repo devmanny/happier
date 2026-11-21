@@ -27,6 +27,9 @@ const TOOL_ARCHIVE_MANIFEST = [
     { tool: 'zellij', platformDir: 'x64-darwin', archiveName: 'zellij-no-web-x86_64-apple-darwin.tar.gz', archiveType: 'tar.gz', binaryName: 'zellij', version: '0.44.3', licenseName: 'zellij-LICENSE' },
     { tool: 'zellij', platformDir: 'arm64-linux', archiveName: 'zellij-no-web-aarch64-unknown-linux-musl.tar.gz', archiveType: 'tar.gz', binaryName: 'zellij', version: '0.44.3', licenseName: 'zellij-LICENSE' },
     { tool: 'zellij', platformDir: 'x64-linux', archiveName: 'zellij-no-web-x86_64-unknown-linux-musl.tar.gz', archiveType: 'tar.gz', binaryName: 'zellij', version: '0.44.3', licenseName: 'zellij-LICENSE' },
+    // First-party, built from tools/sources/happier-daemon-launcher (universal: one archive for both architectures).
+    { tool: 'happier-daemon-launcher', platformDir: 'arm64-darwin', archiveName: 'happier-daemon-launcher-darwin-universal.tar.gz', archiveType: 'tar.gz', binaryName: 'happier-daemon-launcher', version: '1' },
+    { tool: 'happier-daemon-launcher', platformDir: 'x64-darwin', archiveName: 'happier-daemon-launcher-darwin-universal.tar.gz', archiveType: 'tar.gz', binaryName: 'happier-daemon-launcher', version: '1' },
 ];
 
 const VERSION_MARKER_NAME = '.happier-tools-manifest.json';

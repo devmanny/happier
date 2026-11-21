@@ -172,7 +172,16 @@ function readClaudeTranscriptRecordSessionId(record: Record<string, unknown>): s
     }
 }
 
-async function readClaudeTranscriptProofSessionId(path: string): Promise<string | null> {
+const CONFLICTING_TRANSCRIPT_SESSION_IDS = Symbol('conflicting Claude transcript session ids');
+
+/**
+ * Reads the single Claude session id carried by every identifying row. Proof needs complete
+ * records: null while the file is empty, has no identifying row, or ends in a line Claude is
+ * still writing; `CONFLICTING_TRANSCRIPT_SESSION_IDS` when rows disagree.
+ */
+async function readClaudeTranscriptProofSessionId(
+    path: string,
+): Promise<string | typeof CONFLICTING_TRANSCRIPT_SESSION_IDS | null> {
     let proofSessionId: string | null = null;
     let offsetBytes = 0;
     try {
@@ -190,7 +199,7 @@ async function readClaudeTranscriptProofSessionId(path: string): Promise<string 
                 if (!record) continue;
                 const rowSessionId = readClaudeTranscriptRecordSessionId(record);
                 if (!rowSessionId) continue;
-                if (proofSessionId && proofSessionId !== rowSessionId) return null;
+                if (proofSessionId && proofSessionId !== rowSessionId) return CONFLICTING_TRANSCRIPT_SESSION_IDS;
                 proofSessionId = rowSessionId;
             }
             if (page.reachedEnd) return proofSessionId;
@@ -202,18 +211,31 @@ async function readClaudeTranscriptProofSessionId(path: string): Promise<string 
     }
 }
 
-async function isProvenClaudeTranscriptPath(params: Readonly<{
+/**
+ * `unmaterialized`: the native transcript has no complete identifying record yet (Claude creates
+ * `<id>.jsonl` at the first prompt, after SessionStart, and may be mid-write on its last line).
+ * `rejected`: it can never prove this id.
+ */
+export type ClaudeTranscriptProof = 'proven' | 'unmaterialized' | 'rejected';
+
+/**
+ * The identity owner's transcript proof. Exported for a caller that must choose which conversation
+ * to follow before publication (an adopted live Claude); publication itself stays in `Session`.
+ */
+export async function proveClaudeTranscriptPath(params: Readonly<{
     sessionId: string;
     transcriptPath: string | null;
-}>): Promise<boolean> {
+}>): Promise<ClaudeTranscriptProof> {
     const transcriptPath = params.transcriptPath;
-    if (!transcriptPath) return false;
+    if (!transcriptPath) return 'rejected';
     if (readPathBasename(transcriptPath) !== `${params.sessionId}.jsonl`) {
-        return false;
+        return 'rejected';
     }
-    return isClaudeNativeTranscriptPath(transcriptPath)
-        && isReachableClaudeTranscriptPath(transcriptPath)
-        && await readClaudeTranscriptProofSessionId(transcriptPath) === params.sessionId;
+    if (!isClaudeNativeTranscriptPath(transcriptPath)) return 'rejected';
+    if (!isReachableClaudeTranscriptPath(transcriptPath)) return 'unmaterialized';
+    const proofSessionId = await readClaudeTranscriptProofSessionId(transcriptPath);
+    if (proofSessionId === null) return 'unmaterialized';
+    return proofSessionId === params.sessionId ? 'proven' : 'rejected';
 }
 
 function isClaudeNativeTranscriptPathCandidate(params: Readonly<{
@@ -233,17 +255,23 @@ function resolveNativeClaudeTranscriptPathCandidate(params: Readonly<{
     return join(getProjectPath(params.workingDirectory), `${params.sessionId}.jsonl`);
 }
 
-async function resolveProvenNativeClaudeTranscriptPath(params: Readonly<{
+/** Proves the hook-reported transcript first, then the canonical native path for the working directory. */
+async function resolveProvenClaudeTranscriptPath(params: Readonly<{
     sessionId: string;
+    hookTranscriptPath: string | null;
     workingDirectory: string;
-}>): Promise<string | null> {
-    const transcriptPath = resolveNativeClaudeTranscriptPathCandidate(params);
-    return await isProvenClaudeTranscriptPath({
-        sessionId: params.sessionId,
-        transcriptPath,
-    })
-        ? transcriptPath
-        : null;
+}>): Promise<Readonly<{ transcriptPath: string; proof: 'proven' } | { transcriptPath: null; proof: Exclude<ClaudeTranscriptProof, 'proven'> }>> {
+    const hookProof = await proveClaudeTranscriptPath({ sessionId: params.sessionId, transcriptPath: params.hookTranscriptPath });
+    if (hookProof === 'proven' && params.hookTranscriptPath) {
+        return { transcriptPath: params.hookTranscriptPath, proof: 'proven' };
+    }
+    const nativeTranscriptPath = resolveNativeClaudeTranscriptPathCandidate(params);
+    const nativeProof = await proveClaudeTranscriptPath({ sessionId: params.sessionId, transcriptPath: nativeTranscriptPath });
+    if (nativeProof === 'proven') return { transcriptPath: nativeTranscriptPath, proof: 'proven' };
+    return {
+        transcriptPath: null,
+        proof: hookProof === 'unmaterialized' || nativeProof === 'unmaterialized' ? 'unmaterialized' : 'rejected',
+    };
 }
 
 function isReachableClaudeTranscriptPath(transcriptPath: string | null): boolean {
@@ -291,6 +319,14 @@ function buildClaudeReportedSessionMetadata(params: Readonly<{
     }
     return nextMetadata;
 }
+
+type ClaudeSessionIdentityPublicationAttempt = Readonly<{
+    sessionId: string;
+    hookTranscriptPath: string | null;
+    observedTranscriptPath: string | null;
+    didSessionIdChange: boolean;
+    prevTranscriptPath: string | null;
+}>;
 
 export class Session {
     readonly reconcileSessionModels = createClaudeSessionModelsReconciler();
@@ -368,6 +404,16 @@ export class Session {
      */
     private lastUserAbortRequestedAtMs: number = 0;
     
+    /**
+     * An observed Claude id that could not be published yet because its transcript carried no
+     * identifying row (SessionStart precedes `<id>.jsonl`). Only a successful publication clears it.
+     */
+    private pendingIdentityPublication: {
+        attempt: ClaudeSessionIdentityPublicationAttempt;
+        retryInFlight: boolean;
+        retryRequested: boolean;
+    } | null = null;
+
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((info: SessionFoundInfo) => void)[] = [];
     private claudeSessionHookCallbacks: ((data: SessionHookData) => void)[] = [];
@@ -830,6 +876,12 @@ export class Session {
      * all registered callbacks (e.g., SessionScanner) about the change.
      */
     onSessionFound = (sessionId: string, hookData?: SessionHookData) => {
+        const hookEventName = hookData ? readSessionHookEventName(hookData) : '';
+        // Lifecycle notifications describe activity, not a new conversation. In particular,
+        // SessionEnd can report a different, unmaterialized id while switching to remote mode.
+        // Eventless SDK and offline discoveries still use this same identity owner.
+        if (hookEventName && hookEventName !== 'SessionStart') return;
+
         // PLAN 4.9.1 step 2: arm the provider-task identity gate HERE, at the one place this runtime
         // learns its Claude session identity, so the unified terminal, the local launcher and the
         // remote launcher inherit it instead of each remembering to arm the ledger they were handed.
@@ -867,45 +919,19 @@ export class Session {
             // Same sessionId, but we learned/updated the exact transcript path.
             this.transcriptPath = observedTranscriptPath;
         }
+        if (this.pendingIdentityPublication && this.pendingIdentityPublication.attempt.sessionId !== sessionId) {
+            this.pendingIdentityPublication = null;
+        }
         // Hooks need the observed identity immediately, but allocation alone does not
         // establish a native session that a later inactive resume can load.
-        this.trackCriticalMetadataWrite(
-            async () => {
-                const hookTranscriptPathIsProven = await isProvenClaudeTranscriptPath({ sessionId, transcriptPath: nextTranscriptPath });
-                const metadataTranscriptPath = hookTranscriptPathIsProven
-                    ? nextTranscriptPath
-                    : await resolveProvenNativeClaudeTranscriptPath({ sessionId, workingDirectory: this.path });
-                // A newer observation can arrive while complete-record proof is being read.
-                if (this.sessionId !== sessionId || this.transcriptPath !== observedTranscriptPath) return;
-                if (!canPublishSessionResumeIdentity({ isExistingResume: false, hasResumeEvidence: Boolean(metadataTranscriptPath) })) return;
-                if (metadataTranscriptPath && this.transcriptPath !== metadataTranscriptPath) {
-                    this.transcriptPath = metadataTranscriptPath;
-                    for (const callback of this.sessionFoundCallbacks) callback({ sessionId, transcriptPath: metadataTranscriptPath });
-                }
-                const didKnownTranscriptPathChange = !didSessionIdChange
-                    && typeof prevTranscriptPath === 'string'
-                    && typeof metadataTranscriptPath === 'string'
-                    && prevTranscriptPath !== metadataTranscriptPath;
-                let updatedMetadata: Metadata | null = null;
-                await this.client.updateMetadata((metadata) => {
-                    updatedMetadata = buildClaudeReportedSessionMetadata({
-                        metadata,
-                        sessionId,
-                        transcriptPath: metadataTranscriptPath,
-                        shouldClearAssistantResumeAnchor: metadata.claudeSessionId !== sessionId || didKnownTranscriptPathChange,
-                    });
-                    return updatedMetadata;
-                });
-                if (updatedMetadata) {
-                    await this.reportSessionMetadataToDaemon?.({
-                        sessionId: this.client.sessionId,
-                        metadata: updatedMetadata,
-                    });
-                }
-                logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata`);
-            },
-            'claude_session_found',
-        );
+        const attempt: ClaudeSessionIdentityPublicationAttempt = {
+            sessionId,
+            hookTranscriptPath: nextTranscriptPath,
+            observedTranscriptPath,
+            didSessionIdChange,
+            prevTranscriptPath,
+        };
+        this.trackCriticalMetadataWrite(() => this.publishSessionIdentity(attempt), 'claude_session_found');
 
         // Notify callbacks when either the sessionId changes or we learned a better transcript path.
         const didTranscriptPathChange = Boolean(observedTranscriptPath) && observedTranscriptPath !== prevTranscriptPath;
@@ -922,6 +948,102 @@ export class Session {
         for (const callback of this.sessionFoundCallbacks) {
             callback(info);
         }
+    }
+
+    /**
+     * Re-runs the identity proof for an id whose transcript was not materialized when it was
+     * observed. Callers report every trusted transcript row of the primary conversation; this is a
+     * no-op unless that exact id is still pending, so a published identity is never rewritten.
+     */
+    retryPendingSessionIdentityPublication = (sessionId: string): void => {
+        const pending = this.pendingIdentityPublication;
+        if (!pending || pending.attempt.sessionId !== sessionId) return;
+        if (pending.retryInFlight) {
+            pending.retryRequested = true;
+            return;
+        }
+        pending.retryInFlight = true;
+        pending.retryRequested = false;
+        this.trackCriticalMetadataWrite(async () => {
+            try {
+                await this.publishSessionIdentity(pending.attempt);
+            } finally {
+                pending.retryInFlight = false;
+                if (pending.retryRequested && this.pendingIdentityPublication === pending) {
+                    this.retryPendingSessionIdentityPublication(sessionId);
+                }
+            }
+        }, 'claude_session_found_retry');
+    }
+
+    private async publishSessionIdentity(attempt: ClaudeSessionIdentityPublicationAttempt): Promise<void> {
+        const { sessionId, observedTranscriptPath } = attempt;
+        const proven = await resolveProvenClaudeTranscriptPath({
+            sessionId,
+            hookTranscriptPath: attempt.hookTranscriptPath,
+            workingDirectory: this.path,
+        });
+        // A newer observation can arrive while complete-record proof is being read.
+        if (this.sessionId !== sessionId || this.transcriptPath !== observedTranscriptPath) return;
+        if (!canPublishSessionResumeIdentity({ isExistingResume: false, hasResumeEvidence: proven.proof === 'proven' })) {
+            if (proven.proof !== 'proven') this.withholdSessionIdentityPublication(attempt, proven.proof);
+            return;
+        }
+        const metadataTranscriptPath = proven.transcriptPath;
+        if (metadataTranscriptPath && this.transcriptPath !== metadataTranscriptPath) {
+            this.transcriptPath = metadataTranscriptPath;
+            for (const callback of this.sessionFoundCallbacks) callback({ sessionId, transcriptPath: metadataTranscriptPath });
+        }
+        const didKnownTranscriptPathChange = !attempt.didSessionIdChange
+            && typeof attempt.prevTranscriptPath === 'string'
+            && typeof metadataTranscriptPath === 'string'
+            && attempt.prevTranscriptPath !== metadataTranscriptPath;
+        let updatedMetadata: Metadata | null = null;
+        await this.client.updateMetadata((metadata) => {
+            updatedMetadata = buildClaudeReportedSessionMetadata({
+                metadata,
+                sessionId,
+                transcriptPath: metadataTranscriptPath,
+                shouldClearAssistantResumeAnchor: metadata.claudeSessionId !== sessionId || didKnownTranscriptPathChange,
+            });
+            return updatedMetadata;
+        });
+        const wasPending = this.pendingIdentityPublication?.attempt.sessionId === sessionId;
+        if (wasPending) {
+            this.pendingIdentityPublication = null;
+            logger.infoFile('[Session] Claude session id published after its transcript materialized', {
+                claudeSessionId: sessionId,
+            });
+        }
+        if (updatedMetadata) {
+            await this.reportSessionMetadataToDaemon?.({
+                sessionId: this.client.sessionId,
+                metadata: updatedMetadata,
+            });
+        }
+        logger.debug(`[Session] Claude Code session ID ${sessionId} added to metadata`);
+    }
+
+    private withholdSessionIdentityPublication(
+        attempt: ClaudeSessionIdentityPublicationAttempt,
+        proof: 'unmaterialized' | 'rejected',
+    ): void {
+        const pending = this.pendingIdentityPublication;
+        if (proof === 'rejected') {
+            if (pending?.attempt.sessionId === attempt.sessionId) this.pendingIdentityPublication = null;
+            logger.infoFile('[Session] Claude session id not published: its transcript does not prove it', {
+                claudeSessionId: attempt.sessionId,
+            });
+            return;
+        }
+        if (pending?.attempt.sessionId === attempt.sessionId) {
+            pending.attempt = attempt;
+            return;
+        }
+        this.pendingIdentityPublication = { attempt, retryInFlight: false, retryRequested: false };
+        logger.infoFile('[Session] Claude session id publication pending until its transcript materializes', {
+            claudeSessionId: attempt.sessionId,
+        });
     }
 
     onClaudeSessionHook = (data: SessionHookData): void => {
@@ -1035,6 +1157,7 @@ export class Session {
     clearSessionId = (): void => {
         this.sessionId = null;
         this.transcriptPath = null;
+        this.pendingIdentityPublication = null;
         updateMetadataBestEffort(
             this.client,
             clearClaudeLastAssistantUuid,

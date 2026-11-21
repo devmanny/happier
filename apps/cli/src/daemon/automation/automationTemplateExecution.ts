@@ -53,6 +53,13 @@ const TemplateSchema = z.object({
   sessionEncryptionVariant: z.literal('dataKey').optional(),
   prompt: z.string().optional(),
   displayText: z.string().optional(),
+  /** A recurring task's rule: the run works that task's occurrence instead of this template. */
+  agentTaskV1: z.object({
+    taskId: z.string().trim().min(1),
+    ruleId: z.string().trim().min(1).optional(),
+    /** A repeating rule's occurrence (default), or the task's one-time scheduled start. */
+    kind: z.enum(['recurrence', 'scheduled_start']).optional(),
+  }).strict().optional(),
 }).strict();
 
 const TemplateEnvelopeSchema = z.object({
@@ -122,6 +129,7 @@ export type ParsedAutomationExecution = Readonly<{
   sessionEncryptionVariant?: 'dataKey';
   prompt?: string;
   displayText?: string;
+  agentTaskV1?: Readonly<{ taskId: string; ruleId?: string; kind?: 'recurrence' | 'scheduled_start' }>;
 }>;
 
 export function parseAutomationTemplateExecution(
@@ -275,6 +283,7 @@ export function parseAutomationTemplateExecution(
       ...(typeof template.displayText === 'string' && template.displayText.trim().length > 0
         ? { displayText: template.displayText }
         : {}),
+      ...(template.agentTaskV1 ? { agentTaskV1: template.agentTaskV1 } : {}),
     },
   };
 }
