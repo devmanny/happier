@@ -243,10 +243,30 @@ public struct HappierAPI: Sendable {
 
     // MARK: Session organization (`sessionOrganizationApi.ts`)
 
-    /// Pins only: folders, tags and labels are left out of the snapshot.
-    public func sessionOrganizationPins() async throws -> JSONValue {
+    /// Pins, groups (folders) and every session's group; tags and labels are left out.
+    public func sessionOrganization() async throws -> JSONValue {
         try await http.get("/v2/session-organization",
-                           query: ["includeFolders": "false", "includeTags": "false", "includeLabels": "false"])
+                           query: ["includeFolders": "true", "includeAllFolderAssignments": "true", "includeTags": "false", "includeLabels": "false"])
+    }
+
+    /// Creates or updates a group (`POST /v2/session-organization/folders`, keyed by `folderKey`).
+    func saveSessionFolder(_ body: JSONValue) async throws {
+        _ = try await http.post("/v2/session-organization/folders", body)
+    }
+
+    /// Deletes a group; its sessions go back to the list (`moveAssignmentsToParent`, the default).
+    func deleteSessionFolder(_ folderId: String) async throws {
+        _ = try await http.delete("/v2/session-organization/folders/\(folderId)")
+    }
+
+    /// Puts a session in a group, or takes it out of its group with nil.
+    func setSessionFolder(_ sessionId: String, folderId: String?) async throws {
+        _ = try await http.put("/v2/session-organization/folder-assignments/\(sessionId)", ["folderId": folderId.map(JSONValue.string) ?? .null])
+    }
+
+    /// What the relay offers (`GET /v1/features`).
+    func features() async throws -> JSONValue {
+        try await http.get("/v1/features")
     }
 
     public func setSessionPin(_ sessionId: String, pinned: Bool) async throws {

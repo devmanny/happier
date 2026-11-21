@@ -5,6 +5,8 @@ import SwiftUI
 /// way back to the usual list. Every change applies at once and is remembered on this device.
 struct SessionFilterView: View {
     @Binding var filter: SessionListFilter
+    /// By state (the usual list) or by folder; not part of the filter, so it applies to both.
+    @Binding var grouping: SessionListGrouping
     /// Agents to filter by, id to name.
     let agents: [String: String]
     @Environment(\.dismiss) private var dismiss
@@ -15,6 +17,19 @@ struct SessionFilterView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Group By", selection: Binding(get: { grouping }, set: { next in grouping = next })) {
+                        ForEach(SessionListGrouping.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("session-list-grouping")
+                } header: {
+                    Text("Group By")
+                } footer: {
+                    Text("By folder, the sessions in view are listed under the folder they work in. Your groups stay under Pinned.")
+                }
                 Section {
                     ForEach(SessionListFilter.shortcuts) { shortcut in
                         Button {

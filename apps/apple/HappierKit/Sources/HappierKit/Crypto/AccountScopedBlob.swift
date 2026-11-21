@@ -8,6 +8,8 @@ public enum AccountScopedBlob {
         case accountSettings = 1
         case automationTemplatePayload = 2
         case providerAccountUsageSnapshot = 6
+        /// A session group's name (`SessionGroup`).
+        case sessionOrganizationDisplay = 7
         case agentProfile = 11
         case agentPresence = 12
         case agentMemory = 13
@@ -21,6 +23,7 @@ public enum AccountScopedBlob {
             case .accountSettings: "account_settings"
             case .automationTemplatePayload: "automation_template_payload"
             case .providerAccountUsageSnapshot: "provider_account_usage_snapshot"
+            case .sessionOrganizationDisplay: "session_organization_display"
             case .agentProfile: "agent_profile"
             case .agentPresence: "agent_presence"
             case .agentMemory: "agent_memory"

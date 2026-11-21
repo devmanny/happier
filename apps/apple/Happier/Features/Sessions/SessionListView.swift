@@ -50,6 +50,12 @@ struct SessionListView: View {
     /// The filter button's chosen filter and whether it's on, kept on this device.
     @AppStorage("happier.sessionListFilter") private var storedFilter = ""
     @State private var showFilter = false
+    /// By state (the usual list) or by the folder the sessions work in, kept on this device.
+    @AppStorage("happier.sessionList.grouping") private var storedGrouping = SessionListGrouping.status.rawValue
+    /// The session a new group is being named for.
+    @State private var groupingSession: Session?
+    @State private var renamingGroup: SessionGroup?
+    @State private var deletingGroup: SessionGroup?
     /// The running sessions offered to put to rest, while the user picks which.
     @State private var restChoice: SessionRest.Candidates?
     /// Sessions whose sub-sessions are unfolded.
@@ -100,6 +106,13 @@ struct SessionListView: View {
     }
 
     private var filterChoice: SessionListFilterChoice { SessionListFilterChoice(stored: storedFilter) }
+    private var grouping: SessionListGrouping { SessionListGrouping(rawValue: storedGrouping) ?? .status }
+
+    private func changeGrouping(_ next: SessionListGrouping) {
+        guard next != grouping else { return }
+        AppHaptics.selection()
+        withAnimation(.smooth(duration: 0.2)) { storedGrouping = next.rawValue }
+    }
     private var filter: SessionListFilter { filterChoice.applied }
 
     private func changeFilter(_ change: (inout SessionListFilterChoice) -> Void) {
@@ -218,7 +231,8 @@ struct SessionListView: View {
         if onOpen != nil {
             content
                 .listRowBackground(selection == session.id ? DrawerRowHighlight().fill(Color.primary.opacity(0.1)) : nil)
-                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) },
+                            newGroup: { groupingSession = session })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -230,7 +244,8 @@ struct SessionListView: View {
                     ? Self.rowBackground.overlay(Color.userBubble.opacity(justClosedGlow ? 0.2 : 0))
                     : nil)
                 .tag(session.id)
-                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) })
+                .rowActions(session, store: store, openInWindow: openInWindow(session), rename: { startRenaming(session) }, moveInto: { movingInto = session }, newSession: { newSessionDraft = NewSessionDraft(inFolderOf: session) },
+                            newGroup: { groupingSession = session })
                 #if os(iOS)
                 .modifier(SessionRowDrag(session: session))
                 #endif
@@ -350,28 +365,38 @@ struct SessionListView: View {
     @ViewBuilder
     private func groupedList() -> some View {
         let now = Date.now, filter = filter, context = filterContext
-        let groups = SessionSidebar.groups(sessions, pinned: store.pinnedSessionIds, date: { store.listDate($0, now: now) },
-                                           recentSince: now.addingTimeInterval(-Self.recentWindow),
+        let date = { (session: Session) in store.listDate(session, now: now) }
+        let groupsShown = store.sessionGroupsAvailable
+        let groups = SessionSidebar.groups(sessions, pinned: store.pinnedSessionIds,
+                                           groups: groupsShown ? store.sessionGroups : [], groupIds: groupsShown ? store.sessionGroupIds : [:],
+                                           date: date, recentSince: now.addingTimeInterval(-Self.recentWindow),
                                            shows: { filter.includes($0, context: context) })
         if !groups.pinned.isEmpty {
             CollapsibleListSection("Pinned", key: "pinned", count: Self.flatten(groups.pinned).count, drawer: isDrawer) {
                 outline(groups.pinned)
             }
         }
-        if !groups.active.isEmpty {
-            // Titled (and so foldable) to set it apart from Pinned, and from the agents above them.
-            if !groups.pinned.isEmpty || !store.agentProfiles.isEmpty {
-                CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
-                    outline(groups.active)
+        // The user's groups, under Pinned: each keeps its sessions whatever their state.
+        ForEach(groups.grouped) { section in groupSection(section) }
+        if grouping == .folder {
+            // What the usual list keeps in view (running, and used in the last two days), by folder.
+            folderSections(SessionSidebar.folders(groups.active + groups.recent, date: date))
+        } else {
+            if !groups.active.isEmpty {
+                // Titled (and so foldable) to set it apart from Pinned and the groups, and from the agents above them.
+                if !groups.pinned.isEmpty || !groups.grouped.isEmpty || !store.agentProfiles.isEmpty {
+                    CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
+                        outline(groups.active)
+                    }
+                } else {
+                    Section { outline(groups.active) }
                 }
-            } else {
-                Section { outline(groups.active) }
             }
-        }
-        // Resting or stopped, used in the last two days: still in view, one tap away.
-        if !groups.recent.isEmpty {
-            CollapsibleListSection("Recent", key: "recent", count: Self.flatten(groups.recent).count, drawer: isDrawer) {
-                outline(groups.recent)
+            // Resting or stopped, used in the last two days: still in view, one tap away.
+            if !groups.recent.isEmpty {
+                CollapsibleListSection("Recent", key: "recent", count: Self.flatten(groups.recent).count, drawer: isDrawer) {
+                    outline(groups.recent)
+                }
             }
         }
         Section {
@@ -386,6 +411,55 @@ struct SessionListView: View {
             .buttonStyle(.plain)
             .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] + 36 }
             .listRowSeparatorTint(isDrawer ? Self.separatorTint : nil)
+        }
+    }
+
+    /// A group of the user's: folds like the other sections; its menu renames or deletes it.
+    private func groupSection(_ section: SessionSidebar.GroupSection) -> some View {
+        CollapsibleListSection(verbatim: section.group.name, key: "group.\(section.id)", count: Self.flatten(section.nodes).count, drawer: isDrawer) {
+            if section.nodes.isEmpty {
+                // Still listed, so it can be renamed or deleted.
+                Text("No sessions. Move one here from its menu.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .listRowSeparator(.hidden)
+            } else {
+                outline(section.nodes)
+            }
+        } accessory: {
+            Menu {
+                Button("Rename Group…", systemImage: "pencil") {
+                    AppHaptics.light()
+                    renamingGroup = section.group
+                }
+                Button("Delete Group", systemImage: "trash", role: .destructive) {
+                    AppHaptics.warning()
+                    deletingGroup = section.group
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 28, height: 22)
+                    .contentShape(Rectangle())
+            }
+            #if os(macOS)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            #endif
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(Text("Group Actions"))
+            .accessibilityIdentifier("session-group-menu")
+        }
+    }
+
+    /// The list by folder: a section per folder, folding like the others, each remembered apart.
+    @ViewBuilder
+    private func folderSections(_ folders: [SessionSidebar.FolderSection]) -> some View {
+        ForEach(folders) { folder in
+            CollapsibleListSection(verbatim: folder.title, key: "folder.\(folder.id)", count: Self.flatten(folder.nodes).count, drawer: isDrawer) {
+                outline(folder.nodes)
+            }
         }
     }
 
@@ -467,8 +541,19 @@ struct SessionListView: View {
             .accessibilityIdentifier("session-filter-summary")
         }
         let now = Date.now
-        ForEach(filteredSessions.sorted { store.listDate($0, now: now) > store.listDate($1, now: now) }) { session in
-            if session.archivedAt != nil { archivedRow(session) } else { row(session) }
+        let found = filteredSessions.sorted { store.listDate($0, now: now) > store.listDate($1, now: now) }
+        if grouping == .folder {
+            ForEach(SessionSidebar.folders(found, date: { store.listDate($0, now: now) })) { folder in
+                CollapsibleListSection(verbatim: folder.title, key: "folder.\(folder.id)", count: folder.nodes.count, drawer: isDrawer) {
+                    ForEach(folder.nodes) { node in
+                        if node.item.archivedAt != nil { archivedRow(node.item) } else { row(node.item) }
+                    }
+                }
+            }
+        } else {
+            ForEach(found) { session in
+                if session.archivedAt != nil { archivedRow(session) } else { row(session) }
+            }
         }
         if filter.includesArchived, archivedSearch?.isLoading == true {
             HappierSpinner(size: HappierSpinner.mini).listRowSeparator(.hidden)
@@ -513,7 +598,8 @@ struct SessionListView: View {
 
 extension View {
     /// Swipe right: read / unread. Swipe left: archive. Long press: everything, plus pin and stop.
-    func rowActions(_ session: Session, store: HappierStore, openInWindow: (() -> Void)? = nil, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil, newSession: (() -> Void)? = nil) -> some View {
+    func rowActions(_ session: Session, store: HappierStore, openInWindow: (() -> Void)? = nil, rename: (() -> Void)? = nil, moveInto: (() -> Void)? = nil, newSession: (() -> Void)? = nil,
+                    newGroup: (() -> Void)? = nil) -> some View {
         let unread = session.unreadSince != nil
         let pinned = store.isPinned(session.id)
         return self
@@ -588,6 +674,9 @@ extension View {
                         AppHaptics.light()
                         moveInto()
                     }
+                }
+                if let newGroup, store.sessionGroupsAvailable {
+                    SessionGroupMenu(session: session, store: store, newGroup: newGroup)
                 }
                 if let parentId = session.parentSessionId, store.sessions.keys.contains(parentId) {
                     Button {
@@ -908,6 +997,13 @@ extension SessionListView {
                         }
                     }
                     Divider()
+                    Button {
+                        changeGrouping(grouping == .folder ? .status : .folder)
+                    } label: {
+                        Label("Group by Folder", systemImage: grouping == .folder ? "checkmark" : "folder")
+                    }
+                    .accessibilityIdentifier("session-group-by-folder")
+                    Divider()
                     Button("Edit Filter…", systemImage: "slider.horizontal.3") { showFilter = true }
                     Button("Clear Filter", systemImage: "xmark.circle") {
                         // The usual list, with nothing chosen.
@@ -930,6 +1026,7 @@ extension SessionListView {
                 .help(Text("Click to switch your filter on or off; hold for shortcuts and to edit it"))
                 .popover(isPresented: $showFilter) {
                     SessionFilterView(filter: Binding(get: { filterChoice.chosen }, set: { next in changeFilter { $0.choose(next) } }),
+                                      grouping: Binding(get: { grouping }, set: { changeGrouping($0) }),
                                       agents: agentNames)
                         #if os(macOS)
                         .frame(width: 340, height: 520)
@@ -951,6 +1048,7 @@ extension SessionListView {
             withAnimation(.smooth(duration: 0.2)) { _ = expanded.insert(targetId) }
         })
         .modifier(RenameSessionAlert(session: $renaming))
+        .modifier(SessionGroupAlerts(newGroupFor: $groupingSession, renaming: $renamingGroup, deleting: $deletingGroup))
         .sheet(item: $newSessionDraft) { draft in
             NewSessionSheet(draft: draft)
         }
@@ -1373,7 +1471,7 @@ private struct SessionListStyle: ViewModifier {
 /// the agents, how many sessions wait for you). The sidebar (iPad, Mac) adds its own disclosure
 /// chevron; the drawer draws one after the title. Each device remembers how you left it.
 struct CollapsibleListSection<Content: View, Accessory: View>: View {
-    private let title: LocalizedStringKey
+    private let title: Text
     private let count: Int
     private let drawer: Bool
     private let waiting: Int
@@ -1386,6 +1484,17 @@ struct CollapsibleListSection<Content: View, Accessory: View>: View {
 
     init(_ title: LocalizedStringKey, key: String, count: Int, drawer: Bool, waiting: Int = 0,
          @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory) {
+        self.init(title: Text(title), key: key, count: count, drawer: drawer, waiting: waiting, content: content, accessory: accessory)
+    }
+
+    /// A title the user wrote (a group's name) or that comes from the data (a folder's), shown as is.
+    init(verbatim title: String, key: String, count: Int, drawer: Bool, waiting: Int = 0,
+         @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory) {
+        self.init(title: Text(verbatim: title), key: key, count: count, drawer: drawer, waiting: waiting, content: content, accessory: accessory)
+    }
+
+    private init(title: Text, key: String, count: Int, drawer: Bool, waiting: Int,
+                 @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory) {
         self.title = title
         self.count = count
         self.drawer = drawer
@@ -1405,7 +1514,7 @@ struct CollapsibleListSection<Content: View, Accessory: View>: View {
                     withAnimation(.smooth(duration: 0.25)) { collapsed.toggle() }
                 } label: {
                     HStack(spacing: 6) {
-                        Text(title)
+                        title.lineLimit(1)
                         if drawer {
                             Image(systemName: "chevron.right")
                                 .font(.caption2.weight(.bold))
@@ -1440,6 +1549,11 @@ extension CollapsibleListSection where Accessory == EmptyView {
     init(_ title: LocalizedStringKey, key: String, count: Int, drawer: Bool, waiting: Int = 0,
          @ViewBuilder content: () -> Content) {
         self.init(title, key: key, count: count, drawer: drawer, waiting: waiting, content: content, accessory: { EmptyView() })
+    }
+
+    init(verbatim title: String, key: String, count: Int, drawer: Bool, waiting: Int = 0,
+         @ViewBuilder content: () -> Content) {
+        self.init(verbatim: title, key: key, count: count, drawer: drawer, waiting: waiting, content: content, accessory: { EmptyView() })
     }
 }
 

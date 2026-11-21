@@ -195,7 +195,8 @@ public struct AccountSettings: Sendable, Equatable {
         return [Self.folderColorsKey: .object(map)]
     }
 
-    private static func folderKey(_ path: String) -> String {
+    /// A folder's path as one key: the same folder written with a trailing separator is the same.
+    static func folderKey(_ path: String) -> String {
         var key = path.trimmingCharacters(in: .whitespaces)
         while key.count > 1, key.hasSuffix("/") || key.hasSuffix("\\") { key.removeLast() }
         return key

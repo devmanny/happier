@@ -1205,6 +1205,11 @@ public final class HappierStore {
         openRequest = nil
         messageRequest = nil
         pinnedSessionIds = []
+        sessionGroups = []
+        sessionGroupIds = [:]
+        sessionGroupsAvailable = false
+        checkedGroupsFeature = false
+        organizationIsPlain = nil
         deleteRequest = nil
         deletedSessionIds = []
         accountSettings = nil
@@ -1409,7 +1414,7 @@ public final class HappierStore {
         snapshotCursor = snapshot.cursor
         hasLoadedSessions = true
         log.notice("sessions: \(decoded.sessions.count, privacy: .public) from cache in \(clock.now - started, privacy: .public)")
-        Task { await refreshPinnedSessions() }
+        Task { await refreshSessionOrganization() }
         Task { await handlePendingPushTap() }
     }
 
@@ -1516,7 +1521,7 @@ public final class HappierStore {
     }
 
     private func didUpdateSessions(_ ids: Set<String>) {
-        Task { await refreshPinnedSessions() }
+        Task { await refreshSessionOrganization() }
         Task { await handlePendingPushTap() }
         for id in ids where transcripts[id] != nil {
             if let state = sessions[id]?.agentState { applyAgentState(state, to: id) }
@@ -3025,13 +3030,129 @@ public final class HappierStore {
     /// Pinned session ids in pin order (shared with the official app through the account).
     public private(set) var pinnedSessionIds: [String] = []
 
-    private func refreshPinnedSessions() async {
+    // MARK: - Session groups
+
+    /// The user's groups, in list order (`SessionGroup.ordered`).
+    public private(set) var sessionGroups: [SessionGroup] = []
+    /// Each grouped session's group.
+    public private(set) var sessionGroupIds: [String: String] = [:]
+    /// Whether the relay keeps groups (`sessions.folders`); groups aren't offered until it says so.
+    public private(set) var sessionGroupsAvailable = false
+    @ObservationIgnored private var checkedGroupsFeature = false
+    /// Whether group names are written plain (a plain account); asked once, when first needed.
+    @ObservationIgnored private var organizationIsPlain: Bool?
+    /// Counts this device's changes to pins and groups: a snapshot asked for before one of them
+    /// would put back what it changed, so it's dropped (the next refresh comes with the next sync).
+    @ObservationIgnored private var organizationEdits = 0
+
+    /// Pins and groups, from the account's session organization (with every session list sync).
+    func refreshSessionOrganization() async {
         guard let api else { return }
-        do {
-            pinnedSessionIds = SessionPins.orderedIds(fromSnapshot: try await api.sessionOrganizationPins())
-        } catch {
-            logBackground(error, "pinned sessions")
+        if !checkedGroupsFeature {
+            do {
+                sessionGroupsAvailable = SessionOrganization.groupsEnabled(features: try await api.features())
+                checkedGroupsFeature = true
+            } catch {
+                logBackground(error, "relay features")
+            }
         }
+        let edits = organizationEdits
+        do {
+            let organization = SessionOrganization(snapshot: try await api.sessionOrganization(), machineKey: keys?.content.secretKey)
+            guard edits == organizationEdits else { return }
+            if pinnedSessionIds != organization.pinnedIds { pinnedSessionIds = organization.pinnedIds }
+            let groups = sessionGroupsAvailable ? organization.groups : []
+            let groupIds = sessionGroupsAvailable ? organization.groupIds : [:]
+            if sessionGroups != groups { sessionGroups = groups }
+            if sessionGroupIds != groupIds { sessionGroupIds = groupIds }
+        } catch {
+            logBackground(error, "session organization")
+        }
+    }
+
+    public func sessionGroup(of sessionId: String) -> SessionGroup? {
+        sessionGroupIds[sessionId].flatMap { id in sessionGroups.first { $0.id == id } }
+    }
+
+    /// Makes a group named `name` and puts the session in it; shown at once, taken back if the
+    /// relay refuses.
+    public func moveToNewGroup(_ sessionId: String, named name: String) async {
+        guard let api, sessionGroupsAvailable, let name = SessionGroup.cleanName(name) else { return }
+        let group = SessionGroup.new(named: name)
+        let previous = (sessionGroups, sessionGroupIds)
+        organizationEdits += 1
+        sessionGroups = SessionGroup.ordered(sessionGroups + [group])
+        sessionGroupIds[sessionId] = group.id
+        do {
+            try await api.saveSessionFolder(group.request(display: try await groupDisplay(group)))
+            try await api.setSessionFolder(sessionId, folderId: group.id)
+        } catch {
+            (sessionGroups, sessionGroupIds) = previous
+            report(error)
+        }
+    }
+
+    /// Puts the session in a group, or takes it out of its group with nil.
+    public func moveToGroup(_ sessionId: String, _ groupId: String?) async {
+        guard let api, sessionGroupIds[sessionId] != groupId else { return }
+        let previous = sessionGroupIds
+        organizationEdits += 1
+        sessionGroupIds[sessionId] = groupId
+        do {
+            try await api.setSessionFolder(sessionId, folderId: groupId)
+        } catch {
+            sessionGroupIds = previous
+            report(error)
+        }
+    }
+
+    public func renameGroup(_ groupId: String, to name: String) async {
+        guard let api, let name = SessionGroup.cleanName(name), let group = sessionGroups.first(where: { $0.id == groupId }),
+              name != group.ownName else { return }
+        let renamed = group.renamed(name)
+        let previous = sessionGroups
+        organizationEdits += 1
+        sessionGroups = SessionGroup.ordered(sessionGroups.map { $0.id == groupId ? renamed : $0 })
+        do {
+            try await api.saveSessionFolder(renamed.request(display: try await groupDisplay(renamed)))
+        } catch {
+            sessionGroups = previous
+            report(error)
+        }
+    }
+
+    /// Deletes a group and the groups inside it; their sessions go to the group it was in, or back
+    /// to the list (as the relay moves them).
+    public func deleteGroup(_ groupId: String) async {
+        guard let api, let group = sessionGroups.first(where: { $0.id == groupId }) else { return }
+        var deleted: Set<String> = [groupId]
+        while true {
+            let inside = Set(sessionGroups.filter { $0.parentId.map(deleted.contains) == true }.map(\.id))
+            guard !inside.isSubset(of: deleted) else { break }
+            deleted.formUnion(inside)
+        }
+        let previous = (sessionGroups, sessionGroupIds)
+        organizationEdits += 1
+        sessionGroups.removeAll { deleted.contains($0.id) }
+        for (sessionId, id) in sessionGroupIds where deleted.contains(id) { sessionGroupIds[sessionId] = group.parentId }
+        do {
+            try await api.deleteSessionFolder(groupId)
+        } catch {
+            (sessionGroups, sessionGroupIds) = previous
+            report(error)
+        }
+    }
+
+    private func groupDisplay(_ group: SessionGroup) async throws -> JSONValue {
+        guard let api else { throw CancellationError() }
+        let plain: Bool
+        if let known = organizationIsPlain {
+            plain = known
+        } else {
+            plain = try await !api.accountIsEncrypted()
+            organizationIsPlain = plain
+        }
+        return try group.display(machineKey: keys?.content.secretKey, plain: plain)
     }
 
     public func isPinned(_ sessionId: String) -> Bool { pinnedSessionIds.contains(sessionId) }
@@ -3040,6 +3161,7 @@ public final class HappierStore {
     public func setPinned(_ sessionId: String, _ pinned: Bool) async {
         guard let api, isPinned(sessionId) != pinned else { return }
         let previous = pinnedSessionIds
+        organizationEdits += 1
         if pinned { pinnedSessionIds.append(sessionId) } else { pinnedSessionIds.removeAll { $0 == sessionId } }
         do {
             try await api.setSessionPin(sessionId, pinned: pinned)
@@ -3184,6 +3306,7 @@ public final class HappierStore {
         transcripts[sessionId] = nil
         pendingQueues[sessionId] = nil
         pinnedSessionIds.removeAll { $0 == sessionId }
+        sessionGroupIds[sessionId] = nil
     }
 
     // MARK: - Renaming and nesting sessions by hand
