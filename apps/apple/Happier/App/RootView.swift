@@ -1,5 +1,8 @@
 import HappierKit
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 struct RootView: View {
     @Environment(HappierStore.self) private var store
@@ -208,10 +211,10 @@ struct MainView: View {
         }
     }
 
-    /// iPad (regular width) and Mac get the Tasks panel on the right; the iPhone keeps its sheet.
+    /// The Tasks panel on the right shows now (`TasksPanel`); otherwise Tasks is a sheet.
     private var tasksPanelAvailable: Bool {
         #if os(iOS)
-        sizeClass == .regular
+        TasksPanel.shows(on: UIDevice.current.userInterfaceIdiom, sizeClass: sizeClass)
         #else
         true
         #endif
@@ -219,22 +222,31 @@ struct MainView: View {
 
     @ViewBuilder
     private var detailWithTasksPanel: some View {
-        if tasksPanelAvailable {
+        #if os(iOS)
+        let hostsPanel = TasksPanel.isPart(of: UIDevice.current.userInterfaceIdiom)
+        #else
+        let hostsPanel = true
+        #endif
+        if hostsPanel {
+            // Attached whatever the width, shown only where it fits: a resize only shows or hides it.
             detail
-                .inspector(isPresented: $tasksPanelOpen) {
+                .inspector(isPresented: Binding(get: { tasksPanelAvailable && tasksPanelOpen },
+                                                set: { open in if tasksPanelAvailable { tasksPanelOpen = open } })) {
                     TasksView(presentation: .panel, openSessionId: openSessionId)
                         .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
                 }
                 .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            AppHaptics.light()
-                            tasksPanelOpen.toggle()
-                        } label: {
-                            Label(tasksPanelOpen ? "Hide Tasks" : "Show Tasks", systemImage: "checklist")
+                    if tasksPanelAvailable {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                AppHaptics.light()
+                                tasksPanelOpen.toggle()
+                            } label: {
+                                Label(tasksPanelOpen ? "Hide Tasks" : "Show Tasks", systemImage: "checklist")
+                            }
+                            .help(Text(tasksPanelOpen ? "Hide Tasks" : "Show Tasks"))
+                            .keyboardShortcut("t", modifiers: [.command, .option])
                         }
-                        .help(Text(tasksPanelOpen ? "Hide Tasks" : "Show Tasks"))
-                        .keyboardShortcut("t", modifiers: [.command, .option])
                     }
                 }
         } else {
@@ -280,6 +292,22 @@ struct MainView: View {
         }
     }
 }
+
+#if os(iOS)
+/// Where Tasks goes on iOS: a panel on the right on the iPad, in a window wide enough; a sheet on
+/// the iPhone, a large one in landscape too. There it has an iPad's width, and the panel (a split
+/// view inside the sidebar's) closed the app as the phone turned: UIKit's split view asserted
+/// while adapting to the new width (`_performLayoutForSplitViewControllerColumn`, iOS 27.3 beta).
+enum TasksPanel {
+    /// Whether the panel is part of the layout: fixed for the device, so turning or resizing never
+    /// adds or removes it while the split views adapt.
+    static func isPart(of idiom: UIUserInterfaceIdiom) -> Bool { idiom == .pad }
+
+    static func shows(on idiom: UIUserInterfaceIdiom, sizeClass: UserInterfaceSizeClass?) -> Bool {
+        isPart(of: idiom) && sizeClass == .regular
+    }
+}
+#endif
 
 extension MainView {
     private func followOpenRequest() {
