@@ -94,3 +94,54 @@ struct SessionGroupAlerts: ViewModifier {
             .onChange(of: renaming?.id, initial: true) { name = renaming?.ownName ?? "" }
     }
 }
+
+/// "Reorder Groups": a group and the ones beside it (inside the same group, or at the top) as rows
+/// to drag into place; each move is saved as it's made (`HappierStore.reorderGroups`).
+struct SessionGroupOrderSheet: View {
+    /// Any of the groups to order.
+    let groupId: String
+    @Environment(HappierStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var order: [SessionGroup] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(order) { group in
+                    Label {
+                        Text(verbatim: group.ownName)
+                    } icon: {
+                        Image(systemName: "rectangle.stack").foregroundStyle(.secondary)
+                    }
+                }
+                .onMove { offsets, destination in
+                    order.move(fromOffsets: offsets, toOffset: destination)
+                    AppHaptics.selection()
+                    let ids = order.map(\.id)
+                    Task { await store.reorderGroups(ids) }
+                }
+            }
+            #if os(iOS)
+            .environment(\.editMode, .constant(.active))
+            #endif
+            .navigationTitle("Reorder Groups")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        AppHaptics.light()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onAppear { order = store.siblingGroups(of: groupId) }
+        // A group deleted on another device meanwhile leaves the rows.
+        .onChange(of: store.sessionGroups.map(\.id)) { _, ids in
+            let listed = Set(ids)
+            order.removeAll { !listed.contains($0.id) }
+        }
+    }
+}

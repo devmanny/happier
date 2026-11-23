@@ -3058,6 +3058,8 @@ public final class HappierStore {
     @ObservationIgnored private var organizationEdits = 0
     @ObservationIgnored private var organizationWrites = 0
     @ObservationIgnored private var organizationStale = false
+    /// The group order being saved; the next waits for it, so the relay ends with the last one.
+    @ObservationIgnored private var groupOrdering: Task<Void, Never>?
 
     /// Pins and groups, from the account's session organization: with every session list sync,
     /// when another device changed them (`/v2/changes`), and when the app comes to the front.
@@ -3186,6 +3188,70 @@ public final class HappierStore {
             if sessionGroups.contains(where: { $0.id == groupId && $0.ownName == name }) {
                 sessionGroups = SessionGroup.ordered(sessionGroups.map { $0.id == groupId ? group : $0 })
             }
+        }
+    }
+
+    /// The groups listed beside this one, itself among them (`SessionGroup.siblings`): what it moves
+    /// up and down among.
+    public func siblingGroups(of groupId: String) -> [SessionGroup] {
+        SessionGroup.siblings(of: groupId, in: sessionGroups)
+    }
+
+    /// Moves a group one place up (-1) or down (+1) among the groups beside it.
+    public func moveGroup(_ groupId: String, by offset: Int) async {
+        var ids = siblingGroups(of: groupId).map(\.id)
+        guard let index = ids.firstIndex(of: groupId), ids.indices.contains(index + offset) else { return }
+        ids.swapAt(index, index + offset)
+        await reorderGroups(ids)
+    }
+
+    /// Puts groups listed beside one another in the order of `ids`: each takes the sort key of its
+    /// place (`SessionGroup.orderKey`), written only where that changes. Orders are saved one after
+    /// another, so the relay ends with the last one asked for.
+    public func reorderGroups(_ ids: [String]) async {
+        let previous = groupOrdering
+        let ordering = Task { [weak self] in
+            await previous?.value
+            await self?.saveGroupOrder(ids)
+        }
+        groupOrdering = ordering
+        await ordering.value
+    }
+
+    private func saveGroupOrder(_ ids: [String]) async {
+        guard let api, let account = snapshots, let first = ids.first else { return }
+        // Each group is written whole: read what the relay has first, so a group renamed or deleted
+        // on another device isn't brought back as this device last saw it.
+        await refreshSessionOrganization()
+        guard snapshots === account else { return }
+        let siblings = siblingGroups(of: first)
+        let listed = Set(siblings.map(\.id))
+        var seen: Set<String> = []
+        // Ones gone meanwhile are left out; ones made meanwhile keep their place after the rest.
+        let order = (ids + siblings.map(\.id)).filter { listed.contains($0) && seen.insert($0).inserted }
+        let keys = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, SessionGroup.orderKey($0)) })
+        let changed = siblings.filter { $0.sortKey != keys[$0.id] }.map { $0.sorted(by: keys[$0.id]) }
+        guard !changed.isEmpty else { return }
+        let before = Dictionary(uniqueKeysWithValues: siblings.map { ($0.id, $0.sortKey) })
+        let written = Set(changed.map(\.id))
+        await changeOrganization {
+            sessionGroups = SessionGroup.ordered(sessionGroups.map { written.contains($0.id) ? $0.sorted(by: keys[$0.id]) : $0 })
+        } send: {
+            for id in order where written.contains(id) {
+                // As the group is now (renamed meanwhile) with only its place changed; one deleted
+                // meanwhile stays deleted.
+                guard let group = sessionGroups.first(where: { $0.id == id }), group.sortKey == keys[id] else { continue }
+                let display = try await groupDisplay(group)
+                // Onto another account meanwhile: the rest isn't this one's to write, nor to seal with its key.
+                guard snapshots === account else { throw CancellationError() }
+                try await api.saveSessionFolder(group.request(display: display))
+            }
+        } undo: {
+            // Each key this order set and nothing changed since goes back.
+            sessionGroups = SessionGroup.ordered(sessionGroups.map { group in
+                guard written.contains(group.id), group.sortKey == keys[group.id], let old = before[group.id] else { return group }
+                return group.sorted(by: old)
+            })
         }
     }
 

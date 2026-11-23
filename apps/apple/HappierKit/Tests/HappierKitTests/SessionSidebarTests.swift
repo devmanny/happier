@@ -22,6 +22,58 @@ import Testing
         }
     }
 
+    /// A resting session put to rest at `restedAt` seconds, last active at `at` milliseconds.
+    private func resting(_ id: String, at: Double, restedAt: Double) throws -> Session {
+        let metadata = #"{"path":"/a","name":"t","lifecycleStateSince":1,"sessionRestV1":{"v":1,"reason":"idle","at":\#(restedAt * 1000)}}"#
+        return try Session(row: ["id": .string(id), "encryptionMode": "plain", "metadata": .string(metadata), "metadataVersion": 1,
+                                 "active": false, "updatedAt": .number(at)], keys: nil)
+    }
+
+    @Test func theSessionsThatWentToSleepLastComeFirst() throws {
+        let groups = SessionSidebar.groups([
+            try resting("longAgo", at: 9_000, restedAt: 10),
+            // Quiet for long, put to rest just now.
+            try resting("justNow", at: 1_000, restedAt: 500),
+            try resting("sameTimeOlder", at: 2_000, restedAt: 300),
+            try resting("sameTimeNewer", at: 3_000, restedAt: 300),
+        ], pinned: [])
+        #expect(ids(groups.resting) == ["justNow", "sameTimeNewer", "sameTimeOlder", "longAgo"])
+        #expect(groups.resting.first?.item.restedAt == Date(timeIntervalSince1970: 500))
+    }
+
+    /// A running session: working (a fresh heartbeat), waiting for an approval, unread, or idle.
+    private func running(_ id: String, working: Bool = false, approval: Bool = false, unread: Bool = false,
+                         parent: String? = nil, now: Date) throws -> Session {
+        let spawned = parent.map { #","spawnedBySessionV1":{"parentSessionId":"\#($0)"}"# } ?? ""
+        let ms = now.timeIntervalSince1970 * 1000
+        var row: [String: JSONValue] = ["id": .string(id), "encryptionMode": "plain", "metadata": .string(#"{"path":"/a","name":"t"\#(spawned)}"#),
+                                        "metadataVersion": 1, "active": true, "updatedAt": .number(ms)]
+        if working {
+            row["thinking"] = true
+            row["thinkingAt"] = .number(ms)
+        }
+        if approval { row["pendingPermissionRequestCount"] = 1 }
+        if unread { row["unreadSince"] = .number(ms) }
+        return try Session(row: .object(row), keys: nil)
+    }
+
+    @Test func aSectionCountsWhatWorksAndWhatNeedsYouSubSessionsIncluded() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let groups = SessionSidebar.groups([
+            try running("working", working: true, now: now),
+            try running("asks", approval: true, now: now),
+            try running("parent", now: now),
+            try running("workingChild", working: true, parent: "parent", now: now),
+            try running("unreadChild", unread: true, parent: "parent", now: now),
+            try running("idle", now: now),
+        ], pinned: [])
+        let context = SessionListFilter.Context(tasks: [])
+        #expect(SessionSidebar.activity(of: groups.active, context: context, now: now) == .init(working: 2, needingYou: 2))
+        // Two minutes later without news, nothing is working any more; what needs you still does.
+        #expect(SessionSidebar.activity(of: groups.active, context: context, now: now.addingTimeInterval(600)) == .init(working: 0, needingYou: 2))
+        #expect(SessionSidebar.activity(of: [], context: context, now: now) == .init(working: 0, needingYou: 0))
+    }
+
     @Test func splitsPinnedRunningRestingAndStopped() throws {
         let groups = SessionSidebar.groups([
             try session("run", active: true, at: 30),

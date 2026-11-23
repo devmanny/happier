@@ -13,6 +13,7 @@ public enum SessionSidebar {
         public let active: [SessionTreeNode<Session>]
         /// Not running, resting or stopped, with activity since `recentSince`; empty without it.
         public let recent: [SessionTreeNode<Session>]
+        /// The ones put to rest last first (`Session.restedAt`), then by their latest activity.
         public let resting: [SessionTreeNode<Session>]
         public let stopped: [SessionTreeNode<Session>]
     }
@@ -68,7 +69,46 @@ public enum SessionSidebar {
                           GroupSection(group: group, nodes: byGroup[group.id] ?? [], pinned: pinnedRoots.count { groupIds[$0.id] == group.id })
                       },
                       active: ungrouped.filter(isRunning), recent: recent,
-                      resting: older.filter(\.item.isResting), stopped: older.filter { !$0.item.isResting })
+                      resting: byRest(older.filter(\.item.isResting), date: date), stopped: older.filter { !$0.item.isResting })
+    }
+
+    /// Resting families, the ones that went to rest last first: where to find a session that just
+    /// went to sleep, however long ago it last did something. Then by latest activity, then id.
+    private static func byRest(_ nodes: [SessionTreeNode<Session>], date: (Session) -> Date) -> [SessionTreeNode<Session>] {
+        nodes.map { ($0, $0.item.restedAt ?? .distantPast, latest($0, date: date)) }
+            .sorted { a, b in
+                if a.1 != b.1 { return a.1 > b.1 }
+                if a.2 != b.2 { return a.2 > b.2 }
+                return a.0.id < b.0.id
+            }
+            .map(\.0)
+    }
+
+    /// How many sessions of a section are working, and how many need you
+    /// (`SessionListFilter.Context.needsAttention`), sub-sessions included: what its title shows.
+    public struct Activity: Equatable, Sendable {
+        public let working: Int
+        public let needingYou: Int
+
+        public init(working: Int, needingYou: Int) {
+            self.working = working
+            self.needingYou = needingYou
+        }
+    }
+
+    /// A section's `Activity`, with each session's status at `now` (the list's presence date).
+    public static func activity(of nodes: [SessionTreeNode<Session>], context: SessionListFilter.Context, now: Date) -> Activity {
+        var working = 0
+        var needingYou = 0
+        func count(_ nodes: [SessionTreeNode<Session>]) {
+            for node in nodes {
+                if node.item.status(at: now) == .working { working += 1 }
+                if context.needsAttention(node.item, now: now) { needingYou += 1 }
+                count(node.children ?? [])
+            }
+        }
+        count(nodes)
+        return Activity(working: working, needingYou: needingYou)
     }
 
     /// The sessions of one folder (`SessionSidebar.folders`).

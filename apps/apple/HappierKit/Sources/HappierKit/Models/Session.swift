@@ -246,6 +246,12 @@ public struct Session: Identifiable, Sendable, Equatable {
         return at >= since
     }
 
+    /// When the idle cleaner put it to rest (`sessionRestV1.at`), while it rests.
+    public var restedAt: Date? {
+        guard isResting, let at = metadata["sessionRestV1"]?["at"]?.doubleValue else { return nil }
+        return Date(timeIntervalSince1970: at / 1000)
+    }
+
     /// Whether the user may delete the session for good (`sessionActionContext.ts` `canDelete`):
     /// only their own, once it has stopped, and not while a preserved terminal host still holds it.
     public var canDelete: Bool {

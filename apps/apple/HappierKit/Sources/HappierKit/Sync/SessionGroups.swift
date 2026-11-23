@@ -30,15 +30,38 @@ public struct SessionGroup: Identifiable, Equatable, Sendable {
         self.payload = payload ?? ["name": .string(name)]
     }
 
-    private init(_ group: SessionGroup, listedAs name: String) {
+    private init(_ group: SessionGroup, listedAs name: String, sortKey: String?? = nil) {
         id = group.id
         self.name = name
         ownName = group.ownName
         folderKey = group.folderKey
         parentId = group.parentId
         parentKey = group.parentKey
-        sortKey = group.sortKey
+        self.sortKey = sortKey ?? group.sortKey
         payload = group.payload
+    }
+
+    /// The same group at another place among the ones beside it.
+    func sorted(by sortKey: String?) -> SessionGroup {
+        SessionGroup(self, listedAs: name, sortKey: .some(sortKey))
+    }
+
+    /// The sort key of the group at `index` once the user puts the groups beside it in order: the
+    /// same width for every place, so text order is list order (on the web too, `tree.ts`). A whole
+    /// fractional-indexing key ("g" heads an 8-character one), which the web orders others around.
+    static func orderKey(_ index: Int) -> String {
+        let digits = String(index)
+        return "g" + String(repeating: "0", count: max(0, 7 - digits.count)) + digits
+    }
+
+    /// The groups listed beside this one, itself among them: inside the same group (or at the top),
+    /// in list order. Empty when it isn't listed.
+    static func siblings(of groupId: String, in groups: [SessionGroup]) -> [SessionGroup] {
+        let ids = Set(groups.map(\.id))
+        func parent(_ group: SessionGroup) -> String? { group.parentId.flatMap { ids.contains($0) ? $0 : nil } }
+        guard let group = groups.first(where: { $0.id == groupId }) else { return [] }
+        let parentId = parent(group)
+        return groups.filter { parent($0) == parentId }
     }
 
     /// The web app's limit (`folders/constants.ts`).

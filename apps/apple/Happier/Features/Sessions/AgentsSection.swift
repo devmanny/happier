@@ -60,6 +60,9 @@ struct AgentsSection: View {
         // Readings for agents with none shown yet: one read of one session each, when the section
         // appears or an agent gets a session to read from.
         .task(id: usageSources(profiles).map(\.id)) { await readMissingUsage(profiles) }
+        // The agents' chats and the threads they answer in are rooms (`AgentRoom`): read once
+        // when the agents show; later changes come with the account's.
+        .task { await store.refreshRooms() }
     }
 
     /// The sessions that need you across every agent: what the folded section still shows.
@@ -141,7 +144,10 @@ private struct AgentBubble: View {
     /// A task from the Tasks panel is being dragged over it.
     @State private var dropTargeted = false
 
-    private static let size: CGFloat = 70
+    private static let size: CGFloat = 52
+    /// Wider than the circle, so a name of about eight letters (and the Approve button) fits under
+    /// it; it grows with the text size while the circle keeps its own.
+    @ScaledMetric(relativeTo: .caption2) private var width: CGFloat = 66
     /// The sessions-need-you count and what it waits on you for: the app's alert orange-red.
     private static let waiting = Color(red: 0xC2 / 255, green: 0x41 / 255, blue: 0x0C / 255)
 
@@ -156,7 +162,7 @@ private struct AgentBubble: View {
                     ZStack {
                         // The disc is 82 % of the avatar; the ring sits just outside it.
                         AgentProfileAvatar(profile: profile, size: Self.size)
-                        AgentUsageRing(meter: summary.weekly, diameter: Self.size - 4, lineWidth: 3.5, tint: .userBubble)
+                        AgentUsageRing(meter: summary.weekly, diameter: Self.size - 3, lineWidth: 3, tint: .userBubble)
                     }
                     .frame(width: Self.size, height: Self.size)
                     .overlay(alignment: .topTrailing) {
@@ -165,10 +171,10 @@ private struct AgentBubble: View {
                                 .font(.caption2.weight(.bold))
                                 .monospacedDigit()
                                 .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .frame(minWidth: 22, minHeight: 22)
+                                .padding(.horizontal, 5)
+                                .frame(minWidth: 19, minHeight: 19)
                                 .background(Self.waiting, in: Capsule())
-                                .offset(x: 2, y: -1)
+                                .offset(x: 4, y: -2)
                         }
                     }
                     .padding(.bottom, 2)
@@ -198,7 +204,7 @@ private struct AgentBubble: View {
                     .transition(.opacity)
             }
         }
-        .frame(width: Self.size + 8)
+        .frame(width: width)
         .opacity(summary.state == .asleep && !selected ? 0.5 : 1)
         // A task dropped on it is assigned to the agent (nothing starts).
         .overlay {

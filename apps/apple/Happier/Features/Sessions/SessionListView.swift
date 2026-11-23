@@ -70,7 +70,8 @@ struct SessionListView: View {
     @State private var newSessionDraft: NewSessionDraft?
     /// A session started from an agent's card, with that agent chosen.
     @State private var newSessionAgent: AgentProfile?
-    @State private var creatingRoom = false
+    /// The group whose "Reorder Groups…" is open: it and the groups beside it, to drag into place.
+    @State private var reorderingGroups: SessionGroup?
     /// The agents' Edit: their rows show drag handles.
     @State private var editingAgents = false
     /// The row a dragged session is over.
@@ -375,6 +376,8 @@ struct SessionListView: View {
             CollapsibleListSection("Pinned", key: "pinned", count: Self.flatten(groups.pinned).count, drawer: isDrawer) {
                 outline(groups.pinned)
             }
+            .sessionActivity(activity(groups.pinned))
+            .acceptsSessions { place($0, in: .pinned) }
         }
         // The user's groups, under Pinned: each keeps its sessions whatever their state.
         ForEach(groups.grouped) { section in groupSection(section) }
@@ -388,19 +391,37 @@ struct SessionListView: View {
                     CollapsibleListSection("Active", key: "active", count: Self.flatten(groups.active).count, drawer: isDrawer) {
                         outline(groups.active)
                     }
+                    .acceptsSessions { place($0, in: .list) }
                 } else {
                     Section { outline(groups.active) }
                 }
+            } else if Self.dragsSessions, !groups.grouped.isEmpty {
+                // Still titled while every running session is in a group: where one is dropped to
+                // take it out of its group.
+                CollapsibleListSection("Active", key: "active", count: 0, drawer: isDrawer) {
+                    Text("No sessions. Drag one here to take it out of its group.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
+                }
+                .acceptsSessions { place($0, in: .list) }
             }
             // Resting or stopped, used in the last two days: still in view, one tap away.
             if !groups.recent.isEmpty {
                 CollapsibleListSection("Recent", key: "recent", count: Self.flatten(groups.recent).count, drawer: isDrawer) {
                     outline(groups.recent)
                 }
+                .acceptsSessions { place($0, in: .list) }
             }
         }
+        // Put to rest by the idle cleaner: in the list itself, the ones that went to sleep last first.
+        if !groups.resting.isEmpty {
+            CollapsibleListSection("Resting", key: "resting", count: Self.flatten(groups.resting).count, drawer: isDrawer) {
+                outline(groups.resting)
+            }
+            .acceptsSessions { place($0, in: .list) }
+        }
         Section {
-            olderFolder("Resting", systemImage: "moon.zzz", groups.resting, section: .resting)
             olderFolder("Stopped", systemImage: "stop.circle", groups.stopped, section: .stopped)
             Button {
                 AppHaptics.light()
@@ -414,12 +435,15 @@ struct SessionListView: View {
         }
     }
 
-    /// A group of the user's: folds like the other sections; its menu renames or deletes it.
+    /// A group of the user's: folds like the other sections; its menu renames it, moves it up or
+    /// down among the groups, or deletes it. A session row dragged onto its title moves in.
     private func groupSection(_ section: SessionSidebar.GroupSection) -> some View {
-        CollapsibleListSection(verbatim: section.group.name, key: "group.\(section.id)", count: Self.flatten(section.nodes).count, drawer: isDrawer) {
+        let siblings = store.siblingGroups(of: section.id).map(\.id)
+        let index = siblings.firstIndex(of: section.id)
+        return CollapsibleListSection(verbatim: section.group.name, key: "group.\(section.id)", count: Self.flatten(section.nodes).count, drawer: isDrawer) {
             if section.nodes.isEmpty {
                 // Still listed, so it can be renamed or deleted.
-                Text(section.pinned > 0 ? "Its sessions are pinned, so they're in Pinned." : "No sessions. Move one here from its menu.")
+                Text(section.pinned > 0 ? "Its sessions are pinned, so they're in Pinned." : Self.emptyGroupHint)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .listRowSeparator(.hidden)
@@ -431,6 +455,26 @@ struct SessionListView: View {
                 Button("Rename Group…", systemImage: "pencil") {
                     AppHaptics.light()
                     renamingGroup = section.group
+                }
+                if let index, siblings.count > 1 {
+                    Divider()
+                    if index > 0 {
+                        Button("Move Up", systemImage: "arrow.up") {
+                            AppHaptics.selection()
+                            Task { await store.moveGroup(section.id, by: -1) }
+                        }
+                    }
+                    if index < siblings.count - 1 {
+                        Button("Move Down", systemImage: "arrow.down") {
+                            AppHaptics.selection()
+                            Task { await store.moveGroup(section.id, by: 1) }
+                        }
+                    }
+                    Button("Reorder Groups…", systemImage: "arrow.up.arrow.down") {
+                        AppHaptics.light()
+                        reorderingGroups = section.group
+                    }
+                    Divider()
                 }
                 Button("Delete Group", systemImage: "trash", role: .destructive) {
                     AppHaptics.warning()
@@ -451,6 +495,60 @@ struct SessionListView: View {
             .accessibilityLabel(Text("Group Actions"))
             .accessibilityIdentifier("session-group-menu")
         }
+        .sessionActivity(activity(section.nodes))
+        .acceptsSessions { place($0, in: .group(section.id)) }
+    }
+
+    #if os(iOS)
+    /// Rows drag onto section titles (on the Mac, draggable rows locked the sidebar).
+    private static let dragsSessions = true
+    private static let emptyGroupHint: LocalizedStringKey = "No sessions. Drag one onto its name, or move it here from its menu."
+    #else
+    private static let dragsSessions = false
+    private static let emptyGroupHint: LocalizedStringKey = "No sessions. Move one here from its menu."
+    #endif
+
+    /// How many of these sessions work and need you, for their section's title.
+    private func activity(_ nodes: [SessionTreeNode<Session>]) -> (Date) -> SessionSidebar.Activity {
+        let context = filterContext
+        return { [store] date in SessionSidebar.activity(of: nodes, context: context, now: store.presenceDate(date)) }
+    }
+
+    /// Where a session row dropped on a section's title goes.
+    private enum SessionPlace {
+        case pinned
+        case group(String)
+        /// The list itself: out of Pinned and of its group, listed by its state.
+        case list
+    }
+
+    /// A session row dropped on a section's title: pinned, put in that group (out of Pinned), or
+    /// taken out of Pinned and of its group. False when it's already there, or listed in a group
+    /// only by being under a session in it (it goes with that session).
+    private func place(_ items: [String], in place: SessionPlace) -> Bool {
+        guard let id = items.lazy.compactMap(SessionDrag.sessionId).first, store.sessions[id] != nil else { return false }
+        let pinned = store.isPinned(id)
+        let change: (() async -> Void)?
+        switch place {
+        case .pinned:
+            change = pinned ? nil : { await store.setPinned(id, true) }
+        case .group(let groupId):
+            let inGroup = store.groupId(of: id) == groupId
+            change = !pinned && inGroup ? nil : {
+                if pinned { await store.setPinned(id, false) }
+                if !inGroup { await store.moveToGroup(id, groupId) }
+            }
+        case .list:
+            let grouped = store.isGroupedOnItsOwn(id)
+            change = !pinned && !grouped ? nil : {
+                if pinned { await store.setPinned(id, false) }
+                if grouped { await store.moveToGroup(id, nil) }
+            }
+        }
+        guard let change else { return false }
+        AppHaptics.confirm()
+        Task { await change() }
+        return true
     }
 
     /// The list by folder: a section per folder, folding like the others, each remembered apart.
@@ -460,11 +558,13 @@ struct SessionListView: View {
             CollapsibleListSection(verbatim: folder.title, key: "folder.\(folder.id)", count: Self.flatten(folder.nodes).count, drawer: isDrawer) {
                 outline(folder.nodes)
             }
+            .sessionActivity(activity(folder.nodes))
+            .acceptsSessions { place($0, in: .list) }
         }
     }
 
-    /// The Resting or Stopped row, counting the sessions not in Recent; its window lists them all.
-    /// Hidden while empty.
+    /// The Stopped row, counting the sessions not in Recent; its window lists them all (and the
+    /// resting and archived ones). Hidden while empty.
     @ViewBuilder
     private func olderFolder(_ title: LocalizedStringKey, systemImage: String, _ group: [SessionTreeNode<Session>],
                              section: OlderSessionsSection) -> some View {
@@ -549,6 +649,7 @@ struct SessionListView: View {
                         if node.item.archivedAt != nil { archivedRow(node.item) } else { row(node.item) }
                     }
                 }
+                .sessionActivity(activity(folder.nodes))
             }
         } else {
             ForEach(found) { session in
@@ -568,7 +669,7 @@ struct SessionListView: View {
         return names
     }
 
-    /// The Resting, Stopped and Archived rows: an icon, a count, and a chevron to their window.
+    /// The Stopped and Archived rows: an icon, a count, and a chevron to their window.
     private func folderRow(_ title: LocalizedStringKey, systemImage: String, count: Int?, unread: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
@@ -803,8 +904,8 @@ extension SessionListView {
         list.offlineNotice()
     }
 
-    /// The agents and the rooms head the list (not while searching) once the account has agents.
-    private var showsAgentsAndRooms: Bool { query.isEmpty && !store.agentProfiles.isEmpty }
+    /// The agents head the list (not while searching) once the account has agents.
+    private var showsAgents: Bool { query.isEmpty && !store.agentProfiles.isEmpty }
 
     /// What the list shows when it has no sessions to show.
     private enum EmptyState { case noMatchingSessions, loading, noSearchResults, noSessions }
@@ -818,8 +919,8 @@ extension SessionListView {
         return query.isEmpty ? .noSessions : .noSearchResults
     }
 
-    /// The empty state: over the list when it is otherwise empty, under the agents and rooms when it
-    /// shows them (`showsAgentsAndRooms`).
+    /// The empty state: over the list when it is otherwise empty, under the agents when it shows
+    /// them (`showsAgents`).
     @ViewBuilder
     private func emptyStateView(_ state: EmptyState) -> some View {
         switch state {
@@ -851,10 +952,9 @@ extension SessionListView {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            if showsAgentsAndRooms {
+            if showsAgents {
                 AgentsSection(sessions: listed.sessions ?? store.sessionList, drawer: isDrawer, selection: selection, open: open,
                               newSession: { newSessionAgent = $0 }, editing: $editingAgents)
-                RoomsSection(drawer: isDrawer, selection: selection, open: open, newRoom: { creatingRoom = true })
             }
             if !query.isEmpty {
                 searchResults()
@@ -863,8 +963,8 @@ extension SessionListView {
             } else {
                 filteredList()
             }
-            if showsAgentsAndRooms, let emptyState {
-                // Under the agents and rooms, not over them.
+            if showsAgents, let emptyState {
+                // Under the agents, not over them.
                 emptyStateView(emptyState)
                     .frame(maxWidth: .infinity)
                     .listRowBackground(Color.clear)
@@ -920,7 +1020,7 @@ extension SessionListView {
             .padding(.vertical, 8)
         }
         .overlay {
-            if !showsAgentsAndRooms, let emptyState { emptyStateView(emptyState) }
+            if !showsAgents, let emptyState { emptyStateView(emptyState) }
         }
         .navigationTitle(isDrawer ? "Happier" : "Sessions")
         #if os(iOS)
@@ -1055,10 +1155,10 @@ extension SessionListView {
         .sheet(item: $newSessionAgent) { agent in
             NewSessionSheet(preselectedAgentId: agent.id)
         }
-        .sheet(isPresented: $creatingRoom) {
-            NewRoomSheet { room in open(AgentRoom.selection(id: room.id)) }
+        .sheet(item: $reorderingGroups) { group in
+            SessionGroupOrderSheet(groupId: group.id)
                 #if os(macOS)
-                .frame(minWidth: 480, minHeight: 600)
+                .frame(minWidth: 340, minHeight: 420)
                 #endif
         }
         #if os(macOS)
@@ -1477,7 +1577,13 @@ struct CollapsibleListSection<Content: View, Accessory: View>: View {
     private let waiting: Int
     private let content: Content
     private let accessory: Accessory
+    /// How many of its sessions work and need you, at a date (`sessionActivity`).
+    private var activity: ((Date) -> SessionSidebar.Activity)?
+    /// A session row dropped on the title (`acceptsSessions`); true when it moved.
+    private var dropSession: (([String]) -> Bool)?
     @AppStorage private var collapsed: Bool
+    @State private var dropTargeted = false
+    @Environment(\.sessionListOnScreen) private var onScreen
 
     /// The sessions-need-you count, as on the agents' circles.
     static var waitingColor: Color { Color(red: 0xC2 / 255, green: 0x41 / 255, blue: 0x0C / 255) }
@@ -1539,9 +1645,92 @@ struct CollapsibleListSection<Content: View, Accessory: View>: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityValue(collapsed ? Text("Collapsed") : Text("Expanded"))
+                if let activity {
+                    // "Working" fades after two minutes without news, as in the rows.
+                    TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
+                        SectionActivityBadges(activity: activity(context.date))
+                    }
+                }
                 if !collapsed { accessory }
             }
+            .contentShape(Rectangle())
+            .background {
+                if dropTargeted { RowDropHighlight() }
+            }
+            #if os(iOS)
+            .modifier(SectionSessionDrop(drop: dropSession, targeted: $dropTargeted))
+            #endif
         }
+    }
+
+    /// Shows by the title, folded or not, how many of its sessions are working and how many need you.
+    func sessionActivity(_ activity: @escaping (Date) -> SessionSidebar.Activity) -> Self {
+        var section = self
+        section.activity = activity
+        return section
+    }
+
+    /// A session row dragged onto the title is moved into this section (on iOS, where rows drag).
+    func acceptsSessions(_ drop: @escaping ([String]) -> Bool) -> Self {
+        var section = self
+        section.dropSession = drop
+        return section
+    }
+}
+
+/// A section's title taking a dragged session row, lit while one is held over it.
+private struct SectionSessionDrop: ViewModifier {
+    let drop: (([String]) -> Bool)?
+    @Binding var targeted: Bool
+
+    func body(content: Content) -> some View {
+        if let drop {
+            content.dropDestination(for: String.self) { items, _ in
+                targeted = false
+                return drop(items)
+            } isTargeted: { over in
+                withAnimation(.smooth(duration: 0.15)) { targeted = over }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// By a section's title: the working mark with how many sessions are working, then how many need
+/// you on the blue of the unread dot. Quiet gray otherwise; nothing while neither.
+struct SectionActivityBadges: View {
+    let activity: SessionSidebar.Activity
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if activity.working > 0 {
+                HStack(spacing: 3) {
+                    HappierSpinner(size: 11, color: .userBubble)
+                    Text(activity.working, format: .number)
+                }
+                .font(.caption2.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .frame(minHeight: 18)
+                .background(.fill.tertiary, in: Capsule())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text("\(activity.working) working"))
+            }
+            if activity.needingYou > 0 {
+                Text(activity.needingYou, format: .number)
+                    .font(.caption2.weight(.bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(Color.userBubble, in: Capsule())
+                    .accessibilityLabel(Text("\(activity.needingYou) need you"))
+            }
+        }
+        .textCase(nil)
+        .fixedSize()
     }
 }
 

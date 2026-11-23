@@ -14,11 +14,16 @@ private final class OrganizationServer: @unchecked Sendable {
     /// Sessions the relay no longer has: moving one answers 404.
     var goneSessions: Set<String> = []
     private var holding = false
+    private var holdingSave = false
     private var heldCount = 0
+    /// Saving a group (`POST folders`) answers 500.
+    var refusesSaves = false
     private let held = DispatchSemaphore(value: 0)
 
     /// Moves (`PUT folder-assignments`) wait until `release` while held.
     func holdMoves() { lock.withLock { holding = true } }
+    /// The next group save (`POST folders`) waits until `release`.
+    func holdNextSave() { lock.withLock { holdingSave = true } }
     var heldMoves: Int { lock.withLock { heldCount } }
     func release() {
         let count = lock.withLock { () -> Int in
@@ -30,6 +35,11 @@ private final class OrganizationServer: @unchecked Sendable {
     /// Whether the request waits for `release`; then `wait` returns once it does.
     func holds(_ request: URLRequest) -> Bool {
         lock.withLock { () -> Bool in
+            if holdingSave, request.httpMethod == "POST" {
+                holdingSave = false
+                heldCount += 1
+                return true
+            }
             guard holding, request.httpMethod == "PUT" else { return false }
             heldCount += 1
             return true
@@ -73,6 +83,7 @@ private final class OrganizationServer: @unchecked Sendable {
                                            "folders": .array(folders.values.sorted { $0["folderId"]!.stringValue! < $1["folderId"]!.stringValue! }),
                                            "folderAssignments": .array(rows), "tags": [], "tagAssignments": [], "orderEntries": [], "labels": []]])
             case ("POST", "/v2/session-organization/folders"):
+                if refusesSaves { return (500, ["error": "internal"]) }
                 guard let json = try? JSONValue.parse(body), let id = json["folderId"]?.stringValue else { return (400, ["error": "invalid-params"]) }
                 var folder = json.objectValue ?? [:]
                 folder["archivedAt"] = .null
@@ -336,6 +347,180 @@ private final class OrganizationURLProtocol: URLProtocol, @unchecked Sendable {
 
         #expect(server.folder("g-radar") == nil)
         #expect(store.sessionGroups.isEmpty)
+    }
+
+    // MARK: Order
+
+    private func sortKeys(_ server: OrganizationServer, _ ids: [String]) -> [String?] {
+        ids.map { server.folder($0)?["sortKey"]?.stringValue }
+    }
+
+    /// Whether the web app's fractional indexing (`fractional-indexing` validateOrderKey) takes the
+    /// key: its head letter sets how long the whole-number part is, digits are base 62, and a
+    /// fraction doesn't end in 0.
+    private static func webReads(_ key: String) -> Bool {
+        let digits = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+        let characters = Array(key)
+        guard let head = characters.first?.asciiValue else { return false }
+        let integerLength: Int
+        switch head {
+        case UInt8(ascii: "a")...UInt8(ascii: "z"): integerLength = Int(head - UInt8(ascii: "a")) + 2
+        case UInt8(ascii: "A")...UInt8(ascii: "Z"): integerLength = Int(UInt8(ascii: "Z") - head) + 2
+        default: return false
+        }
+        guard characters.count >= integerLength, characters.dropFirst().allSatisfy(digits.contains) else { return false }
+        return characters.count == integerLength || characters.last != "0"
+    }
+
+    /// Three groups listed by name (none ordered yet): Alpha, Beta, Gamma.
+    private func threeGroups(_ server: OrganizationServer) throws {
+        server.seed(folder: try folder("g-a", ["name": "Alpha"]))
+        server.seed(folder: try folder("g-b", ["name": "Beta"]))
+        server.seed(folder: try folder("g-c", ["name": "Gamma"]))
+    }
+
+    @Test func aGroupMovedUpIsListedThereOnEveryDevice() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        #expect(store.sessionGroups.map(\.name) == ["Alpha", "Beta", "Gamma"])
+
+        await store.moveGroup("g-c", by: -1)
+
+        #expect(store.sessionGroups.map(\.name) == ["Alpha", "Gamma", "Beta"])
+        #expect(sortKeys(server, ["g-a", "g-c", "g-b"]) == ["g0000000", "g0000001", "g0000002"])
+        // The web app orders groups around these keys (fractional indexing): each must be one it reads.
+        #expect(sortKeys(server, ["g-a", "g-b", "g-c"]).allSatisfy { $0.map(Self.webReads) == true })
+        // Each write kept the group's name.
+        #expect(["g-a", "g-b", "g-c"].map { name(of: server.folder($0)) } == ["Alpha", "Beta", "Gamma"])
+        let other = self.store(server)
+        await other.refreshSessionOrganization()
+        #expect(other.sessionGroups.map(\.name) == ["Alpha", "Gamma", "Beta"])
+    }
+
+    @Test func onlyTheGroupsThatChangePlaceAreWritten() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        await store.moveGroup("g-c", by: -1)
+        let saves = server.requests.count { $0 == "POST /v2/session-organization/folders" }
+
+        await store.moveGroup("g-a", by: 1)
+
+        #expect(store.sessionGroups.map(\.name) == ["Gamma", "Alpha", "Beta"])
+        #expect(server.requests.count { $0 == "POST /v2/session-organization/folders" } == saves + 2)
+        // At the ends there's nowhere to go.
+        await store.moveGroup("g-c", by: -1)
+        await store.moveGroup("g-b", by: 1)
+        #expect(server.requests.count { $0 == "POST /v2/session-organization/folders" } == saves + 2)
+    }
+
+    @Test func groupsInsideAnotherMoveOnlyAmongThemselves() async throws {
+        let server = OrganizationServer()
+        server.seed(folder: try folder("g-kelpi", ["name": "Kelpi"]))
+        server.seed(folder: try folder("g-kelpi-design", ["name": "Diseño"], parent: "g-kelpi"))
+        server.seed(folder: try folder("g-kelpi-web", ["name": "Web"], parent: "g-kelpi"))
+        server.seed(folder: try folder("g-radar", ["name": "Radar"]))
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        #expect(store.siblingGroups(of: "g-kelpi-web").map(\.id) == ["g-kelpi-design", "g-kelpi-web"])
+        #expect(store.siblingGroups(of: "g-radar").map(\.id) == ["g-kelpi", "g-radar"])
+
+        await store.moveGroup("g-kelpi-web", by: -1)
+        await store.moveGroup("g-radar", by: -1)
+
+        #expect(store.sessionGroups.map(\.name) == ["Radar", "Kelpi", "Kelpi › Web", "Kelpi › Diseño"])
+    }
+
+    @Test func anOrderTheRelayRefusesIsTakenBack() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.refusesSaves = true
+
+        await store.moveGroup("g-c", by: -1)
+
+        #expect(store.sessionGroups.map(\.name) == ["Alpha", "Beta", "Gamma"])
+        #expect(store.lastError != nil)
+    }
+
+    @Test func ordersAskedOneAfterAnotherEndWithTheLast() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.holdNextSave()
+
+        let first = Task { await store.reorderGroups(["g-c", "g-a", "g-b"]) }
+        while server.heldMoves == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        let second = Task { await store.reorderGroups(["g-b", "g-c", "g-a"]) }
+        try await Task.sleep(for: .milliseconds(50))
+        server.release()
+        await first.value
+        await second.value
+
+        #expect(store.sessionGroups.map(\.name) == ["Beta", "Gamma", "Alpha"])
+        let other = self.store(server)
+        await other.refreshSessionOrganization()
+        #expect(other.sessionGroups.map(\.name) == ["Beta", "Gamma", "Alpha"])
+    }
+
+    @Test func aGroupRenamedWhileAnOrderIsSavedKeepsItsNewName() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.holdNextSave()
+
+        let order = Task { await store.reorderGroups(["g-c", "g-b", "g-a"]) }
+        while server.heldMoves == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        await store.renameGroup("g-b", to: "Bet")
+        server.release()
+        await order.value
+
+        #expect(name(of: server.folder("g-b")) == "Bet")
+        #expect(store.sessionGroups.map(\.name) == ["Gamma", "Bet", "Alpha"])
+        let other = self.store(server)
+        await other.refreshSessionOrganization()
+        #expect(other.sessionGroups.map(\.name) == ["Gamma", "Bet", "Alpha"])
+    }
+
+    @Test func anOrderStopsWhenTheAccountChangesMidway() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.holdNextSave()
+
+        let order = Task { await store.reorderGroups(["g-c", "g-b", "g-a"]) }
+        while server.heldMoves == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        // Onto another account (as switching relays does) while the first group is being saved.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OrganizationURLProtocol.self]
+        store.installForTesting(api: HappierAPI(server: URL(string: "https://groups.invalid")!, token: "u", session: URLSession(configuration: configuration)),
+                                keys: try AccountKeys(masterSecret: Data(repeating: 9, count: 32)),
+                                snapshotDirectory: FileManager.default.temporaryDirectory.appending(path: "groups-\(UUID().uuidString)")) { _, _ in [] }
+        server.release()
+        await order.value
+
+        // None of the first account's groups was sealed with the other account's key.
+        #expect(["g-a", "g-b", "g-c"].map { name(of: server.folder($0)) } == ["Alpha", "Beta", "Gamma"])
+    }
+
+    @Test func anOrderKeepsAGroupDeletedOnAnotherDeviceDeleted() async throws {
+        let server = OrganizationServer()
+        try threeGroups(server)
+        let store = store(server)
+        await store.refreshSessionOrganization()
+        server.remove(folder: "g-b")
+
+        await store.reorderGroups(["g-c", "g-b", "g-a"])
+
+        #expect(server.folder("g-b") == nil)
+        #expect(store.sessionGroups.map(\.name) == ["Gamma", "Alpha"])
     }
 
     /// A plain session row; `parent` is the session it was started from.
