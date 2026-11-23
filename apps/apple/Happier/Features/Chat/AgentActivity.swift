@@ -36,9 +36,9 @@ struct BackgroundActivityPill: View {
     }
 }
 
-/// The subagents the agent started, the runs delegated from the session through Happier and the
-/// commands it left running, newest first: what each one is, whether it is still going, and since
-/// when. A subagent opens its own conversation.
+/// The subagents the agent started, its workflows, the runs delegated from the session through
+/// Happier and the commands it left running, newest first: what each one is, whether it is still
+/// going, and since when. A subagent opens its own conversation.
 struct AgentActivitySheet: View {
     let sessionId: String
     @Environment(HappierStore.self) private var store
@@ -49,6 +49,7 @@ struct AgentActivitySheet: View {
         (store.transcripts[sessionId]?.subagents ?? []).reversed().map { $0.settled(by: session) }
     }
     private var commands: [BackgroundCommand] { store.backgroundCommands[sessionId] ?? [] }
+    private var workflows: [WorkflowRun] { store.workflowRuns[sessionId] ?? [] }
     private var runs: [DelegatedRun] { store.delegatedRuns[sessionId] ?? [] }
 
     var body: some View {
@@ -61,6 +62,13 @@ struct AgentActivitySheet: View {
                                 NavigationLink(value: subagent) {
                                     SubagentRow(subagent: subagent, now: context.date)
                                 }
+                            }
+                        }
+                    }
+                    if !workflows.isEmpty {
+                        Section("Workflows") {
+                            ForEach(workflows) { run in
+                                WorkflowRunRow(run: run, now: context.date)
                             }
                         }
                     }
@@ -80,9 +88,9 @@ struct AgentActivitySheet: View {
                     }
                 }
                 .overlay {
-                    if subagents.isEmpty, runs.isEmpty, commands.isEmpty {
+                    if subagents.isEmpty, workflows.isEmpty, runs.isEmpty, commands.isEmpty {
                         ContentUnavailableView("Nothing in the Background", systemImage: "moon.zzz",
-                                               description: Text("Subagents, delegated runs and commands the agent starts show up here."))
+                                               description: Text("Subagents, workflows, delegated runs and commands the agent starts show up here."))
                     }
                 }
             }
@@ -97,8 +105,17 @@ struct AgentActivitySheet: View {
         }
         .task(id: session?.runtimeActivityRevision) {
             await store.refreshSubagentStatus(sessionId)
+            await store.refreshWorkflowRuns(sessionId)
             await store.refreshBackgroundCommands(sessionId)
             await store.refreshDelegatedRuns(sessionId)
+        }
+        .task {
+            // A workflow's agents finish without the background count changing: while one runs in
+            // view, its progress is read again now and then.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                if workflows.contains(where: \.isLive) { await store.refreshWorkflowRuns(sessionId) }
+            }
         }
     }
 }
@@ -125,6 +142,41 @@ private struct SubagentRow: View {
             }
             Spacer(minLength: 8)
             StatusBadge(status: subagent.status, since: subagent.startedAt, until: subagent.status == .running ? now : subagent.lastActivityAt)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// A workflow: what it does, how many of its agents are done, and how it went.
+private struct WorkflowRunRow: View {
+    let run: WorkflowRun
+    let now: Date
+    @Environment(\.userBubbleColor) private var accent
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .foregroundStyle(run.isLive ? accent : .secondary)
+                .frame(width: 26)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(run.title).lineLimit(2)
+                HStack(spacing: 4) {
+                    if run.totalAgents > 0 {
+                        Text("\(run.completedAgents) of \(run.totalAgents) agents")
+                    }
+                    if let startedAt = run.startedAt {
+                        if run.totalAgents > 0 { Text("·") }
+                        Text(startedAt, format: .relative(presentation: .named))
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            StatusBadge(status: run.isLive ? .running : run.status == "complete" ? .finished : .failed,
+                        since: run.startedAt, until: run.isLive ? now : run.completedAt ?? run.updatedAt)
         }
         .padding(.vertical, 2)
     }

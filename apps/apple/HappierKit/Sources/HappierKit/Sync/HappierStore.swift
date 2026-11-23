@@ -3735,19 +3735,33 @@ public final class HappierStore {
     public private(set) var backgroundCommands: [String: [BackgroundCommand]] = [:]
 
     public func refreshBackgroundCommands(_ sessionId: String) async {
-        guard let api, let session = sessions[sessionId] else { return }
+        guard let payloads = await activityRecords(sessionId, kind: "background_task.v1") else { return }
+        backgroundCommands[sessionId] = payloads.compactMap(BackgroundCommand.init(payload:)).sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Workflows the agent ran, by session (newest first).
+    public private(set) var workflowRuns: [String: [WorkflowRun]] = [:]
+
+    public func refreshWorkflowRuns(_ sessionId: String) async {
+        guard let payloads = await activityRecords(sessionId, kind: "workflow_run.v1") else { return }
+        workflowRuns[sessionId] = payloads.compactMap(WorkflowRun.init(payload:)).sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// The opened payloads of one kind of the session's `activity` records; nil when they can't be read.
+    private func activityRecords(_ sessionId: String, kind: String) async -> [JSONValue]? {
+        guard let api, let session = sessions[sessionId] else { return nil }
         do {
-            let records = try await api.systemRecords(sessionId: sessionId, namespace: "activity", kind: "background_task.v1")
-            let tasks = records.compactMap { record -> BackgroundCommand? in
+            let records = try await api.systemRecords(sessionId: sessionId, namespace: "activity", kind: kind)
+            return records.compactMap { record in
                 guard let payload = try? TranscriptMessage.open(record["content"] ?? .null, session: session) else {
-                    log.error("background task record \(record["id"]?.stringValue ?? "?", privacy: .public) doesn't open")
+                    log.error("\(kind, privacy: .public) record \(record["id"]?.stringValue ?? "?", privacy: .public) doesn't open")
                     return nil
                 }
-                return BackgroundCommand(payload: payload)
+                return payload
             }
-            backgroundCommands[sessionId] = tasks.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
-            log.error("background tasks: \(String(describing: error), privacy: .public)")
+            log.error("\(kind, privacy: .public) records: \(String(describing: error), privacy: .public)")
+            return nil
         }
     }
 
