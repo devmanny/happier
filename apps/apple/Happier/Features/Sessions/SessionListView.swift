@@ -809,6 +809,7 @@ extension View {
                               providerName: session.agentId.flatMap { Agent.displayNames[$0] },
                               providerSessionId: session.vendorSessionId)
                 if session.status() != .offline {
+                    RestartSessionButton(sessionId: session.id)
                     Button("Stop Session", systemImage: "power", role: .destructive) {
                         AppHaptics.warning()
                         store.requestStop(session.id)
@@ -883,6 +884,25 @@ struct ResumeSessionButton: View {
             .accessibilityIdentifier("resume-session-\(sessionId)")
             .help(Text("Reconnect this conversation on its computer without sending a message."))
         }
+    }
+}
+
+/// For a session that stopped answering: stops it and starts it again on its computer, keeping the
+/// conversation. Next to Stop Session, in the row's menu and the chat's.
+struct RestartSessionButton: View {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    var body: some View {
+        let restarting = store.restartingSessions.contains(sessionId)
+        let title: LocalizedStringKey = restarting ? "Restarting…" : "Restart Session"
+        Button(title, systemImage: "arrow.clockwise.circle") {
+            AppHaptics.light()
+            Task { await store.restartSession(sessionId) }
+        }
+        .disabled(restarting)
+        .accessibilityIdentifier("restart-session-\(sessionId)")
+        .help(Text("Stop this session and start it again on its computer. The conversation is kept."))
     }
 }
 

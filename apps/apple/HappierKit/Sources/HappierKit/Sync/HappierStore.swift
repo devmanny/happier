@@ -2917,13 +2917,21 @@ public final class HappierStore {
     }
 
     /// A message the runner paused because its terminal never became usable goes back to that same
-    /// terminal on a plain retry. This stops the session (its daemon closes the terminal),
-    /// resumes it on a fresh one and queues the message again.
+    /// terminal on a plain retry. This restarts the session on a fresh terminal and queues the
+    /// message again.
     public func restartSessionAndRetry(_ localId: String, in sessionId: String) async {
-        guard let api, !restartingSessions.contains(sessionId) else { return }
+        guard await restartSession(sessionId) else { return }
+        await requeuePending(localId, in: sessionId)
+    }
+
+    /// Stops the session (its daemon closes the agent and its terminal) and resumes it on a fresh
+    /// process; the conversation is kept. For a session that stopped answering.
+    @discardableResult
+    public func restartSession(_ sessionId: String) async -> Bool {
+        guard let api, !restartingSessions.contains(sessionId) else { return false }
         restartingSessions.insert(sessionId)
         defer { restartingSessions.remove(sessionId) }
-        guard await stop(sessionId) else { return }
+        guard await stop(sessionId) else { return false }
         // Resume needs the relay to see the session inactive, as archiving after a stop does
         // (`confirmStop`, same wait).
         let deadline = ContinuousClock.now + .seconds(75)
@@ -2935,16 +2943,15 @@ public final class HappierStore {
                 }
             } catch {
                 report(error)
-                return
+                return false
             }
             guard ContinuousClock.now < deadline else {
-                lastError = String(localized: "The session stopped but still shows as running. Reactivate it in a moment, then retry the message.")
-                return
+                lastError = String(localized: "The session stopped but still shows as running. Resume it in a moment.")
+                return false
             }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        guard await resumeSession(sessionId) else { return }
-        await requeuePending(localId, in: sessionId)
+        return await resumeSession(sessionId)
     }
 
     /// Messages held back by text open in Claude's terminal composer (`terminal_composer_draft`):

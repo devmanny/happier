@@ -16,6 +16,16 @@ struct SessionRestartRetryTests {
         #expect(store.lastError == nil)
     }
 
+    /// The session menu's Restart Session: the same stop and resume, with no message to queue.
+    @Test func restartingASessionStopsItAndResumesIt() async throws {
+        let relay = StuckTerminalRelay()
+        let store = try relay.store()
+        #expect(await store.restartSession("s1"))
+        #expect(relay.steps == ["stop", "resume"])
+        #expect(store.restartingSessions.isEmpty)
+        #expect(store.lastError == nil)
+    }
+
     @Test func aSessionThatCouldNotBeStoppedIsLeftAsItWas() async throws {
         let relay = StuckTerminalRelay(stopResult: ["status": "incomplete", "reason": "runner_exit_timeout"])
         let store = try relay.store()

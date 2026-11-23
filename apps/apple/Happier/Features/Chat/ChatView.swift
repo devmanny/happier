@@ -1120,6 +1120,7 @@ private struct SessionDetailsMenu: View, Equatable {
                 Section {
                     if details.active {
                         Button("Stop Agent", systemImage: "stop.circle") { perform(.stopAgent) }
+                        RestartSessionButton(sessionId: details.sessionId)
                         Button("Stop Session", systemImage: "power", role: .destructive) { perform(.stopSession) }
                     } else {
                         ResumeSessionButton(sessionId: details.sessionId)
