@@ -65,6 +65,16 @@ import Testing
         #expect(store.task(id: "t1")?.version == 2)
     }
 
+    /// The rows read which sessions have an open task from the store, kept with the tasks.
+    @MainActor @Test func theSessionsWithAnOpenTaskFollowTheTasks() throws {
+        let store = HappierStore(server: URL(string: "http://127.0.0.1:1")!)
+        let linked = try AgentTaskTests.task(["id": "t1", "title": "Ligada", "threads": ["s1"]]).sealed(machineKey: Self.machineKey)
+        store.applyKVChanges([.init(key: "task/t1", value: linked, version: 1)], machineKey: Self.machineKey)
+        #expect(store.taskContext.hasOpenTask("s1"))
+        store.applyKVChanges([.init(key: "task/t1", value: nil, version: 2)], machineKey: Self.machineKey)
+        #expect(!store.taskContext.hasOpenTask("s1"))
+    }
+
     @MainActor @Test func appliesMemoryChangesOnlyToAMemoryThatIsLoaded() throws {
         let store = HappierStore(server: URL(string: "http://127.0.0.1:1")!)
         let note = try AgentMemoryTests.sealed(["v": 1, "id": "n1", "title": "Manny", "markdown": "Hola", "updatedAt": 9])

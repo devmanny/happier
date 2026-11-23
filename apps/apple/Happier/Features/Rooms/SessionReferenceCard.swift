@@ -50,7 +50,7 @@ struct SessionReferenceCard: View {
         let line = session.flatMap { session in
             store.map { store in
                 AgentRoster.line(of: session, memory: session.agentIdentity.flatMap { store.agentMemories[$0.id] },
-                                 context: SessionListFilter.Context(tasks: store.tasks), now: store.presenceDate(date))
+                                 context: store.taskContext, now: store.presenceDate(date))
             }
         }
         return HStack(spacing: 10) {

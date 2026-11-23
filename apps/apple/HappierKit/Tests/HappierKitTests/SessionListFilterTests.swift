@@ -37,6 +37,13 @@ import Testing
         return sessions.filter { filter.includes($0, context: context) }.map(\.id)
     }
 
+    @Test func aSessionWithAnOpenTaskSaysSoUntilTheTaskIsDone() {
+        let open = SessionListFilter.Context(tasks: [task("t", threads: ["s"])])
+        #expect(open.hasOpenTask("s"))
+        #expect(!open.hasOpenTask("other"))
+        #expect(!SessionListFilter.Context(tasks: [task("t", threads: ["s"], status: "done")]).hasOpenTask("s"))
+    }
+
     @Test func theUsualListStoredBeforeTaskSessionsWereShownStillReadsAsTheUsualList() {
         let previousDefault = SessionListFilter(kinds: [.normal, .sub], states: [.active, .inactive])
         #expect(SessionListFilter(stored: previousDefault.stored) == .default)

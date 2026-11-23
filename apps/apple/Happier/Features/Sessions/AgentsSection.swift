@@ -67,7 +67,7 @@ struct AgentsSection: View {
 
     /// The sessions that need you across every agent: what the folded section still shows.
     private func waiting(_ profiles: [AgentProfile]) -> Int {
-        let context = SessionListFilter.Context(tasks: store.tasks), now = store.presenceDate()
+        let context = store.taskContext, now = store.presenceDate()
         return profiles.reduce(0) { total, profile in
             total + AgentRoster.openSessions(of: profile, in: sessions).count { context.needsAttention($0, now: now) }
         }
@@ -104,7 +104,7 @@ private struct AgentStrip: View {
         // "Working" fades after two minutes without news, as in the session rows.
         TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
             let now = store.presenceDate(context.date)
-            let filter = SessionListFilter.Context(tasks: store.tasks)
+            let filter = store.taskContext
             // A reply in a room is read (and answered) in the room, not in its thread.
             let threads = store.roomThreads
             let summaries = AgentRoster.needingYouFirst(profiles.map { profile in
@@ -325,7 +325,7 @@ private struct AgentRow: View {
     private var content: some View {
         // "Working" fades after two minutes without news, as in the session rows.
         TimelineView(.periodic(from: .now, by: onScreen ? 30 : 3_600)) { context in
-            label(AgentRoster.summary(of: profile, sessions: sessions, context: SessionListFilter.Context(tasks: store.tasks),
+            label(AgentRoster.summary(of: profile, sessions: sessions, context: store.taskContext,
                                       now: store.presenceDate(context.date), usage: { store.usage(for: $0.id) }))
         }
         .contentShape(Rectangle())

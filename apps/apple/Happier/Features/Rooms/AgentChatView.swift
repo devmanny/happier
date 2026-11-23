@@ -88,7 +88,7 @@ struct AgentChatView: View {
 
     /// Its photo over its name, as Messages shows who you're writing to; "Working" while it is.
     private func header(_ profile: AgentProfile) -> some View {
-        let summary = AgentRoster.summary(of: profile, sessions: store.sessionList, context: SessionListFilter.Context(tasks: store.tasks),
+        let summary = AgentRoster.summary(of: profile, sessions: store.sessionList, context: store.taskContext,
                                           now: store.presenceDate(.now), usage: { store.usage(for: $0.id) })
         let working = summary.working > 0 || store.roomSeats[room?.id ?? ""]?.contains { $0.inFlight != nil } == true
         return Button {

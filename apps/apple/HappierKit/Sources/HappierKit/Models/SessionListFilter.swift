@@ -120,10 +120,14 @@ public struct SessionListFilter: Equatable, Sendable, Codable {
             return session.parentSessionId == nil ? .normal : .sub
         }
 
+        /// A task that isn't done or archived was written, worked or run in it: the row's task mark.
+        public func hasOpenTask(_ sessionId: String) -> Bool { openTaskSessionIds.contains(sessionId) }
+
+        /// A request or question waiting, a reply not read, or an open task: each has its mark on the row.
         public func needsAttention(_ session: Session, now: Date = .now) -> Bool {
             switch session.status(at: now) {
             case .permissionRequired, .actionRequired: return true
-            default: return session.unreadSince != nil || openTaskSessionIds.contains(session.id)
+            default: return session.unreadSince != nil || hasOpenTask(session.id)
             }
         }
     }

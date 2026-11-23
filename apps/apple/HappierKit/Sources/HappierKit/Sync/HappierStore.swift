@@ -538,7 +538,12 @@ public final class HappierStore {
     // MARK: - Tasks (`task/<id>`, sealed `agent_task`)
 
     /// The user's and the agents' tasks, once loaded.
-    public private(set) var tasks: [AgentTask] = []
+    public private(set) var tasks: [AgentTask] = [] {
+        didSet { taskContext = SessionListFilter.Context(tasks: tasks) }
+    }
+    /// What the tasks say about the sessions, worked out once per change of the tasks rather than
+    /// by every row and section that asks.
+    public private(set) var taskContext = SessionListFilter.Context(tasks: [])
     /// The account's rooms (`room/`), and the messages and members' seats of those opened here.
     public internal(set) var rooms: [AgentRoom] = []
     public internal(set) var roomMessages: [String: [AgentRoomMessage]] = [:]

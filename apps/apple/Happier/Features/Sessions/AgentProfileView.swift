@@ -120,7 +120,7 @@ struct AgentProfileView: View {
     private func content(_ profile: AgentProfile) -> some View {
         // "Working" fades after two minutes without news, as in the sidebar's rows.
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let filterContext = SessionListFilter.Context(tasks: store.tasks)
+            let filterContext = store.taskContext
             let now = store.presenceDate(context.date)
             let summary = AgentRoster.summary(of: profile, sessions: store.sessionList, context: filterContext, now: now,
                                               usage: { store.usage(for: $0.id) })

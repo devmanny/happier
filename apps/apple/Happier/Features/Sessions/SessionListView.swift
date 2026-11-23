@@ -133,7 +133,7 @@ struct SessionListView: View {
         withAnimation(.smooth(duration: 0.2)) { storedFilter = next.stored }
     }
 
-    private var filterContext: SessionListFilter.Context { SessionListFilter.Context(tasks: store.tasks) }
+    private var filterContext: SessionListFilter.Context { store.taskContext }
 
     /// The list as the filter leaves it, the archive included when the filter asks for it.
     private var filteredSessions: [Session] {
@@ -200,7 +200,7 @@ struct SessionListView: View {
             } else {
                 SessionRow(session: session).equatable()
             }
-            if childCount > 0 { subSessionsButton(session.id, count: childCount) }
+            if childCount > 0 { subSessionsButton(session.id, count: childCount, needsYou: tree?.hidesNeedsYou == true) }
         }
         .sessionListRow(drawer: isDrawer, indent: CGFloat(depth) * indent)
         .background(alignment: .leading) {
@@ -294,7 +294,7 @@ struct SessionListView: View {
     }
 
     /// "2 ›": how many sessions it started; tap to unfold them.
-    private func subSessionsButton(_ id: String, count: Int) -> some View {
+    private func subSessionsButton(_ id: String, count: Int, needsYou: Bool) -> some View {
         let open = expanded.contains(id)
         return Button {
             AppHaptics.selection()
@@ -313,9 +313,20 @@ struct SessionListView: View {
             .padding(.vertical, 6)
             .glassEffect(.regular.interactive(), in: Capsule())
             .contentShape(Capsule())
+            .overlay(alignment: .topLeading) {
+                // The unread dot of a row, for what needs you inside the folded branch.
+                if needsYou {
+                    Circle()
+                        .fill(Color.userBubble)
+                        .frame(width: 8, height: 8)
+                        .background(Circle().fill(.background).padding(-1.5))
+                        .offset(x: -1, y: -1)
+                }
+            }
         }
         .buttonStyle(.pressable)
-        .accessibilityLabel(open ? Text("Hide sub-sessions") : Text("Show \(count) sub-sessions"))
+        .accessibilityLabel(open ? Text("Hide sub-sessions")
+                            : needsYou ? Text("Show \(count) sub-sessions, some need you") : Text("Show \(count) sub-sessions"))
     }
 
     static let drawerIndent: CGFloat = 22
@@ -340,16 +351,23 @@ struct SessionListView: View {
         let trail: [Bool]
         /// Its own sub-sessions are unfolded beneath it.
         let isOpen: Bool
+        /// Folded, and something in its branch needs you: its button carries the dot.
+        var hidesNeedsYou = false
         var id: String { session.id }
     }
 
     /// The tree as rows: each session, then (when unfolded) the sessions it started, indented.
     private func treeRows(_ nodes: [SessionTreeNode<Session>], depth: Int = 0, trail: [Bool] = []) -> [TreeRow] {
-        nodes.enumerated().flatMap { index, node -> [TreeRow] in
+        let context = store.taskContext, now = store.presenceDate()
+        return nodes.enumerated().flatMap { index, node -> [TreeRow] in
             let children = node.children ?? []
             let isLast = index == nodes.count - 1
             let isOpen = expanded.contains(node.id) && !children.isEmpty
-            let own = TreeRow(session: node.item, depth: depth, childCount: children.count, isLast: isLast, trail: trail, isOpen: isOpen)
+            // Counted in the section's title whether folded or not, so a folded branch shows it.
+            let hidden = !isOpen && !children.isEmpty
+                && SessionSidebar.activity(of: children, context: context, now: now).needingYou > 0
+            let own = TreeRow(session: node.item, depth: depth, childCount: children.count, isLast: isLast, trail: trail,
+                              isOpen: isOpen, hidesNeedsYou: hidden)
             return isOpen ? [own] + treeRows(children, depth: depth + 1, trail: trail + [!isLast]) : [own]
         }
     }
@@ -1258,8 +1276,11 @@ struct SessionRow: View, Equatable {
     }
 
     private func row(now: Date) -> some View {
-        HStack(alignment: .center, spacing: SessionListView.avatarGap) {
+        // A resting session fades; what needs you in it (the unread dot, the task mark) doesn't.
+        let fade = session.isResting ? Self.restingOpacity : 1
+        return HStack(alignment: .center, spacing: SessionListView.avatarGap) {
             SessionAvatar(session: session, size: SessionListView.drawerAvatar)
+                .opacity(fade)
                 .overlay(alignment: .topLeading) {
                     if session.unreadSince != nil {
                         Circle()
@@ -1272,40 +1293,47 @@ struct SessionRow: View, Equatable {
                 }
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .center, spacing: 4) {
-                    if store.isPinned(session.id) {
-                        Image(systemName: "pin.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel(Text("Pinned"))
+                    if store.taskContext.hasOpenTask(session.id) {
+                        OpenTaskMark().font(.caption2)
                     }
-                    if session.notificationsMuted {
-                        Image(systemName: "bell.slash.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel(Text("Notifications muted"))
+                    Group {
+                        if store.isPinned(session.id) {
+                            Image(systemName: "pin.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(Text("Pinned"))
+                        }
+                        if session.notificationsMuted {
+                            Image(systemName: "bell.slash.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(Text("Notifications muted"))
+                        }
+                        if session.archivedAt != nil {
+                            Image(systemName: "archivebox.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(Text("Archived"))
+                        }
+                        if session.isResting {
+                            RestingMark().font(.caption2)
+                        }
+                        if speaker.autoReadSessionId == session.id {
+                            // New messages of this session are read aloud (moving while it reads).
+                            Image(systemName: "speaker.wave.2.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.userBubble)
+                                .symbolEffect(.variableColor.iterative, isActive: speaker.speakingText != nil && onScreen)
+                                .accessibilityLabel(Text("Reading new messages aloud"))
+                        }
+                        Text(session.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
                     }
-                    if session.archivedAt != nil {
-                        Image(systemName: "archivebox.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel(Text("Archived"))
-                    }
-                    if session.isResting {
-                        RestingMark().font(.caption2)
-                    }
-                    if speaker.autoReadSessionId == session.id {
-                        // New messages of this session are read aloud (moving while it reads).
-                        Image(systemName: "speaker.wave.2.fill")
-                            .font(.caption2)
-                            .foregroundStyle(Color.userBubble)
-                            .symbolEffect(.variableColor.iterative, isActive: speaker.speakingText != nil && onScreen)
-                            .accessibilityLabel(Text("Reading new messages aloud"))
-                    }
-                    Text(session.title)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
+                    .opacity(fade)
                     Spacer(minLength: 4)
                     RowTrailing(session: session, now: now)
+                        .opacity(fade)
                 }
                 HStack(spacing: 6) {
                     // Left, where it works (the folder's own name); right, who works there:
@@ -1326,8 +1354,22 @@ struct SessionRow: View, Equatable {
                         ModelPill(word: model.word)
                     }
                 }
+                .opacity(fade)
             }
         }
+    }
+
+    static let restingOpacity = 0.45
+}
+
+/// A task still open in the session (written, worked or run there): it counts among what needs
+/// you, so it's blue like the unread dot, in the Tasks list's own symbol.
+private struct OpenTaskMark: View {
+    var body: some View {
+        Image(systemName: "checklist")
+            .foregroundStyle(Color.userBubble)
+            .accessibilityLabel(Text("Open task"))
+            .help(Text("Open task"))
     }
 }
 
