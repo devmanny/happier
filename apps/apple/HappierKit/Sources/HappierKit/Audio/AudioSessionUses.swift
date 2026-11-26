@@ -5,7 +5,8 @@ import Foundation
 public enum AudioUse: Sendable, Hashable {
     /// Oído, all day: other apps' audio keeps playing at its volume.
     case listening
-    /// Dictating into a composer: other audio is lowered while it listens (when Oído isn't on).
+    /// Dictating into a composer: other audio is lowered while it listens (when nothing else that
+    /// mixes holds the session).
     case dictating
     /// Reading a message aloud: plays with the silent switch on; lowers other audio when asked.
     case reading(ducksOthers: Bool)
@@ -15,16 +16,28 @@ public enum AudioUse: Sendable, Hashable {
 
     public var records: Bool { self == .listening || self == .dictating || self == .standby }
 
+    /// Whether this use alone would lower other apps' audio (`AudioSessionPlan.resolve` decides
+    /// for all of them together).
+    public var ducksOthers: Bool {
+        switch self {
+        case .dictating: true
+        case .reading(let ducks): ducks
+        case .listening, .standby: false
+        }
+    }
+
     /// Oído waits for a microphone that a call or another app holds and comes back by itself;
     /// a dictation take that can't open the microphone fails at once and says so.
     public var waitsForMicrophone: Bool { self == .listening }
 }
 
-/// The audio session's configuration, in the platform's terms (`AVAudioSession` category, mode
-/// and options), kept free of AVFoundation so it can be decided and tested here.
+/// The audio session's configuration, kept free of AVFoundation so it can be decided and tested
+/// here. Always the play-and-record category in its default mode, without the AirPlay option, for
+/// every use: playback would follow AirPlay to a TV by itself (Apple implies AirPlay for the
+/// output-only categories), while play-and-record reaches non-mirrored AirPlay only with
+/// `.allowAirPlay`, which Happier never sets. One category for everything also means a dictation
+/// take starting under a reply being read doesn't move the route under the microphone.
 public struct AudioSessionPlan: Sendable, Equatable {
-    public enum Category: Sendable, Equatable { case playAndRecord, playback }
-    public enum Mode: Sendable, Equatable { case standard, spokenAudio }
     public struct Options: OptionSet, Sendable, Hashable {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
@@ -34,45 +47,40 @@ public struct AudioSessionPlan: Sendable, Equatable {
         public static let allowBluetoothA2DP = Options(rawValue: 1 << 3)
     }
 
-    public var category: Category
-    public var mode: Mode
     public var options: Options
+    /// Happier is speaking or dictating. Play-and-record still follows a mirrored screen to the TV
+    /// (Apple's category documentation), so while this is set and the output is AirPlay, the
+    /// sound and the microphone are moved back to the iPhone. Oído or the keyboard's standby
+    /// alone leave the route as the user chose it.
+    public var staysOffAirPlay: Bool
 
-    public init(category: Category, mode: Mode, options: Options) {
-        self.category = category
-        self.mode = mode
+    public init(options: Options, staysOffAirPlay: Bool) {
         self.options = options
+        self.staysOffAirPlay = staysOffAirPlay
     }
 
     /// The configuration for everything in use at once; nil when nothing is.
     ///
-    /// Recording wins: reading aloud plays fine through a play-and-record session, while switching
-    /// to playback would take the microphone from Oído. Oído's mixing wins over dictation's ducking:
-    /// iOS lowers other audio only from the session's activation, so ducking for a take would mean
-    /// deactivating the session under Oído's recording (and, in the background, not getting it back).
+    /// Other audio is lowered only while every use wants it. iOS lowers it when the session
+    /// activates and raises it again only when the session ends, so a use that mixes and stays
+    /// (Oído all day, auto read waiting for the next message) must never inherit a lowering it
+    /// can't undo: ending it would mean deactivating the session under Oído's recording (and, in
+    /// the background, not getting it back).
     public static func resolve(_ uses: some Sequence<AudioUse>) -> AudioSessionPlan? {
-        var listening = false, dictating = false, reading = false, readingDucks = false
+        var any = false, ducks = true, ownSound = false
         for use in uses {
+            any = true
+            ducks = ducks && use.ducksOthers
             switch use {
-            case .listening, .standby: listening = true
-            case .dictating: dictating = true
-            case .reading(let ducks):
-                reading = true
-                readingDucks = readingDucks || ducks
+            case .dictating, .reading: ownSound = true
+            case .listening, .standby: break
             }
         }
+        guard any else { return nil }
         // Bluetooth headphones play in A2DP; the microphone stays the device's own (HFP would
         // drop music to call quality all day).
-        if listening {
-            return AudioSessionPlan(category: .playAndRecord, mode: .standard, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
-        }
-        if dictating {
-            return AudioSessionPlan(category: .playAndRecord, mode: .standard, options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP])
-        }
-        if reading {
-            return AudioSessionPlan(category: .playback, mode: .spokenAudio, options: readingDucks ? [.duckOthers] : [.mixWithOthers])
-        }
-        return nil
+        return AudioSessionPlan(options: [ducks ? .duckOthers : .mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP],
+                                staysOffAirPlay: ownSound)
     }
 }
 

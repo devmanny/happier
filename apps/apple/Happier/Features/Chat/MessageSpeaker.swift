@@ -62,6 +62,8 @@ final class MessageSpeaker: NSObject {
     @ObservationIgnored private var wordInUtterance = 0
     /// A speed change while paused takes effect on resume.
     @ObservationIgnored private var restartOnResume = false
+    /// The voice sample playing in Settings (`preview`), kept so its end can be told apart.
+    @ObservationIgnored private var previewUtterance: AVSpeechUtterance?
 
     override private init() {
         let stored = UserDefaults.standard.double(forKey: Self.rateKey)
@@ -318,9 +320,12 @@ final class MessageSpeaker: NSObject {
         currentUtterance = nil
         synthesizer.stopSpeaking(at: .immediate)
         #if os(iOS)
-        // Plays with the silent switch on and the app minimized, lowering other audio while it reads.
-        // Through a recording session while Oído listens (`AppAudioSession`), so it keeps the mic.
-        try? AppAudioSession.begin(.reading(ducksOthers: true), by: self)
+        // Plays with the silent switch on and the app minimized, through the microphone's session
+        // (`AppAudioSession`), so it keeps Oído's mic and stays off a TV picked for AirPlay. A
+        // message picked by hand lowers other audio while it's read; auto read keeps the session
+        // between messages, and iOS raises other audio again only when the session ends, so it
+        // reads over music at its own volume instead of leaving it lowered while auto read is on.
+        try? AppAudioSession.begin(.reading(ducksOthers: autoReadSessionId == nil), by: self)
         #endif
         publishNowPlaying(markdown)
         sentences = parts
@@ -456,18 +461,25 @@ final class MessageSpeaker: NSObject {
         synthesizer.stopSpeaking(at: .immediate)
         let sample = language == "es" ? "Hola, así sueno cuando leo tus mensajes." : "Hi, this is how I sound reading your messages."
         #if os(iOS)
-        // Through a recording session while Oído listens (`AppAudioSession`), so it keeps the mic.
-        try? AppAudioSession.begin(.reading(ducksOthers: true), by: self)
+        // As a reading (`start`): lowers other audio only when it can raise it again at the end.
+        try? AppAudioSession.begin(.reading(ducksOthers: autoReadSessionId == nil), by: self)
         #endif
         let utterance = AVSpeechUtterance(string: sample)
         utterance.voice = voice
         utterance.rate = min(max(AVSpeechUtteranceDefaultSpeechRate * Float(rate), AVSpeechUtteranceMinimumSpeechRate),
                              AVSpeechUtteranceMaximumSpeechRate)
         currentUtterance = nil
+        previewUtterance = utterance
         synthesizer.speak(utterance)
     }
 
     fileprivate func finished(_ utterance: ObjectIdentifier) {
+        if let preview = previewUtterance, utterance == ObjectIdentifier(preview) {
+            // A voice sample is over: other audio comes back up unless a reading holds the session.
+            previewUtterance = nil
+            if speakingText == nil, autoReadSessionId == nil { deactivateAudio() }
+            return
+        }
         // A sentence cut short by a skip or a speed change also ends; only the current one counts.
         guard utterance == currentUtterance else { return }
         sentenceIndex += 1
@@ -497,7 +509,7 @@ final class MessageSpeaker: NSObject {
         #if os(iOS)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         #endif
-        // Auto read keeps the audio session for the next message (other audio back to full volume).
+        // Auto read keeps the audio session for the next message (it never lowered other audio).
         if autoReadSessionId == nil { deactivateAudio() } else { mixWithOthers() }
         refreshActivity()
         noteIdle()

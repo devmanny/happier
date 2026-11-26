@@ -57,7 +57,10 @@ final class MessageSpeakerRecordingTests: XCTestCase {
         XCTAssertEqual(speaker.queue.current?.id, "new")
         XCTAssertEqual(speaker.speakingText, "Respuesta nueva.")
         XCTAssertEqual(speaker.queue.waiting, 0)
-        XCTAssertEqual(audio.category, .playback)
+        // Reading rides the microphone's session too: it never follows a TV picked for AirPlay.
+        XCTAssertEqual(audio.category, .playAndRecord)
+        XCTAssertFalse(audio.categoryOptions.contains(.allowAirPlay))
+        XCTAssertFalse(audio.categoryOptions.contains(.duckOthers), "auto read mustn't leave other audio lowered")
     }
 
     func testOneComposerCannotReleaseAnotherRecordersSuspension() {

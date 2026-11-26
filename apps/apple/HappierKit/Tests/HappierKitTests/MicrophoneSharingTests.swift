@@ -5,10 +5,10 @@ import Testing
 /// session decides its configuration, one holder leaving never switches it off under another, and
 /// the microphone comes back by itself after a call or another app took it.
 @Suite struct MicrophoneSharingTests {
-    private let listening = AudioSessionPlan(category: .playAndRecord, mode: .standard,
-                                             options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
-    private let dictating = AudioSessionPlan(category: .playAndRecord, mode: .standard,
-                                             options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+    private let listening = AudioSessionPlan(options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP], staysOffAirPlay: false)
+    private let dictating = AudioSessionPlan(options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP], staysOffAirPlay: true)
+    /// Happier speaking or dictating over music it leaves at full volume.
+    private let mixingOwnSound = AudioSessionPlan(options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP], staysOffAirPlay: true)
 
     // MARK: Audio session holders
 
@@ -17,8 +17,8 @@ import Testing
         #expect(uses.begin(.listening, by: 1) == .activate(listening))
         // Oído's mixing wins over dictation's ducking: changing it would mean deactivating the
         // session under Oído's recording.
-        #expect(uses.begin(.dictating, by: 2) == .activate(listening))
-        #expect(uses.end(by: 2) == .keep)
+        #expect(uses.begin(.dictating, by: 2) == .activate(mixingOwnSound))
+        #expect(uses.end(by: 2) == .activate(listening))
         #expect(uses.plan == listening)
     }
 
@@ -28,8 +28,8 @@ import Testing
         // background: music keeps playing, and a take on top of it doesn't reconfigure the session
         // (in the background it couldn't be activated again).
         #expect(uses.begin(.standby, by: 1) == .activate(listening))
-        #expect(uses.begin(.dictating, by: 2) == .activate(listening))
-        #expect(uses.end(by: 2) == .keep)
+        #expect(uses.begin(.dictating, by: 2) == .activate(mixingOwnSound))
+        #expect(uses.end(by: 2) == .activate(listening))
         #expect(uses.end(by: 1) == .deactivate)
         #expect(AudioUse.standby.records)
         #expect(!AudioUse.standby.waitsForMicrophone)
@@ -47,28 +47,58 @@ import Testing
         var uses = AudioSessionUses<Int>()
         #expect(uses.begin(.dictating, by: 1) == .activate(dictating))
         // Oído starting meanwhile: its mixing applies from now on.
-        #expect(uses.begin(.listening, by: 2) == .activate(listening))
+        #expect(uses.begin(.listening, by: 2) == .activate(mixingOwnSound))
         #expect(uses.end(by: 2) == .activate(dictating))
     }
 
     @Test func readingAloudUsesTheRecordingSessionWhileOidoListens() {
         var uses = AudioSessionUses<Int>()
         _ = uses.begin(.listening, by: 1)
-        #expect(uses.begin(.reading(ducksOthers: true), by: 2) == .activate(listening))
-        #expect(uses.end(by: 2) == .keep)
-        // Oído paused while reading: back to the reading session, not switched off.
+        #expect(uses.begin(.reading(ducksOthers: true), by: 2) == .activate(mixingOwnSound))
+        #expect(uses.end(by: 2) == .activate(listening))
+        // Oído paused while reading: the same session goes on, not switched off.
         _ = uses.begin(.reading(ducksOthers: false), by: 2)
-        #expect(uses.end(by: 1) == .activate(AudioSessionPlan(category: .playback, mode: .spokenAudio, options: [.mixWithOthers])))
+        #expect(uses.end(by: 1) == .keep)
+        #expect(uses.plan == mixingOwnSound)
     }
 
     @Test func readingAloneDucksOrMixesAsAsked() {
         var uses = AudioSessionUses<Int>()
-        #expect(uses.begin(.reading(ducksOthers: true), by: 1)
-            == .activate(AudioSessionPlan(category: .playback, mode: .spokenAudio, options: [.duckOthers])))
+        let ducking = AudioSessionPlan(options: [.duckOthers, .defaultToSpeaker, .allowBluetoothA2DP], staysOffAirPlay: true)
+        #expect(uses.begin(.reading(ducksOthers: true), by: 1) == .activate(ducking))
         // The same holder again replaces its use (auto read waiting between messages).
-        #expect(uses.begin(.reading(ducksOthers: false), by: 1)
-            == .activate(AudioSessionPlan(category: .playback, mode: .spokenAudio, options: [.mixWithOthers])))
+        #expect(uses.begin(.reading(ducksOthers: false), by: 1) == .activate(mixingOwnSound))
         #expect(uses.end(by: 1) == .deactivate)
+    }
+
+    @Test func spokenRepliesPlayThroughTheSessionThatNeverFollowsATV() {
+        // Playback follows AirPlay to a TV by itself; play-and-record reaches it only with an
+        // option Happier never sets. So reading aloud shares the microphone's session: alone,
+        // with Oído, and across a dictation take, whose start then doesn't move the route.
+        #expect(AudioSessionPlan.resolve([.reading(ducksOthers: false)]) == mixingOwnSound)
+        #expect(AudioSessionPlan.resolve([.reading(ducksOthers: false), .listening]) == mixingOwnSound)
+        #expect(AudioSessionPlan.resolve([.reading(ducksOthers: false), .dictating]) == mixingOwnSound)
+    }
+
+    @Test func dictatingWhileAutoReadWaitsNeverLeavesMusicLowered() {
+        var uses = AudioSessionUses<Int>()
+        // Auto read holds the session between messages; iOS raises other audio again only when
+        // the session ends. A take lowering music on top of it would leave it lowered for as
+        // long as auto read stays on, so the take mixes.
+        #expect(uses.begin(.reading(ducksOthers: false), by: 1) == .activate(mixingOwnSound))
+        #expect(uses.begin(.dictating, by: 2) == .activate(mixingOwnSound))
+        #expect(uses.end(by: 2) == .keep)
+        #expect(uses.plan == mixingOwnSound)
+    }
+
+    @Test func onlyHappiersOwnSoundIsPulledOffAMirroredTV() {
+        // Speaking or dictating: the sound and the microphone come back to the iPhone when a
+        // mirrored screen took the route. Oído or the keyboard's standby alone leave it alone.
+        #expect(AudioSessionPlan.resolve([.listening])?.staysOffAirPlay == false)
+        #expect(AudioSessionPlan.resolve([.standby])?.staysOffAirPlay == false)
+        #expect(AudioSessionPlan.resolve([.standby, .dictating])?.staysOffAirPlay == true)
+        #expect(AudioSessionPlan.resolve([.listening, .reading(ducksOthers: true)])?.staysOffAirPlay == true)
+        #expect(AudioSessionPlan.resolve([.dictating])?.staysOffAirPlay == true)
     }
 
     // MARK: Microphone recovery

@@ -182,7 +182,15 @@ final class Microphone: @unchecked Sendable {
         }
         let input = engine.inputNode
         guard let format = Self.usableTapFormat(input) else {
-            throw input.inputFormat(forBus: 0).channelCount == 0 ? MicrophoneError.noInput : MicrophoneError.unavailable
+            let hardware = input.inputFormat(forBus: 0), output = input.outputFormat(forBus: 0)
+            #if os(iOS)
+            let route = AVAudioSession.sharedInstance().currentRoute
+            let ports = (route.inputs + route.outputs).map(\.portType.rawValue).joined(separator: ",")
+            #else
+            let ports = "-"
+            #endif
+            Self.log.error("no usable input format: hardware \(hardware.sampleRate, privacy: .public) Hz × \(hardware.channelCount, privacy: .public), tap \(output.sampleRate, privacy: .public) Hz × \(output.channelCount, privacy: .public), route \(ports, privacy: .public)")
+            throw hardware.channelCount == 0 ? MicrophoneError.noInput : MicrophoneError.unavailable
         }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [taps] buffer, _ in
             for tap in taps.withLock({ $0 }) { tap.onBuffer(buffer) }
