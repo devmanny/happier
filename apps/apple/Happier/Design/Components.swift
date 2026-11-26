@@ -155,9 +155,10 @@ enum AgentPhotoImage {
     }
 }
 
-/// A session's avatar: its project's favicon filling the whole circle (like CSS `object-fit:
-/// cover`), with the agent's logo small at the bottom right; the agent's avatar alone while the
-/// project has no favicon (or the computer hasn't sent it yet).
+/// A session's avatar: its project's favicon whole and as large as the avatar's slot allows (like
+/// CSS `object-fit: contain`), on a squircle tile with an app icon's continuous corners, and the
+/// agent's logo small at the bottom right; the agent's avatar alone while the project has no
+/// favicon (or the computer hasn't sent it yet).
 struct SessionAvatar: View {
     let session: Session
     var size: CGFloat = 26
@@ -167,11 +168,15 @@ struct SessionAvatar: View {
 
     var body: some View {
         if let favicon = store?.workspaceFavicons.icon(machineId: session.machineId, path: session.path).flatMap(FaviconImage.image) {
+            // An app icon's corner (about 22% of its side); the tile shows the shape behind a
+            // transparent favicon.
+            let tile = RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
             favicon
                 .resizable()
-                .scaledToFill()
+                .scaledToFit()
                 .frame(width: size, height: size)
-                .clipShape(Circle())
+                .background(.fill.quaternary, in: tile)
+                .clipShape(tile)
                 .overlay(alignment: .bottomTrailing) {
                     if let agentId = session.agentId {
                         ProviderBadge(agentId: agentId, size: size * 0.46)
