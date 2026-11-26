@@ -127,6 +127,7 @@ struct MainView: View {
     @Environment(NotificationInbox.self) private var inbox
     @Environment(\.appearsActive) private var appearsActive
     @State private var selection: String?
+    @State private var conversation = WindowConversation()
     /// Conversation open when the app last ran (empty when the list was showing).
     @AppStorage("happier.lastOpenSessionId") private var lastOpenSessionId = ""
     /// The conversation reopened automatically on launch, until the user navigates elsewhere.
@@ -145,6 +146,8 @@ struct MainView: View {
 
     var body: some View {
         layout
+            .environment(\.windowConversation, conversation)
+            .onAppear { conversation.show = { selection = $0 } }
             .onChange(of: selection) { _, id in
                 // A new, unsent conversation or an agent's profile isn't one to reopen.
                 lastOpenSessionId = Self.sessionId(in: id) ?? ""

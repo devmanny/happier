@@ -184,6 +184,7 @@ public final class HappierStore {
         self.server = current
         knownServers = RelayList.adding(current, to: saved)
         pendingTerminalConnect = pendingTerminalConnects.load()
+        trackBranches()
     }
 
     // MARK: - Account
@@ -1214,6 +1215,8 @@ public final class HappierStore {
         transcripts.removeAll()
         forkContexts.removeAll()
         forkContextRevisions = [:]
+        firstUserMessages = [:]
+        firstUserMessageRetries = [:]
         staleTranscripts = []
         resumingSessions.removeAll()
         hasLoadedSessions = false
@@ -2276,14 +2279,16 @@ public final class HappierStore {
     /// send again. The session itself is left as it was; files on disk aren't rolled back.
     public func fork(_ sessionId: String, upToSeq seq: Int, restoring text: String?) async {
         guard !forkingSessions.contains(sessionId) else { return }
-        // A borrowed row's conversation may no longer be listed (archived): its context has it.
-        let source = sessions[sessionId] ?? forkContexts.values.lazy.flatMap(\.segments).first { $0.session.id == sessionId }?.session
+        forkingSessions.insert(sessionId)
+        defer { forkingSessions.remove(sessionId) }
+        // A borrowed row's conversation, or the original another version is made of, may no
+        // longer be listed (archived).
+        var source = listedOrBorrowed(sessionId)
+        if source == nil { source = try? await knownSession(sessionId) }
         guard let machineId = source?.machineId else {
             lastError = String(localized: "This session isn't linked to a machine, so it can't be forked.")
             return
         }
-        forkingSessions.insert(sessionId)
-        defer { forkingSessions.remove(sessionId) }
         var params: [String: JSONValue] = [
             "v": 1, "parentSessionId": .string(sessionId),
             "forkPoint": ["type": "seq", "upToSeqInclusive": .number(Double(seq))], "strategy": "auto",
@@ -2404,6 +2409,160 @@ public final class HappierStore {
     /// branch came from: its actions (branching again, copying) act there.
     public func forkContextSession(ofItem itemId: String, in id: String) -> String? {
         forkContexts[id]?.origins[itemId]
+    }
+
+    // MARK: - A message's versions (Claude's arrows)
+
+    /// Branches by where they were made from ("session:cutoff"), oldest first, and each listed
+    /// branch's lineage. Kept apart from `sessions` so the arrows don't redraw on every message of
+    /// every session, only when a branch comes or goes.
+    private(set) var branchesByAnchor: [String: [String]] = [:]
+    private(set) var branchLineages: [String: Session.ForkLineage] = [:]
+
+    /// The first message of the user's after a seq, by "session:seq", once looked up: what makes
+    /// a branch a version of a message, and where that version is.
+    private enum FirstUserMessage: Equatable {
+        case at(Int)
+        /// None yet as of the session's `seq` then; asked again once it has more messages.
+        case notYet(seenSeq: Int)
+    }
+    private var firstUserMessages: [String: FirstUserMessage] = [:]
+    @ObservationIgnored private var lookingUpFirstUserMessages: Set<String> = []
+    /// Lookups that failed (offline): not asked again on every redraw.
+    @ObservationIgnored private var firstUserMessageRetries: [String: Date] = [:]
+    @ObservationIgnored var versionLookupRetry: Duration = .seconds(30)
+
+    /// Editing a message branches the conversation from just before it (`fork`), so a message's
+    /// versions are the conversation it was first sent in and each branch made from just before
+    /// it that has a message of its own: what the arrows on it switch between, oldest first. Nil
+    /// while it has one. Safe to call from a view: what isn't known yet is looked up and arrives
+    /// through observed state.
+    public func versions(ofMessageAt seq: Int, in sessionId: String) -> MessageVersions? {
+        guard let anchor = versionAnchor(ofMessageAt: seq, in: sessionId) else { return nil }
+        var all = [anchor.original]
+        for branch in branchesByAnchor[anchor.key] ?? [] {
+            // Made but never sent (edited away, or still in the composer): not a version.
+            if let first = firstUserMessage(in: branch, after: 0) { all.append(MessageVersion(sessionId: branch, seq: first)) }
+        }
+        guard all.count > 1, let current = all.firstIndex(where: { $0.sessionId == sessionId }) else { return nil }
+        return MessageVersions(all: all, current: current)
+    }
+
+    /// The message editing this one branches from. A branch's first message is a version of the
+    /// one it was made from, so editing it again makes another version of that (as in Claude),
+    /// not a branch of the branch; any other message is edited where it is.
+    public func editTarget(forMessageAt seq: Int, in sessionId: String) -> MessageVersion {
+        versionAnchor(ofMessageAt: seq, in: sessionId)?.original ?? MessageVersion(sessionId: sessionId, seq: seq)
+    }
+
+    /// Shows another version of a message at that message, unlit: in the window the arrows are
+    /// in (`show`), else where conversations open (`openRequest`).
+    public func openVersion(_ version: MessageVersion, show: ((String) -> Void)? = nil) async {
+        messageRequest = MessageRequest(sessionId: version.sessionId, seq: version.seq, lit: false)
+        guard await loadRelatedSession(version.sessionId) else { return }
+        if let show { show(version.sessionId) } else { openRequest = version.sessionId }
+    }
+
+    private struct VersionAnchor {
+        /// In `branchesByAnchor`.
+        let key: String
+        /// The message as first sent.
+        let original: MessageVersion
+    }
+
+    private func versionAnchor(ofMessageAt seq: Int, in sessionId: String) -> VersionAnchor? {
+        // A branch whose original was deleted has nothing to be a version of.
+        if let lineage = branchLineages[sessionId] ?? listedOrBorrowed(sessionId)?.fork,
+           !deletedSessionIds.contains(lineage.parentSessionId) {
+            // Until the branch's first message is known, it isn't guessed.
+            guard let first = firstUserMessage(in: sessionId, after: 0) else { return nil }
+            // A version only if it was made from just before a message of the user's (an edit),
+            // not after a reply; otherwise its first message has versions of its own.
+            let original = lineage.cutoffSeq + 1
+            if seq == first, firstUserMessage(in: lineage.parentSessionId, after: lineage.cutoffSeq, nextOnly: true) == original {
+                return VersionAnchor(key: "\(lineage.parentSessionId):\(lineage.cutoffSeq)",
+                                     original: MessageVersion(sessionId: lineage.parentSessionId, seq: original))
+            }
+        }
+        // The first message can't be branched from before (`resolveForkCutoffSeqInclusive`).
+        guard seq >= 2 else { return nil }
+        return VersionAnchor(key: "\(sessionId):\(seq - 1)", original: MessageVersion(sessionId: sessionId, seq: seq))
+    }
+
+    /// `nextOnly`: all that matters is whether it's the message right after `seq`.
+    private func firstUserMessage(in id: String, after seq: Int, nextOnly: Bool = false) -> Int? {
+        let key = "\(id):\(seq)"
+        switch firstUserMessages[key] {
+        case .at(let found):
+            return found
+        case .notYet(let seenSeq) where nextOnly && seenSeq > seq:
+            // The message right after was there and wasn't the user's: it never will be.
+            return nil
+        case .notYet(let seenSeq) where seenSeq == sessions[id]?.seq ?? seenSeq:
+            // Asked again once a listed session has more messages; one the list doesn't hold
+            // (archived, deleted) keeps its answer.
+            return nil
+        default:
+            if !lookingUpFirstUserMessages.contains(key), firstUserMessageRetries[key].map({ $0 <= Date() }) ?? true {
+                lookingUpFirstUserMessages.insert(key)
+                Task { await lookUpFirstUserMessage(in: id, after: seq, key: key) }
+            }
+            return nil
+        }
+    }
+
+    private func lookUpFirstUserMessage(in id: String, after seq: Int, key: String) async {
+        defer { lookingUpFirstUserMessages.remove(key) }
+        guard let api else { return }
+        do {
+            guard let session = try await knownSession(id) else {
+                firstUserMessages[key] = .notYet(seenSeq: -1)
+                return
+            }
+            // A relay without the role filter sends every message; the user's are picked here.
+            let page = try await api.messages(sessionId: id, afterSeq: seq, limit: 3, role: "user")
+            let (messages, _) = await Self.decodeDetached(page.rows, session: session)
+            let first = messages.filter { $0.seq > seq && $0.record["role"]?.stringValue == "user" }.map(\.seq).min()
+            firstUserMessages[key] = first.map(FirstUserMessage.at) ?? .notYet(seenSeq: session.seq)
+        } catch {
+            logBackground(error, "a message's versions")
+            let retry = versionLookupRetry
+            firstUserMessageRetries[key] = Date().addingTimeInterval(retry / .seconds(1))
+            Task { [weak self] in
+                try? await Task.sleep(for: retry)
+                // Nothing the arrows read has changed: this has them ask again.
+                self?.firstUserMessageRetries[key] = nil
+                self?.firstUserMessages[key] = nil
+            }
+        }
+    }
+
+    /// Keeps `branchesByAnchor` and `branchLineages` up to date with the session list.
+    private func trackBranches() {
+        let (byAnchor, lineages) = withObservationTracking {
+            Self.branchIndex(sessions.values)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.trackBranches() }
+        }
+        if byAnchor != branchesByAnchor { branchesByAnchor = byAnchor }
+        if lineages != branchLineages { branchLineages = lineages }
+    }
+
+    private static func branchIndex(_ sessions: [Session]) -> ([String: [String]], [String: Session.ForkLineage]) {
+        var byAnchor: [String: [(id: String, at: Date)]] = [:]
+        var lineages: [String: Session.ForkLineage] = [:]
+        for session in sessions {
+            guard let fork = session.fork else { continue }
+            lineages[session.id] = fork
+            byAnchor["\(fork.parentSessionId):\(fork.cutoffSeq)", default: []].append((session.id, fork.createdAt ?? session.createdAt))
+        }
+        return (byAnchor.mapValues { $0.sorted { ($0.at, $0.id) < ($1.at, $1.id) }.map(\.id) }, lineages)
+    }
+
+    /// A session listed here, or one a branch shows rows of (its context has it when the list
+    /// no longer does: archived).
+    private func listedOrBorrowed(_ id: String) -> Session? {
+        sessions[id] ?? forkContexts.values.lazy.flatMap(\.segments).first { $0.session.id == id }?.session
     }
 
     /// A branch is being made from this conversation, or from one it shows rows of.
@@ -3768,36 +3927,46 @@ public final class HappierStore {
 
     /// Opens a session referenced by an inter-session message or automatic activity notice.
     public func openRelatedSession(_ id: String) async {
-        if sessions[id] != nil {
-            openRequest = id
-            return
-        }
+        if await loadRelatedSession(id) { openRequest = id }
+    }
+
+    /// Makes sure a session can be shown: one the list doesn't hold (archived) is fetched and
+    /// kept. False, saying why in `lastError`, when it can't be.
+    func loadRelatedSession(_ id: String) async -> Bool {
+        if sessions[id] != nil { return true }
         guard let api, let account = snapshots else {
             lastError = String(localized: "Connect to load this session.")
-            return
+            return false
         }
         do {
             let row = try await api.session(id: id)
-            guard !Task.isCancelled, snapshots === account else { return }
+            guard !Task.isCancelled, snapshots === account else { return false }
             guard let row, row != .null else {
                 lastError = String(localized: "This session is no longer available.")
-                return
+                return false
             }
-            openArchived(try Session(row: row, keys: keys))
+            keepOpened(try Session(row: row, keys: keys))
+            return true
         } catch let error as HTTPClient.ServerError where error.status == 404 {
-            guard !Task.isCancelled, snapshots === account else { return }
+            guard !Task.isCancelled, snapshots === account else { return false }
             lastError = String(localized: "This session is no longer available.")
         } catch {
-            guard !Task.isCancelled, snapshots === account else { return }
+            guard !Task.isCancelled, snapshots === account else { return false }
             report(error)
         }
+        return false
     }
 
     /// Opens an archived conversation found in the archive or a search.
     public func openArchived(_ session: Session) {
+        keepOpened(session)
+        openRequest = session.id
+    }
+
+    /// An archived session being shown stays in the list until it's closed.
+    private func keepOpened(_ session: Session) {
         openedArchivedIds.insert(session.id)
         if sessions[session.id] == nil { sessions[session.id] = session }
-        openRequest = session.id
     }
 
     public func unarchive(_ sessionId: String) async {

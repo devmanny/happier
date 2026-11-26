@@ -9,8 +9,11 @@ import UIKit.UIGestureRecognizerSubclass
 struct SessionWindow: View {
     static let id = "session"
 
-    let sessionId: String?
+    /// The window's own value: another conversation shown in it in place (a message's other
+    /// version) is the one it reopens with.
+    @Binding var sessionId: String?
     @Environment(HappierStore.self) private var store
+    @State private var conversation = WindowConversation()
 
     var body: some View {
         NavigationStack {
@@ -25,6 +28,8 @@ struct SessionWindow: View {
             }
         }
         .environment(\.inSessionWindow, true)
+        .environment(\.windowConversation, conversation)
+        .onAppear { conversation.show = { sessionId = $0 } }
         // A window restored on launch without the main one still needs the store started.
         .task { store.restore() }
         .modifier(StoreAlerts())
@@ -37,6 +42,17 @@ struct SessionWindow: View {
 extension EnvironmentValues {
     /// Inside a conversation's own window, where "Open in New Window" would only point at itself.
     @Entry var inSessionWindow = false
+    /// Shows another conversation in this window, in place of the one it shows.
+    @Entry var windowConversation: WindowConversation? = nil
+}
+
+/// Swaps the conversation a window shows, for what opens another one in place (a message's other
+/// version): the main window's selection, a conversation window's own. Without it, a request
+/// would go to the main window in front (`openRequest`), not the one tapped in. One object per
+/// window, made once, so the environment stays the same across redraws (as `ChatRowActions`).
+@MainActor
+final class WindowConversation {
+    var show: (String) -> Void = { _ in }
 }
 
 /// The store's app-wide prompts (stop confirmation, errors), shown once, in the window in front,

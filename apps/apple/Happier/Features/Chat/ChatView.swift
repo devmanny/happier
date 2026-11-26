@@ -658,6 +658,7 @@ private struct ChatConversationContent: View, Equatable {
         windowLimit = ChatWindow.limit(including: target, in: ChatRow.rows(from: items, working: facts.working), current: windowLimit)
         await Task.yield()
         withAnimation(.smooth) { scrollPosition.scrollTo(id: target, anchor: .center) }
+        guard request.lit else { return }
         jumpHighlightId = target
         try? await Task.sleep(for: .seconds(2.5))
         if jumpHighlightId == target { withAnimation(.easeOut(duration: 0.6)) { jumpHighlightId = nil } }

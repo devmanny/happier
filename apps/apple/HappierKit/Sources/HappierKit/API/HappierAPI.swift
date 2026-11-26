@@ -102,10 +102,12 @@ public struct HappierAPI: Sendable {
     /// `limit` defaults to the server's own page size.
     /// The conversation's own messages, or one subagent's thread (`sidechainId`, the id of the tool
     /// call that started it).
+    /// `role`: only messages of the user ("user") or the agent ("agent").
     public func messages(sessionId: String, beforeSeq: Int? = nil, afterSeq: Int? = nil, limit: Int? = nil,
-                         sidechainId: String? = nil) async throws -> MessagePage {
+                         sidechainId: String? = nil, role: String? = nil) async throws -> MessagePage {
         var query = ["scope": sidechainId == nil ? "main" : "sidechain"]
         if let sidechainId { query["sidechainId"] = sidechainId }
+        if let role { query["role"] = role }
         if let limit { query["limit"] = String(limit) }
         if let beforeSeq { query["beforeSeq"] = String(beforeSeq) }
         if let afterSeq { query["afterSeq"] = String(afterSeq) }

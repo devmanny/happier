@@ -66,7 +66,7 @@ struct HappierApp: App {
         #endif
 
         WindowGroup("Conversation", id: SessionWindow.id, for: String.self) { $sessionId in
-            SessionWindow(sessionId: sessionId)
+            SessionWindow(sessionId: $sessionId)
                 .environment(store)
                 .environment(delegate.inbox)
                 .environment(delegate.browser)

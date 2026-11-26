@@ -78,6 +78,9 @@ private struct UserBubble: View {
                     .opacity(message.isPending ? 0.7 : 1)
                 }
             }
+            if let seq = message.seq, !message.isPending {
+                MessageVersionArrows(sessionId: sessionId, seq: seq)
+            }
             if message.isPending {
                 if let localId = message.localId, let error = store.failedSends[localId] {
                     VStack(alignment: .trailing, spacing: 5) {
@@ -271,6 +274,53 @@ private struct ThinkingRow: View {
     }
 }
 
+/// "‹ 2/3 ›" under a message you edited, as in a Claude chat: each edit is a branch of the
+/// conversation (`HappierStore.versions`), and the arrows open the next or previous one at that
+/// message, in place of this one.
+private struct MessageVersionArrows: View {
+    let sessionId: String
+    let seq: Int
+    @Environment(HappierStore.self) private var store
+    @Environment(\.windowConversation) private var window
+
+    var body: some View {
+        if let versions = store.versions(ofMessageAt: seq, in: sessionId) {
+            HStack(spacing: 0) {
+                Button("Previous Version", systemImage: "chevron.left") { show(versions.all[versions.current - 1]) }
+                    .disabled(versions.current == 0)
+                Text("\(versions.current + 1)/\(versions.all.count)")
+                    .monospacedDigit()
+                    .accessibilityLabel("Version \(versions.current + 1) of \(versions.all.count)")
+                Button("Next Version", systemImage: "chevron.right") { show(versions.all[versions.current + 1]) }
+                    .disabled(versions.current == versions.all.count - 1)
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(VersionArrowStyle())
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.trailing, 2)
+            .transition(.opacity)
+        }
+    }
+
+    private func show(_ version: MessageVersion) {
+        AppHaptics.selection()
+        Task { await store.openVersion(version, show: window?.show) }
+    }
+}
+
+/// A small arrow with a finger-sized target.
+private struct VersionArrowStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(minWidth: 30, minHeight: 28)
+            .contentShape(.rect)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.5 : 1) : 0.35)
+    }
+}
+
 private struct EventRow: View {
     let event: TranscriptEvent
 
@@ -376,14 +426,16 @@ private struct MessageActionsModifier: ViewModifier {
                         }
                         if target.seq > 0 {
                             // Going back, as in a Claude chat: a branch up to just before your message,
-                            // with it back in the composer to edit (seq >= 2); after a reply, a
-                            // branch that continues from it.
-                            let editing = target.role == .user && target.seq >= 2
+                            // with it back in the composer to edit (seq >= 2), which becomes another
+                            // version of it; after a reply, a branch that continues from it.
+                            let from = target.role == .user ? store.editTarget(forMessageAt: target.seq, in: target.sessionId)
+                                : MessageVersion(sessionId: target.sessionId, seq: target.seq)
+                            let editing = target.role == .user && from.seq >= 2
                             Button(editing ? "Edit from Here" : "Fork from Here", systemImage: editing ? "pencil" : "arrow.triangle.branch") {
                                 AppHaptics.confirm()
-                                Task { await store.fork(target.sessionId, upToSeq: target.seq, restoring: editing ? text : nil) }
+                                Task { await store.fork(from.sessionId, upToSeq: from.seq, restoring: editing ? text : nil) }
                             }
-                            .disabled(store.forkingSessions.contains(target.sessionId))
+                            .disabled(store.forkingSessions.contains(from.sessionId))
                         }
                         if !borrowed, target.role == .user, store.sessions[target.sessionId]?.canRollback(toUserMessageSeq: target.seq) == true {
                             Button("Restore to Here", systemImage: "arrow.uturn.backward", role: .destructive) {

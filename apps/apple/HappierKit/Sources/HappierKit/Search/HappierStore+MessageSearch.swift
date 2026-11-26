@@ -1,13 +1,18 @@
 import Foundation
 
-/// A conversation to open at one of its messages (a message-search result).
+/// A conversation to open at one of its messages (a message-search result, another version of
+/// a message).
 public struct MessageRequest: Equatable, Hashable, Sendable {
     public let sessionId: String
     public let seq: Int
+    /// Lit for a moment once in view: a search result is, a version switched to isn't (you're
+    /// already looking at that message).
+    public let lit: Bool
 
-    public init(sessionId: String, seq: Int) {
+    public init(sessionId: String, seq: Int, lit: Bool = true) {
         self.sessionId = sessionId
         self.seq = seq
+        self.lit = lit
     }
 }
 
