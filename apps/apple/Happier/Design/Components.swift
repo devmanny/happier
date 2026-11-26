@@ -77,6 +77,9 @@ struct AgentAvatar: View {
     var emoji: String? = nil
     /// An agent's photo (JPEG), filling the disc in place of the emoji or the logo.
     var photo: Data? = nil
+    /// On a session's tile (`SessionAvatar.tile`) instead of the disc, so it lines up with the
+    /// sessions that show their project's favicon.
+    var onTile = false
 
     /// Brand colours, muted: the disc is mostly the neutral glass with a hint of the brand, the
     /// logo in the brand colour itself.
@@ -91,18 +94,23 @@ struct AgentAvatar: View {
     var body: some View {
         let brand = Self.brand(agentId)
         let glass: Glass = brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
+        let backdrop = onTile ? size : size * 0.82
         ZStack {
-            // A little smaller than the avatar's slot, snug around the logo.
-            Circle()
-                .fill(.clear)
-                .frame(width: size * 0.82, height: size * 0.82)
-                .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
+            if onTile {
+                SessionAvatar.tile(size).fill(.fill.quaternary)
+            } else {
+                // A little smaller than the avatar's slot, snug around the logo.
+                Circle()
+                    .fill(.clear)
+                    .frame(width: backdrop, height: backdrop)
+                    .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
+            }
             if let photo = photo.flatMap(AgentPhotoImage.image) {
                 photo
                     .resizable()
                     .scaledToFill()
-                    .frame(width: size * 0.82, height: size * 0.82)
-                    .clipShape(Circle())
+                    .frame(width: backdrop, height: backdrop)
+                    .clipShape(onTile ? AnyShape(SessionAvatar.tile(size)) : AnyShape(Circle()))
             } else if let emoji, !emoji.isEmpty {
                 Text(emoji).font(.system(size: size * 0.5))
             } else if let agentId {
@@ -166,11 +174,15 @@ struct SessionAvatar: View {
     /// required store there crashes the app (the favicon is just left out).
     @Environment(HappierStore.self) private var store: HappierStore?
 
+    /// A session's icon shape: an app icon's corner (about 22% of its side).
+    static func tile(_ size: CGFloat) -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+    }
+
     var body: some View {
         if let favicon = store?.workspaceFavicons.icon(machineId: session.machineId, path: session.path).flatMap(FaviconImage.image) {
-            // An app icon's corner (about 22% of its side); the tile shows the shape behind a
-            // transparent favicon.
-            let tile = RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+            // The tile shows the shape behind a transparent favicon.
+            let tile = Self.tile(size)
             favicon
                 .resizable()
                 .scaledToFit()
@@ -186,7 +198,7 @@ struct SessionAvatar: View {
                 .frame(width: size, height: size)
                 .accessibilityHidden(true)
         } else {
-            AgentAvatar(agentId: session.agentId, size: size)
+            AgentAvatar(agentId: session.agentId, size: size, onTile: true)
         }
     }
 }
