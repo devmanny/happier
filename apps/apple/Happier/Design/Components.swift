@@ -1,9 +1,14 @@
 import HappierKit
+import ImageIO
+import os
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
 import AppKit
+#endif
+#if os(iOS)
+import WebKit
 #endif
 
 /// An agent's provider logo, small, at the trailing edge of a row that names one of your agents.
@@ -59,17 +64,15 @@ struct ProviderLogo: View {
     }
 }
 
-/// The one agent avatar, wherever an agent is shown (session rows, the Agents section, previews,
-/// notifications, the new conversation): its logo (or an agent's emoji) on a Liquid Glass disc
-/// with a faint wash of its brand colour (Claude's orange, ChatGPT's classic green), so agents
-/// tell apart at a glance; a neutral disc and the sparkle for a session with no agent.
+/// The one agent avatar, wherever an agent is shown (session rows without a project icon, the
+/// Agents section, previews, notifications, the new conversation): its logo (or an agent's emoji)
+/// on a Liquid Glass disc with a faint wash of its brand colour (Claude's orange, ChatGPT's classic
+/// green), so agents tell apart at a glance; a neutral disc and the sparkle for a session with no agent.
 struct AgentAvatar: View {
     let agentId: String?
     var size: CGFloat = 26
     /// Glass that answers to touch, for an avatar that is also a button.
     var interactive = false
-    /// The project folder's color, for the disc behind the logo (instead of the brand's hint).
-    var folderTint: Color? = nil
     /// An agent's own emoji, drawn on the disc in place of the logo (the disc keeps the brand's hint).
     var emoji: String? = nil
     /// An agent's photo (JPEG), filling the disc in place of the emoji or the logo.
@@ -82,14 +85,16 @@ struct AgentAvatar: View {
         "codex": Color(red: 0x10 / 255, green: 0xA3 / 255, blue: 0x7F / 255),
     ]
 
+    /// The brand colour of a provider's logo, when it has one.
+    static func brand(_ agentId: String?) -> Color? { agentId.flatMap { brands[$0] } }
+
     var body: some View {
-        let brand = agentId.flatMap { Self.brands[$0] }
-        let glass: Glass = folderTint != nil ? .regular : brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
+        let brand = Self.brand(agentId)
+        let glass: Glass = brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
         ZStack {
-            // A little smaller than the avatar's slot, snug around the logo. A folder's color is a
-            // plain fill, not a glass tint, so it stays when the window is in the background.
+            // A little smaller than the avatar's slot, snug around the logo.
             Circle()
-                .fill(folderTint.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.clear))
+                .fill(.clear)
                 .frame(width: size * 0.82, height: size * 0.82)
                 .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
             if let photo = photo.flatMap(AgentPhotoImage.image) {
@@ -104,8 +109,7 @@ struct AgentAvatar: View {
                 Image("Agents/\(agentId)")
                     .resizable()
                     .scaledToFit()
-                    // White on a folder's color; otherwise the brand's own color.
-                    .foregroundStyle(folderTint != nil ? AnyShapeStyle(.white) : brand.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+                    .foregroundStyle(brand.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
                     .frame(width: size * 0.5, height: size * 0.5)
             } else {
                 Image(systemName: "sparkle")
@@ -151,17 +155,117 @@ enum AgentPhotoImage {
     }
 }
 
-/// A session's agent avatar.
+/// A session's avatar: its project's favicon filling the whole circle (like CSS `object-fit:
+/// cover`), with the agent's logo small at the bottom right; the agent's avatar alone while the
+/// project has no favicon (or the computer hasn't sent it yet).
 struct SessionAvatar: View {
     let session: Session
     var size: CGFloat = 26
     /// Optional: context-menu and drag previews draw outside the app's environment, and a
-    /// required store there crashes the app (the folder color is just left out).
+    /// required store there crashes the app (the favicon is just left out).
     @Environment(HappierStore.self) private var store: HappierStore?
 
     var body: some View {
-        AgentAvatar(agentId: session.agentId, size: size, folderTint: store?.folderColor(of: session)?.color)
+        if let favicon = store?.workspaceFavicons.icon(machineId: session.machineId, path: session.path).flatMap(FaviconImage.image) {
+            favicon
+                .resizable()
+                .scaledToFill()
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+                .overlay(alignment: .bottomTrailing) {
+                    if let agentId = session.agentId {
+                        ProviderBadge(agentId: agentId, size: size * 0.46)
+                            .offset(x: size * 0.08, y: size * 0.08)
+                    }
+                }
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        } else {
+            AgentAvatar(agentId: session.agentId, size: size)
+        }
     }
+}
+
+/// The agent's logo in its brand colour on a small solid disc, at the corner of a session's
+/// favicon; the disc's background colour sets it apart from any icon under it.
+struct ProviderBadge: View {
+    let agentId: String
+    let size: CGFloat
+
+    var body: some View {
+        Image("Agents/\(agentId)")
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(AgentAvatar.brand(agentId).map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+            .frame(width: size * 0.62, height: size * 0.62)
+            .frame(width: size, height: size)
+            .background(.background, in: Circle())
+            .accessibilityHidden(true)
+    }
+}
+
+/// Project favicons as images, decoded once (the list redraws often). The largest picture in the
+/// file is used (an `.ico` carries several sizes, the first often 16 px); on the Mac an SVG draws
+/// as it is, on the iPhone it is drawn to a PNG first (`prepare`), since iOS has no SVG decoder.
+@MainActor
+enum FaviconImage {
+    private static var decoded: [Data: Image] = [:]
+
+    static func image(_ icon: WorkspaceFavicons.Icon) -> Image? {
+        if let image = decoded[icon.data] { return image }
+        guard let image = decode(icon) else { return nil }
+        // A few dozen projects: forget them all on the rare overflow.
+        if decoded.count >= 64 { decoded.removeAll() }
+        decoded[icon.data] = image
+        return image
+    }
+
+    private static func decode(_ icon: WorkspaceFavicons.Icon) -> Image? {
+        #if os(macOS)
+        if icon.mimeType == "image/svg+xml" { return NSImage(data: icon.data).map(Image.init(nsImage:)) }
+        #endif
+        guard let source = CGImageSourceCreateWithData(icon.data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(source)
+        let largest = (0..<count).compactMap { CGImageSourceCreateImageAtIndex(source, $0, nil) }.max { $0.width < $1.width }
+        guard let largest else { return nil }
+        #if canImport(UIKit)
+        return Image(uiImage: UIImage(cgImage: largest))
+        #else
+        return Image(nsImage: NSImage(cgImage: largest, size: NSSize(width: largest.width, height: largest.height)))
+        #endif
+    }
+
+    #if os(iOS)
+    /// For `WorkspaceFavicons.prepare`: an SVG becomes a PNG (drawn by WebKit, headless, at
+    /// 192 px on its longer side); everything else is kept as sent.
+    static func prepare(_ icon: WorkspaceFavicons.Icon) async -> WorkspaceFavicons.Icon? {
+        guard icon.mimeType == "image/svg+xml" else { return icon }
+        let page = WebPage()
+        do {
+            for try await event in page.load(html: "<!doctype html><html><body></body></html>") {
+                if case .finished = event { break }
+            }
+            let drawn = try await page.callJavaScript("""
+                const image = new Image();
+                image.src = source;
+                await image.decode();
+                const width = image.naturalWidth || side, height = image.naturalHeight || side;
+                const scale = side / Math.max(width, height);
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(width * scale));
+                canvas.height = Math.max(1, Math.round(height * scale));
+                canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+                return canvas.toDataURL('image/png');
+                """, arguments: ["source": "data:image/svg+xml;base64," + icon.data.base64EncodedString(), "side": 192])
+            guard let url = drawn as? String, let comma = url.firstIndex(of: ","),
+                  let png = Data(base64Encoded: String(url[url.index(after: comma)...])) else { return nil }
+            return WorkspaceFavicons.Icon(data: png, mimeType: "image/png")
+        } catch {
+            Logger(subsystem: "dev.happier.apple", category: "favicons").error("SVG favicon not drawn: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+    #endif
 }
 
 /// The mark of a session the idle cleaner put to rest (`Session.isResting`): quiet, in the secondary

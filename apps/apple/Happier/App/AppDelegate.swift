@@ -173,6 +173,8 @@ extension AppDelegate: UIApplicationDelegate {
         WatchBridge.shared.activate()
         oido.resume()
         _ = keyboard
+        // Project favicons in SVG are drawn to PNGs (iOS has no SVG decoder).
+        store.workspaceFavicons.prepare = FaviconImage.prepare
         return true
     }
 

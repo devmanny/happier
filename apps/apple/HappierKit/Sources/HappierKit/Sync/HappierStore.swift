@@ -387,6 +387,16 @@ public final class HappierStore {
         }
     }
 
+    // MARK: - Project favicons
+
+    /// Each project folder's favicon, drawn on its sessions (`WorkspaceFavicons`).
+    @ObservationIgnored public private(set) lazy var workspaceFavicons = WorkspaceFavicons(
+        directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Happier/WorkspaceFavicons")
+    ) { [weak self] machineId, method, params in
+        guard let self else { throw CancellationError() }
+        return try await self.machineRPC(machineId, method: method, params: params, timeout: .seconds(15))
+    }
+
     // MARK: - Agent photos (sealed JPEGs in the account's UserKVStore, `agentphoto/<id>`)
 
     /// Each agent's photo (JPEG) by agent id; empty until loaded, and for agents with none.
