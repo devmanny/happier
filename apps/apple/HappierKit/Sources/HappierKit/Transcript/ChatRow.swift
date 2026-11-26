@@ -103,10 +103,11 @@ private extension ChatItem {
     var staysVisible: Bool {
         switch self {
         case .toolCall(let tool): tool.isQuestion || tool.permission?.status == .pending
-        // A model or effort change, a command's line and a notice from the runner ("Aborted by
-        // user", "Your queued message is paused…") are said in the conversation, not folded into
-        // the steps they came between.
+        // A model or effort change, a command's line, a notice from the runner ("Aborted by
+        // user", "Your queued message is paused…") and where a branch starts are said in the
+        // conversation, not folded into the steps they came between.
         case .event(let event): event.kind == "runtime-config-outcome" || event.kind == LocalCommandLine.kind || event.kind == "message"
+            || event.kind == "fork"
         default: false
         }
     }

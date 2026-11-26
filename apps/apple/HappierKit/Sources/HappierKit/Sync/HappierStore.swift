@@ -1212,6 +1212,8 @@ public final class HappierStore {
         sessionTokenUsage.removeAll()
         sessions.removeAll()
         transcripts.removeAll()
+        forkContexts.removeAll()
+        forkContextRevisions = [:]
         staleTranscripts = []
         resumingSessions.removeAll()
         hasLoadedSessions = false
@@ -1880,6 +1882,8 @@ public final class HappierStore {
                 hasOlderMessages[id] = page.hasMore
                 transcripts[id]?.markLoaded()
                 staleTranscripts.remove(id)
+                // A branch shows where it came from as soon as its own history is all here.
+                if !page.hasMore, forkContexts[id] == nil { Task { await loadOlderForkContext(id) } }
             } catch {
                 transcriptErrors[id] = UserFacingError.message(for: error)
                 log.error("open failed: \(String(describing: error), privacy: .public)")
@@ -2251,46 +2255,262 @@ public final class HappierStore {
         } catch { report(error) }
     }
 
-    /// Forks the session up to (and including) this message on its machine (`session.fork` with
-    /// `strategy: "auto"`: native fork when the agent supports it, otherwise replay), then opens it.
+    // MARK: - Branching from a message (`session.fork`)
+
+    /// Sessions a branch is being made from: their message menus wait, their conversation says
+    /// one is on its way. One at a time each, so a second tap doesn't make a second branch.
+    public private(set) var forkingSessions: Set<String> = []
+    /// Taps whose branch may still be on its way (the answer was lost and the list didn't show
+    /// it in time), by "session:seq": tapping that message again sends the same key, so the
+    /// daemon answers with that branch instead of making a second one.
+    @ObservationIgnored private var unresolvedForks: [String: String] = [:]
+
+    /// How long a branch may take to make: the web client's budget (`spawnSessionRpcTimeout.ts`),
+    /// above the daemon's own waits (a replayed branch waits up to 5 minutes for its session).
+    static let forkTimeout: Duration = .seconds(480)
+
+    /// Branches the session at this message on its machine and opens the branch, as going back in
+    /// a Claude chat (`forkSession` in `apps/ui/sources/sync/ops/sessions.ts`): the daemon forks
+    /// the agent's own conversation when it can, else replays this one up to there. For a user
+    /// message it cuts just before it, and `text` comes back in the branch's composer to edit and
+    /// send again. The session itself is left as it was; files on disk aren't rolled back.
     public func fork(_ sessionId: String, upToSeq seq: Int, restoring text: String?) async {
-        guard let machineId = sessions[sessionId]?.machineId else {
+        guard !forkingSessions.contains(sessionId) else { return }
+        // A borrowed row's conversation may no longer be listed (archived): its context has it.
+        let source = sessions[sessionId] ?? forkContexts.values.lazy.flatMap(\.segments).first { $0.session.id == sessionId }?.session
+        guard let machineId = source?.machineId else {
             lastError = String(localized: "This session isn't linked to a machine, so it can't be forked.")
             return
         }
+        forkingSessions.insert(sessionId)
+        defer { forkingSessions.remove(sessionId) }
+        var params: [String: JSONValue] = [
+            "v": 1, "parentSessionId": .string(sessionId),
+            "forkPoint": ["type": "seq", "upToSeqInclusive": .number(Double(seq))], "strategy": "auto",
+        ]
+        let attempt = "\(sessionId):\(seq)"
+        var requestId: String?
+        var childId: String?
+        var failure: Error?
         do {
-            let result = try await machineRPC(machineId, method: "session.fork", params: [
-                "v": 1, "parentSessionId": .string(sessionId),
-                "forkPoint": ["type": "seq", "upToSeqInclusive": .number(Double(seq))], "strategy": "auto",
-            ], timeout: .seconds(180))
-            guard result["ok"]?.boolValue == true, let childId = result["childSessionId"]?.stringValue else {
-                throw RPCError(message: result["errorMessage"]?.stringValue ?? "The fork failed.", code: result["errorCode"]?.stringValue)
+            // One key per tap: the daemon folds a retry of it into the fork it's making, and the
+            // branch carries it (`forkV1.requestId`), so a lost answer can be found. Daemons
+            // before it reject the field (their schema is strict).
+            let machine = try await machine(machineId)
+            if CLIVersion.isAtLeast(machine.daemon?.cliVersion ?? machine.cliVersion, CLIVersion.forkRequestId) {
+                requestId = unresolvedForks[attempt] ?? UUID().uuidString
+                params["requestId"] = requestId.map(JSONValue.string)
             }
-            if let text, !text.isEmpty { draftSeeds[childId] = text }
-            for _ in 0..<15 where sessions[childId] == nil {
-                await refreshSessions()
-                if sessions[childId] == nil { try await Task.sleep(for: .seconds(2)) }
+            let result = try await machineRPC(machineId, method: "session.fork", params: .object(params), timeout: Self.forkTimeout)
+            if result["ok"]?.boolValue == true, let id = result["childSessionId"]?.stringValue, !id.isEmpty {
+                childId = id
+            } else {
+                failure = RPCError(message: result["errorMessage"]?.stringValue ?? String(localized: "The branch couldn't be made."),
+                                   code: result["errorCode"]?.stringValue)
             }
-            if sessions[childId] != nil { openRequest = childId } else {
-                lastError = String(localized: "The fork was created but hasn't appeared yet. It will show up in the list shortly.")
+        } catch { failure = error }
+        if let failure {
+            // Not a "no": the branch may be made all the same. Look for it rather than forking again
+            // (`classifySessionForkRpcOutcome`).
+            guard forkMayHaveHappened(failure), let requestId else {
+                unresolvedForks[attempt] = nil
+                report(failure)
+                return
             }
-        } catch { report(error) }
+            guard let found = await branch(of: sessionId, madeBy: requestId) else {
+                unresolvedForks[attempt] = requestId
+                log.notice("fork: no answer and no branch yet: \(String(describing: failure), privacy: .public)")
+                lastError = String(localized: "The branch may still be on its way: it will show up in the list if it was made. Trying again won't make a second one.")
+                return
+            }
+            log.notice("fork: the answer was lost (\(String(describing: failure), privacy: .public)); found the branch")
+            childId = found
+        }
+        unresolvedForks[attempt] = nil
+        guard let childId else { return }
+        if let text, !text.isEmpty { draftSeeds[childId] = text }
+        for _ in 0..<15 where sessions[childId] == nil {
+            await refreshSessions()
+            if sessions[childId] == nil { try? await Task.sleep(for: .seconds(2)) }
+        }
+        if sessions[childId] != nil { openRequest = childId } else {
+            lastError = String(localized: "The fork was created but hasn't appeared yet. It will show up in the list shortly.")
+        }
+    }
+
+    /// Whether a failed fork may still have made its branch: only a daemon's own refusal, or a
+    /// call that never left, says it didn't. A timeout or a lost answer doesn't.
+    func forkMayHaveHappened(_ error: Error) -> Bool {
+        guard let rpc = error as? RPCError else { return !(error is CancellationError) }
+        guard let code = rpc.code else { return rpc.message != notConnectedMessage }
+        return ["SESSION_WEBHOOK_TIMEOUT", "UNEXPECTED"].contains(code)
+    }
+
+    /// Between looks at the session list for a branch whose answer was lost.
+    @ObservationIgnored var forkLookupDelay: Duration = .seconds(2)
+
+    /// The branch a tap made, once the session list shows it (about 20 seconds at most).
+    private func branch(of parentId: String, madeBy requestId: String) async -> String? {
+        func found() -> String? {
+            sessions.values.first { $0.fork?.parentSessionId == parentId && $0.fork?.requestId == requestId }?.id
+        }
+        for attempt in 0..<10 {
+            if attempt > 0 { try? await Task.sleep(for: forkLookupDelay) }
+            await refreshSessions()
+            if let id = found() { return id }
+        }
+        return nil
+    }
+
+    // MARK: - A branch's earlier conversation
+
+    /// What a branch shows above its own messages: the conversation it came from up to where it
+    /// left it, and that one's own origin before it, as the web client shows them
+    /// (`forkedTranscriptSnapshot.ts`). Read a page at a time, newest first, once the branch's
+    /// own history is all here; it never changes after the cut, so it's read once.
+    public struct ForkContext {
+        struct Segment {
+            let session: Session
+            let cutoffSeq: Int
+            var transcript = Transcript()
+            var hasOlder = true
+        }
+        /// Nearest conversation first.
+        var segments: [Segment] = []
+        /// Nothing older left to read.
+        var exhausted = false
+        let forkedAt: Date?
+        /// Oldest first, ending with the line that says where the branch starts.
+        fileprivate(set) var items: [ChatItem] = []
+        /// The conversation each borrowed row comes from.
+        fileprivate(set) var origins: [String: String] = [:]
+    }
+
+    @ObservationIgnored private var forkContexts: [String: ForkContext] = [:]
+    /// Bumped when a branch's earlier conversation grows, for the views that show it.
+    public private(set) var forkContextRevisions: [String: Int] = [:]
+    @ObservationIgnored private var loadingForkContexts: Set<String> = []
+
+    /// The conversation as shown: a branch's earlier conversation (once its own history is all
+    /// here), then its own messages.
+    public func conversationItems(_ id: String) -> [ChatItem] {
+        _ = forkContextRevisions[id]
+        let own = transcripts[id]?.items ?? []
+        guard hasOlderMessages[id] != true, let context = forkContexts[id], !context.items.isEmpty else { return own }
+        return context.items + own
+    }
+
+    /// The conversation a row shown in this one comes from, when it's borrowed from where the
+    /// branch came from: its actions (branching again, copying) act there.
+    public func forkContextSession(ofItem itemId: String, in id: String) -> String? {
+        forkContexts[id]?.origins[itemId]
+    }
+
+    /// A branch is being made from this conversation, or from one it shows rows of.
+    public func isForking(from id: String) -> Bool {
+        guard !forkingSessions.isEmpty else { return false }
+        _ = forkContextRevisions[id]
+        return forkingSessions.contains(id) || forkContexts[id]?.segments.contains { forkingSessions.contains($0.session.id) } == true
+    }
+
+    /// A branch has earlier conversation still to read.
+    public func hasOlderForkContext(_ id: String) -> Bool {
+        _ = forkContextRevisions[id]
+        return sessions[id]?.fork != nil && forkContexts[id]?.exhausted != true
+    }
+
+    /// Reads the next page of a branch's earlier conversation: older messages of the one being
+    /// read, else the start of the conversation that one came from.
+    public func loadOlderForkContext(_ id: String) async {
+        guard let api, let lineage = sessions[id]?.fork, forkContexts[id]?.exhausted != true,
+              !loadingForkContexts.contains(id) else { return }
+        loadingForkContexts.insert(id)
+        defer { loadingForkContexts.remove(id) }
+        var context = forkContexts[id] ?? ForkContext(forkedAt: lineage.createdAt)
+        do {
+            if let index = context.segments.indices.last, context.segments[index].hasOlder {
+                let segment = context.segments[index]
+                let page = try await api.messages(sessionId: segment.session.id,
+                                                  beforeSeq: segment.transcript.minSeq ?? segment.cutoffSeq + 1)
+                let (messages, _) = await Self.decodeDetached(page.rows, session: segment.session)
+                context.segments[index].transcript.apply(messages.filter { $0.seq <= segment.cutoffSeq })
+                context.segments[index].hasOlder = page.hasMore && !messages.isEmpty
+            } else {
+                let link = context.segments.last.map { $0.session.fork } ?? lineage
+                let seen = Set(context.segments.map(\.session.id) + [id])
+                if let link, !seen.contains(link.parentSessionId), let parent = try await knownSession(link.parentSessionId) {
+                    let page = try await api.messages(sessionId: parent.id, beforeSeq: link.cutoffSeq + 1)
+                    let (messages, _) = await Self.decodeDetached(page.rows, session: parent)
+                    var segment = ForkContext.Segment(session: parent, cutoffSeq: link.cutoffSeq)
+                    segment.transcript.apply(messages.filter { $0.seq <= link.cutoffSeq })
+                    segment.hasOlder = page.hasMore && !messages.isEmpty
+                    context.segments.append(segment)
+                } else {
+                    context.exhausted = true
+                }
+            }
+        } catch {
+            logBackground(error, "a branch's earlier conversation")
+            return
+        }
+        if let last = context.segments.last, !last.hasOlder, last.session.fork == nil { context.exhausted = true }
+        guard sessions[id] != nil else { return }
+        compose(&context, for: id)
+        forkContexts[id] = context
+        forkContextRevisions[id, default: 0] += 1
+    }
+
+    private func compose(_ context: inout ForkContext, for id: String) {
+        var items: [ChatItem] = []
+        var origins: [String: String] = [:]
+        for segment in context.segments.reversed() {
+            for item in segment.transcript.items {
+                items.append(item)
+                origins[item.id] = segment.session.id
+            }
+        }
+        if !items.isEmpty, let parent = context.segments.first?.session {
+            items.append(.event(TranscriptEvent(id: "fork-divider:\(id)", kind: "fork", data: ["title": .string(parent.title)],
+                                                createdAt: context.forkedAt ?? items.last?.createdAt ?? .now)))
+        }
+        context.items = items
+        context.origins = origins
+    }
+
+    /// A session this device knows, or the relay's copy of one it doesn't list (archived).
+    private func knownSession(_ id: String) async throws -> Session? {
+        if let session = sessions[id] { return session }
+        guard let api else { return nil }
+        do {
+            guard let row = try await api.session(id: id) else { return nil }
+            return try? Session(row: row, keys: keys)
+        } catch let error as HTTPClient.ServerError where error.status == 404 {
+            // Deleted (or no longer shared): the earlier conversation ends there.
+            return nil
+        }
+    }
+
+    private static func decodeDetached(_ rows: [JSONValue], session: Session) async -> ([TranscriptMessage], Int) {
+        await Task.detached(priority: .userInitiated) { Self.decode(rows, session: session) }.value
     }
 
     /// Machine-scoped RPC (`apiSocket.ts:410-443`): params/result use the machine's content key.
     /// Session writes (stop, runner restart, agent switch) carry their proof (`MachineRPCCall`).
     public func machineRPC(_ machineId: String, method: String, params: JSONValue, timeout: Duration = .seconds(30)) async throws -> JSONValue {
-        guard let emit = acknowledgedEmit, let api else { throw RPCError(message: notConnectedMessage, code: nil) }
-        let machine: Machine
-        if let cached = machines.first(where: { $0.id == machineId }) {
-            machine = cached
-        } else {
-            guard let row = try await api.machine(id: machineId) else { throw RPCError(message: "Machine not found", code: nil) }
-            machine = try Machine(row: row, keys: keys)
-            // Keep it: every machine RPC needs its key, and refetching made quick calls fragile.
-            if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
-        }
+        guard let emit = acknowledgedEmit else { throw RPCError(message: notConnectedMessage, code: nil) }
+        let machine = try await machine(machineId)
         return try await MachineRPCCall.call(machine, method: method, params: params, timeout: timeout, emit: emit)
+    }
+
+    /// The machine as this device knows it, fetched (and kept) the first time it's needed.
+    private func machine(_ machineId: String) async throws -> Machine {
+        if let cached = machines.first(where: { $0.id == machineId }) { return cached }
+        guard let api else { throw RPCError(message: notConnectedMessage, code: nil) }
+        guard let row = try await api.machine(id: machineId) else { throw RPCError(message: "Machine not found", code: nil) }
+        let machine = try Machine(row: row, keys: keys)
+        // Keep it: every machine RPC needs its key, and refetching made quick calls fragile.
+        if !machines.contains(where: { $0.id == machineId }) { machines.append(machine) }
+        return machine
     }
 
     // MARK: - Machines and new sessions

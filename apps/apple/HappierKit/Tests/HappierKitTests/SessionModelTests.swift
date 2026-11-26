@@ -32,6 +32,26 @@ import Testing
         #expect(fork.parentSessionId == nil)
     }
 
+    /// A branch knows the conversation it came from and where it left it (`forkV1`, written by
+    /// the daemon), and which tap made it (`requestId`).
+    @Test func aForkKnowsWhereItBranchedFrom() throws {
+        let fork = try Session(row: e2eeRow(metadata: [
+            "path": "/a", "forkV1": ["v": 1, "parentSessionId": "p1", "parentCutoffSeqInclusive": 3, "createdAtMs": 1_000,
+                                     "strategy": "replay", "requestId": "tap-1"],
+        ]), keys: keys)
+        #expect(fork.fork == Session.ForkLineage(parentSessionId: "p1", cutoffSeq: 3, requestId: "tap-1",
+                                                 createdAt: Date(timeIntervalSince1970: 1)))
+        for malformed: JSONValue in [
+            ["v": 2, "parentSessionId": "p1", "parentCutoffSeqInclusive": 3],
+            ["v": 1, "parentSessionId": "", "parentCutoffSeqInclusive": 3],
+            ["v": 1, "parentSessionId": "p1"],
+            ["v": 1, "parentSessionId": "p1", "parentCutoffSeqInclusive": -1],
+        ] {
+            let session = try Session(row: e2eeRow(metadata: ["path": "/a", "forkV1": malformed]), keys: keys)
+            #expect(session.fork == nil)
+        }
+    }
+
     @Test func decryptsE2EESessionAndDerivesDisplayFields() throws {
         let session = try Session(row: e2eeRow(metadata: [
             "path": "/Users/manny/Projects/app", "homeDir": "/Users/manny", "flavor": "codex-acp", "machineId": "m1",

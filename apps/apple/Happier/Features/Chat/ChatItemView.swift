@@ -134,6 +134,7 @@ private struct AgentBubble: View {
     let tail: Bool
     let sessionId: String
     @Environment(HappierStore.self) private var store
+    @Environment(\.borrowedInto) private var borrowedInto
     /// Its TL;DR is shown instead of it (`TLDRButton`).
     @State private var showsSummary = false
 
@@ -157,7 +158,8 @@ private struct AgentBubble: View {
             }
             if !options.isEmpty {
                 ReplyOptions(options: options) { option in
-                    Task { await store.send(option, to: sessionId) }
+                    // In a branch, its last borrowed reply's options continue the branch.
+                    Task { await store.send(option, to: borrowedInto ?? sessionId) }
                 }
             }
         }
@@ -297,6 +299,9 @@ private struct EventRow: View {
         switch event.kind {
         case "switch":
             event.data["mode"]?.stringValue == "local" ? String(localized: "Continued on the computer") : String(localized: "Continued remotely")
+        case "fork":
+            // Above it, the conversation this branch came from (`HappierStore.conversationItems`).
+            event.data["title"]?.stringValue.map { String(localized: "Forked from \($0)") } ?? String(localized: "Forked from earlier context")
         case "message", "runtime-config-outcome":
             event.data["message"]?.stringValue ?? ""
         case "limit-reached":
@@ -328,9 +333,11 @@ private struct MessageActionsModifier: ViewModifier {
     let target: MessageTarget?
     @Environment(HappierStore.self) private var store
     @Environment(\.chatRowActions) private var rowActions
+    @Environment(\.borrowedInto) private var borrowedInto
 
     func body(content: Content) -> some View {
-        let pinned = target.map { store.pins.isPinned(sessionId: $0.sessionId, seq: $0.seq) } ?? false
+        let borrowed = borrowedInto != nil
+        let pinned = !borrowed && (target.map { store.pins.isPinned(sessionId: $0.sessionId, seq: $0.seq) } ?? false)
         content
             #if os(iOS)
             .contentShape(.contextMenuPreview, shape)
@@ -352,7 +359,7 @@ private struct MessageActionsModifier: ViewModifier {
                     let speaking = MessageSpeaker.shared.isSpeaking(spoken)
                     Button(speaking ? "Stop Speaking" : "Speak", systemImage: speaking ? "stop.circle" : "speaker.wave.2") {
                         AppHaptics.light()
-                        MessageSpeaker.shared.toggle(spoken, sessionId: target?.sessionId)
+                        MessageSpeaker.shared.toggle(spoken, sessionId: borrowedInto ?? target?.sessionId)
                     }
                     if let selectionId, let rowActions {
                         Button("Select Text", systemImage: "text.cursor") { rowActions.beginTextSelection(selectionId) }
@@ -361,19 +368,24 @@ private struct MessageActionsModifier: ViewModifier {
                         Button("Select", systemImage: "checkmark.circle") { rowActions.beginMessageSelection(selectionId) }
                     }
                     if let target {
-                        Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
-                            AppHaptics.selection()
-                            store.togglePin(sessionId: target.sessionId, seq: target.seq, role: target.role)
-                        }
-                        if target.seq > 0 {
-                            Button("Fork from Here", systemImage: "arrow.triangle.branch") {
-                                AppHaptics.confirm()
-                                // A forked user message comes back as the new session's draft (seq >= 2).
-                                let restored = target.role == .user && target.seq >= 2 ? text : nil
-                                Task { await store.fork(target.sessionId, upToSeq: target.seq, restoring: restored) }
+                        if !borrowed {
+                            Button(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin") {
+                                AppHaptics.selection()
+                                store.togglePin(sessionId: target.sessionId, seq: target.seq, role: target.role)
                             }
                         }
-                        if target.role == .user, store.sessions[target.sessionId]?.canRollback(toUserMessageSeq: target.seq) == true {
+                        if target.seq > 0 {
+                            // Going back, as in a Claude chat: a branch up to just before your message,
+                            // with it back in the composer to edit (seq >= 2); after a reply, a
+                            // branch that continues from it.
+                            let editing = target.role == .user && target.seq >= 2
+                            Button(editing ? "Edit from Here" : "Fork from Here", systemImage: editing ? "pencil" : "arrow.triangle.branch") {
+                                AppHaptics.confirm()
+                                Task { await store.fork(target.sessionId, upToSeq: target.seq, restoring: editing ? text : nil) }
+                            }
+                            .disabled(store.forkingSessions.contains(target.sessionId))
+                        }
+                        if !borrowed, target.role == .user, store.sessions[target.sessionId]?.canRollback(toUserMessageSeq: target.seq) == true {
                             Button("Restore to Here", systemImage: "arrow.uturn.backward", role: .destructive) {
                                 AppHaptics.warning()
                                 Task { await store.rollback(target.sessionId, toUserMessageSeq: target.seq, restoring: text) }

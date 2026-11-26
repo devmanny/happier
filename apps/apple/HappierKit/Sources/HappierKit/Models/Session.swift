@@ -196,6 +196,23 @@ public struct Session: Identifiable, Sendable, Equatable {
         if let moved = metadata["listParentV1"], moved.objectValue != nil { return moved["parentSessionId"]?.stringValue }
         return metadata["spawnedBySessionV1"]?["parentSessionId"]?.stringValue
     }
+    /// Where a branch came from (`forkV1`, written by the daemon on the session it forked):
+    /// the conversation it left and its last message there (`cutoffSeq`, inclusive).
+    public struct ForkLineage: Equatable, Sendable {
+        public let parentSessionId: String
+        public let cutoffSeq: Int
+        /// The tap that made it (`session.fork`'s idempotency key), when the client sent one.
+        public let requestId: String?
+        public let createdAt: Date?
+    }
+    public var fork: ForkLineage? {
+        let fork = metadata["forkV1"]
+        guard fork?["v"]?.intValue == 1, let parent = fork?["parentSessionId"]?.stringValue, !parent.isEmpty,
+              let cutoff = fork?["parentCutoffSeqInclusive"]?.intValue, cutoff >= 0 else { return nil }
+        return ForkLineage(parentSessionId: parent, cutoffSeq: cutoff,
+                           requestId: fork?["requestId"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 },
+                           createdAt: Session.date(fork?["createdAtMs"]))
+    }
     public var host: String? { metadata["host"]?.stringValue }
     public var agentId: String? { Agent.id(fromFlavor: metadata["flavor"]?.stringValue) }
     /// The bell is off: the session never notifies (`notificationsMutedV1`, on by default).

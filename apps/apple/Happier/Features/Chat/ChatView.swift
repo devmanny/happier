@@ -10,6 +10,7 @@ struct ChatView: View {
     var body: some View {
         SessionChatHost(sessionId: sessionId, details: details).equatable()
             .offlineNotice()
+            .modifier(ForkingNotice(sessionId: sessionId))
     }
 
     /// What the ⓘ menu shows, as plain values.
@@ -166,9 +167,10 @@ private struct ChatConversationContent: View, Equatable {
 
     /// Transcript items plus server-queued messages, in one list. A sent message keeps the same id
     /// (`UserText.stableId`) whether it's optimistic, queued or committed, so SwiftUI updates it in
-    /// place instead of removing one bubble and inserting another.
+    /// place instead of removing one bubble and inserting another. A branch's earlier conversation
+    /// comes first (`HappierStore.conversationItems`).
     private var items: [ChatItem] {
-        var all = store.transcripts[sessionId]?.items ?? []
+        var all = store.conversationItems(sessionId)
         let present = Set(all.compactMap { item -> String? in if case .userText(let user) = item { user.localId } else { nil } })
         for message in queue where !present.contains(message.localId) {
             all.append(.userText(UserText(id: UserText.stableId(localId: message.localId), text: message.text,
@@ -188,7 +190,7 @@ private struct ChatConversationContent: View, Equatable {
             VStack(spacing: 2) {
                 let allRows = ChatRow.rows(from: items, working: working)
                 let rows = Array(ChatWindow.visible(allRows, limit: windowLimit, keeping: windowStart))
-                if rows.count < allRows.count || store.hasOlderMessages[sessionId] == true {
+                if rows.count < allRows.count || store.hasOlderMessages[sessionId] == true || store.hasOlderForkContext(sessionId) {
                     // One step back in history each time it comes into view.
                     HappierSpinner()
                         .padding()
@@ -512,6 +514,7 @@ private struct ChatConversationContent: View, Equatable {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             rowContent(row, previous: previous, next: next, working: working)
+                .environment(\.borrowedInto, origin(of: row) != sessionId ? sessionId : nil)
                 .allowsHitTesting(selected == nil)
         }
         .background {
@@ -547,16 +550,27 @@ private struct ChatConversationContent: View, Equatable {
                 PendingBubble(message: queued, sessionId: sessionId, working: working)
             }
         case .item(let item):
-            ChatItemView(item: item, sessionId: sessionId, tail: Side(row) != next.map(Side.init) || working && next == nil)
+            ChatItemView(item: item, sessionId: origin(of: row), tail: Side(row) != next.map(Side.init) || working && next == nil)
         case .work(let steps, _, let inProgress):
             // Duration runs from the message before these steps to the agent's next message.
             WorkRow(steps: steps, inProgress: inProgress,
                     startedAt: previous.flatMap { if case .item = $0 { $0.createdAt } else { nil } },
                     endedAt: next.flatMap { Side($0) == .agent ? $0.createdAt : nil },
-                    sessionId: sessionId)
+                    sessionId: origin(of: row))
         case .tools(let tools, _):
-            ToolGroupRow(tools: tools, sessionId: sessionId)
+            ToolGroupRow(tools: tools, sessionId: origin(of: row))
         }
+    }
+
+    /// The conversation a row belongs to: in a branch, its earlier rows are the conversation it
+    /// came from, so their actions (files, branching again) act there.
+    private func origin(of row: ChatRow) -> String {
+        let first: String? = switch row {
+        case .item(let item): item.id
+        case .work(let steps, _, _): steps.first?.id
+        case .tools(let tools, _): tools.first?.itemId
+        }
+        return first.flatMap { store.forkContextSession(ofItem: $0, in: sessionId) } ?? sessionId
     }
 
     // MARK: Selection
@@ -626,7 +640,10 @@ private struct ChatConversationContent: View, Equatable {
         guard let request = pendingMessageJump else { return }
         // Cleared last: clearing it changes this task's id, which would cancel the jump midway.
         defer { if store.messageRequest == request { store.messageRequest = nil } }
-        func rowId() -> String? { ChatRow.rowId(showingSeq: request.seq, in: ChatRow.rows(from: items, working: facts.working)) }
+        // Among the branch's own rows: those borrowed from where it came from have their own seqs.
+        func rowId() -> String? {
+            ChatRow.rowId(showingSeq: request.seq, in: ChatRow.rows(from: items, working: facts.working).filter { origin(of: $0) == sessionId })
+        }
         while rowId() == nil, store.hasOlderMessages[sessionId] == true, !Task.isCancelled {
             let before = store.transcripts[sessionId]?.minSeq
             if let before, before <= request.seq { break }
@@ -691,6 +708,10 @@ private struct ChatConversationContent: View, Equatable {
             } else if store.hasOlderMessages[sessionId] == true {
                 await store.loadOlder(sessionId)
                 windowLimit = ChatRow.rows(from: items, working: false).count
+            } else if store.hasOlderForkContext(sessionId) {
+                // A branch, all its own history here: the conversation it came from, a page at a time.
+                await store.loadOlderForkContext(sessionId)
+                windowLimit = ChatRow.rows(from: items, working: false).count
             } else {
                 return
             }
@@ -707,6 +728,44 @@ private struct ChatConversationContent: View, Equatable {
     }
 
 
+}
+
+/// A branch is being made from this conversation (`HappierStore.fork`). It can take a while (the
+/// daemon may replay the conversation into a new session), so it says so until the branch opens.
+private struct ForkingNotice: ViewModifier {
+    let sessionId: String
+    @Environment(HappierStore.self) private var store
+
+    func body(content: Content) -> some View {
+        let forking = store.isForking(from: sessionId)
+        content
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if forking {
+                    Label {
+                        Text("Making a branch from here…")
+                    } icon: {
+                        ProgressView().controlSize(.small)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+                    .accessibilityElement(children: .combine)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.smooth(duration: 0.3), value: forking)
+    }
+}
+
+extension EnvironmentValues {
+    /// The branch showing this row, when the row is borrowed from the conversation it came from:
+    /// reading it or branching from it again applies there, but what continues the conversation
+    /// (a reply option, the read-aloud player) belongs to the branch, and pins and rewinds don't
+    /// apply.
+    @Entry var borrowedInto: String? = nil
 }
 
 /// The toolbar and its presentations own a separate update boundary from the live transcript.
