@@ -90,7 +90,7 @@ Passkeys stay in Apple Passwords or the user's credential provider. Happier does
 a JavaScript credential bridge or store private keys. Authentication requires the user to show
 the tab and complete the system prompt.
 
-**Status: Apple declined the Default Web Browser request for `com.devmanny.happier` (Capability Requests, seen 27 Nov 2026), so iOS passkeys and site-matched password AutoFill are unavailable in this browser.** The separate Web Browser Public Key Credential request Apple offers covers macOS browsers only.
+**Status: Apple declined the Default Web Browser request for `com.devmanny.happier` (Capability Requests, seen 27 Nov 2026), so iOS passkeys and site-matched password AutoFill are unavailable in this browser.** The separate Web Browser Public Key Credential request Apple offers covers macOS browsers only; see [Passkeys in the macOS browser](#passkeys-in-the-macos-browser).
 The ordinary `project.yml` does not request restricted browser capabilities. To use passkeys for
 third-party sites such as Google, GitHub and Vercel in `WKWebView`, first obtain Apple's
 `com.apple.developer.web-browser` managed entitlement for `com.devmanny.happier`:
@@ -188,8 +188,8 @@ References: [WebKit's entitlement restriction](https://bugs.webkit.org/show_bug.
 
 ## Passkeys in the macOS browser
 
-**Status: optional development configuration prepared; the Mac entitlement request remains a draft.**
-Apple approval, provisioning and signed passkey validation remain pending. The iOS request
+**Status: optional development configuration prepared; the Mac entitlement request was submitted on
+2026-11-27 (request ID DVV8996A4C).** Apple approval, provisioning and signed passkey validation remain pending. The iOS request
 `QHLPSLWXM8` does not grant the macOS capability.
 
 `project.browser-macos.yml` opens the existing browser window on launch, including before
