@@ -70,6 +70,7 @@ import {
 import { repairClaudeTranscriptAfterInterrupt } from './agentSdk/repairClaudeTranscriptAfterInterrupt';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { parseCheckpointsCommand, parseRewindCommand } from './agentSdk/claudeAgentSdkSlashCommands';
+import { rewindClaudeFilesVerified } from '@/backends/claude/fileRestore/claudeRewindFiles';
 import {
     mapClaudeRateLimitEventToQuotaEvidence,
     readClaudeRateLimitEventWindows,
@@ -1577,10 +1578,9 @@ export async function claudeRemoteAgentSdk(opts: {
                             }
 
                             promptSettlements.accept(next);
-                            const result = await (response as any).rewindFiles?.(checkpointId, undefined);
-                            if (result && typeof result === 'object' && (result as any).canRewind === false) {
-                                const error = typeof (result as any).error === 'string' ? (result as any).error : 'Rewind failed';
-                                opts.onCompletionEvent?.(error);
+                            const rewind = await rewindClaudeFilesVerified(response, checkpointId);
+                            if (rewind.status !== 'ok') {
+                                opts.onCompletionEvent?.(rewind.reason);
                                 continue;
                             }
 

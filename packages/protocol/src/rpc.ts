@@ -97,6 +97,14 @@ export const RPC_METHODS = {
   SESSION_CONTINUE_WITH_REPLAY: 'session.continueWithReplay',
   SESSION_FORK: 'session.fork',
   /**
+   * Restores a session's working-directory files to just before one user
+   * message through the Agent's own file checkpoints. Daemon machine RPC like
+   * `session.fork`: it reads the session's metadata and transcript on the
+   * machine, independent of whether the session runtime is live, and resumes
+   * the Agent without a model turn (so it is provider-starting).
+   */
+  SESSION_RESTORE_FILES: 'session.restoreFiles',
+  /**
    * Same-Session cross-Agent continuation. Owned by the DAEMON machine RPC, not
    * the session-process registrar: the operation stops the very runtime that
    * would otherwise be handling it, so the session process cannot be its own
@@ -215,6 +223,8 @@ const SOCKET_RPC_PROVIDER_STARTING_METHODS = new Set<string>([
   RPC_METHODS.SPAWN_HAPPY_SESSION_PROVIDER_SAFE,
   RPC_METHODS.SESSION_CONTINUE_WITH_REPLAY,
   RPC_METHODS.SESSION_FORK,
+  // Resumes the session's Agent (without a model turn) to restore files.
+  RPC_METHODS.SESSION_RESTORE_FILES,
   RPC_METHODS.SESSION_AGENT_TRANSITION,
   RPC_METHODS.DAEMON_SESSION_CONNECTED_SERVICE_AUTH_SWITCH,
   RPC_METHODS.DAEMON_SESSION_RUNNER_RESTART,

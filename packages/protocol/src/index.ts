@@ -1461,6 +1461,17 @@ export {
   type SessionForkStrategy,
 } from './sessionFork.js';
 export {
+  SESSION_RESTORE_FILES_ERROR_CODES,
+  SessionRestoreFilesNotRestorableReasonCodeSchema,
+  SessionRestoreFilesRpcParamsSchema,
+  SessionRestoreFilesRpcResultSchema,
+  SessionRestoreFilesTargetSchema,
+  type SessionRestoreFilesNotRestorableReasonCode,
+  type SessionRestoreFilesRpcParams,
+  type SessionRestoreFilesRpcResult,
+  type SessionRestoreFilesTarget,
+} from './sessionRestoreFiles.js';
+export {
   SESSION_AGENT_TRANSITION_DIVIDER_LOCAL_ID_PREFIX,
   SESSION_AGENT_TRANSITION_DIVIDER_MESSAGE,
   SESSION_AGENT_TRANSITION_DIVIDER_SIDECAR_KEY,

@@ -31,6 +31,7 @@ import type {
   ProviderAttachOps,
   ProviderNativeForkHandler,
   SessionCatalogControlAdapter,
+  SessionFileRestoreHandler,
   SessionGoalControlAdapter,
   SessionUsageLimitRecoveryControlAdapter,
   VendorResumeSupportFn,
@@ -150,6 +151,7 @@ const cachedSessionGoalControlAdapterPromises = new Map<CatalogAgentId, Promise<
 const cachedSessionUsageLimitRecoveryControlAdapterPromises = new Map<CatalogAgentId, Promise<SessionUsageLimitRecoveryControlAdapter | null>>();
 const cachedAcpForkContinuationHandlerPromises = new Map<CatalogAgentId, Promise<AcpForkContinuationHandler | null>>();
 const cachedProviderNativeForkHandlerPromises = new Map<CatalogAgentId, Promise<ProviderNativeForkHandler | null>>();
+const cachedSessionFileRestoreHandlerPromises = new Map<CatalogAgentId, Promise<SessionFileRestoreHandler | null>>();
 
 function getOrLoadCatalogHookPromise<TKey, TValue>(
   cache: Map<TKey, Promise<TValue>>,
@@ -431,6 +433,15 @@ export async function getProviderNativeForkHandler(agentId: CatalogAgentId): Pro
     cachedProviderNativeForkHandlerPromises,
     agentId,
     () => entry?.getProviderNativeForkHandler ? entry.getProviderNativeForkHandler() : Promise.resolve(null),
+  );
+}
+
+export async function getSessionFileRestoreHandler(agentId: CatalogAgentId): Promise<SessionFileRestoreHandler | null> {
+  const entry = AGENTS[agentId];
+  return await getOrLoadCatalogHookPromise(
+    cachedSessionFileRestoreHandlerPromises,
+    agentId,
+    () => entry?.getSessionFileRestoreHandler ? entry.getSessionFileRestoreHandler() : Promise.resolve(null),
   );
 }
 

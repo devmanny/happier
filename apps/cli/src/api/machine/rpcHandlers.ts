@@ -33,19 +33,22 @@ import {
   SessionContinueWithReplayRpcParamsSchema,
   SessionForkRpcParamsSchema,
   SessionInitialGoalRequestV1Schema,
+  SessionRestoreFilesRpcParamsSchema,
   SessionMcpSelectionV1Schema,
   SessionRunnerStatusGetRequestV1Schema,
   SessionSpawnSourceContextV1Schema,
   getActionSpec,
   type ConnectedServiceBindingsV1,
   type SessionForkRpcResult,
+  type SessionRestoreFilesRpcResult,
   type SessionHandoffStartRequest,
   type SessionSpawnSourceContextV1,
 } from '@happier-dev/protocol';
 import { isPermissionMode } from '@/api/types';
+import type { RpcHandlerContext } from '@/api/rpc/types';
 import { CATALOG_AGENT_IDS } from '@/backends/types';
 import type { CatalogAgentId } from '@/backends/types';
-import { readCredentials } from '@/persistence';
+import { readCredentials, type Credentials } from '@/persistence';
 import { runSessionAgentTransition } from '@/session/agentTransition/sessionAgentTransitionCoordinator';
 import { previewSessionAgentTransitionBrief } from '@/session/agentTransition/previewSessionAgentTransitionBrief';
 import {
@@ -134,7 +137,7 @@ import {
   readOpenCodeSessionAffinityFromMetadata,
 } from '@/backends/opencode/utils/opencodeSessionAffinity';
 import { inferAgentIdFromSessionMetadata, resolveVendorResumeIdFromSessionMetadata } from '@happier-dev/agents';
-import { getAcpForkContinuationHandler } from '@/backends/catalog';
+import { getAcpForkContinuationHandler, getSessionFileRestoreHandler } from '@/backends/catalog';
 import {
   isProviderNativeForkFailedBeforeDispatchError,
   isProviderNativeForkIndeterminateError,
@@ -380,6 +383,71 @@ async function toCanonicalPath(path: string): Promise<string | null> {
 
 function isKnownAgentId(value: string): value is CatalogAgentId {
   return (CATALOG_AGENT_IDS as readonly string[]).includes(value);
+}
+
+type MachineRpcFailure = Readonly<{ ok: false; errorCode: string; errorMessage: string }>;
+
+/**
+ * Loads a session for a machine RPC that acts on it as its Agent (fork, file restore): the
+ * daemon's credentials, the raw session, its decrypted metadata, its normalized working directory
+ * and its Agent. Cancellation and authentication failures propagate; everything else is an
+ * operation failure.
+ */
+async function loadAgentSessionForMachineRpc(params: Readonly<{
+  sessionId: string;
+  signal?: AbortSignal;
+  fetchFailureMessage: string;
+}>): Promise<MachineRpcFailure | Readonly<{
+  ok: true;
+  credentials: Credentials;
+  rawSession: NonNullable<Awaited<ReturnType<typeof fetchSessionByIdCompat>>>;
+  metadata: Record<string, unknown>;
+  directory: string;
+  agentId: CatalogAgentId;
+}>> {
+  const invalid = (errorMessage: string): MachineRpcFailure => ({
+    ok: false,
+    errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
+    errorMessage,
+  });
+  throwIfTrackedActionAborted(params.signal);
+
+  const credentials = await readCredentials().catch(() => null);
+  if (!credentials) return invalid('Not authenticated');
+
+  let rawSession: Awaited<ReturnType<typeof fetchSessionByIdCompat>> | null = null;
+  try {
+    rawSession = await fetchSessionByIdCompat({ token: credentials.token, sessionId: params.sessionId });
+    throwIfTrackedActionAborted(params.signal);
+  } catch (error) {
+    if (isTrackedActionAbort(error)) throw error;
+    if (isAuthenticationError(error)) throw error;
+    return {
+      ok: false,
+      errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+      errorMessage: error instanceof Error ? error.message : params.fetchFailureMessage,
+    };
+  }
+  if (!rawSession) return invalid('Session not found');
+
+  const metadata = tryDecryptSessionMetadata({ credentials, rawSession });
+  if (!metadata) return invalid('Unable to decrypt session metadata');
+
+  const directory = typeof metadata.path === 'string' ? metadata.path.trim() : '';
+  if (!directory) return invalid('Session metadata missing path');
+
+  const unknownAgentId = '__unknown__' as CatalogAgentId;
+  const agentId = inferAgentIdFromSessionMetadata(metadata, unknownAgentId);
+  if (agentId === unknownAgentId || !isKnownAgentId(agentId)) return invalid('Session metadata missing agent flavor');
+
+  return {
+    ok: true,
+    credentials,
+    rawSession,
+    metadata,
+    directory: normalizeSpawnSessionDirectory(directory, process.env),
+    agentId,
+  };
 }
 
 function isPathInside(targetPath: string, allowedDir: string): boolean {
@@ -1503,71 +1571,19 @@ export function registerMachineRpcHandlers(params: Readonly<{
     const forkRequestId = readNonBlankOpaqueIdentifier(parsed.data.requestId) ?? '';
     const executeSessionFork = async (): Promise<SessionForkRpcResult> => {
 
-    throwIfTrackedActionAborted(signal);
-
-    const credentials = await readCredentials().catch(() => null);
-    if (!credentials) {
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
-        errorMessage: 'Not authenticated',
-      };
-    }
-
-    let parentSession: Awaited<ReturnType<typeof fetchSessionByIdCompat>> | null = null;
-    try {
-      parentSession = await fetchSessionByIdCompat({ token: credentials.token, sessionId: parentSessionId });
-      throwIfTrackedActionAborted(signal);
-    } catch (error) {
-      if (isTrackedActionAbort(error)) throw error;
-      if (isAuthenticationError(error)) throw error;
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
-        errorMessage: error instanceof Error ? error.message : 'Failed to load parent session',
-      };
-    }
-    if (!parentSession) {
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
-        errorMessage: 'Session not found',
-      };
-    }
-
-    const parentMetadata = tryDecryptSessionMetadata({
+    const loaded = await loadAgentSessionForMachineRpc({
+      sessionId: parentSessionId,
+      signal,
+      fetchFailureMessage: 'Failed to load parent session',
+    });
+    if (!loaded.ok) return loaded;
+    const {
       credentials,
       rawSession: parentSession,
-    });
-    if (!parentMetadata) {
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
-        errorMessage: 'Unable to decrypt session metadata',
-      };
-    }
-
-    const directory = typeof parentMetadata.path === 'string' && parentMetadata.path.trim().length > 0
-      ? parentMetadata.path.trim()
-      : '';
-    if (!directory) {
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
-        errorMessage: 'Session metadata missing path',
-      };
-    }
-    const normalizedDirectory = normalizeSpawnSessionDirectory(directory, process.env);
-
-    const unknownAgentId = '__unknown__' as CatalogAgentId;
-    const agentRaw = inferAgentIdFromSessionMetadata(parentMetadata, unknownAgentId);
-    if (agentRaw === unknownAgentId || !isKnownAgentId(agentRaw)) {
-      return {
-        ok: false,
-        errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST,
-        errorMessage: 'Session metadata missing agent flavor',
-      };
-    }
+      metadata: parentMetadata,
+      directory: normalizedDirectory,
+      agentId: agentRaw,
+    } = loaded;
 
     const openCodeParentAffinity =
       agentRaw === 'opencode'
@@ -2135,6 +2151,53 @@ export function registerMachineRpcHandlers(params: Readonly<{
         ? { ok: true, result }
         : { ok: false, errorCode: result.errorCode, error: result.errorMessage },
     });
+  });
+
+  rpcHandlerManager.registerHandler(RPC_METHODS.SESSION_RESTORE_FILES, async (
+    raw: unknown,
+    _compat?: unknown,
+    context?: RpcHandlerContext,
+  ): Promise<SessionRestoreFilesRpcResult> => {
+    const parsed = SessionRestoreFilesRpcParamsSchema.safeParse(raw);
+    if (!parsed.success) {
+      return { ok: false, errorCode: SPAWN_SESSION_ERROR_CODES.INVALID_REQUEST, errorMessage: 'Invalid params' };
+    }
+    const signal = context?.signal;
+    const loaded = await loadAgentSessionForMachineRpc({
+      sessionId: parsed.data.sessionId,
+      signal,
+      fetchFailureMessage: 'Failed to load session',
+    });
+    if (!loaded.ok) return loaded;
+    const restoreFiles = await getSessionFileRestoreHandler(loaded.agentId);
+    if (!restoreFiles) {
+      return {
+        ok: true,
+        restorable: false,
+        reasonCode: 'unsupported',
+        reason: 'This session\'s agent cannot restore files to an earlier message.',
+      };
+    }
+    try {
+      return await restoreFiles({
+        credentials: loaded.credentials,
+        sessionId: parsed.data.sessionId,
+        rawSession: loaded.rawSession,
+        metadata: loaded.metadata,
+        directory: loaded.directory,
+        userMessageSeq: parsed.data.target.userMessageSeq,
+        dryRun: parsed.data.dryRun === true,
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      // Cancellation and authentication propagate as they do for fork; anything else is an operation failure.
+      if (signal?.aborted || isTrackedActionAbort(error) || isAuthenticationError(error)) throw error;
+      return {
+        ok: false,
+        errorCode: SPAWN_SESSION_ERROR_CODES.UNEXPECTED,
+        errorMessage: error instanceof Error ? error.message : 'Failed to restore files',
+      };
+    }
   });
 
   rpcHandlerManager.registerHandler(RPC_METHODS.DAEMON_EXECUTION_RUNS_LIST, async () => {
