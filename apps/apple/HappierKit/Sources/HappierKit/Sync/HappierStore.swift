@@ -2272,22 +2272,135 @@ public final class HappierStore {
     /// above the daemon's own waits (a replayed branch waits up to 5 minutes for its session).
     static let forkTimeout: Duration = .seconds(480)
 
+    /// Edit from Here on a message as the conversation `conversationId` shows it: branches from
+    /// just before it (`editTarget`) with its text back in the composer (`fork`). When the agent
+    /// can also put the files back as they were before it, nothing is branched yet: the question
+    /// comes back, and `editFromHere(answering:restoringFiles:)` follows the user's answer.
+    /// Only the conversation's own messages are asked about, with its own restore points: a
+    /// borrowed row's are the earlier conversation's, and don't cover what this one changed
+    /// since. Anything else (its agent working, an agent that can't, nothing changed, a daemon
+    /// from before restores, no answer) branches right away, as before.
+    public func editFromHere(_ message: MessageVersion, in conversationId: String, text: String) async -> FileRestoreQuestion? {
+        let from = editTarget(forMessageAt: message.seq, in: message.sessionId)
+        if message.sessionId == conversationId {
+            switch await fileRestoreOffer(before: message, branchingFrom: from.sessionId) {
+            case .files(let files): return FileRestoreQuestion(message: message, from: from, text: text, files: files)
+            case .unavailable: return FileRestoreQuestion(message: message, from: from, text: text, files: nil)
+            case .none: break
+            }
+        }
+        await fork(from.sessionId, upToSeq: from.seq, restoring: text)
+        return nil
+    }
+
+    /// The user's answer to an Edit from Here's question: the branch, after putting the files back
+    /// when they chose to.
+    public func editFromHere(answering question: FileRestoreQuestion, restoringFiles: Bool) async {
+        await fork(question.from.sessionId, upToSeq: question.from.seq, restoring: question.text,
+                   restoringFilesBefore: restoringFiles ? question.message : nil)
+    }
+
+    /// A dry run of restoring the files as they were before `message` (`session.restoreFiles`).
+    /// While it's asked, edits of both conversations wait as a fork does. Anything but an answer
+    /// to offer is `.none`, logged, so the edit goes ahead as before.
+    private func fileRestoreOffer(before message: MessageVersion, branchingFrom source: String) async -> FileRestoreOffer {
+        // A branch or a restore already on its way: `fork`'s own guard turns the edit away.
+        let held: Set = [source, message.sessionId]
+        guard forkingSessions.isDisjoint(with: held) else { return .none }
+        forkingSessions.formUnion(held)
+        defer { forkingSessions.subtract(held) }
+        guard let conversation = await forkSource(message.sessionId), let machineId = conversation.machineId,
+              !isMidTurn(conversation) else { return .none }
+        do {
+            let result = try await restoreFiles(message, on: machineId, dryRun: true)
+            switch (result["ok"]?.boolValue, result["restorable"]?.boolValue) {
+            case (true, true):
+                let paths = result["filesChanged"]?.arrayValue?.compactMap(\.stringValue) ?? []
+                return paths.isEmpty ? .none : .files(paths)
+            case (true, false) where result["reasonCode"]?.stringValue == "no_checkpoint":
+                return .unavailable
+            case (true, false):
+                return .none
+            default:
+                throw Self.restoreFailure(result)
+            }
+        } catch {
+            logBackground(error, "file restore offer")
+            return .none
+        }
+    }
+
+    /// Whether the session's agent is in the middle of a turn: restoring files then would race its
+    /// own edits, and the daemon doesn't check (`sessionRestoreFiles.ts`).
+    private func isMidTurn(_ session: Session) -> Bool {
+        [.working, .permissionRequired, .actionRequired].contains(session.status(at: presenceDate()))
+    }
+
+    private func restoreFiles(_ message: MessageVersion, on machineId: String, dryRun: Bool) async throws -> JSONValue {
+        let params: JSONValue = [
+            "v": 1, "sessionId": .string(message.sessionId),
+            "target": ["type": "before_user_message", "userMessageSeq": .number(Double(message.seq))], "dryRun": .bool(dryRun),
+        ]
+        // A dry run only looks and waits for no session to start: a machine call's usual budget.
+        // A real one is part of the branch the user chose to wait for.
+        if dryRun { return try await machineRPC(machineId, method: "session.restoreFiles", params: params) }
+        return try await machineRPC(machineId, method: "session.restoreFiles", params: params, timeout: Self.forkTimeout)
+    }
+
+    private static func restoreFailure(_ result: JSONValue) -> RPCError {
+        RPCError(message: result["errorMessage"]?.stringValue ?? result["reason"]?.stringValue ?? result["error"]?.stringValue
+                    ?? String(localized: "The files weren't restored."),
+                 code: result["errorCode"]?.stringValue ?? result["reasonCode"]?.stringValue)
+    }
+
+    /// The session a branch is made from. A borrowed row's conversation, or the original another
+    /// version is made of, may no longer be listed (archived).
+    private func forkSource(_ sessionId: String) async -> Session? {
+        if let listed = listedOrBorrowed(sessionId) { return listed }
+        return try? await knownSession(sessionId)
+    }
+
     /// Branches the session at this message on its machine and opens the branch, as going back in
     /// a Claude chat (`forkSession` in `apps/ui/sources/sync/ops/sessions.ts`): the daemon forks
     /// the agent's own conversation when it can, else replays this one up to there. For a user
     /// message it cuts just before it, and `text` comes back in the branch's composer to edit and
-    /// send again. The session itself is left as it was; files on disk aren't rolled back.
-    public func fork(_ sessionId: String, upToSeq seq: Int, restoring text: String?) async {
-        guard !forkingSessions.contains(sessionId) else { return }
-        forkingSessions.insert(sessionId)
-        defer { forkingSessions.remove(sessionId) }
-        // A borrowed row's conversation, or the original another version is made of, may no
-        // longer be listed (archived).
-        var source = listedOrBorrowed(sessionId)
-        if source == nil { source = try? await knownSession(sessionId) }
-        guard let machineId = source?.machineId else {
+    /// send again. The session itself is left as it was. `restoringFilesBefore`: first put the
+    /// folder back as it was before that message (`session.restoreFiles`); when that can't be
+    /// done, nothing is forked.
+    public func fork(_ sessionId: String, upToSeq seq: Int, restoring text: String?, restoringFilesBefore restored: MessageVersion? = nil) async {
+        // The conversation whose files are put back waits too.
+        let held = Set([sessionId] + (restored.map { [$0.sessionId] } ?? []))
+        guard forkingSessions.isDisjoint(with: held) else { return }
+        forkingSessions.formUnion(held)
+        defer { forkingSessions.subtract(held) }
+        guard let source = await forkSource(sessionId), let machineId = source.machineId else {
             lastError = String(localized: "This session isn't linked to a machine, so it can't be forked.")
             return
+        }
+        var restoredFiles = false
+        if let restored {
+            guard let conversation = await forkSource(restored.sessionId), let restoreMachineId = conversation.machineId else {
+                lastError = String(localized: "This session isn't linked to a machine, so it can't be forked.")
+                return
+            }
+            // Its agent may have started a turn while the user was choosing.
+            guard !isMidTurn(conversation) else {
+                lastError = String(localized: "Couldn't restore the files: the agent is working. Try again when it finishes.")
+                return
+            }
+            do {
+                let result = try await restoreFiles(restored, on: restoreMachineId, dryRun: false)
+                guard result["ok"]?.boolValue == true, result["restorable"]?.boolValue == true, result["restored"]?.boolValue == true else {
+                    throw Self.restoreFailure(result)
+                }
+                restoredFiles = true
+            } catch {
+                if UserFacingError.isSilent(error) { return }
+                log.error("fork: restoring files failed: \(String(describing: error), privacy: .public)")
+                let reason = UserFacingError.message(for: error, hasNetworkPath: hasNetworkPath)
+                lastError = String(localized: "Couldn't restore the files: \(reason)")
+                return
+            }
         }
         var params: [String: JSONValue] = [
             "v": 1, "parentSessionId": .string(sessionId),
@@ -2319,7 +2432,14 @@ public final class HappierStore {
             // (`classifySessionForkRpcOutcome`).
             guard forkMayHaveHappened(failure), let requestId else {
                 unresolvedForks[attempt] = nil
-                report(failure)
+                if restoredFiles, !UserFacingError.isSilent(failure) {
+                    // The folder did change: that's said, whatever happened to the branch.
+                    log.error("fork after restoring files failed: \(String(describing: failure), privacy: .public)")
+                    let reason = UserFacingError.message(for: failure, hasNetworkPath: hasNetworkPath)
+                    lastError = String(localized: "The files were restored, but the branch wasn't made: \(reason)")
+                } else {
+                    report(failure)
+                }
                 return
             }
             guard let found = await branch(of: sessionId, madeBy: requestId) else {

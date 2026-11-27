@@ -162,6 +162,8 @@ private struct ChatConversationContent: View, Equatable {
     /// Selected transcript item ids; nil when not in selection mode.
     @State private var selected: Set<String>?
     @State private var choosingDestination = false
+    /// An Edit from Here waiting for the user to say what happens to the files.
+    @State private var pendingEdit: FileRestoreQuestion?
 
     private var queue: [PendingMessage] { store.pendingQueues[sessionId] ?? [] }
 
@@ -462,6 +464,7 @@ private struct ChatConversationContent: View, Equatable {
             }
         }
         .environment(\.chatRowActions, rowActions)
+        .modifier(EditFilesQuestion(pending: $pendingEdit))
         // Your bubbles in the project folder's color, when it has one.
         .environment(\.userBubbleColor, facts.folderColor?.color ?? .userBubble)
         .background { FolderWash(color: facts.folderColor?.color) }
@@ -609,6 +612,14 @@ private struct ChatConversationContent: View, Equatable {
             withAnimation(.smooth) { selected = [id] }
         }
         rowActions.editInComposer = { text in appendToDraft(text) }
+        rowActions.editFromHere = { message, text in
+            // A question SwiftUI couldn't show (a sheet was up) is still set and would keep the
+            // next one from showing: cleared here, the next arrives after the dry run as a change.
+            pendingEdit = nil
+            Task {
+                if let question = await store.editFromHere(message, in: sessionId, text: text) { pendingEdit = question }
+            }
+        }
         rowActions.beginTextSelection = { id in
             AppHaptics.light()
             withAnimation(.smooth(duration: 0.2)) { textSelectingId = id }
@@ -758,6 +769,43 @@ private struct ForkingNotice: ViewModifier {
                 }
             }
             .animation(.smooth(duration: 0.3), value: forking)
+    }
+}
+
+/// Asks what happens to the files before an edit branches the conversation
+/// (`HappierStore.editFromHere`): restore them too, or leave them; or, without a restore point,
+/// edit anyway. Hosted by the conversation so the question stays up when the row that asked
+/// scrolls away.
+private struct EditFilesQuestion: ViewModifier {
+    @Binding var pending: FileRestoreQuestion?
+    @Environment(HappierStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(pending?.files != nil ? Text("Restore Files Too?") : Text("Files Can't Be Restored"),
+                                isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+                                titleVisibility: .visible, presenting: pending) { question in
+                if question.files != nil {
+                    Button("Edit and Restore Files", role: .destructive) {
+                        AppHaptics.warning()
+                        answer(question, restoringFiles: true)
+                    }
+                    Button("Edit Only") { answer(question, restoringFiles: false) }
+                } else {
+                    Button("Edit Anyway") { answer(question, restoringFiles: false) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { question in
+                if let files = question.files {
+                    Text("^[\(files.count) file](inflect: true) changed after this message. Restoring puts them back the way they were, in the folder every conversation here shares. Other changes, like those made by shell commands, stay as they are.")
+                } else {
+                    Text("There's no restore point for this message, so the files stay as they are.")
+                }
+            }
+    }
+
+    private func answer(_ question: FileRestoreQuestion, restoringFiles: Bool) {
+        Task { await store.editFromHere(answering: question, restoringFiles: restoringFiles) }
     }
 }
 

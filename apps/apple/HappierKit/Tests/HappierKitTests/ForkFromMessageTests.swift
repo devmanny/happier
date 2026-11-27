@@ -16,6 +16,8 @@ struct ForkFromMessageTests {
         _ = await (first, second)
 
         #expect(relay.forkRequests.count == 1)
+        // Files are restored only when asked to.
+        #expect(relay.methods == ["session.fork"])
         let request = try #require(relay.forkRequests.first)
         #expect(request["parentSessionId"]?.stringValue == "p")
         #expect(request["forkPoint"]?["upToSeqInclusive"]?.intValue == 3)
@@ -253,6 +255,206 @@ struct ForkFromMessageTests {
         #expect(store.forkContextSession(ofItem: borrowed.id, in: "c") == "p")
         #expect(store.forkContextSession(ofItem: divider.id, in: "c") == nil)
     }
+
+    // MARK: Restoring files with an edit (`session.restoreFiles`)
+
+    /// p's message 3 as p shows it.
+    private let login = MessageVersion(sessionId: "p", seq: 3)
+
+    @Test func editingOffersToRestoreTheFilesChangedSinceTheMessage() async throws {
+        let relay = ForkRelay(restoreAnswer: { _ in
+            ["ok": true, "restorable": true, "restored": false, "filesChanged": ["src/login.ts", "src/session.ts"], "insertions": 4, "deletions": 9]
+        })
+        let store = try relay.store()
+        async let asked = store.editFromHere(login, in: "p", text: "Arregla el login")
+        for _ in 0..<300 where relay.methods.isEmpty { try await Task.sleep(for: .milliseconds(1)) }
+        // Editing that conversation waits for the answer; another tap meanwhile sends nothing.
+        #expect(store.forkingSessions.contains("p"))
+        #expect(await store.editFromHere(login, in: "p", text: "Arregla el login") == nil)
+
+        let question = try #require(await asked)
+        #expect(question.files == ["src/login.ts", "src/session.ts"])
+        #expect(question.from == login)
+        let request = try #require(relay.restoreRequests.first)
+        #expect(request["v"]?.intValue == 1)
+        #expect(request["sessionId"]?.stringValue == "p")
+        #expect(request["target"]?["type"]?.stringValue == "before_user_message")
+        #expect(request["target"]?["userMessageSeq"]?.intValue == 3)
+        #expect(request["dryRun"]?.boolValue == true)
+        // Only a look, which waits for no session to start: a machine call's usual budget.
+        #expect(relay.restoreTimeouts == [30_000])
+        // Nothing is forked or restored until the user says how.
+        #expect(relay.methods == ["session.restoreFiles"])
+        #expect(store.forkingSessions.isEmpty)
+        #expect(store.lastError == nil)
+    }
+
+    @Test func aMessageWithoutARestorePointSaysSo() async throws {
+        let relay = ForkRelay(restoreAnswer: { _ in
+            ["ok": true, "restorable": false, "reasonCode": "no_checkpoint", "reason": "No checkpoint for this message"]
+        })
+        let store = try relay.store()
+        let question = try #require(await store.editFromHere(login, in: "p", text: "Arregla el login"))
+        #expect(question.files == nil)
+        #expect(relay.methods == ["session.restoreFiles"])
+        #expect(store.lastError == nil)
+    }
+
+    @Test func editingIsAsTodayWhenThereAreNoFilesToOffer() async throws {
+        let answers: [(@Sendable (JSONValue) -> JSONValue)?] = [
+            // A daemon from before the method.
+            nil,
+            // One whose runner answers it doesn't know it (`RpcHandlerManager`).
+            { _ in ["error": "Method not found", "errorCode": "RPC_METHOD_NOT_FOUND"] },
+            { _ in ["ok": true, "restorable": false, "reasonCode": "unsupported", "reason": "Codex can't restore files"] },
+            { _ in ["ok": false, "errorCode": "restore_failed", "errorMessage": "Claude didn't answer"] },
+            // Nothing changed since the message.
+            { _ in ["ok": true, "restorable": true, "restored": false, "filesChanged": []] },
+        ]
+        for answer in answers {
+            let relay = ForkRelay(restoreAnswer: answer)
+            let store = try relay.store()
+            #expect(await store.editFromHere(login, in: "p", text: "Arregla el login") == nil)
+            // Branched right away with the text, as before restores; not the user's problem.
+            #expect(relay.methods == ["session.restoreFiles", "session.fork"])
+            #expect(store.openRequest == "c")
+            #expect(store.draftSeeds["c"] == "Arregla el login")
+            #expect(store.lastError == nil)
+            #expect(store.forkingSessions.isEmpty)
+        }
+    }
+
+    @Test func filesArentTouchedWhileTheConversationIsWorking() async throws {
+        let relay = ForkRelay(restoreAnswer: daemonRestores)
+        let store = try relay.store()
+        let question = try #require(await store.editFromHere(login, in: "p", text: "Arregla el login"))
+        // It started working while the user was choosing: no restore, and so no edit either.
+        store.sessions["p"]?.thinking = true
+        store.sessions["p"]?.thinkingAt = .now
+        await store.editFromHere(answering: question, restoringFiles: true)
+        #expect(relay.methods == ["session.restoreFiles"])
+        #expect(store.lastError != nil)
+        #expect(store.openRequest == nil)
+        // Its agent is changing them right now (the daemon doesn't check): an edit doesn't ask.
+        #expect(await store.editFromHere(login, in: "p", text: "Arregla el login") == nil)
+        #expect(relay.methods == ["session.restoreFiles", "session.fork"])
+    }
+
+    @Test func anotherVersionOfABranchsMessagePutsBackWhatTheBranchChanged() async throws {
+        // `c` is an edit of p's message 3; its agent changed the files after c's own message 1.
+        let relay = ForkRelay(branches: ["c": .init(messages: [("user", "Arregla el registro"), ("agent", "Listo")])],
+                              restoreAnswer: daemonRestores)
+        let store = try relay.store()
+        try await waitUntilVersionOfLogin(store)
+        let question = try #require(await store.editFromHere(MessageVersion(sessionId: "c", seq: 1), in: "c", text: "Arregla el registro"))
+        // Another version of p's message, with the files as they were before the one on screen:
+        // p's restore points don't cover what c's agent changed.
+        #expect(question.from == login)
+        #expect(relay.restoreRequests.first?["sessionId"]?.stringValue == "c")
+        #expect(relay.restoreRequests.first?["target"]?["userMessageSeq"]?.intValue == 1)
+
+        await store.editFromHere(answering: question, restoringFiles: true)
+        #expect(relay.methods == ["session.restoreFiles", "session.restoreFiles", "session.fork"])
+        let restore = try #require(relay.restoreRequests.last)
+        #expect(restore["sessionId"]?.stringValue == "c")
+        #expect(restore["target"]?["userMessageSeq"]?.intValue == 1)
+        #expect(restore["dryRun"]?.boolValue == false)
+        #expect(relay.forkRequests.last?["parentSessionId"]?.stringValue == "p")
+        #expect(relay.forkRequests.last?["forkPoint"]?["upToSeqInclusive"]?.intValue == 3)
+        #expect(store.lastError == nil)
+    }
+
+    @Test func aBranchWhoseAgentIsWorkingIsEditedWithoutAsking() async throws {
+        let relay = ForkRelay(branches: ["c": .init(messages: [("user", "Arregla el registro"), ("agent", "Listo")])],
+                              restoreAnswer: daemonRestores)
+        let store = try relay.store()
+        try await waitUntilVersionOfLogin(store)
+        // c's agent is changing the folder it shares with p, which is idle.
+        store.sessions["c"]?.thinking = true
+        store.sessions["c"]?.thinkingAt = .now
+        #expect(await store.editFromHere(MessageVersion(sessionId: "c", seq: 1), in: "c", text: "Arregla el registro") == nil)
+        #expect(relay.methods == ["session.fork"])
+        #expect(relay.forkRequests.last?["parentSessionId"]?.stringValue == "p")
+    }
+
+    @Test func aMessageABranchBorrowsIsEditedWithoutAsking() async throws {
+        // `e` was made after p's reply 4, so it shows p's message 3 above its own.
+        let relay = ForkRelay(branches: ["e": .init(cutoff: 4, messages: [("user", "Otra cosa")])], restoreAnswer: daemonRestores)
+        let store = try relay.store()
+        // p's restore points don't cover what e's agent changed since.
+        #expect(await store.editFromHere(login, in: "e", text: "Arregla el login") == nil)
+        #expect(relay.methods == ["session.fork"])
+        #expect(relay.forkRequests.last?["parentSessionId"]?.stringValue == "p")
+        #expect(relay.forkRequests.last?["forkPoint"]?["upToSeqInclusive"]?.intValue == 3)
+    }
+
+    @Test func editingAndRestoringPutsTheFilesBackBeforeForking() async throws {
+        let relay = ForkRelay(restoreAnswer: daemonRestores)
+        let store = try relay.store()
+        let question = try #require(await store.editFromHere(login, in: "p", text: "Arregla el login"))
+        await store.editFromHere(answering: question, restoringFiles: true)
+
+        #expect(relay.methods == ["session.restoreFiles", "session.restoreFiles", "session.fork"])
+        let restore = try #require(relay.restoreRequests.last)
+        #expect(restore["sessionId"]?.stringValue == "p")
+        #expect(restore["target"]?["userMessageSeq"]?.intValue == 3)
+        #expect(restore["dryRun"]?.boolValue == false)
+        // The user chose to wait for it: the branch's own budget.
+        #expect(relay.restoreTimeouts.last == 480_000)
+        #expect(store.openRequest == "c")
+        #expect(store.draftSeeds["c"] == "Arregla el login")
+        #expect(store.lastError == nil)
+        #expect(store.forkingSessions.isEmpty)
+    }
+
+    @Test func aRestoreThatFailsDoesntFork() async throws {
+        let answers: [(answer: (@Sendable (JSONValue) -> JSONValue)?, reason: String)] = [
+            ({ _ in ["ok": false, "errorCode": "restore_failed", "errorMessage": "src/login.ts still differs"] }, "src/login.ts still differs"),
+            ({ _ in ["ok": true, "restorable": false, "reasonCode": "no_checkpoint", "reason": "No checkpoint for this message"] },
+             "No checkpoint for this message"),
+            // The daemon was downgraded while the user was choosing.
+            (nil, "RPC method not available"),
+        ]
+        for (answer, reason) in answers {
+            let relay = ForkRelay(restoreAnswer: answer)
+            let store = try relay.store()
+            await store.editFromHere(answering: FileRestoreQuestion(message: login, from: login, text: "Arregla el login", files: ["src/login.ts"]),
+                                     restoringFiles: true)
+            #expect(relay.methods == ["session.restoreFiles"])
+            #expect(store.openRequest == nil)
+            #expect(store.lastError?.hasPrefix("Couldn't restore the files") == true)
+            #expect(store.lastError?.contains(reason) == true)
+            #expect(store.forkingSessions.isEmpty)
+        }
+    }
+
+    @Test func filesRestoredForABranchThatFailedAreSaidToBe() async throws {
+        let relay = ForkRelay(restoreAnswer: daemonRestores,
+                              answer: { _ in ["ok": false, "errorCode": "INVALID_REQUEST", "errorMessage": "The session's folder is gone"] })
+        let store = try relay.store()
+        await store.editFromHere(answering: FileRestoreQuestion(message: login, from: login, text: "Arregla el login", files: ["src/login.ts"]),
+                                 restoringFiles: true)
+        #expect(relay.methods == ["session.restoreFiles", "session.fork"])
+        #expect(store.openRequest == nil)
+        // The original's folder did change: that's said, whatever happened to the branch.
+        #expect(store.lastError?.hasPrefix("The files were restored") == true)
+        #expect(store.lastError?.contains("The session's folder is gone") == true)
+    }
+
+    /// Until `c` is known to be a version of p's message 3.
+    private func waitUntilVersionOfLogin(_ store: HappierStore) async throws {
+        for _ in 0..<300 where store.editTarget(forMessageAt: 1, in: "c") != login {
+            _ = store.versions(ofMessageAt: 1, in: "c")
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(store.editTarget(forMessageAt: 1, in: "c") == login)
+    }
+}
+
+/// Answers `session.restoreFiles` as a daemon whose agent can: a dry run lists what would change,
+/// a real run restores it.
+private let daemonRestores: @Sendable (JSONValue) -> JSONValue = { params in
+    ["ok": true, "restorable": true, "restored": .bool(params["dryRun"]?.boolValue == false), "filesChanged": ["src/login.ts"]]
 }
 
 private final class Flag: @unchecked Sendable {
@@ -273,6 +475,9 @@ private final class ForkRelay: @unchecked Sendable {
 
     private let lock = NSLock()
     private let answer: @Sendable (JSONValue) -> JSONValue
+    /// The daemon's `session.restoreFiles` result; nil for a daemon from before it.
+    private let restoreAnswer: (@Sendable (JSONValue) -> JSONValue)?
+    private var calls: [(method: String, params: JSONValue, timeoutMs: Int?)] = []
     private let daemonVersion: String
     private let listsChild: Bool
     private let listsParent: Bool
@@ -286,7 +491,9 @@ private final class ForkRelay: @unchecked Sendable {
 
     init(daemonVersion: String = "0.2.19-dev.3", listsChild: Bool = true, listsParent: Bool = true, parentGone: Bool = false,
          branches: [String: Branch] = [:], failingOnce: Set<String> = [],
+         restoreAnswer: (@Sendable (JSONValue) -> JSONValue)? = nil,
          answer: @escaping @Sendable (JSONValue) -> JSONValue = { _ in ["ok": true, "childSessionId": "c"] }) {
+        self.restoreAnswer = restoreAnswer
         self.daemonVersion = daemonVersion
         self.listsChild = listsChild
         self.listsParent = listsParent
@@ -310,6 +517,11 @@ private final class ForkRelay: @unchecked Sendable {
     func requests(_ prefix: String) -> Int { lock.withLock { log.filter { $0.hasPrefix(prefix) }.count } }
 
     var forkRequests: [JSONValue] { lock.withLock { requests } }
+    /// The machine RPCs asked for, in order.
+    var methods: [String] { lock.withLock { calls.map(\.method) } }
+    var restoreRequests: [JSONValue] { lock.withLock { calls.filter { $0.method == "session.restoreFiles" }.map(\.params) } }
+    /// How long the relay was told to wait for each `session.restoreFiles` (`timeoutMs`).
+    var restoreTimeouts: [Int?] { lock.withLock { calls.filter { $0.method == "session.restoreFiles" }.map(\.timeoutMs) } }
 
     @MainActor func store() throws -> HappierStore {
         let configuration = URLSessionConfiguration.ephemeral
@@ -346,9 +558,26 @@ private final class ForkRelay: @unchecked Sendable {
     }
 
     private func socketAck(_ payload: JSONValue) async throws -> [JSONValue] {
-        guard payload["method"]?.stringValue == "m1:session.fork" else { return [["ok": false, "error": "unexpected"]] }
         let params = payload["params"] ?? .null
+        switch payload["method"]?.stringValue {
+        case "m1:session.fork": return try await forkAck(params)
+        case "m1:session.restoreFiles":
+            lock.withLock { calls.append(("session.restoreFiles", params, payload["timeoutMs"]?.intValue)) }
+            // Slow enough to see what the app shows while it waits.
+            try await Task.sleep(for: .milliseconds(30))
+            // A daemon from before it: no handler on the relay for it (`rpcHandler.ts`).
+            guard let restoreAnswer else {
+                return [["ok": false, "error": "RPC method not available", "errorCode": "RPC_METHOD_NOT_AVAILABLE"]]
+            }
+            return [["ok": true, "result": restoreAnswer(params)]]
+        default:
+            return [["ok": false, "error": "unexpected"]]
+        }
+    }
+
+    private func forkAck(_ params: JSONValue) async throws -> [JSONValue] {
         let first: Bool = lock.withLock {
+            calls.append(("session.fork", params, nil))
             requests.append(params)
             made = child(requestId: params["requestId"]?.stringValue)
             return requests.count == 1

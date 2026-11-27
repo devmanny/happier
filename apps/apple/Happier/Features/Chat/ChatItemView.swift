@@ -433,7 +433,10 @@ private struct MessageActionsModifier: ViewModifier {
                             let editing = target.role == .user && from.seq >= 2
                             Button(editing ? "Edit from Here" : "Fork from Here", systemImage: editing ? "pencil" : "arrow.triangle.branch") {
                                 AppHaptics.confirm()
-                                Task { await store.fork(from.sessionId, upToSeq: from.seq, restoring: editing ? text : nil) }
+                                // An edit may also put the files back; the conversation asks.
+                                if editing, let rowActions { rowActions.editFromHere(MessageVersion(sessionId: target.sessionId, seq: target.seq), text) } else {
+                                    Task { await store.fork(from.sessionId, upToSeq: from.seq, restoring: editing ? text : nil) }
+                                }
                             }
                             .disabled(store.forkingSessions.contains(from.sessionId))
                         }
@@ -478,6 +481,10 @@ final class ChatRowActions {
     var beginMessageSelection: (String) -> Void = { _ in }
     /// Puts text in the composer to edit before sending.
     var editInComposer: (String) -> Void = { _ in }
+    /// Edit from Here on a message as the row shows it (`HappierStore.editFromHere`): branches
+    /// from just before it with its text, first asking whether to put the files back too when the
+    /// agent can. The conversation asks, so the question survives the row scrolling away.
+    var editFromHere: (MessageVersion, String) -> Void = { _, _ in }
     /// Opens a message's text for selecting.
     var beginTextSelection: (String) -> Void = { _ in }
     /// Where the message being selected sits on screen, so a tap elsewhere can close it.
