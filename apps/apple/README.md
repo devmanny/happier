@@ -116,6 +116,10 @@ Mac and iPad use a Safari-style native toolbar: the blue Happier mark on the lef
 controls, a centered address field, Share and New Tab, with the tab strip below. The toolbar
 reserves the system window controls rather than drawing the mark over them. Browser builds
 open a separate browser window when the device supports multiple windows; iPhone uses a sheet.
+On iPhone the sheet has Safari's bottom bar: back, the address pill, the tab count and a menu
+(Forward, Share, Copy Link, Find on Page, New Tab, Close Tab). Typing an address leaves only the
+pill and **Cancel**. The tab count opens a tab overview with a picture of each page, the user's tabs
+first and each session's tabs under its name. Pull down on a page to reload it.
 
 Apple ignores a browser app's Universal Link claims, so this variant omits the app's associated
 domains. A session's HTTPS link opens its landing page in the chosen browser; **Open in Happier Native**

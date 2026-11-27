@@ -78,6 +78,7 @@ struct BrowserView: View {
 /// Navigation belongs to the selected tab, below the row that selects it.
 private struct BrowserNavigationBar: View {
     @Environment(BrowserModel.self) private var browser
+    @FocusState private var addressFocused: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -89,7 +90,7 @@ private struct BrowserNavigationBar: View {
             .labelStyle(.iconOnly)
             .frame(width: controlSize * 2 + 4)
             Spacer(minLength: 0)
-            BrowserAddressField(compact: false)
+            BrowserAddressField(compact: false, focused: $addressFocused)
                 .frame(maxWidth: 720)
             Spacer(minLength: 0)
             Group {
@@ -207,18 +208,19 @@ private struct BrowserStartPage: View {
 // MARK: - Address
 
 /// Safari-style address: the site's host centered while browsing; the full address, selected,
-/// while typing. Reload/stop and the agent's ✨ sit inside it.
+/// while typing. Reload/stop and the agent's ✨ sit inside it. Its focus belongs to the bar, which
+/// rearranges around it while typing.
 private struct BrowserAddressField: View {
     @Environment(BrowserModel.self) private var browser
     let compact: Bool
+    var focused: FocusState<Bool>.Binding
     @State private var text = ""
     @State private var selection: TextSelection?
-    @FocusState private var focused: Bool
 
     var body: some View {
         let tab = browser.selectedTab
         HStack(spacing: 6) {
-            if !focused, let url = tab?.url {
+            if !focused.wrappedValue, let url = tab?.url {
                 Image(systemName: url.scheme == "https" ? "lock.fill" : "globe")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -231,12 +233,12 @@ private struct BrowserAddressField: View {
                 // Keep it stable while selecting the full URL.
                 .multilineTextAlignment(.center)
                 // Let the first tap focus/select the address without also placing the caret.
-                .allowsHitTesting(focused)
+                .allowsHitTesting(focused.wrappedValue)
                 #else
-                .multilineTextAlignment(focused ? .leading : .center)
+                .multilineTextAlignment(focused.wrappedValue ? .leading : .center)
                 #endif
                 .font(compact ? .body.weight(.medium) : .callout)
-                .focused($focused)
+                .focused(focused)
                 .autocorrectionDisabled()
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
@@ -245,9 +247,23 @@ private struct BrowserAddressField: View {
                 .submitLabel(.go)
                 .onSubmit {
                     browser.open(typed: text)
-                    focused = false
+                    focused.wrappedValue = false
                 }
-            if let tab, !focused, tab.url != nil {
+            #if os(iOS)
+            if focused.wrappedValue, !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("Clear"))
+            }
+            #endif
+            if let tab, !focused.wrappedValue, tab.url != nil {
                 if compact { AgentSparkle(tab: tab) }
                 Button {
                     if tab.isLoading { tab.webView.stopLoading() } else { tab.webView.reload() }
@@ -271,20 +287,20 @@ private struct BrowserAddressField: View {
             if compact { BrowserActivityOutline(tab: tab) }
         }
         .contentShape(.capsule)
-        .onTapGesture { focused = true }
-        .onChange(of: focused) { _, isFocused in
+        .onTapGesture { focused.wrappedValue = true }
+        .onChange(of: focused.wrappedValue) { _, isFocused in
             text = display(tab?.url, editing: isFocused)
             if isFocused { selection = TextSelection(range: text.startIndex..<text.endIndex) }
         }
         .onChange(of: tab?.url, initial: true) { _, url in
-            if !focused { text = display(url, editing: false) }
+            if !focused.wrappedValue { text = display(url, editing: false) }
         }
         .onChange(of: browser.selectedTabId) { _, _ in
             #if os(macOS)
             // Toolbar tab buttons do not resign the address field's keyboard focus.
-            focused = false
+            focused.wrappedValue = false
             #endif
-            if !focused { text = display(browser.selectedTab?.url, editing: false) }
+            if !focused.wrappedValue { text = display(browser.selectedTab?.url, editing: false) }
         }
     }
 
@@ -321,50 +337,114 @@ private struct BrowserForwardButton: View {
     }
 }
 
+#if os(iOS)
 // MARK: - iPhone bar
 
-/// The iPhone's bottom bar: back, the address pill and a menu, three pieces of glass that meld.
+/// The iPhone's bottom bar, pieces of glass that meld: back, the address pill, the tabs and a
+/// menu. While typing an address only the pill and Cancel remain, as in Safari.
 private struct BrowserPhoneBar: View {
     @Environment(BrowserModel.self) private var browser
     @Environment(\.dismiss) private var dismiss
     let inSheet: Bool
+    @FocusState private var addressFocused: Bool
+    @State private var showingTabs = false
+    /// A tab opened from the overview: type its address once the overview has gone.
+    @State private var focusAddressAfterTabs = false
 
     var body: some View {
         GlassEffectContainer(spacing: 10) {
             HStack(spacing: 10) {
-                Button {
-                    AppHaptics.light()
-                    browser.selectedTab?.webView.goBack()
-                } label: {
-                    Image(systemName: "chevron.backward")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 46, height: 46)
-                        .contentShape(.circle)
+                if !addressFocused {
+                    Button {
+                        AppHaptics.light()
+                        browser.selectedTab?.webView.goBack()
+                    } label: {
+                        Image(systemName: "chevron.backward")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 46, height: 46)
+                            .contentShape(.circle)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(browser.selectedTab?.canGoBack != true)
+                    .opacity(browser.selectedTab?.canGoBack == true ? 1 : 0.35)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .accessibilityLabel(Text("Back"))
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
-                .buttonStyle(.plain)
-                .disabled(browser.selectedTab?.canGoBack != true)
-                .opacity(browser.selectedTab?.canGoBack == true ? 1 : 0.35)
-                .glassEffect(.regular.interactive(), in: .circle)
-                .accessibilityLabel(Text("Back"))
 
-                BrowserAddressField(compact: true)
+                BrowserAddressField(compact: true, focused: $addressFocused)
                     .glassEffect(.regular.interactive(), in: .capsule)
 
-                Menu { menu } label: {
-                    Image(systemName: browser.tabs.count > 1 ? "square.on.square" : "ellipsis")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 46, height: 46)
-                        .contentShape(.circle)
+                if addressFocused {
+                    Button("Cancel") { addressFocused = false }
+                        .font(.body.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .frame(height: 46)
+                        .contentShape(.capsule)
+                        .buttonStyle(.plain)
+                        .glassEffect(.regular.interactive(), in: .capsule)
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    tabsButton
+                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    Menu { menu } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 46, height: 46)
+                            .contentShape(.circle)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .accessibilityLabel(Text("More"))
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .glassEffect(.regular.interactive(), in: .circle)
-                .accessibilityLabel(Text("More"))
             }
+            .animation(.smooth(duration: 0.25), value: addressFocused)
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)
         .padding(.bottom, 4)
+        .sheet(isPresented: $showingTabs, onDismiss: {
+            guard focusAddressAfterTabs else { return }
+            focusAddressAfterTabs = false
+            addressFocused = true
+        }) {
+            BrowserTabOverview { focusAddressAfterTabs = true }
+        }
+    }
+
+    /// The tab count, like Safari's; press and hold for New Tab and Close Tab.
+    private var tabsButton: some View {
+        Button {
+            AppHaptics.light()
+            showingTabs = true
+        } label: {
+            Text(browser.tabs.count > 99 ? "∞" : "\(browser.tabs.count)")
+                .font(.caption.weight(.bold))
+                .monospacedDigit()
+                .minimumScaleFactor(0.7)
+                .frame(width: 21, height: 21)
+                .overlay { RoundedRectangle(cornerRadius: 5.5).strokeBorder(lineWidth: 1.75) }
+                .frame(width: 46, height: 46)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel(Text("Tabs"))
+        .accessibilityValue(Text("\(browser.tabs.count)"))
+        .contextMenu {
+            Button(action: openNewTab) { Label("New Tab", systemImage: "plus") }
+            if let tab = browser.selectedTab {
+                Button(role: .destructive) { browser.closeTab(tab.id) } label: { Label("Close Tab", systemImage: "xmark") }
+            }
+        }
+    }
+
+    /// A new tab is for typing an address, so the keyboard comes up with it.
+    private func openNewTab() {
+        browser.newTab()
+        addressFocused = true
     }
 
     @ViewBuilder private var menu: some View {
@@ -372,8 +452,12 @@ private struct BrowserPhoneBar: View {
         Section {
             Button { tab?.webView.goForward() } label: { Label("Forward", systemImage: "chevron.forward") }
                 .disabled(tab?.canGoForward != true)
-            if let url = tab?.url {
+            if let tab, let url = tab.url {
                 ShareLink(item: url) { Label("Share", systemImage: "square.and.arrow.up") }
+                Button { UIPasteboard.general.url = url } label: { Label("Copy Link", systemImage: "link") }
+                Button { tab.webView.findInteraction?.presentFindNavigator(showingReplace: false) } label: {
+                    Label("Find on Page", systemImage: "doc.text.magnifyingglass")
+                }
                 // A browser build may itself be the default; avoid reopening this URL in a loop.
                 if !BrowserModel.isBrowserRole {
                     Button { BrowserModel.openInDefaultBrowser(url) } label: {
@@ -382,14 +466,8 @@ private struct BrowserPhoneBar: View {
                 }
             }
         }
-        Section("Tabs") {
-            Picker("Tabs", selection: Binding(get: { browser.selectedTab?.id }, set: { browser.selectedTabId = $0 })) {
-                ForEach(browser.tabs) { tab in
-                    Text(browser.tabTitle(tab)).tag(Optional(tab.id))
-                }
-            }
-            .pickerStyle(.inline)
-            Button { browser.newTab() } label: { Label("New Tab", systemImage: "plus") }
+        Section {
+            Button(action: openNewTab) { Label("New Tab", systemImage: "plus") }
             if let tab {
                 Button(role: .destructive) { browser.closeTab(tab.id) } label: { Label("Close Tab", systemImage: "xmark") }
             }
@@ -401,6 +479,194 @@ private struct BrowserPhoneBar: View {
         }
     }
 }
+
+// MARK: - Tab overview (iPhone)
+
+/// Every tab as a card, like Safari's tab overview: the user's own tabs first, then each session's
+/// under its name. Tap a card to show it; its ✕ closes it.
+private struct BrowserTabOverview: View {
+    @Environment(BrowserModel.self) private var browser
+    @Environment(\.dismiss) private var dismiss
+    /// Called when the user opens a new tab from here, before the overview goes away.
+    let onNewTab: () -> Void
+    @State private var snapshots: [String: UIImage] = [:]
+
+    private struct TabGroup: Identifiable {
+        let id: String
+        let sessionId: String?
+        let tabs: [BrowserTab]
+    }
+
+    private var groups: [TabGroup] {
+        var result: [TabGroup] = []
+        let own = browser.tabs.filter { $0.sessionId == nil }
+        if !own.isEmpty { result.append(TabGroup(id: "user", sessionId: nil, tabs: own)) }
+        var sessionOrder: [String] = []
+        for tab in browser.tabs { if let id = tab.sessionId, !sessionOrder.contains(id) { sessionOrder.append(id) } }
+        for id in sessionOrder {
+            result.append(TabGroup(id: id, sessionId: id, tabs: browser.tabs.filter { $0.sessionId == id }))
+        }
+        return result
+    }
+
+    private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if browser.tabs.isEmpty {
+                        ContentUnavailableView("No Tabs", systemImage: "square.on.square",
+                                               description: Text("Open a new tab to start browsing."))
+                            .padding(.top, 80)
+                    }
+                    LazyVStack(alignment: .leading, spacing: 22) {
+                        ForEach(groups) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                if let sessionId = group.sessionId {
+                                    HStack(spacing: 7) {
+                                        Circle()
+                                            .fill(browser.sessionColor(sessionId) ?? Color.secondary.opacity(0.6))
+                                            .frame(width: 8, height: 8)
+                                        Text(browser.sessionTitle(sessionId))
+                                            .font(.subheadline.weight(.semibold))
+                                            .lineLimit(1)
+                                    }
+                                    .foregroundStyle(.secondary)
+                                    .padding(.leading, 2)
+                                }
+                                LazyVGrid(columns: columns, spacing: 16) {
+                                    ForEach(group.tabs) { tab in
+                                        BrowserTabCard(
+                                            tab: tab,
+                                            title: browser.tabTitle(tab),
+                                            selected: tab.id == browser.selectedTab?.id,
+                                            snapshot: snapshots[tab.id],
+                                            select: {
+                                                browser.selectedTabId = tab.id
+                                                dismiss()
+                                            },
+                                            close: {
+                                                withAnimation(.smooth(duration: 0.25)) { browser.closeTab(tab.id) }
+                                            }
+                                        )
+                                        .id(tab.id)
+                                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(16)
+                }
+                .onAppear {
+                    if let id = browser.selectedTab?.id { proxy.scrollTo(id, anchor: .center) }
+                }
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle(Text("\(browser.tabs.count) Tabs"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .bottomBar) {
+                    Button {
+                        browser.newTab()
+                        onNewTab()
+                        dismiss()
+                    } label: {
+                        Label("New Tab", systemImage: "plus")
+                    }
+                }
+                ToolbarSpacer(.flexible, placement: .bottomBar)
+                ToolbarItem(placement: .bottomBar) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .task { await captureSnapshots() }
+    }
+
+    /// Small pictures of each page, taken when the overview opens; the shown tab first.
+    private func captureSnapshots() async {
+        let shownId = browser.selectedTab?.id
+        let ordered = browser.tabs.filter { $0.id == shownId } + browser.tabs.filter { $0.id != shownId }
+        for tab in ordered where tab.url != nil {
+            let configuration = WKSnapshotConfiguration()
+            configuration.snapshotWidth = 360
+            if let image = try? await tab.webView.takeSnapshot(configuration: configuration) {
+                snapshots[tab.id] = image
+            }
+        }
+    }
+}
+
+private struct BrowserTabCard: View {
+    let tab: BrowserTab
+    let title: String
+    let selected: Bool
+    let snapshot: UIImage?
+    let select: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Color.clear
+                .aspectRatio(0.75, contentMode: .fit)
+                .overlay(alignment: .top) {
+                    if let snapshot {
+                        Image(uiImage: snapshot)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        ZStack {
+                            Color(uiColor: .secondarySystemGroupedBackground)
+                            Image(systemName: tab.url == nil ? "plus" : "globe")
+                                .font(.title2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .clipShape(.rect(cornerRadius: 18))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18)
+                        .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: selected ? 3 : 0.5)
+                }
+                .overlay(alignment: .topTrailing) {
+                    Button(action: close) {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 26, height: 26)
+                            .background(.regularMaterial, in: .circle)
+                            .frame(width: 44, height: 44)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text("Close Tab"))
+                }
+                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+            HStack(spacing: 5) {
+                BrowserTabMark(tab: tab)
+                Text(title)
+                    .font(.caption.weight(selected ? .semibold : .medium))
+                    .lineLimit(1)
+                AgentSparkle(tab: tab)
+            }
+            .padding(.horizontal, 4)
+        }
+        .contentShape(.rect)
+        .onTapGesture(perform: select)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { select() }
+        .accessibilityAction(named: Text("Close Tab")) { close() }
+        .contextMenu {
+            Button(role: .destructive, action: close) { Label("Close Tab", systemImage: "xmark") }
+        }
+    }
+}
+
+#endif
 
 // MARK: - Tab strip (Mac, iPad)
 
@@ -510,12 +776,13 @@ private struct BrowserTabMark: View {
 
 /// A subtle activity tint on the tab (or the phone's address bar).
 /// The timeline lives in the decoration so animation never replaces the web view or its focus.
+/// It wakes only when the agent's activity ends, never on a running clock.
 private struct BrowserActivityOutline: View {
     let tab: BrowserTab?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.explicit([tab?.agentActiveUntil].compactMap { $0 })) { context in
             if let until = tab?.agentActiveUntil, until > context.date {
                 if reduceMotion {
                     outline(strength: 0.7)
@@ -541,13 +808,14 @@ private struct BrowserActivityOutline: View {
     }
 }
 
-/// ✨ while an agent has used this tab in the last seconds; never blocks anything.
+/// ✨ while an agent has used this tab in the last seconds; never blocks anything. Like the
+/// outline, it re-renders only when that activity ends.
 struct AgentSparkle: View {
     let tab: BrowserTab
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.explicit([tab.agentActiveUntil].compactMap { $0 })) { context in
             if let until = tab.agentActiveUntil, until > context.date {
                 Image(systemName: "sparkles")
                     .font(.caption)

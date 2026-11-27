@@ -32,13 +32,29 @@ final class BrowserTab: Identifiable {
         webView.allowsBackForwardNavigationGestures = true
         #if os(iOS)
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        // Find on Page from the menu, and ⌘F with a keyboard.
+        webView.isFindInteractionEnabled = true
+        // Pull down to reload, as in Safari; the spinner ends when loading does.
+        let refresh = UIRefreshControl()
+        refresh.addAction(UIAction { [weak webView, weak refresh] _ in
+            guard let webView, webView.url != nil else { refresh?.endRefreshing(); return }
+            webView.reload()
+        }, for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
         #endif
         // Inspectable from Safari's Develop menu, which helps when a site misbehaves.
         webView.isInspectable = true
         observations = [
             webView.observe(\.title) { [weak self] view, _ in MainActor.assumeIsolated { self?.title = view.title ?? "" } },
             webView.observe(\.url) { [weak self] view, _ in MainActor.assumeIsolated { self?.url = view.url } },
-            webView.observe(\.isLoading) { [weak self] view, _ in MainActor.assumeIsolated { self?.isLoading = view.isLoading } },
+            webView.observe(\.isLoading) { [weak self] view, _ in
+                MainActor.assumeIsolated {
+                    self?.isLoading = view.isLoading
+                    #if os(iOS)
+                    if !view.isLoading { view.scrollView.refreshControl?.endRefreshing() }
+                    #endif
+                }
+            },
             webView.observe(\.canGoBack) { [weak self] view, _ in MainActor.assumeIsolated { self?.canGoBack = view.canGoBack } },
             webView.observe(\.canGoForward) { [weak self] view, _ in MainActor.assumeIsolated { self?.canGoForward = view.canGoForward } },
             webView.observe(\.estimatedProgress) { [weak self] view, _ in
