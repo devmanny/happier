@@ -120,6 +120,10 @@ On iPhone the sheet has Safari's bottom bar: back, the address pill, the tab cou
 (Forward, Share, Copy Link, Find on Page, New Tab, Close Tab). Typing an address leaves only the
 pill and **Cancel**. The tab count opens a tab overview with a picture of each page, the user's tabs
 first and each session's tabs under its name. Pull down on a page to reload it.
+While an address is typed, pages from the browsing history that match it appear above the iPhone bar
+(below the address field on iPad and Mac). Only the user's own tabs are recorded, never agents'; the
+history stays on the device, forgets pages not visited for a year, and **Clear Browsing Data** in
+Settings erases it.
 
 Apple ignores a browser app's Universal Link claims, so this variant omits the app's associated
 domains. A session's HTTPS link opens its landing page in the chosen browser; **Open in Happier Native**

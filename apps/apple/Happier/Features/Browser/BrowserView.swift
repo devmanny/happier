@@ -79,6 +79,7 @@ struct BrowserView: View {
 private struct BrowserNavigationBar: View {
     @Environment(BrowserModel.self) private var browser
     @FocusState private var addressFocused: Bool
+    @State private var typed = ""
 
     var body: some View {
         HStack(spacing: 12) {
@@ -90,8 +91,15 @@ private struct BrowserNavigationBar: View {
             .labelStyle(.iconOnly)
             .frame(width: controlSize * 2 + 4)
             Spacer(minLength: 0)
-            BrowserAddressField(compact: false, focused: $addressFocused)
+            BrowserAddressField(compact: false, focused: $addressFocused, typed: $typed)
                 .frame(maxWidth: 720)
+                .overlay(alignment: .top) {
+                    if addressFocused {
+                        BrowserSuggestions(typed: typed) { addressFocused = false }
+                            .frame(maxWidth: 720)
+                            .offset(y: 44)
+                    }
+                }
             Spacer(minLength: 0)
             Group {
                 if let url = browser.selectedTab?.url {
@@ -107,6 +115,8 @@ private struct BrowserNavigationBar: View {
         .padding(.vertical, 7)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+        // The suggestions hang below the bar, over the page.
+        .zIndex(1)
     }
 
     private var controlSize: CGFloat {
@@ -214,8 +224,11 @@ private struct BrowserAddressField: View {
     @Environment(BrowserModel.self) private var browser
     let compact: Bool
     var focused: FocusState<Bool>.Binding
+    /// What the user has typed since focusing the field; empty until they change the address.
+    @Binding var typed: String
     @State private var text = ""
     @State private var selection: TextSelection?
+    @State private var textAtFocus = ""
 
     var body: some View {
         let tab = browser.selectedTab
@@ -290,7 +303,13 @@ private struct BrowserAddressField: View {
         .onTapGesture { focused.wrappedValue = true }
         .onChange(of: focused.wrappedValue) { _, isFocused in
             text = display(tab?.url, editing: isFocused)
+            textAtFocus = text
+            typed = ""
             if isFocused { selection = TextSelection(range: text.startIndex..<text.endIndex) }
+        }
+        .onChange(of: text) { _, newText in
+            guard focused.wrappedValue else { return }
+            typed = newText == textAtFocus ? "" : newText
         }
         .onChange(of: tab?.url, initial: true) { _, url in
             if !focused.wrappedValue { text = display(url, editing: false) }
@@ -310,6 +329,69 @@ private struct BrowserAddressField: View {
         if editing { return url.absoluteString }
         let host = url.host() ?? url.absoluteString
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+}
+
+// MARK: - Suggestions
+
+/// Pages from the history that match what is being typed; picking one opens it in this tab.
+private struct BrowserSuggestions: View {
+    @Environment(BrowserModel.self) private var browser
+    let typed: String
+    let picked: () -> Void
+
+    /// As many rows as fit above the keyboard on the smallest iPhone.
+    private static let limit = 6
+
+    var body: some View {
+        let suggestions = browser.history.suggestions(for: typed, limit: Self.limit)
+        if !suggestions.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(Array(suggestions.enumerated()), id: \.element.url) { index, entry in
+                    if index > 0 { Divider().padding(.leading, 46) }
+                    Button {
+                        AppHaptics.light()
+                        browser.open(typed: entry.url.absoluteString)
+                        picked()
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(entry.title.isEmpty ? Self.address(entry.url) : entry.title)
+                                    .font(.callout.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                Text(Self.address(entry.url))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 50)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(entry.title.isEmpty ? Self.address(entry.url) : entry.title))
+                    .accessibilityHint(Text(Self.address(entry.url)))
+                }
+            }
+            .padding(.vertical, 4)
+            .glassEffect(.regular, in: .rect(cornerRadius: 22))
+            .transition(.opacity)
+        }
+    }
+
+    /// "github.com/happier-dev": the address without its scheme or "www.".
+    private static func address(_ url: URL) -> String {
+        var text = url.absoluteString
+        for prefix in ["https://", "http://"] where text.hasPrefix(prefix) { text.removeFirst(prefix.count) }
+        if text.hasPrefix("www.") { text.removeFirst(4) }
+        if text.hasSuffix("/") { text.removeLast() }
+        return text
     }
 }
 
@@ -347,11 +429,32 @@ private struct BrowserPhoneBar: View {
     @Environment(\.dismiss) private var dismiss
     let inSheet: Bool
     @FocusState private var addressFocused: Bool
+    @State private var typed = ""
     @State private var showingTabs = false
     /// A tab opened from the overview: type its address once the overview has gone.
     @State private var focusAddressAfterTabs = false
 
     var body: some View {
+        VStack(spacing: 8) {
+            // Suggestions above the bar while typing, as in Safari.
+            if addressFocused {
+                BrowserSuggestions(typed: typed) { addressFocused = false }
+            }
+            bar
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+        .sheet(isPresented: $showingTabs, onDismiss: {
+            guard focusAddressAfterTabs else { return }
+            focusAddressAfterTabs = false
+            addressFocused = true
+        }) {
+            BrowserTabOverview { focusAddressAfterTabs = true }
+        }
+    }
+
+    private var bar: some View {
         GlassEffectContainer(spacing: 10) {
             HStack(spacing: 10) {
                 if !addressFocused {
@@ -372,7 +475,7 @@ private struct BrowserPhoneBar: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
 
-                BrowserAddressField(compact: true, focused: $addressFocused)
+                BrowserAddressField(compact: true, focused: $addressFocused, typed: $typed)
                     .glassEffect(.regular.interactive(), in: .capsule)
 
                 if addressFocused {
@@ -401,16 +504,6 @@ private struct BrowserPhoneBar: View {
                 }
             }
             .animation(.smooth(duration: 0.25), value: addressFocused)
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-        .sheet(isPresented: $showingTabs, onDismiss: {
-            guard focusAddressAfterTabs else { return }
-            focusAddressAfterTabs = false
-            addressFocused = true
-        }) {
-            BrowserTabOverview { focusAddressAfterTabs = true }
         }
     }
 

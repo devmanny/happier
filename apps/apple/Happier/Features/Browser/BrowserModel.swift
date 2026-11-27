@@ -1,5 +1,6 @@
 import HappierKit
 import Observation
+import OSLog
 import SwiftUI
 import WebKit
 #if os(iOS)
@@ -86,6 +87,7 @@ final class BrowserTab: Identifiable {
 @MainActor @Observable
 final class BrowserModel: NSObject {
     static let agentAccessKey = "browser.agentAccess"
+    private static let log = Logger(subsystem: "dev.happier.apple", category: "browser")
     /// Build role only, not a claim that passkeys work on this device. WebKit owns WebAuthn
     /// availability, credential selection and user verification using the signed entitlements.
     static var isBrowserRole: Bool { Bundle.main.object(forInfoDictionaryKey: "HappierBrowserRole") as? Bool == true }
@@ -110,6 +112,10 @@ final class BrowserModel: NSObject {
     @ObservationIgnored let configuration: WKWebViewConfiguration
     @ObservationIgnored private let parking = BrowserParking()
     @ObservationIgnored var navigationWaiters: [ObjectIdentifier: [CheckedContinuation<Error?, Never>]] = [:]
+    /// Pages the user visited in their own tabs (not agents'), for address suggestions.
+    private(set) var history = BrowserHistory()
+    @ObservationIgnored private let historyFile = URL.applicationSupportDirectory
+        .appending(path: "Browser/History.json", directoryHint: .notDirectory)
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -120,6 +126,7 @@ final class BrowserModel: NSObject {
         #endif
         self.configuration = configuration
         super.init()
+        loadHistory()
     }
 
     var selectedTab: BrowserTab? { tabs.first { $0.id == selectedTabId } ?? tabs.first { $0.owner == .user } }
@@ -349,6 +356,37 @@ final class BrowserModel: NSObject {
     func clearWebsiteData() async {
         let store = WKWebsiteDataStore.default()
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        history = BrowserHistory()
+        saveHistory()
+    }
+
+    // MARK: - History
+
+    private func loadHistory() {
+        guard let data = try? Data(contentsOf: historyFile) else { return }
+        do {
+            history = try JSONDecoder().decode(BrowserHistory.self, from: data)
+            history.removeExpired(now: Date())
+        } catch {
+            Self.log.error("Browser history unreadable; starting a new one: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func saveHistory() {
+        do {
+            try FileManager.default.createDirectory(at: historyFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(history).write(to: historyFile, options: [.atomic, .completeFileProtection])
+        } catch {
+            Self.log.error("Browser history not saved: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// A page finished loading in one of the user's own tabs. Agents' browsing stays out of the
+    /// user's suggestions.
+    private func recordVisit(_ webView: WKWebView) {
+        guard let url = webView.url, tabs.first(where: { $0.webView === webView })?.owner == .user else { return }
+        history.recordVisit(url: url, title: webView.title ?? "", at: Date())
+        saveHistory()
     }
 
     static var device: DeviceBrowserDevice {
@@ -378,7 +416,10 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate {
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        MainActor.assumeIsolated { finishNavigation(webView, error: nil) }
+        MainActor.assumeIsolated {
+            recordVisit(webView)
+            finishNavigation(webView, error: nil)
+        }
     }
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

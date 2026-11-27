@@ -27,7 +27,7 @@ struct BrowserSettingsSection: View {
             Button("Clear Browsing Data", systemImage: "trash", role: .destructive) {
                 confirmingClear = true
             }
-            .confirmationDialog("Clear cookies, logins and site data of the integrated browser?",
+            .confirmationDialog("Clear history, cookies, logins and site data of the integrated browser?",
                                 isPresented: $confirmingClear, titleVisibility: .visible) {
                 Button("Clear Browsing Data", role: .destructive) { Task { await browser.clearWebsiteData() } }
             }
