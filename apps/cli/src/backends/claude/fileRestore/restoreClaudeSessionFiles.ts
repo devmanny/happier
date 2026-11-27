@@ -1,17 +1,12 @@
-import { isAbsolute, join, relative } from 'node:path';
-
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { resolveVendorResumeIdFromSessionMetadata } from '@happier-dev/agents';
-import { resolveHomeDirFromEnvironment } from '@happier-dev/cli-common/providers';
 import { SESSION_RESTORE_FILES_ERROR_CODES, type SessionRestoreFilesRpcResult } from '@happier-dev/protocol';
 
-import { readSessionNativeEnvironment } from '@/agent/runtime/sessionNativeEnvironment';
 import { resolveClaudeAgentSdkLaunch, spawnClaudeAgentSdkProcess, type ClaudeAgentSdkLaunch } from '@/backends/claude/sdk/claudeAgentSdkProcess';
 import { buildClaudeSubprocessEnv } from '@/backends/claude/spawn/buildClaudeSubprocessEnv';
 import type { SessionFileRestoreHandler } from '@/backends/fileRestore/sessionFileRestoreHandler';
 
-import { resolveClaudeConnectedServiceCandidatePersistedSessionFile } from '../connectedServices/resolveClaudeConnectedServiceCandidatePersistedSessionFile';
-import { getProjectPath } from '../utils/path';
+import { resolveSessionClaudeConfigDir, resolveSessionClaudeTranscriptPath } from '../utils/claudeSessionTranscriptLocation';
 import { requestClaudeRewindFiles, rewindClaudeFilesVerified } from './claudeRewindFiles';
 import { resolveClaudeUserMessageCheckpoint } from './resolveClaudeUserMessageCheckpoint';
 
@@ -21,32 +16,6 @@ function notRestorable(reason: string): SessionRestoreFilesRpcResult {
 
 function restoreFailed(reason: string): SessionRestoreFilesRpcResult {
   return { ok: false, errorCode: SESSION_RESTORE_FILES_ERROR_CODES.RESTORE_FAILED, errorMessage: reason };
-}
-
-/**
- * The session's Claude config dir decides where its transcript and file backups live, so it must
- * come from the session: metadata records `CLAUDE_CONFIG_DIR` only when the session ran with one,
- * and its absence means Claude's default home dir. The daemon's own environment is not the
- * session's. (With the wrong dir a dry run can still report `canRewind: true`.)
- */
-function resolveSessionClaudeConfigDir(metadata: Readonly<Record<string, unknown>>): string {
-  return readSessionNativeEnvironment(metadata.nativeAgentEnvironmentV1)?.CLAUDE_CONFIG_DIR
-    ?? join(resolveHomeDirFromEnvironment(process.env), '.claude');
-}
-
-function resolveSessionTranscriptPath(params: Readonly<{
-  metadata: Readonly<Record<string, unknown>>;
-  configDir: string;
-  directory: string;
-  claudeSessionId: string;
-}>): string {
-  // Prefer the path Claude itself reported, while it belongs to the config dir the restore resumes.
-  const reported = resolveClaudeConnectedServiceCandidatePersistedSessionFile({ metadata: params.metadata });
-  if (reported) {
-    const withinProjects = relative(join(params.configDir, 'projects'), reported);
-    if (withinProjects && !withinProjects.startsWith('..') && !isAbsolute(withinProjects)) return reported;
-  }
-  return join(getProjectPath(params.directory, params.configDir), `${params.claudeSessionId}.jsonl`);
 }
 
 /**
@@ -150,7 +119,7 @@ export const restoreClaudeSessionFiles: SessionFileRestoreHandler = async (param
     rawSession: params.rawSession,
     userMessageSeq: params.userMessageSeq,
     directory: params.directory,
-    transcriptPath: resolveSessionTranscriptPath({
+    transcriptPath: resolveSessionClaudeTranscriptPath({
       metadata: params.metadata,
       configDir,
       directory: params.directory,

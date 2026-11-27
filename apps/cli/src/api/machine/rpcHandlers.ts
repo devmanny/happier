@@ -1694,6 +1694,7 @@ export function registerMachineRpcHandlers(params: Readonly<{
             ? { type: 'seq', upToSeqInclusive: targetSeqInclusive }
             : { type: 'latest' },
           targetSeqInclusive,
+          cutoffSeqInclusive: effectiveCutoffSeqInclusive,
           ...(signal ? { signal } : {}),
         });
         throwIfTrackedActionAborted(signal);

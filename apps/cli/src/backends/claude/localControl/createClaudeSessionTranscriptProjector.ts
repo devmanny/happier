@@ -45,6 +45,10 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+function isClaudeForkCopiedRow(message: RawJSONLines): boolean {
+  return readString(readRecord((message as Record<string, unknown>).forkedFrom)?.sessionId) !== null;
+}
+
 /**
  * The CLAUDE transcript session id for this session, read from the metadata snapshot (set from the
  * Claude `system.session_id`). This — NOT the Happier `session.sessionId` — is what `goal_status`
@@ -352,6 +356,15 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     },
     async observeCommitted(message) {
       return enqueueObservation(async () => {
+        // Claude marks every row it copies into a forked conversation with `forkedFrom`. That
+        // history is the source conversation's: a Happier fork shows it through its lineage, so
+        // importing it here would show it twice.
+        if (isClaudeForkCopiedRow(message)) {
+          logger.debug(`${params.logPrefix}: skipped historical Claude transcript row copied from a forked-from conversation`, {
+            type: message.type,
+          });
+          return;
+        }
         if (!buildClaudeJsonlMessageKey(message)) {
           logger.debug(`${params.logPrefix}: skipped historical Claude transcript row without trustworthy provider identity`, {
             type: message.type,

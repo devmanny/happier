@@ -56,7 +56,7 @@ export const AGENTS_CORE = {
         sessionStorage: { direct: true, persisted: true },
         sessionCapabilities: {
             sessionListing: 'supported',
-            sessionFork: { conversation: 'unsupported', fromMessage: 'unsupported' },
+            sessionFork: { conversation: 'supported', fromMessage: 'supported' },
             sessionRollback: { conversation: 'unsupported' },
             usageLimitRecovery: { checkNow: 'supported' },
         },

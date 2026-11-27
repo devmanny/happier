@@ -343,7 +343,7 @@ describe('createDefaultActionExecutor (session.fork)', () => {
           id: 'sess_parent',
           seq: 1,
           presence: 0,
-          metadata: { machineId: 'machine_1', flavor: 'claude' },
+          metadata: { machineId: 'machine_1', flavor: 'gemini' },
         },
       },
       settings: { sessionReplayEnabled: false },

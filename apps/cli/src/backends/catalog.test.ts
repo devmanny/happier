@@ -1078,7 +1078,8 @@ describe('AGENTS', () => {
   it('loads provider-native fork handlers through backend catalog hooks only for supporting providers', async () => {
     await expect(getProviderNativeForkHandler('codex')).resolves.toBeTypeOf('function');
     await expect(getProviderNativeForkHandler('opencode')).resolves.toBeTypeOf('function');
-    await expect(getProviderNativeForkHandler('claude')).resolves.toBeNull();
+    await expect(getProviderNativeForkHandler('claude')).resolves.toBeTypeOf('function');
+    await expect(getProviderNativeForkHandler('gemini')).resolves.toBeNull();
   });
 
   it('loads ACP fork continuation handlers through backend catalog hooks only for supporting providers', async () => {

@@ -73,15 +73,15 @@ describe('forkUiSupport', () => {
   });
 
   it('returns false only when no route at all is offerable', () => {
-    const session = makeSession({ machineId: 'm1', flavor: 'claude' });
+    const session = makeSession({ machineId: 'm1', flavor: 'gemini' });
     expect(canForkConversation({ session, replayEnabled: false, agentSwitchingEnabled: false })).toBe(false);
     expect(canForkFromMessage({ session, messageSeq: 5, replayEnabled: false, agentSwitchingEnabled: false })).toBe(false);
   });
 
   it('keeps the fork affordance for an Agent with no native fork and Replay off, because Configure is still a route', () => {
-    // The exact Claude-shaped case that lost every entry point: the affordance
-    // must survive so the modal can open and explain why Native is closed.
-    const session = makeSession({ machineId: 'm1', flavor: 'claude' });
+    // The case that once lost every entry point: the affordance must survive so
+    // the modal can open and explain why Native is closed.
+    const session = makeSession({ machineId: 'm1', flavor: 'gemini' });
     expect(canForkConversation({ session, replayEnabled: false, agentSwitchingEnabled: true })).toBe(true);
     expect(canForkFromMessage({ session, messageSeq: 5, replayEnabled: false, agentSwitchingEnabled: true })).toBe(true);
   });
@@ -89,7 +89,7 @@ describe('forkUiSupport', () => {
 
 describe('resolveSessionForkStrategyAvailability', () => {
   it('names the two routes separately instead of collapsing them into one boolean', () => {
-    const session = makeSession({ machineId: 'm1', flavor: 'claude' });
+    const session = makeSession({ machineId: 'm1', flavor: 'gemini' });
     expect(resolveSessionForkStrategyAvailability({
       session,
       forkPoint: { type: 'latest' },
@@ -128,6 +128,16 @@ describe('resolveSessionForkStrategyAvailability', () => {
     });
   });
 
+  it('offers Native for Claude at a message cutoff, without Replay', () => {
+    const session = makeSession({ machineId: 'm1', flavor: 'claude' });
+    expect(resolveSessionForkStrategyAvailability({
+      session,
+      forkPoint: { type: 'seq', upToSeqInclusive: 5 },
+      replayEnabled: false,
+      agentSwitchingEnabled: false,
+    })).toEqual({ native: true, replay: false, configure: false, nativeUnavailableReason: null });
+  });
+
   it('offers both routes when the Agent forks natively and Replay is enabled', () => {
     const session = makeSession({ machineId: 'm1', flavor: 'opencode', opencodeBackendMode: 'acp' });
     expect(resolveSessionForkStrategyAvailability({
@@ -138,8 +148,8 @@ describe('resolveSessionForkStrategyAvailability', () => {
     })).toEqual({ native: true, replay: true, configure: false, nativeUnavailableReason: null });
   });
 
-  it('offers Configure as its own route, so a Claude Session with Replay off still has one', () => {
-    const session = makeSession({ machineId: 'm1', flavor: 'claude' });
+  it('offers Configure as its own route, so a Session without native fork and with Replay off still has one', () => {
+    const session = makeSession({ machineId: 'm1', flavor: 'gemini' });
     expect(resolveSessionForkStrategyAvailability({
       session,
       forkPoint: { type: 'latest' },
