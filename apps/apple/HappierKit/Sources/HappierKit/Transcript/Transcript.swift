@@ -127,6 +127,14 @@ public struct Transcript: Sendable {
         finish()
     }
 
+    /// Messages sent from here still waiting for their row, with the id their copy would carry.
+    public var pendingSends: [(localId: String, resentAs: String?)] { pending.map { ($0.localId, $0.resentAs) } }
+
+    /// What a message sent from here said, to send it again.
+    public func pendingSend(_ localId: String) -> (text: String, attachments: [String])? {
+        pending.first { $0.localId == localId }.map { ($0.text, $0.attachments) }
+    }
+
     public mutating func removePending(localId: String) {
         pending.removeAll { $0.localId == localId }
         finish()

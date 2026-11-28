@@ -106,6 +106,33 @@ private struct UserBubble: View {
                     .font(.caption)
                     .padding(.leading, 56)
                     .padding(.trailing, 6)
+                } else if let localId = message.localId, store.undeliveredSends.contains(localId) {
+                    // It left the line without reaching the agent: say so, and let it be dropped or sent again.
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Label("Not delivered", systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.orange)
+                        Text("It left the line without reaching the agent.")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                        HStack(spacing: 8) {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                AppHaptics.warning()
+                                withAnimation(.smooth(duration: 0.2)) { store.discardUndeliveredSend(localId, in: sessionId) }
+                            }
+                            .accessibilityIdentifier("discard-undelivered-\(localId)")
+                            if message.attachments.isEmpty {
+                                Button("Send Again", systemImage: "arrow.clockwise") {
+                                    AppHaptics.confirm()
+                                    Task { await store.sendUndeliveredAgain(localId, in: sessionId) }
+                                }
+                                .accessibilityIdentifier("resend-undelivered-\(localId)")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .font(.caption)
+                    .padding(.leading, 56)
+                    .padding(.trailing, 6)
                 } else if let progress = message.localId.flatMap({ store.uploadProgress[$0] }) {
                     // Attachments still uploading to the computer.
                     HStack(spacing: 6) {

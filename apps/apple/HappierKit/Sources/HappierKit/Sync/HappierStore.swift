@@ -1202,6 +1202,8 @@ public final class HappierStore {
         outgoingSends.values.forEach { $0.isCancelled = true }
         outgoingSends = [:]
         failedSends = [:]
+        undeliveredSends = []
+        switchSendsInFlight = []
         for localId in uploadProgress.keys { uploadObserver?.uploadDidFinish(localId: localId, success: false) }
         uploadProgress = [:]
         uploadSessionIds = [:]
@@ -2119,6 +2121,8 @@ public final class HappierStore {
         let params = AgentTransitionRequest.params(sessionId: id, currentAgentId: current, selection: selection,
                                                    text: text, localId: localId, meta: meta, carriesIdentity: carriesIdentity)
         let failure: String
+        switchSendsInFlight.insert(localId)
+        defer { switchSendsInFlight.remove(localId) }
         do {
             let result = try await machineRPC(machineId, method: "session.agentTransition", params: params, timeout: .seconds(180))
             switch result["type"]?.stringValue {
@@ -2183,6 +2187,38 @@ public final class HappierStore {
         outgoingSends[localId] = nil
         failedSends[localId] = nil
         transcripts[id]?.removePending(localId: localId)
+    }
+
+    /// Messages sent from here that the line no longer lists (nor a copy of them) and that the
+    /// conversation, read after the line, doesn't have either.
+    private func noteUndeliveredSends(_ id: String, listed: Set<String>) async {
+        let isGone = { [self] (send: (localId: String, resentAs: String?)) in
+            !listed.contains(send.localId) && !(send.resentAs.map(listed.contains) ?? false)
+                && outgoingSends[send.localId] == nil && failedSends[send.localId] == nil
+                && !switchSendsInFlight.contains(send.localId)
+        }
+        let sends = transcripts[id]?.pendingSends ?? []
+        undeliveredSends.subtract(sends.filter { !isGone($0) }.map(\.localId))
+        guard sends.contains(where: { isGone($0) && !undeliveredSends.contains($0.localId) }),
+              case .after = transcripts[id]?.refresh else { return }
+        await catchUp(id)
+        let gone = (transcripts[id]?.pendingSends ?? []).filter(isGone).map(\.localId)
+        if !gone.isEmpty { undeliveredSends.formUnion(gone) }
+    }
+
+    /// Drops a message sent from here that left the line without reaching the conversation.
+    public func discardUndeliveredSend(_ localId: String, in id: String) {
+        guard undeliveredSends.remove(localId) != nil else { return }
+        transcripts[id]?.removePending(localId: localId)
+    }
+
+    /// Sends again, as a new message, one that left the line without reaching the conversation.
+    @discardableResult
+    public func sendUndeliveredAgain(_ localId: String, in id: String) async -> Bool {
+        guard undeliveredSends.contains(localId), let sent = transcripts[id]?.pendingSend(localId) else { return false }
+        undeliveredSends.remove(localId)
+        transcripts[id]?.removePending(localId: localId)
+        return await send(sent.text, to: id)
     }
 
     private func deliver(_ send: OutgoingSend, api: HappierAPI) async -> Bool {
@@ -3147,6 +3183,7 @@ public final class HappierStore {
                     // A message sent from here that went in line again as new: its copy stands for it.
                     let inLine = Set(items.map(\.localId))
                     if transcripts[id]?.hasResent(among: inLine) == true { transcripts[id]?.releaseResent(seen: inLine) }
+                    await noteUndeliveredSends(id, listed: Set(rows.compactMap { $0["localId"]?.stringValue }))
                 } catch {
                     log.error("pending refresh failed: \(String(describing: error), privacy: .public)")
                 }
@@ -3847,7 +3884,13 @@ public final class HappierStore {
     private var uploadSessionIds: [String: String] = [:]
     /// Failed local messages remain in the transcript with their original files until retried.
     public private(set) var failedSends: [String: String] = [:]
+    /// Messages sent from here that left the line without reaching the conversation: the relay
+    /// writes the row and takes it out of line in one step, so neither means it never will (a
+    /// runner released it as handled, or it was deleted elsewhere).
+    public private(set) var undeliveredSends: Set<String> = []
     @ObservationIgnored private var outgoingSends: [String: OutgoingSend] = [:]
+    /// Agent switches still handing their first message to the machine (it isn't in line yet).
+    @ObservationIgnored private var switchSendsInFlight: Set<String> = []
     /// Platform hook for keeping uploads alive in the background (iOS continued-processing tasks).
     @ObservationIgnored public weak var uploadObserver: (any UploadObserver)?
 

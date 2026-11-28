@@ -634,6 +634,43 @@ import Testing
         #expect(ownBubbles() == [])
     }
 
+    /// A message sent from here that left the line without reaching the conversation (the runner
+    /// stopped while taking it) says so, and can be deleted or sent again, instead of showing
+    /// "Queued" with no way to act on it until the app is closed.
+    @Test func aMessageSentFromHereThatLeftTheLineWithoutReachingTheConversationIsNotDelivered() async throws {
+        let (relay, store) = try await openSession()
+        let ownBubbles = {
+            store.transcripts["s1"]?.items.compactMap { item -> String? in
+                if case .userText(let user) = item, user.isPending { user.localId } else { nil }
+            } ?? []
+        }
+        #expect(await store.send("Pregúntale a Cristóbal", to: "s1"))
+        #expect(await store.send("y a Danny", to: "s1"))
+        let sent = ownBubbles()
+        try #require(sent.count == 2)
+        try await until { store.pendingQueues["s1"]?.count == 2 }
+        // Waiting in line is not "not delivered".
+        #expect(store.undeliveredSends.isEmpty)
+
+        // Both leave the line; neither reached the conversation.
+        relay.pendingRows = []
+        store.refreshPending("s1")
+        try await until { store.undeliveredSends == Set(sent) }
+
+        store.discardUndeliveredSend(sent[1], in: "s1")
+        #expect(await store.sendUndeliveredAgain(sent[0], in: "s1"))
+
+        #expect(store.lastError == nil)
+        // One bubble is left: the copy just sent, waiting in line again.
+        let left = ownBubbles()
+        #expect(left.count == 1 && !sent.contains(left[0]))
+        #expect(store.undeliveredSends.isEmpty)
+        #expect(relay.log.values.filter { $0 == "send" }.count == 3)
+        #expect(store.transcripts["s1"]?.items.contains { item in
+            if case .userText(let user) = item { user.isPending && user.text == "Pregúntale a Cristóbal" } else { false }
+        } == true)
+    }
+
     @MainActor private func openSession(pending: [JSONValue] = []) async throws -> (Relay, HappierStore) {
         let relay = Relay()
         let store = relay.store()
@@ -908,6 +945,11 @@ private final class Relay: @unchecked Sendable {
             return (200, ["sessions": .array(sessionRows)])
         case ("POST", let path) where path.hasPrefix("/v2/sessions/") && path.hasSuffix("/pending"):
             log.add("send")
+            // The relay keeps what it accepted in line until the agent takes it.
+            if let localId = (try? JSONDecoder().decode(JSONValue.self, from: body))?["localId"]?.stringValue,
+               !pendingRows.contains(where: { $0["localId"]?.stringValue == localId }) {
+                pendingRows.append(Self.queuedPendingRow(localId))
+            }
             return (200, ["ok": true])
         case ("GET", let path) where path.hasSuffix("/pending"):
             return (200, ["pending": .array(pendingRows)])
