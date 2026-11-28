@@ -148,7 +148,10 @@ export function createLocalTurnLifecycleController(opts: Readonly<{
     }
 
     if (event.type === 'continuation_detected') {
-      if (state.terminal && !state.active) {
+      // Continuation evidence only extends a turn already in progress. A lifecycle that has not
+      // seen one (fresh runner) or has settled it is idle: Claude's idle compaction writes the same
+      // `auto` compact boundary as a mid-turn compaction, and no Stop ever follows it.
+      if (!state.active) {
         resolveSafeWaiters();
         return;
       }

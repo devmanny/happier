@@ -1,0 +1,1193 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "" : {
+
+    },
+    " (offline)" : {
+
+    },
+    "·" : {
+
+    },
+    "· active %@" : {
+
+    },
+    "· sending a message brings it back" : {
+
+    },
+    "“%@” was dropped on “%@”." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "“%1$@” was dropped on “%2$@”."
+          }
+        }
+      }
+    },
+    "/%@" : {
+
+    },
+    "%@ doesn't exist on %@ yet." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ doesn't exist on %2$@ yet."
+          }
+        }
+      }
+    },
+    "%@ is larger than %@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ is larger than %2$@."
+          }
+        }
+      }
+    },
+    "%@ Usage" : {
+
+    },
+    "%@: %lld%% left" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@: %2$lld%% left"
+          }
+        }
+      }
+    },
+    "%lld" : {
+
+    },
+    "%lld files" : {
+
+    },
+    "%lld of %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld"
+          }
+        }
+      }
+    },
+    "%lld running in the background" : {
+
+    },
+    "%lld selected" : {
+
+    },
+    "%lld sessions can't be read on this device" : {
+
+    },
+    "%lld steps" : {
+
+    },
+    "%lld tool calls" : {
+
+    },
+    "%lld tools" : {
+
+    },
+    "%lld%% left" : {
+
+    },
+    "%lld%% used · %@ of %@ tokens" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld%% used · %2$@ of %3$@ tokens"
+          }
+        }
+      }
+    },
+    "• %@" : {
+
+    },
+    "1 file" : {
+
+    },
+    "1 selected" : {
+
+    },
+    "1 step" : {
+
+    },
+    "%lld%% used · %lld%% left" : {
+
+    },
+    "a draft is open in the terminal" : {
+
+    },
+    "A new session that holds “%@” and “%@”, started in the folder they share." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "A new session that holds “%1$@” and “%2$@”, started in the folder they share."
+          }
+        }
+      }
+    },
+    "Account" : {
+
+    },
+    "Active" : {
+
+    },
+    "Add" : {
+
+    },
+    "Add Relay" : {
+
+    },
+    "Add Relay…" : {
+
+    },
+    "Address" : {
+
+    },
+    "Agent" : {
+
+    },
+    "Agent is working" : {
+
+    },
+    "Allow" : {
+
+    },
+    "Allow microphone and speech recognition in Settings to dictate." : {
+
+    },
+    "Always" : {
+
+    },
+    "Anyone with this key can read your sessions. Keep it somewhere safe." : {
+
+    },
+    "Applies from your next message." : {
+
+    },
+    "Archive" : {
+
+    },
+    "Archived" : {
+
+    },
+    "Back" : {
+
+    },
+    "Back to %@" : {
+
+    },
+    "Background" : {
+
+    },
+    "Context usage is not available yet." : {
+
+    },
+    "Inner ring · %@" : {
+
+    },
+    "Other Limits" : {
+
+    },
+    "Outer ring · The agent compacts its context automatically when it fills up." : {
+
+    },
+    "Session Context" : {
+
+    },
+    "Session context %lld%% used" : {
+
+    },
+    "Session context and weekly usage" : {
+
+    },
+    "Subagents & Tasks" : {
+
+    },
+    "Background command" : {
+
+    },
+    "Background Commands" : {
+
+    },
+    "Basic" : {
+
+    },
+    "Blocked" : {
+
+    },
+    "Blocked · %@" : {
+
+    },
+    "Browse Folders…" : {
+
+    },
+    "Can't Load" : {
+
+    },
+    "Can't Open Folder" : {
+
+    },
+    "Can't Open the File" : {
+
+    },
+    "Can't Search" : {
+
+    },
+    "Cancel" : {
+
+    },
+    "Clear" : {
+
+    },
+    "Clear All" : {
+
+    },
+    "Clear Goal" : {
+
+    },
+    "Close" : {
+
+    },
+    "Close Search" : {
+
+    },
+    "Close Sessions" : {
+
+    },
+    "Combine Sessions" : {
+
+    },
+    "Connect" : {
+
+    },
+    "Connected" : {
+
+    },
+    "Connecting…" : {
+
+    },
+    "Context %lld%% used" : {
+
+    },
+    "Context compacted" : {
+
+    },
+    "Context Window" : {
+
+    },
+    "Continued on the computer" : {
+
+    },
+    "Continued remotely" : {
+
+    },
+    "Copied" : {
+
+    },
+    "Copy" : {
+
+    },
+    "Copy code" : {
+
+    },
+    "Copy Session ID" : {
+
+    },
+    "Couldn't Group the Sessions" : {
+
+    },
+    "Couldn't list this project's files. %@" : {
+
+    },
+    "Couldn't Load Messages" : {
+
+    },
+    "Create" : {
+
+    },
+    "Create and Start" : {
+
+    },
+    "Create Folder?" : {
+
+    },
+    "Create one or use this folder." : {
+
+    },
+    "Current" : {
+
+    },
+    "Current Relay" : {
+
+    },
+    "Delete" : {
+
+    },
+    "Delivering…" : {
+
+    },
+    "Deny" : {
+
+    },
+    "Deny and Stop" : {
+
+    },
+    "Describe a task or ask a question…" : {
+
+    },
+    "Details" : {
+
+    },
+    "Dictate" : {
+
+    },
+    "Discarded" : {
+
+    },
+    "Done" : {
+
+    },
+    "Downloads and opens the file" : {
+
+    },
+    "Drop to attach" : {
+
+    },
+    "Each relay keeps its own sign-in on this device." : {
+
+    },
+    "Edit" : {
+
+    },
+    "Edit before Sending" : {
+
+    },
+    "Edit Goal…" : {
+
+    },
+    "Edit Pending Message" : {
+
+    },
+    "Effort" : {
+
+    },
+    "Empty Folder" : {
+
+    },
+    "Enhanced" : {
+
+    },
+    "Enter a server address like happier.example.com" : {
+
+    },
+    "Enter Secret Key" : {
+
+    },
+    "Error" : {
+
+    },
+    "Extra High" : {
+
+    },
+    "Failed" : {
+
+    },
+    "Faster" : {
+
+    },
+    "File" : {
+
+    },
+    "Folder" : {
+
+    },
+    "Folder names can't be empty or contain slashes." : {
+
+    },
+    "For voices that sound more natural, download Enhanced or Premium ones in Settings › Accessibility › Spoken Content › Voices. Siri's voices can't be used by apps." : {
+
+    },
+    "For voices that sound more natural, download Enhanced or Premium ones in System Settings › Accessibility › Spoken Content › System Voice › Manage Voices. Siri's voices can't be used by apps." : {
+
+    },
+    "Fork from Here" : {
+
+    },
+    "Forward" : {
+
+    },
+    "Go to Settings → Account" : {
+
+    },
+    "Goal" : {
+
+    },
+    "Goal: %@" : {
+
+    },
+    "Group Both in a New Session" : {
+
+    },
+    "Happier" : {
+
+    },
+    "happier.example.com" : {
+
+    },
+    "Hide sub-sessions" : {
+
+    },
+    "Hides details" : {
+
+    },
+    "Hides the list" : {
+
+    },
+    "Hides the steps" : {
+
+    },
+    "Hides the thought process" : {
+
+    },
+    "Home" : {
+
+    },
+    "Image" : {
+
+    },
+    "Inactive" : {
+
+    },
+    "Inactive & Archived" : {
+
+    },
+    "Input" : {
+
+    },
+    "Inside %@" : {
+
+    },
+    "It's on its way to the agent and can't be changed now." : {
+
+    },
+    "Jump to latest" : {
+
+    },
+    "Link Device" : {
+
+    },
+    "Link with Another Device" : {
+
+    },
+    "Loading" : {
+
+    },
+    "Loading the archive…" : {
+
+    },
+    "Locations" : {
+
+    },
+    "Machine" : {
+
+    },
+    "Mark as Done" : {
+
+    },
+    "Mark as Read" : {
+
+    },
+    "Mark as Unread" : {
+
+    },
+    "Max" : {
+
+    },
+    "Maximum reasoning with dynamic workflows (forces XHigh effort)." : {
+
+    },
+    "Mention a File" : {
+
+    },
+    "Message" : {
+
+    },
+    "message too large" : {
+
+    },
+    "Model" : {
+
+    },
+    "Models configured in the CLI" : {
+
+    },
+    "More" : {
+
+    },
+    "Move “%@” Into" : {
+
+    },
+    "Move Into…" : {
+
+    },
+    "Detach from Parent" : {
+
+    },
+    "Name" : {
+
+    },
+    "Needs your approval" : {
+
+    },
+    "New Folder" : {
+
+    },
+    "New Parent Session" : {
+
+    },
+    "New Session" : {
+
+    },
+    "Newer match" : {
+
+    },
+    "No archived sessions" : {
+
+    },
+    "No Conversation Selected" : {
+
+    },
+    "No folder matches “%@”." : {
+
+    },
+    "No Folders" : {
+
+    },
+    "No inactive sessions" : {
+
+    },
+    "No matches" : {
+
+    },
+    "No matching files" : {
+
+    },
+    "No Messages Yet" : {
+
+    },
+    "No Notifications" : {
+
+    },
+    "No results" : {
+
+    },
+    "No Results" : {
+
+    },
+    "No Sessions" : {
+
+    },
+    "No Unread Sessions" : {
+
+    },
+    "Not sent: “%@”" : {
+
+    },
+    "Nothing in the Background" : {
+
+    },
+    "Notifications" : {
+
+    },
+    "Offline" : {
+
+    },
+    "OK" : {
+
+    },
+    "Older CLI · Update" : {
+
+    },
+    "Older match" : {
+
+    },
+    "Online" : {
+
+    },
+    "Only the first folders are shown. Search to narrow it down." : {
+
+    },
+    "Open Happier on your other device" : {
+
+    },
+    "Opens the preview" : {
+
+    },
+    "Output" : {
+
+    },
+    "Paste" : {
+
+    },
+    "Pause" : {
+
+    },
+    "Paused" : {
+
+    },
+    "Pending" : {
+
+    },
+    "Permission mode" : {
+
+    },
+    "Permissions" : {
+
+    },
+    "Photo or Video" : {
+
+    },
+    "Pick a session to see what your agent is up to." : {
+
+    },
+    "Pin" : {
+
+    },
+    "Pinned" : {
+
+    },
+    "Pinned Messages" : {
+
+    },
+    "Plan" : {
+
+    },
+    "Plan: %@" : {
+
+    },
+    "Play" : {
+
+    },
+    "Play a sample" : {
+
+    },
+    "Point the agent at a file of the project" : {
+
+    },
+    "Premium" : {
+
+    },
+    "Provider" : {
+
+    },
+    "Put Inside “%@”" : {
+
+    },
+    "Question" : {
+
+    },
+    "Queued" : {
+
+    },
+    "Queued · waiting for the current turn" : {
+
+    },
+    "Re-queue" : {
+
+    },
+    "Read" : {
+
+    },
+    "Read Aloud" : {
+
+    },
+    "Recents" : {
+
+    },
+    "Relay" : {
+
+    },
+    "Remove" : {
+
+    },
+    "Remove %@" : {
+
+    },
+    "Rename Session" : {
+
+    },
+    "Rename…" : {
+
+    },
+    "Resets %@" : {
+
+    },
+    "Response Time" : {
+
+    },
+    "Restarts this session on the CLI the computer now runs. The conversation is kept." : {
+
+    },
+    "Restore to Here" : {
+
+    },
+    "Resume" : {
+
+    },
+    "Retry" : {
+
+    },
+    "Running" : {
+
+    },
+    "Running: %@" : {
+
+    },
+    "Save" : {
+
+    },
+    "Scan this code from a device where you're already signed in to Happier." : {
+
+    },
+    "Search" : {
+
+    },
+    "Search Files" : {
+
+    },
+    "Search in %@" : {
+
+    },
+    "Search Here" : {
+
+    },
+    "Search Sessions" : {
+
+    },
+    "Searching older messages" : {
+
+    },
+    "Searching the archive…" : {
+
+    },
+    "Secret Key" : {
+
+    },
+    "Select" : {
+
+    },
+    "Select All" : {
+
+    },
+    "Select Model" : {
+
+    },
+    "Select Text" : {
+
+    },
+    "Send" : {
+
+    },
+    "Send Answer" : {
+
+    },
+    "Send Now" : {
+
+    },
+    "Send Now (Interrupt)" : {
+
+    },
+    "Send now (interrupt)?" : {
+
+    },
+    "Send now?" : {
+
+    },
+    "Send to Session" : {
+
+    },
+    "Send to Session…" : {
+
+    },
+    "Sending to %@" : {
+
+    },
+    "Sending…" : {
+
+    },
+    "Sends this reply" : {
+
+    },
+    "Server" : {
+
+    },
+    "Server Build" : {
+
+    },
+    "Sessions" : {
+
+    },
+    "Set a goal to keep pursuing" : {
+
+    },
+    "Set Goal" : {
+
+    },
+    "Show %lld sub-sessions" : {
+
+    },
+    "Show all sessions" : {
+
+    },
+    "Show Hidden Folders" : {
+
+    },
+    "Show only unread sessions" : {
+
+    },
+    "Show Secret Key" : {
+
+    },
+    "Show Sessions" : {
+
+    },
+    "Shows actions for this queued message" : {
+
+    },
+    "Shows details" : {
+
+    },
+    "Shows each tool" : {
+
+    },
+    "Shows every step" : {
+
+    },
+    "Shows the agents and commands" : {
+
+    },
+    "Shows the relay you're connected to" : {
+
+    },
+    "Shows the thought process" : {
+
+    },
+    "Sign In" : {
+
+    },
+    "Sign in required" : {
+
+    },
+    "Sign Out" : {
+
+    },
+    "Slower" : {
+
+    },
+    "Something went wrong" : {
+
+    },
+    "Speak" : {
+
+    },
+    "Speech recognition isn't available right now." : {
+
+    },
+    "Speed %@" : {
+
+    },
+    "Start an agent with the Happier CLI on your computer and it will show up here." : {
+
+    },
+    "Starting the parent session…" : {
+
+    },
+    "Status" : {
+
+    },
+    "Steer Now" : {
+
+    },
+    "Steer or queue a message…" : {
+      "extractionState" : "manual"
+    },
+    "steering unavailable" : {
+
+    },
+    "Stop agent" : {
+
+    },
+    "Stop Agent" : {
+
+    },
+    "Stop and Archive" : {
+
+    },
+    "Stop and archive this session?" : {
+
+    },
+    "Stop dictation" : {
+
+    },
+    "Stop Reading" : {
+
+    },
+    "Stop Session" : {
+
+    },
+    "Stop Speaking" : {
+
+    },
+    "Stop this session?" : {
+
+    },
+    "Subagents" : {
+
+    },
+    "Subagents and commands the agent starts show up here." : {
+
+    },
+    "Switch Relay" : {
+
+    },
+    "System Voice" : {
+
+    },
+    "Tap Link New Device and scan" : {
+
+    },
+    "The agent compacts its context automatically when it fills up." : {
+
+    },
+    "The agent keeps pursuing it across turns until it's done." : {
+
+    },
+    "The agent's process on the machine will be stopped." : {
+
+    },
+    "The computer that has it may be offline." : {
+
+    },
+    "The conversation starts with this agent and model." : {
+
+    },
+    "The folder %@ doesn't exist on that machine." : {
+
+    },
+    "Thinking" : {
+
+    },
+    "This will stop the current turn and send this message immediately." : {
+
+    },
+    "Thought process" : {
+
+    },
+    "To-dos" : {
+
+    },
+    "Today %@" : {
+
+    },
+    "Try Again" : {
+
+    },
+    "Turn failed" : {
+
+    },
+    "Ultracode" : {
+
+    },
+    "Unarchive" : {
+
+    },
+    "Unpin" : {
+
+    },
+    "Unreachable" : {
+
+    },
+    "Unread" : {
+
+    },
+    "Updating to the new CLI…" : {
+
+    },
+    "Uploading %@" : {
+
+    },
+    "Usage limit reached" : {
+
+    },
+    "Usage statistics" : {
+
+    },
+    "Use “%@”" : {
+
+    },
+    "Use CLI Settings" : {
+
+    },
+    "Video" : {
+
+    },
+    "Waiting for approval…" : {
+
+    },
+    "Waiting for your answer" : {
+
+    },
+    "Weekly Usage" : {
+
+    },
+    "Weekly usage %lld%% left" : {
+
+    },
+    "Weekly usage is not available yet." : {
+
+    },
+    "What should the agent keep working toward?" : {
+
+    },
+    "What should we work on?" : {
+
+    },
+    "What your sessions tell you shows up here." : {
+
+    },
+    "Worked · %@" : {
+
+    },
+    "Worked for %@ · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Worked for %1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "Working" : {
+
+    },
+    "Working · %@" : {
+
+    },
+    "XXXXX-XXXXX-XXXXX-…" : {
+
+    },
+    "Yesterday" : {
+
+    },
+    "Yesterday %@" : {
+
+    },
+    "You'll sign in to it if this device hasn't before." : {
+
+    },
+    "You're all caught up." : {
+
+    },
+    "Your answer" : {
+
+    },
+    "Your coding agents, in your pocket." : {
+
+    },
+    "Your next message switches this session to %@, keeping the conversation." : {
+
+    },
+    "Your secret key is in Settings → Account on a signed-in device. It never leaves this device." : {
+
+    },
+    "%lld%% used" : {
+
+    },
+    "%@: %lld%% used" : {
+
+    },
+    "Camera Access" : {
+
+    },
+    "Open Settings" : {
+
+    },
+    "Allow camera access in Settings to take a photo and attach it to your message." : {
+
+    },
+    "The photo couldn't be captured. Please try again." : {
+
+    },
+    "Take Photo" : {
+
+    },
+    "Not sent" : {
+
+    },
+    "Upload interrupted. Your message and photos are saved here. Retry when you're ready." : {
+
+    },
+    "Session Info…" : {
+
+    },
+    "Session Info" : {
+
+    },
+    "Session IDs" : {
+
+    },
+    "Happier Session ID" : {
+
+    },
+    "Provider Session ID" : {
+
+    },
+    "Copy Happier Session ID" : {
+
+    },
+    "Copy Provider Session ID" : {
+
+    },
+    "Created" : {
+
+    },
+    "Updated" : {
+
+    },
+    "Directory" : {
+
+    },
+    "Technical Details" : {
+
+    },
+    "CLI Version" : {
+
+    },
+    "Operating System" : {
+
+    },
+    "Process ID" : {
+
+    },
+    "Log Path" : {
+
+    },
+    "Session Unavailable" : {
+
+    }
+  },
+  "version" : "1.2"
+}

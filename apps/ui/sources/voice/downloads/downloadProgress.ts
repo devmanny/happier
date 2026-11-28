@@ -5,6 +5,8 @@ export type DownloadProgressInfo = {
   bytes: { loaded: number; total: number } | null;
   /** Completed and total files, when the source reports a multi-file transfer. */
   files: { done: number; total: number } | null;
+  /** Bytes already checked against their expected hash, when the source verifies what it downloads. */
+  verifiedBytes: number | null;
 };
 
 function clampPercent(x: number): number {
@@ -35,10 +37,10 @@ export function parseDownloadProgress(progress: unknown): DownloadProgressInfo {
   if (typeof progress === 'number' && Number.isFinite(progress)) {
     const isFraction = progress >= 0 && progress <= 1;
     const percent = clampPercent(Math.floor((isFraction ? progress * 100 : progress) as number));
-    return { percent, label: null, bytes: null, files: null };
+    return { percent, label: null, bytes: null, files: null, verifiedBytes: null };
   }
 
-  if (!progress || typeof progress !== 'object') return { percent: null, label: null, bytes: null, files: null };
+  if (!progress || typeof progress !== 'object') return { percent: null, label: null, bytes: null, files: null, verifiedBytes: null };
 
   const obj = progress as Record<string, unknown>;
 
@@ -58,17 +60,19 @@ export function parseDownloadProgress(progress: unknown): DownloadProgressInfo {
   const total = obj?.total;
   if (isFiniteNumber(loaded) && isFiniteNumber(total) && total > 0) {
     const percent = clampPercent(Math.floor((loaded / total) * 100));
-    return { percent, label, bytes: { loaded: Math.min(Math.max(0, loaded), total), total }, files };
+    const verified = obj?.verified;
+    const verifiedBytes = isFiniteNumber(verified) ? Math.min(Math.max(0, verified), total) : null;
+    return { percent, label, bytes: { loaded: Math.min(Math.max(0, loaded), total), total }, files, verifiedBytes };
   }
 
   const rawProgress = obj?.progress;
   if (isFiniteNumber(rawProgress)) {
     const isFraction = rawProgress >= 0 && rawProgress <= 1;
     const percent = clampPercent(Math.floor((isFraction ? rawProgress * 100 : rawProgress) as number));
-    return { percent, label, bytes: null, files };
+    return { percent, label, bytes: null, files, verifiedBytes: null };
   }
 
-  return { percent: null, label, bytes: null, files };
+  return { percent: null, label, bytes: null, files, verifiedBytes: null };
 }
 
 export function formatDownloadProgressDetail(progress: unknown, opts?: { prefix?: string }): string {

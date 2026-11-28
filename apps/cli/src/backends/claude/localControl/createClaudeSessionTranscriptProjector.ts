@@ -17,8 +17,8 @@ import {
 } from '../workState/claudeGoalStatus';
 import type { ClaudeWorkflowActivitySource, ClaudeWorkflowActivityObservationContext } from '../workflows/claudeWorkflowActivitySource';
 import { filterWorkflowOwnedWorkStateItems } from '../workflows/claudeWorkflowOwnedWorkState';
-import { mapClaudeRateLimitEventToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
-import { surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
+import { mapClaudeRateLimitEventToQuotaEvidence, mapClaudeProviderFailureToUsageDetails, type NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
+import { recordClaudeRateLimitQuotaEvidence, surfaceClaudeRateLimitRuntimeIssue } from '../connectedServices/surfaceClaudeRuntimeIssues';
 import {
   buildClaudeCompactBoundaryEventIdentity,
   buildClaudeCompactionCompletedEvent,
@@ -43,6 +43,10 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isClaudeForkCopiedRow(message: RawJSONLines): boolean {
+  return readString(readRecord((message as Record<string, unknown>).forkedFrom)?.sessionId) !== null;
 }
 
 /**
@@ -307,7 +311,13 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
         maybeAdoptEffectiveModel(message);
         maybeProjectWorkState(message);
         maybeEmitCompactionEvents(message);
-        const rateLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+        const quotaEvidence = mapClaudeRateLimitEventToQuotaEvidence(message);
+        if (quotaEvidence.length > 0) {
+          void recordClaudeRateLimitQuotaEvidence(params.session, quotaEvidence, params.logPrefix).catch(() => {
+            logger.infoFile(`${params.logPrefix} Failed to record Claude quota evidence`);
+          });
+        }
+        const rateLimitDetails = mapClaudeProviderFailureToUsageDetails(message);
         if (rateLimitDetails) surfaceRateLimit(rateLimitDetails);
       }
       if (isClaudeInternalTranscriptMessage(message)) {
@@ -346,6 +356,15 @@ export function createClaudeSessionTranscriptProjector(params: Readonly<{
     },
     async observeCommitted(message) {
       return enqueueObservation(async () => {
+        // Claude marks every row it copies into a forked conversation with `forkedFrom`. That
+        // history is the source conversation's: a Happier fork shows it through its lineage, so
+        // importing it here would show it twice.
+        if (isClaudeForkCopiedRow(message)) {
+          logger.debug(`${params.logPrefix}: skipped historical Claude transcript row copied from a forked-from conversation`, {
+            type: message.type,
+          });
+          return;
+        }
         if (!buildClaudeJsonlMessageKey(message)) {
           logger.debug(`${params.logPrefix}: skipped historical Claude transcript row without trustworthy provider identity`, {
             type: message.type,

@@ -1,0 +1,610 @@
+import HappierKit
+import ImageIO
+import os
+import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+#if os(iOS)
+import WebKit
+#endif
+
+/// An agent's provider logo, small, at the trailing edge of a row that names one of your agents.
+struct ProviderLogo: View {
+    let providerId: String
+    var size: CGFloat = 18
+
+    var body: some View {
+        Image("Agents/\(providerId)")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+    }
+
+    /// The logo for a menu item's icon. Menus draw an image at its own size (the asset is a large
+    /// vector), so it is drawn at `size` first; template, so the menu tints it.
+    @MainActor static func menuImage(_ providerId: String, size: CGFloat = 18) -> Image {
+        let key = "\(providerId)@\(size)"
+        if let cached = menuImages[key] { return cached }
+        let image: Image
+        #if canImport(UIKit)
+        if let source = UIImage(named: "Agents/\(providerId)") {
+            let rendered = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
+                source.draw(in: fitted(source.size, in: size))
+            }
+            image = Image(uiImage: rendered.withRenderingMode(.alwaysTemplate))
+        } else {
+            image = Image(systemName: "cpu")
+        }
+        #else
+        if let source = NSImage(named: "Agents/\(providerId)")?.copy() as? NSImage {
+            let fit = fitted(source.size, in: size)
+            source.size = fit.size
+            source.isTemplate = true
+            image = Image(nsImage: source)
+        } else {
+            image = Image(systemName: "cpu")
+        }
+        #endif
+        menuImages[key] = image
+        return image
+    }
+
+    @MainActor private static var menuImages: [String: Image] = [:]
+
+    private static func fitted(_ natural: CGSize, in side: CGFloat) -> CGRect {
+        guard natural.width > 0, natural.height > 0 else { return CGRect(x: 0, y: 0, width: side, height: side) }
+        let scale = min(side / natural.width, side / natural.height)
+        let size = CGSize(width: natural.width * scale, height: natural.height * scale)
+        return CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height)
+    }
+}
+
+/// The one agent avatar, wherever an agent is shown (session rows without a project icon, the
+/// Agents section, previews, notifications, the new conversation): its logo (or an agent's emoji)
+/// on a Liquid Glass disc with a faint wash of its brand colour (Claude's orange, ChatGPT's classic
+/// green), so agents tell apart at a glance; a neutral disc and the sparkle for a session with no agent.
+struct AgentAvatar: View {
+    let agentId: String?
+    var size: CGFloat = 26
+    /// Glass that answers to touch, for an avatar that is also a button.
+    var interactive = false
+    /// An agent's own emoji, drawn on the disc in place of the logo (the disc keeps the brand's hint).
+    var emoji: String? = nil
+    /// An agent's photo (JPEG), filling the disc in place of the emoji or the logo.
+    var photo: Data? = nil
+    /// On a session's tile (`SessionAvatar.tile`) instead of the disc, so it lines up with the
+    /// sessions that show their project's favicon.
+    var onTile = false
+
+    /// Brand colours, muted: the disc is mostly the neutral glass with a hint of the brand, the
+    /// logo in the brand colour itself.
+    private static let brands: [String: Color] = [
+        "claude": Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255),
+        "codex": Color(red: 0x10 / 255, green: 0xA3 / 255, blue: 0x7F / 255),
+    ]
+
+    /// The brand colour of a provider's logo, when it has one.
+    static func brand(_ agentId: String?) -> Color? { agentId.flatMap { brands[$0] } }
+
+    var body: some View {
+        let brand = Self.brand(agentId)
+        let glass: Glass = brand.map { .regular.tint($0.opacity(0.14)) } ?? .regular
+        let backdrop = onTile ? size : size * 0.82
+        ZStack {
+            if onTile {
+                SessionAvatar.tile(size).fill(.fill.quaternary)
+            } else {
+                // A little smaller than the avatar's slot, snug around the logo.
+                Circle()
+                    .fill(.clear)
+                    .frame(width: backdrop, height: backdrop)
+                    .glassEffect(interactive ? glass.interactive() : glass, in: Circle())
+            }
+            if let photo = photo.flatMap(AgentPhotoImage.image) {
+                photo
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: backdrop, height: backdrop)
+                    .clipShape(onTile ? AnyShape(SessionAvatar.tile(size)) : AnyShape(Circle()))
+            } else if let emoji, !emoji.isEmpty {
+                Text(emoji).font(.system(size: size * 0.5))
+            } else if let agentId {
+                Image("Agents/\(agentId)")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(brand.map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+                    .frame(width: size * 0.5, height: size * 0.5)
+            } else {
+                Image(systemName: "sparkle")
+                    .font(.system(size: size * 0.4))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// One of the user's agents as `AgentAvatar` draws it: its photo when it has one, else its emoji.
+struct AgentProfileAvatar: View {
+    let profile: AgentProfile
+    var size: CGFloat = 26
+    /// Optional, as in `SessionAvatar`: previews draw outside the app's environment.
+    @Environment(HappierStore.self) private var store: HappierStore?
+
+    var body: some View {
+        AgentAvatar(agentId: profile.providerId, size: size, emoji: profile.emoji, photo: store?.agentPhotos[profile.id])
+    }
+}
+
+/// Agent photos decoded once: the list redraws often, and each photo is drawn in several places.
+@MainActor
+enum AgentPhotoImage {
+    private static var decoded: [Data: Image] = [:]
+
+    static func image(_ jpeg: Data) -> Image? {
+        if let image = decoded[jpeg] { return image }
+        #if os(iOS)
+        guard let platform = UIImage(data: jpeg) else { return nil }
+        let image = Image(uiImage: platform)
+        #else
+        guard let platform = NSImage(data: jpeg) else { return nil }
+        let image = Image(nsImage: platform)
+        #endif
+        // A handful of agents: forget them all on the rare overflow (photos replaced many times).
+        if decoded.count >= 32 { decoded.removeAll() }
+        decoded[jpeg] = image
+        return image
+    }
+}
+
+/// A session's avatar: its project's favicon whole and as large as the avatar's slot allows (like
+/// CSS `object-fit: contain`), on a squircle tile with an app icon's continuous corners, and the
+/// agent's logo small at the bottom right; the agent's avatar alone while the project has no
+/// favicon (or the computer hasn't sent it yet).
+struct SessionAvatar: View {
+    let session: Session
+    var size: CGFloat = 26
+    /// Optional: context-menu and drag previews draw outside the app's environment, and a
+    /// required store there crashes the app (the favicon is just left out).
+    @Environment(HappierStore.self) private var store: HappierStore?
+
+    /// A session's icon shape: an app icon's corner (about 22% of its side).
+    static func tile(_ size: CGFloat) -> RoundedRectangle {
+        RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+    }
+
+    var body: some View {
+        if let favicon = store?.workspaceFavicons.icon(machineId: session.machineId, path: session.path).flatMap(FaviconImage.image) {
+            // The tile shows the shape behind a transparent favicon.
+            let tile = Self.tile(size)
+            favicon
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .background(.fill.quaternary, in: tile)
+                .clipShape(tile)
+                .overlay(alignment: .bottomTrailing) {
+                    if let agentId = session.agentId {
+                        ProviderBadge(agentId: agentId, size: size * 0.46)
+                            .offset(x: size * 0.08, y: size * 0.08)
+                    }
+                }
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        } else {
+            AgentAvatar(agentId: session.agentId, size: size, onTile: true)
+        }
+    }
+}
+
+/// The agent's logo in its brand colour on a small solid disc, at the corner of a session's
+/// favicon; the disc's background colour sets it apart from any icon under it.
+struct ProviderBadge: View {
+    let agentId: String
+    let size: CGFloat
+
+    var body: some View {
+        Image("Agents/\(agentId)")
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(AgentAvatar.brand(agentId).map(AnyShapeStyle.init) ?? AnyShapeStyle(.primary))
+            .frame(width: size * 0.62, height: size * 0.62)
+            .frame(width: size, height: size)
+            .background(.background, in: Circle())
+            .accessibilityHidden(true)
+    }
+}
+
+/// Project favicons as images, decoded once (the list redraws often). The largest picture in the
+/// file is used (an `.ico` carries several sizes, the first often 16 px); on the Mac an SVG draws
+/// as it is, on the iPhone it is drawn to a PNG first (`prepare`), since iOS has no SVG decoder.
+@MainActor
+enum FaviconImage {
+    private static var decoded: [Data: Image] = [:]
+
+    static func image(_ icon: WorkspaceFavicons.Icon) -> Image? {
+        if let image = decoded[icon.data] { return image }
+        guard let image = decode(icon) else { return nil }
+        // A few dozen projects: forget them all on the rare overflow.
+        if decoded.count >= 64 { decoded.removeAll() }
+        decoded[icon.data] = image
+        return image
+    }
+
+    private static func decode(_ icon: WorkspaceFavicons.Icon) -> Image? {
+        #if os(macOS)
+        if icon.mimeType == "image/svg+xml" { return NSImage(data: icon.data).map(Image.init(nsImage:)) }
+        #endif
+        guard let source = CGImageSourceCreateWithData(icon.data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(source)
+        let largest = (0..<count).compactMap { CGImageSourceCreateImageAtIndex(source, $0, nil) }.max { $0.width < $1.width }
+        guard let largest else { return nil }
+        #if canImport(UIKit)
+        return Image(uiImage: UIImage(cgImage: largest))
+        #else
+        return Image(nsImage: NSImage(cgImage: largest, size: NSSize(width: largest.width, height: largest.height)))
+        #endif
+    }
+
+    #if os(iOS)
+    /// For `WorkspaceFavicons.prepare`: an SVG becomes a PNG (drawn by WebKit, headless, at
+    /// 192 px on its longer side); everything else is kept as sent.
+    static func prepare(_ icon: WorkspaceFavicons.Icon) async -> WorkspaceFavicons.Icon? {
+        guard icon.mimeType == "image/svg+xml" else { return icon }
+        let page = WebPage()
+        do {
+            for try await event in page.load(html: "<!doctype html><html><body></body></html>") {
+                if case .finished = event { break }
+            }
+            let drawn = try await page.callJavaScript("""
+                const image = new Image();
+                image.src = source;
+                await image.decode();
+                const width = image.naturalWidth || side, height = image.naturalHeight || side;
+                const scale = side / Math.max(width, height);
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(width * scale));
+                canvas.height = Math.max(1, Math.round(height * scale));
+                canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+                return canvas.toDataURL('image/png');
+                """, arguments: ["source": "data:image/svg+xml;base64," + icon.data.base64EncodedString(), "side": 192])
+            guard let url = drawn as? String, let comma = url.firstIndex(of: ","),
+                  let png = Data(base64Encoded: String(url[url.index(after: comma)...])) else { return nil }
+            return WorkspaceFavicons.Icon(data: png, mimeType: "image/png")
+        } catch {
+            Logger(subsystem: "dev.happier.apple", category: "favicons").error("SVG favicon not drawn: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+    #endif
+}
+
+/// The mark of a session the idle cleaner put to rest (`Session.isResting`): quiet, in the secondary
+/// color, never an alert. A session the user stopped keeps its usual look. Sized by the caller's font.
+struct RestingMark: View {
+    var body: some View {
+        Image(systemName: "zzz")
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(Text("Resting"))
+            .help(Text("Resting"))
+    }
+}
+
+/// The small chevron at the end of a transcript line that unfolds (steps, tool groups, a tool's
+/// details, the thought process): the same mark, turning down when open.
+struct DisclosureChevron: View {
+    let expanded: Bool
+
+    var body: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 9, weight: .semibold))
+            .rotationEffect(.degrees(expanded ? 90 : 0))
+            .accessibilityHidden(true)
+    }
+}
+
+/// iMessage bubble: generous continuous corners and, on the last bubble of a run, the curved tail
+/// that sweeps out of the bottom corner. Every bubble reserves `tailWidth` on its tail side so a
+/// run's bubbles stay aligned whether or not they carry the tail.
+struct BubbleShape: Shape {
+    static let tailWidth: CGFloat = 8
+
+    var fromUser: Bool
+    var tail: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Self.sentBubble(width: rect.width, height: rect.height, tail: tail)
+        if !fromUser {
+            path = path.applying(CGAffineTransform(translationX: rect.width, y: 0).scaledBy(x: -1, y: 1))
+        }
+        return path.applying(CGAffineTransform(translationX: rect.minX, y: rect.minY))
+    }
+
+    /// Bubble with its tail on the right, in a `width`×`height` box (tail flush with the right edge).
+    private static func sentBubble(width w: CGFloat, height h: CGFloat, tail: Bool) -> Path {
+        let r = min(18, h / 2)
+        let k: CGFloat = 0.47  // control-point factor for continuous-looking corners
+        let right = w - tailWidth
+        var p = Path()
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: right - r, y: 0))
+        p.addCurve(to: CGPoint(x: right, y: r), control1: CGPoint(x: right - r * k, y: 0), control2: CGPoint(x: right, y: r * k))
+        if tail {
+            // The tail sweeps out of the bottom-right corner to a point, then curls back into the bottom edge.
+            p.addLine(to: CGPoint(x: right, y: h - 17))
+            p.addCurve(to: CGPoint(x: w, y: h), control1: CGPoint(x: right, y: h - 4), control2: CGPoint(x: w - 2.5, y: h - 0.5))
+            p.addCurve(to: CGPoint(x: right - 9, y: h - 4.5), control1: CGPoint(x: w - 6, y: h + 1), control2: CGPoint(x: right - 4, y: h - 1.5))
+            p.addCurve(to: CGPoint(x: right - 19, y: h), control1: CGPoint(x: right - 12.5, y: h - 0.8), control2: CGPoint(x: right - 16, y: h))
+        } else {
+            p.addLine(to: CGPoint(x: right, y: h - r))
+            p.addCurve(to: CGPoint(x: right - r, y: h), control1: CGPoint(x: right, y: h - r * k), control2: CGPoint(x: right - r * k, y: h))
+        }
+        p.addLine(to: CGPoint(x: r, y: h))
+        p.addCurve(to: CGPoint(x: 0, y: h - r), control1: CGPoint(x: r * k, y: h), control2: CGPoint(x: 0, y: h - r * k))
+        p.addLine(to: CGPoint(x: 0, y: r))
+        p.addCurve(to: CGPoint(x: r, y: 0), control1: CGPoint(x: 0, y: r * k), control2: CGPoint(x: r * k, y: 0))
+        p.closeSubpath()
+        return p
+    }
+}
+
+extension View {
+    /// iMessage text insets inside a `BubbleShape`, including the space reserved for the tail.
+    func bubblePadding(fromUser: Bool) -> some View {
+        padding(.vertical, 8)
+            .padding(.leading, 13 + (fromUser ? 0 : BubbleShape.tailWidth))
+            .padding(.trailing, 13 + (fromUser ? BubbleShape.tailWidth : 0))
+    }
+}
+
+/// The three bouncing dots shown while the agent is working.
+struct TypingIndicator: View {
+    var body: some View {
+        // Core Animation fades the dots by itself: a SwiftUI animation here redrew the whole
+        // conversation every frame while the agent worked.
+        PulsingDots(color: .secondary)
+            .frame(width: 34, height: 8)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .background(Color.agentBubble, in: Capsule())
+            .background(alignment: .bottomLeading) {
+                // iMessage's typing bubble trails off in two small circles instead of a pointed tail.
+                ZStack(alignment: .bottomLeading) {
+                    Circle().fill(Color.agentBubble).frame(width: 13, height: 13).offset(x: 1, y: 2)
+                    Circle().fill(Color.agentBubble).frame(width: 6, height: 6).offset(x: -4, y: 8)
+                }
+            }
+            .padding(.leading, 4)
+            .padding(.bottom, 6)
+            .accessibilityLabel("Agent is working")
+    }
+}
+
+extension Color {
+    static let userBubble = Color(red: 0, green: 122 / 255, blue: 1)
+
+    #if os(macOS)
+    static let agentBubble = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+    #else
+    static let agentBubble = Color(uiColor: .systemGray5)
+    #endif
+}
+
+enum ChatDate {
+    /// Session list time, like Messages: time today, "Yesterday", weekday, or short date.
+    static func listLabel(_ date: Date, now: Date = .now) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday") }
+        if let days = calendar.dateComponents([.day], from: date, to: now).day, days < 7 {
+            return date.formatted(.dateTime.weekday(.wide))
+        }
+        return date.formatted(date: .numeric, time: .omitted)
+    }
+
+    /// A day as a heading: "Today", "Yesterday", the weekday within the last week, else the date.
+    static func dayLabel(_ day: Date, now: Date = .now) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return String(localized: "Today") }
+        if calendar.isDateInYesterday(day) { return String(localized: "Yesterday") }
+        if let days = calendar.dateComponents([.day], from: day, to: now).day, (0..<7).contains(days) {
+            return day.formatted(.dateTime.weekday(.wide))
+        }
+        return day.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    /// A pause this long between two messages puts the time between them, as Messages does.
+    static let separatorGap: TimeInterval = 15 * 60
+
+    /// Centered separator inside a chat: "Today 10:42", "Monday 18:03", …
+    static func separatorLabel(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let time = date.formatted(date: .omitted, time: .shortened)
+        if calendar.isDateInToday(date) { return String(localized: "Today \(time)") }
+        if calendar.isDateInYesterday(date) { return String(localized: "Yesterday \(time)") }
+        return "\(listLabel(date)) \(time)"
+    }
+}
+
+/// The way out of a sheet whose choices apply at once (Account, Relay, Notifications, Background,
+/// the model picker…): the system's close button (the glass X, placed and localized by it).
+/// Sheets that pick something keep a Cancel button.
+/// A modifier on the sheet's content, not a view inside the toolbar item: on the Mac, `dismiss`
+/// read from inside a toolbar item does nothing, so the sheet never closed.
+private struct SheetCloseToolbar: ViewModifier {
+    let shown: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if shown {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) {
+                        AppHaptics.light()
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+extension View {
+    /// `shown: false` where the same screen also lives outside a sheet (the browser's own window).
+    func sheetCloseButton(_ shown: Bool = true) -> some View { modifier(SheetCloseToolbar(shown: shown)) }
+}
+
+/// The one style for a control the system has no style for (a transcript line that unfolds, a
+/// thumbnail, the agent avatar as a button): the label as drawn, dimmed while pressed, and the
+/// iPad's hover under the Apple Pencil or a pointer. Everything else uses a system style
+/// (`.borderless`, `.glass`, the row style inside a `List`), which already has both.
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            #if os(iOS)
+            // The whole button lights up (a full row, not just its text and icon), a little
+            // wider than its frame, like a system list row under the pointer.
+            .contentShape(.hoverEffect, RoundedRectangle(cornerRadius: 10, style: .continuous).inset(by: -6))
+            .hoverEffect(.highlight)
+            #endif
+    }
+}
+
+extension ButtonStyle where Self == PressableButtonStyle {
+    static var pressable: PressableButtonStyle { PressableButtonStyle() }
+}
+
+extension View {
+    /// A `List` row of the sidebar: the system's selection does not light the row up under the
+    /// Apple Pencil or a pointer on iPad (observed on iPadOS 26), so the row gets the highlight itself.
+    func pointerHoverRow(cornerRadius: CGFloat = 12) -> some View {
+        #if os(iOS)
+        contentShape(.hoverEffect, RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+        #else
+        self
+        #endif
+    }
+}
+
+extension View {
+    /// Glass buttons don't light up under the Apple Pencil or a pointer on iPad by themselves; this
+    /// gives them the system's lift, as Apple recommends for controls that lack it.
+    @ViewBuilder
+    func glassHover() -> some View {
+        #if os(iOS)
+        // The glass is a capsule (or a circle, its square case): the lift takes its shape.
+        contentShape(.hoverEffect, Capsule())
+            .hoverEffect(.lift)
+        #else
+        self
+        #endif
+    }
+}
+
+extension AccountSettings.FolderColor {
+    /// The folder's color: vivid, and readable under white text (your bubbles, the avatar's
+    /// disc, the picker's dots).
+    var color: Color {
+        let rgb = vivid
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    var name: LocalizedStringKey {
+        switch self {
+        case .red: "Red"
+        case .crimson: "Crimson"
+        case .coral: "Coral"
+        case .orange: "Orange"
+        case .brown: "Brown"
+        case .yellow: "Yellow"
+        case .lime: "Lime"
+        case .green: "Green"
+        case .mint: "Mint"
+        case .teal: "Teal"
+        case .sky: "Sky"
+        case .blue: "Blue"
+        case .navy: "Navy"
+        case .indigo: "Indigo"
+        case .purple: "Purple"
+        case .plum: "Plum"
+        case .magenta: "Magenta"
+        case .pink: "Pink"
+        case .gray: "Gray"
+        }
+    }
+}
+
+extension HappierStore {
+    /// The color the user gave this session's project folder, if any.
+    func folderColor(of session: Session?) -> AccountSettings.FolderColor? {
+        guard let path = session?.path else { return nil }
+        return accountSettings?.folderColor(for: path)
+    }
+
+    func setFolderColor(_ color: AccountSettings.FolderColor?, forPath path: String) {
+        Task { await updateAccountSettings { $0.delta(folderColor: color, for: path) } }
+    }
+}
+
+/// "Folder Color": the project's color for every session in it, synced across devices.
+struct FolderColorMenu: View {
+    let path: String
+    let current: AccountSettings.FolderColor?
+    let choose: (AccountSettings.FolderColor?) -> Void
+
+    var body: some View {
+        Menu("Folder Color", systemImage: "circle.lefthalf.filled") {
+            Picker("Folder Color", selection: Binding(get: { current }, set: { choose($0) })) {
+                Text("None").tag(AccountSettings.FolderColor?.none)
+                ForEach(AccountSettings.FolderColor.allCases, id: \.self) { color in
+                    Label { Text(color.name) } icon: {
+                        Image(systemName: "circle.fill").foregroundStyle(color.color, color.color)
+                    }
+                    .tag(Optional(color))
+                }
+            }
+            .pickerStyle(.inline)
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// The color of your own message bubbles, and of what answers for you (send, reply options,
+    /// read aloud): the app's blue, or the conversation's project folder color, set once by the
+    /// conversation.
+    @Entry var userBubbleColor: Color = .userBubble
+}
+
+/// The project folder's color as a barely tinted ground under the conversation and, in a window
+/// of its own, a soft glow along the inside of the window's edges, so it tells its project at a
+/// glance. No glow in the main window, where it would frame only one pane. Static: nothing to
+/// animate.
+struct FolderWash: View {
+    let color: Color?
+    @Environment(\.inSessionWindow) private var inSessionWindow
+
+    var body: some View {
+        if let color {
+            ZStack {
+                color.opacity(0.03)
+                if inSessionWindow {
+                    Rectangle()
+                        .strokeBorder(color.opacity(0.32), lineWidth: 10)
+                        .blur(radius: 26)
+                }
+            }
+            .clipped()
+            // Not sideways: on the Mac that would run the glow's edges under the sidebar.
+            .ignoresSafeArea(edges: .vertical)
+            .allowsHitTesting(false)
+        }
+    }
+}

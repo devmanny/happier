@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+import { logger } from '@/ui/logger';
 
 import type { TmuxCommandResult } from './types';
 import { createTmuxTerminalControlPort, type TmuxControlCommandExecutor } from './control';
@@ -85,6 +87,26 @@ describe('createTmuxTerminalControlPort', () => {
       ['send-keys', '-t', TARGET, 'Enter'],
       ['send-keys', '-t', TARGET, 'Escape'],
     ]);
+  });
+
+  it('records who sent each Escape, since an Escape just after Enter silently cancels a Claude turn (incident cmwyimjvw4buyqh01nx3pp1oh)', async () => {
+    const infoFile = vi.spyOn(logger, 'infoFile').mockImplementation(() => undefined);
+    try {
+      const { executor } = recordingExecutor();
+      const port = createTmuxTerminalControlPort({ executor, target: TARGET });
+
+      await port.sendSpecialKey('Enter');
+      expect(infoFile).not.toHaveBeenCalled();
+      await port.sendSpecialKey('Escape');
+
+      expect(infoFile).toHaveBeenCalledTimes(1);
+      expect(infoFile).toHaveBeenCalledWith('[tmux] Escape sent to the provider pane', expect.objectContaining({
+        path: 'special_key',
+        callers: expect.arrayContaining([expect.stringContaining('control.test')]),
+      }));
+    } finally {
+      infoFile.mockRestore();
+    }
   });
 
   it('sends selection arrows as named keys', async () => {

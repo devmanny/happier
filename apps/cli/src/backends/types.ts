@@ -23,6 +23,7 @@ import type {
 import type { DirectSessionProviderOps } from './directSessions/providerOps';
 import type { AcpForkContinuationHandler } from './forking/acpForkContinuationHandler';
 import type { ProviderNativeForkHandler } from './forking/providerNativeForkHandler';
+import type { SessionFileRestoreHandler } from './fileRestore/sessionFileRestoreHandler';
 import type { SessionCatalogControlAdapter } from '@/session/catalogControls/sessionCatalogControlTypes';
 import type { SessionGoalControlAdapter } from '@/session/goalControls/sessionGoalControlTypes';
 import type { SessionUsageLimitRecoveryControlAdapter } from '@/session/usageLimitRecoveryControls/sessionUsageLimitRecoveryControlTypes';
@@ -492,6 +493,12 @@ export type AgentCatalogEntry = Readonly<{
    */
   getProviderNativeForkHandler?: () => Promise<ProviderNativeForkHandler>;
   /**
+   * Optional Agent-owned `session.restoreFiles`: restore the session's working-directory files to
+   * just before one user message from the Agent's own file checkpoints. Absent means the daemon
+   * answers `unsupported`.
+   */
+  getSessionFileRestoreHandler?: () => Promise<SessionFileRestoreHandler>;
+  /**
    * Optional provider-owned runtime-local metadata builder for session handoff.
    *
    * Shared daemon handoff code owns export/runtime-local splitting; providers own
@@ -555,6 +562,7 @@ export type {
   DirectSessionsProviderId,
   ProviderNativeForkHandler,
   SessionCatalogControlAdapter,
+  SessionFileRestoreHandler,
   SessionGoalControlAdapter,
   SessionUsageLimitRecoveryControlAdapter,
 };

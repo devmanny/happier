@@ -34,6 +34,10 @@ describe('createAcpRuntime (turn hooks)', () => {
       sendAgentMessage: (_provider, body) => {
         sent.push(body);
       },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
+        sent.push(body);
+      },
     });
 
     const runtime = createAcpRuntime({
@@ -127,6 +131,10 @@ describe('createAcpRuntime (turn hooks)', () => {
 
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessage: (_provider, body) => {
+        sent.push(body);
+      },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
         sent.push(body);
       },
       sessionTurnLifecycle: {
@@ -238,6 +246,10 @@ describe('createAcpRuntime (turn hooks)', () => {
 
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessage: (_provider, body) => {
+        sent.push(body);
+      },
+      // The turn's end (`task_complete`) is committed.
+      sendAgentMessageCommitted: async (_provider, body) => {
         sent.push(body);
       },
       sessionTurnLifecycle: {

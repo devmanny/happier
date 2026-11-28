@@ -1,0 +1,688 @@
+import Foundation
+
+/// A room ("sala", `packages/protocol/src/rooms/agentRoom.ts`): a group chat of the user and the
+/// agents they invite, each working from its own folder on one machine. Sealed for the account's
+/// devices under kind `agent_room`, with opaque keys: `room/<id>` (this), `roommsg/<id>/<seq>` (each
+/// message, created with version -1 in the same write that moves `lastSeq`) and
+/// `roomseat/<id>/<agentId>` (a member's thread and read marker, written by its daemon). The daemon
+/// of each member's machine delivers what mentions it; this app writes the room and the user's
+/// messages, and may rewrite, delete or send now (`AgentRoomMessage.sendNow`) one of them its agent
+/// doesn't have yet (`queued`), writing that agent's seat back unchanged in the same atomic write as
+/// a guard. Keys this build doesn't know are kept on rewrite.
+public struct AgentRoom: Identifiable, Sendable, Equatable {
+    public struct Member: Identifiable, Sendable, Equatable {
+        public let agentId: String
+        public var name: String?
+        public var emoji: String?
+        public var machineId: String
+        public var directory: String
+        /// Another agent's mention starts a turn for it (set after the Consumer Terms warning for
+        /// Claude); otherwise only the user's mentions do.
+        public var wakeByAgents: Bool?
+        /// The protocol's intent name (`read_only`, `default`, `auto`, `yolo`); nil is YOLO.
+        public var permissionMode: String?
+        /// The agent mention whose "Let It Answer" the user dismissed: its notice comes back only for a
+        /// later one. Written by the app in the room, so every device hides it; daemons don't read it.
+        public var dismissedMentionSeq: Int?
+        var extra: [String: JSONValue] = [:]
+
+        public var id: String { agentId }
+
+        public init(agentId: String, name: String?, emoji: String? = nil, machineId: String, directory: String,
+                    wakeByAgents: Bool? = nil, permissionMode: String? = nil) {
+            self.agentId = agentId
+            self.name = name
+            self.emoji = emoji
+            self.machineId = machineId
+            self.directory = directory
+            self.wakeByAgents = wakeByAgents
+            self.permissionMode = permissionMode
+        }
+
+        /// The member for an agent of the account; it answers other agents by default unless it is
+        /// Claude (`answersAgentsByDefault`).
+        public init(_ agent: AgentProfile, machineId: String, directory: String, wakeByAgents: Bool? = nil) {
+            self.init(agentId: agent.id, name: agent.name, emoji: agent.emoji, machineId: machineId, directory: directory,
+                      wakeByAgents: wakeByAgents ?? Self.answersAgentsByDefault(providerId: agent.providerId))
+        }
+
+        /// Where a new member works on `machineId`: the folder of its agent's latest session there, else
+        /// the machine's home. Proposed in New Room; the user can change it.
+        public static func suggestedDirectory(agentId: String, machineId: String, sessions: [Session], home: String?) -> String? {
+            sessions.filter { $0.machineId == machineId && $0.agentIdentity?.id == agentId && $0.path?.isEmpty == false }
+                .max { $0.sortDate < $1.sortDate }?.path ?? home
+        }
+
+        /// Another agent's mention wakes a new member, except a Claude one: that is automated access
+        /// (Consumer Terms 3.7), allowed only past the warning (`needsAutomatedAccessWarning`).
+        public static func answersAgentsByDefault(providerId: String?) -> Bool {
+            !TaskRecurrence.needsAutomatedAccessWarning(providerId: providerId)
+        }
+
+        init?(json: JSONValue) {
+            guard let agentId = json["agentId"]?.stringValue, !agentId.isEmpty,
+                  let machineId = json["machineId"]?.stringValue, !machineId.isEmpty,
+                  let directory = json["directory"]?.stringValue, !directory.isEmpty else { return nil }
+            self.init(agentId: agentId, name: json["name"]?.stringValue, emoji: json["emoji"]?.stringValue, machineId: machineId,
+                      directory: directory, wakeByAgents: json["wakeByAgents"]?.boolValue, permissionMode: json["permissionMode"]?.stringValue)
+            dismissedMentionSeq = json["dismissedMentionSeq"]?.intValue
+            let known: Set<String> = ["agentId", "name", "emoji", "machineId", "directory", "wakeByAgents", "permissionMode", "dismissedMentionSeq"]
+            extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
+        }
+
+        var json: JSONValue {
+            var object = extra
+            object["agentId"] = .string(agentId)
+            if let name, !name.isEmpty { object["name"] = .string(name) }
+            if let emoji, !emoji.isEmpty { object["emoji"] = .string(emoji) }
+            object["machineId"] = .string(machineId)
+            object["directory"] = .string(directory)
+            if let wakeByAgents { object["wakeByAgents"] = .bool(wakeByAgents) }
+            if let permissionMode { object["permissionMode"] = .string(permissionMode) }
+            if let dismissedMentionSeq { object["dismissedMentionSeq"] = .number(Double(dismissedMentionSeq)) }
+            return .object(object)
+        }
+    }
+
+    public let id: String
+    public var title: String
+    /// How the members call the user (and mention them); "User" when absent.
+    public var userName: String?
+    public var members: [Member]
+    /// The seq of the last message; 0 before the first.
+    public var lastSeq: Int
+    /// The pause button: nothing is delivered until it is cleared; running turns finish.
+    public var pausedAt: Double?
+    public var archivedAt: Double?
+    public var createdAt: Double
+    public var updatedAt: Double
+    /// The UserKVStore version this copy was read at (-1 for a room not stored yet).
+    public var version = -1
+    var extra: [String: JSONValue] = [:]
+
+    public var isPaused: Bool { pausedAt != nil }
+
+    // MARK: An agent's chat
+
+    /// An agent's own chat with the user (its circle in the sidebar opens it): a room of just that
+    /// agent, marked `kind: "direct"`, where every message of the user reaches it without a mention.
+    /// Daemons deliver it like any room and keep `kind` as an unknown field.
+    public var isDirect: Bool { extra["kind"]?.stringValue == "direct" }
+
+    /// The agent whose chat this is; nil for a group room.
+    public var directAgentId: String? { isDirect ? members.first?.agentId : nil }
+
+    /// One chat per agent, the same id on every device, so two devices opening it at once make one.
+    public static func directId(agentId: String) -> String { "direct-\(agentId.lowercased())" }
+
+    /// The agent's chat, working in `directory` on `machineId` (`directPlacement`).
+    public static func direct(with agent: AgentProfile, machineId: String, directory: String, userName: String?,
+                              now: Double = ServerClock.nowMs()) -> AgentRoom {
+        var room = AgentRoom(id: directId(agentId: agent.id), title: agent.name, userName: userName,
+                             members: [Member(agent, machineId: machineId, directory: directory)], now: now)
+        room.extra["kind"] = "direct"
+        return room
+    }
+
+    /// Where an agent's chat works: the machine and folder of its latest session, else the home of
+    /// a machine that's on (else any machine still linked); nil without a linked machine.
+    public static func directPlacement(agentId: String, sessions: [Session], machines: [Machine]) -> (machineId: String, directory: String)? {
+        let linked = machines.filter { $0.revokedAt == nil && $0.replacedByMachineId == nil }
+        // The chat is with the agent, not about a project: it works from the home of the machine
+        // it last worked on (and goes into any project from there).
+        if let latest = sessions.filter({ $0.agentIdentity?.id == agentId && $0.machineId != nil }).max(by: { $0.sortDate < $1.sortDate }),
+           let machine = linked.first(where: { $0.id == latest.machineId }), let home = machine.homeDir, !home.isEmpty {
+            return (machine.id, home)
+        }
+        guard let machine = linked.first(where: \.active) ?? linked.first, let home = machine.homeDir, !home.isEmpty else { return nil }
+        return (machine.id, home)
+    }
+
+    public init(id: String = UUID().uuidString.lowercased(), title: String, userName: String?, members: [Member],
+                now: Double = ServerClock.nowMs()) {
+        self.id = id.lowercased()
+        self.title = title
+        self.userName = userName
+        self.members = members
+        self.lastSeq = 0
+        self.createdAt = now
+        self.updatedAt = now
+    }
+
+    init?(json: JSONValue) {
+        guard json["v"]?.intValue == 1, let id = json["id"]?.stringValue, !id.isEmpty,
+              let title = json["title"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+              let lastSeq = json["lastSeq"]?.intValue, lastSeq >= 0 else { return nil }
+        self.id = id
+        self.title = title
+        self.userName = json["userName"]?.stringValue
+        self.members = json["members"]?.arrayValue?.compactMap(Member.init(json:)) ?? []
+        self.lastSeq = lastSeq
+        self.pausedAt = json["pausedAt"]?.doubleValue
+        self.archivedAt = json["archivedAt"]?.doubleValue
+        self.createdAt = json["createdAt"]?.doubleValue ?? 0
+        self.updatedAt = json["updatedAt"]?.doubleValue ?? 0
+        let known: Set<String> = ["v", "id", "title", "userName", "members", "lastSeq", "pausedAt", "archivedAt", "createdAt", "updatedAt"]
+        self.extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
+    }
+
+    var json: JSONValue {
+        var object = extra
+        object["v"] = 1
+        object["id"] = .string(id)
+        object["title"] = .string(title)
+        if let userName, !userName.trimmingCharacters(in: .whitespaces).isEmpty { object["userName"] = .string(userName) }
+        object["members"] = .array(members.map(\.json))
+        object["lastSeq"] = .number(Double(lastSeq))
+        if let pausedAt { object["pausedAt"] = .number(pausedAt) }
+        if let archivedAt { object["archivedAt"] = .number(archivedAt) }
+        object["createdAt"] = .number(createdAt)
+        object["updatedAt"] = .number(updatedAt)
+        return .object(object)
+    }
+
+    // MARK: Storage
+
+    public static let kvPrefix = "room/"
+
+    public static func kvKey(id: String) -> String { kvPrefix + id }
+
+    func sealed(machineKey: Data) throws -> String {
+        try AccountScopedBlob.seal(json, kind: .agentRoom, machineKey: machineKey)
+    }
+
+    static func open(_ base64: String, machineKey: Data) -> AgentRoom? {
+        AccountScopedBlob.open(base64, kind: .agentRoom, machineKey: machineKey).flatMap(AgentRoom.init(json:))
+    }
+
+    // MARK: Sidebar selection
+
+    private static let selectionPrefix = "happier.room:"
+
+    /// The sidebar's selection for this room, which opens like a session (never a session's id).
+    public static func selection(id: String) -> String { selectionPrefix + id }
+
+    /// The sidebar's selection that shows this room: an agent's chat opens as its circle does.
+    public var selection: String { directAgentId.map(AgentProfile.selection(id:)) ?? Self.selection(id: id) }
+
+    /// The room `selection` names; nil for a session, an agent or nothing.
+    public static func id(inSelection selection: String?) -> String? {
+        guard let selection, selection.hasPrefix(selectionPrefix) else { return nil }
+        let id = String(selection.dropFirst(selectionPrefix.count))
+        return id.isEmpty ? nil : id
+    }
+
+    // MARK: Messages
+
+    /// The room after the user's message, and the message: it takes the next seq, with the members
+    /// it mentions (in an agent's chat, always that agent). Both are written together (`appendRoomMessage`); nil for an empty text.
+    /// `mentions` overrides the ones found in the text (an option's answer reaches only its author).
+    public func appendingUserMessage(_ text: String, now: Double, replyTo: Int? = nil,
+                                     mentions: [String]? = nil) -> (room: AgentRoom, message: AgentRoomMessage)? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        var room = self
+        room.lastSeq += 1
+        room.updatedAt = now
+        let message = AgentRoomMessage(roomId: id, seq: room.lastSeq, at: now, author: .user, text: text,
+                                       mentions: mentions ?? recipients(of: text), replyTo: replyTo)
+        return (room, message)
+    }
+
+    /// Whom the user's `text` reaches by itself: in an agent's chat always that agent, elsewhere the
+    /// members it mentions.
+    private func recipients(of text: String) -> [String] {
+        isDirect ? members.map(\.agentId) : Self.mentions(in: text, members: members)
+    }
+
+    /// The user's pick of an `<options>` option on an agent's message: "@Name option", mentioning only
+    /// that agent (whatever the option says) and answering that message, so only it is woken.
+    public func answering(_ message: AgentRoomMessage, with option: String, now: Double) -> (room: AgentRoom, message: AgentRoomMessage)? {
+        guard let author = message.author.agentId else { return nil }
+        let name = message.author.name ?? members.first { $0.agentId == author }?.name ?? author
+        return appendingUserMessage("@\(name) \(option)", now: now, replyTo: message.seq, mentions: [author])
+    }
+
+    /// Who the user's reply to `quoted` reaches: its author when that is an agent of the room (never
+    /// the members it mentioned), then whoever `text` reaches by itself (the ones the user named; in
+    /// an agent's chat that agent, whoever wrote the message quoted).
+    public func replyRecipients(to quoted: AgentRoomMessage, text: String) -> [String] {
+        let author = quoted.author.agentId.flatMap { id in members.contains { $0.agentId == id } ? id : nil }
+        var reached = author.map { [$0] } ?? []
+        for id in recipients(of: text) where !reached.contains(id) { reached.append(id) }
+        return reached
+    }
+
+    /// The user's `text` quoting `quoted` (Reply): it answers that message and reaches `replyRecipients`.
+    public func replying(to quoted: AgentRoomMessage, with text: String, now: Double) -> (room: AgentRoom, message: AgentRoomMessage)? {
+        appendingUserMessage(text, now: now, replyTo: quoted.seq, mentions: replyRecipients(to: quoted, text: text))
+    }
+
+    /// The option the user picked on `message`, from the answer that replies to it; nil while none is.
+    public static func chosenOption(on message: AgentRoomMessage, options: [String], messages: [AgentRoomMessage]) -> String? {
+        guard let answer = messages.first(where: { $0.author == .user && $0.replyTo == message.seq }) else { return nil }
+        return options.first { answer.text.hasSuffix(" " + $0) || answer.text == $0 } ?? answer.text
+    }
+
+    /// The members `text` mentions with `@` and their whole name, any case or accents, in the order
+    /// they first appear (`resolveRoomMentions`); `@todos` or `@all` mentions every member there. An `@`
+    /// inside a word, or before a longer word, is no one.
+    public static func mentions(in text: String, members: [Member]) -> [String] {
+        var mentioned: [String] = []
+        for (_, token) in scanMentions(in: text, members: members) {
+            switch token {
+            case .member(let id):
+                if !mentioned.contains(id) { mentioned.append(id) }
+            case .everyone:
+                for member in members where !mentioned.contains(member.agentId) { mentioned.append(member.agentId) }
+            }
+        }
+        return mentioned
+    }
+
+    /// What a mention names: a member, or every member (`@todos` / `@all`).
+    private enum MentionToken { case member(String), everyone }
+
+    /// `@todos` / `@all`, folded (`EVERYONE_MENTIONS`).
+    private static let everyoneWords = ["todos", "all"]
+
+    private static func fold(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).lowercased()
+    }
+
+    /// Each `@name` and `@todos` in `text`, where it is: whole names (any case or accents, the longest
+    /// first) before the words for everyone; never an `@` inside a word or before a longer word.
+    private static func scanMentions(in text: String, members: [Member]) -> [(range: Range<String.Index>, token: MentionToken)] {
+        let characters = Array(text)
+        let indices = Array(text.indices) + [text.endIndex]
+        let folded = characters.map { fold(String($0)) }
+        func isWord(_ character: Character) -> Bool { character.isLetter || character.isNumber || character == "_" }
+        let names = members.compactMap { member -> (token: MentionToken, word: [String])? in
+            guard let name = member.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return nil }
+            return (.member(member.agentId), name.map { fold(String($0)) })
+        }.sorted { $0.word.count > $1.word.count }
+        let everyone = everyoneWords.map { word in (token: MentionToken.everyone, word: word.map { String($0) }) }
+        var found: [(range: Range<String.Index>, token: MentionToken)] = []
+        for at in characters.indices where characters[at] == "@" {
+            if at > 0, isWord(characters[at - 1]) { continue }
+            let start = at + 1
+            func matches(_ word: [String]) -> Bool {
+                let end = start + word.count
+                return end <= characters.count && Array(folded[start..<end]) == word && !(end < characters.count && isWord(characters[end]))
+            }
+            if let match = names.first(where: { matches($0.word) }) ?? everyone.first(where: { matches($0.word) }) {
+                found.append((indices[at]..<indices[start + match.word.count], match.token))
+            }
+        }
+        return found
+    }
+
+    /// Where the mentions are in a message, to highlight them.
+    public static func mentionRanges(in text: String, members: [Member]) -> [Range<String.Index>] {
+        scanMentions(in: text, members: members).map(\.range)
+    }
+
+    /// A chip that completes the `@word` being typed.
+    public enum MentionSuggestion: Hashable, Sendable {
+        /// `@todos`: every agent in the room.
+        case everyone
+        case member(String)
+
+        public func label(members: [Member]) -> String {
+            switch self {
+            case .everyone: "@todos"
+            case .member(let id): "@" + (members.first { $0.agentId == id }?.name ?? id)
+            }
+        }
+    }
+
+    /// The chips for the `@word` being typed (`partial`, without the `@`): everyone first, then the
+    /// members whose name starts with it; none for a word already typed whole.
+    public static func mentionSuggestions(for partial: String, members: [Member]) -> [MentionSuggestion] {
+        let typed = fold(partial)
+        func offers(_ word: String) -> Bool {
+            let folded = fold(word)
+            return folded.hasPrefix(typed) && folded != typed
+        }
+        var suggestions: [MentionSuggestion] = everyoneWords.contains(where: offers) ? [.everyone] : []
+        for member in members {
+            if let name = member.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty, offers(name) {
+                suggestions.append(.member(member.agentId))
+            }
+        }
+        return suggestions
+    }
+
+    /// Who to suggest when the user writes without mentioning anyone (it reaches no one): the
+    /// last agent who spoke.
+    public static func lastAgentSpeaker(_ messages: [AgentRoomMessage]) -> String? {
+        messages.sorted { $0.seq < $1.seq }.last { $0.author.agentId != nil }?.author.agentId
+    }
+
+    /// The agents' replies that came from another thread than the same agent's previous reply: its
+    /// daemon opened a new thread for it (the last one was archived or gone, `reconcileRoomDeliveries`),
+    /// which starts from a recap of the room. An agent's chat marks them "New thread". Read from the
+    /// thread each reply names (`author.sessionId`); an agent's first reply, and one that names no
+    /// thread, never count.
+    public static func newThreadSeqs(in messages: [AgentRoomMessage]) -> Set<Int> {
+        var lastThread: [String: String] = [:]
+        var starts: Set<Int> = []
+        for message in messages.sorted(by: { $0.seq < $1.seq }) {
+            guard case .agent(let agentId, _, _, let thread?) = message.author else { continue }
+            if let last = lastThread[agentId], last != thread { starts.insert(message.seq) }
+            lastThread[agentId] = thread
+        }
+        return starts
+    }
+
+    /// At most this many agent turns in a row without the user (`AGENT_ROOM_MAX_AGENT_TURNS`).
+    public static let maxAgentTurns = 6
+
+    /// The brake holds: the last `maxAgentTurns` messages are all agents'; the user writes to go on.
+    public static func brakeHolds(_ messages: [AgentRoomMessage]) -> Bool {
+        let last = messages.sorted { $0.seq < $1.seq }.suffix(maxAgentTurns)
+        return last.count == maxAgentTurns && last.allSatisfy { $0.author.agentId != nil }
+    }
+
+    /// A member another agent mentioned that waits for the user: the mention (`mentionSeq`) and the
+    /// agent who wrote it.
+    public struct Wait: Equatable, Sendable {
+        public let agentId: String
+        public let mentionSeq: Int
+        public let mentionedBy: String?
+
+        public init(agentId: String, mentionSeq: Int, mentionedBy: String?) {
+            self.agentId = agentId
+            self.mentionSeq = mentionSeq
+            self.mentionedBy = mentionedBy
+        }
+    }
+
+    /// The user dismissed `agentId`'s "Let It Answer" for the mention at `mentionSeq` (it doesn't
+    /// answer it): the notice stays away until another agent mentions it again.
+    public mutating func dismissWait(agentId: String, mentionSeq: Int) {
+        guard let index = members.firstIndex(where: { $0.agentId == agentId }) else { return }
+        members[index].dismissedMentionSeq = max(members[index].dismissedMentionSeq ?? 0, mentionSeq)
+    }
+
+    /// Members another agent mentioned that wait for the user ("Let It Answer"): agents can't wake
+    /// them (Claude, unless allowed after the warning), they haven't spoken, nor been mentioned by
+    /// the user, since, and the user hasn't dismissed that mention. Nothing waits in a paused or
+    /// archived room.
+    public func waitingForUser(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> [Wait] {
+        guard pausedAt == nil, archivedAt == nil else { return [] }
+        let ordered = messages.sorted { $0.seq < $1.seq }
+        return members.compactMap { member -> Wait? in
+            guard member.wakeByAgents != true else { return nil }
+            let seat = seats.first { $0.agentId == member.agentId }
+            guard seat?.inFlight == nil else { return nil }
+            let read = seat?.readThroughSeq ?? 0
+            guard let mention = ordered.last(where: { $0.seq > read && $0.author.agentId != nil
+                && $0.author.agentId != member.agentId && $0.mentions.contains(member.agentId) }),
+                  mention.seq > member.dismissedMentionSeq ?? 0 else { return nil }
+            let answered = ordered.contains { $0.seq > mention.seq
+                && ($0.author.agentId == member.agentId || ($0.author == .user && $0.mentions.contains(member.agentId))) }
+            return answered ? nil : Wait(agentId: member.agentId, mentionSeq: mention.seq, mentionedBy: mention.author.agentId)
+        }
+    }
+
+    // MARK: What waits for the agent
+
+    /// The user's messages in an agent's chat that the agent doesn't have yet, and why they wait.
+    public struct Queue: Equatable, Sendable {
+        public enum Reason: Equatable, Sendable {
+            /// Its turn is under way: they reach it together when that turn ends (`decideRoomDelivery`'s `busy`).
+            case afterCurrentTurn
+            /// Nothing holds them: its daemon hasn't delivered them yet.
+            case notDeliveredYet
+        }
+
+        /// Oldest first.
+        public let messages: [AgentRoomMessage]
+        public let reason: Reason
+        /// They can be edited or canceled: the agent has a seat to guard that write with
+        /// (`HappierStore.reviseQueuedRoomMessage`). Before its first delivery it has none.
+        public let revisable: Bool
+        /// One of them can be sent into the running turn (Steer Now, `AgentRoomMessage.sendNow`): the
+        /// agent's daemon stamped the delivery its thread is working (`InFlight.sendNowSupported`).
+        /// Whether that thread can take it right now is its session's (`Session.canSteerNow`).
+        public let sendNowSupported: Bool
+        /// The latest of them the user sent now: it and the ones before it reach the agent in its
+        /// running turn (`decideRoomDelivery`'s `steer`); the later ones still wait for it to end. Nil
+        /// while none is.
+        public let sendingNowThroughSeq: Int?
+    }
+
+    /// The seq up to which this room's messages can't change any more. In an agent's chat, the
+    /// agent's messages and what it already has (`AgentRoomSeat.deliveredThroughSeq`); the user's
+    /// later messages may still be edited or canceled (`queued`). Nothing changes in a group room.
+    public func settledThroughSeq(seats: [AgentRoomSeat]) -> Int {
+        guard let agentId = directAgentId else { return .max }
+        return seats.first { $0.agentId == agentId }?.deliveredThroughSeq ?? 0
+    }
+
+    /// What waits for the agent in its chat: the user's messages past what it has, which its daemon
+    /// holds while its turn runs (`decideRoomDelivery`), unless the user sends one now. Nil when
+    /// nothing waits, and in a group room.
+    public func queued(seats: [AgentRoomSeat], messages: [AgentRoomMessage]) -> Queue? {
+        guard let agentId = directAgentId else { return nil }
+        let settled = settledThroughSeq(seats: seats)
+        let waiting = messages.filter { $0.author == .user && $0.seq > settled }.sorted { $0.seq < $1.seq }
+        guard !waiting.isEmpty else { return nil }
+        let seat = seats.first { $0.agentId == agentId }
+        return Queue(messages: waiting, reason: seat?.inFlight != nil ? .afterCurrentTurn : .notDeliveredYet, revisable: seat != nil,
+                     sendNowSupported: seat?.inFlight?.sendNowSupported == true, sendingNowThroughSeq: waiting.last { $0.sendNow }?.seq)
+    }
+}
+
+/// One message of a room (`roommsg/<roomId>/<seq>`).
+public struct AgentRoomMessage: Identifiable, Sendable, Equatable {
+    public enum Author: Sendable, Equatable {
+        case user
+        /// Its name and emoji as they were when it wrote.
+        case agent(id: String, name: String?, emoji: String?, sessionId: String?)
+
+        public var agentId: String? {
+            if case .agent(let id, _, _, _) = self { return id }
+            return nil
+        }
+
+        /// The agent's name as it wrote, if it gave one.
+        public var name: String? {
+            if case .agent(_, let name, _, _) = self { return name }
+            return nil
+        }
+
+        public static func == (lhs: Author, rhs: Author) -> Bool {
+            switch (lhs, rhs) {
+            case (.user, .user): true
+            case (.agent(let a, _, _, _), .agent(let b, _, _, _)): a == b
+            default: false
+            }
+        }
+
+        init?(json: JSONValue?) {
+            switch json?["kind"]?.stringValue {
+            case "user": self = .user
+            case "agent":
+                guard let id = json?["agentId"]?.stringValue, !id.isEmpty else { return nil }
+                self = .agent(id: id, name: json?["name"]?.stringValue, emoji: json?["emoji"]?.stringValue,
+                              sessionId: json?["sessionId"]?.stringValue)
+            default: return nil
+            }
+        }
+
+        var json: JSONValue {
+            switch self {
+            case .user: return ["kind": "user"]
+            case .agent(let id, let name, let emoji, let sessionId):
+                var object: [String: JSONValue] = ["kind": "agent", "agentId": .string(id)]
+                if let name { object["name"] = .string(name) }
+                if let emoji { object["emoji"] = .string(emoji) }
+                if let sessionId { object["sessionId"] = .string(sessionId) }
+                return .object(object)
+            }
+        }
+    }
+
+    public let roomId: String
+    public let seq: Int
+    public let at: Double
+    public let author: Author
+    public let text: String
+    /// The members it mentions, in order.
+    public let mentions: [String]
+    /// An agent's message that mentions the user.
+    public let mentionsUser: Bool
+    /// The message this one answers: one the user quoted (Reply), or picked an option on.
+    public let replyTo: Int?
+    /// The UserKVStore version this copy was read at (-1 for one not stored yet).
+    public internal(set) var version = -1
+    /// The user sent it now (Steer Now) while it waited for the agent: it reaches the agent in its
+    /// running turn, with the user's messages before it, instead of after that turn
+    /// (`decideRoomDelivery`'s `steer`). Only the app sets it (`sendingNow`), on a message the agent
+    /// doesn't have yet; at or below what the agent has it means nothing.
+    public internal(set) var sendNow = false
+    var extra: [String: JSONValue] = [:]
+
+    public var id: Int { seq }
+
+    /// The user's message with `text` instead, at the same seq: its time, mentions, the message it
+    /// answers, whether it was sent now and the fields this build doesn't know are kept
+    /// (`HappierStore.reviseQueuedRoomMessage`). Nil for an empty text.
+    func editing(_ text: String) -> AgentRoomMessage? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        var edited = AgentRoomMessage(roomId: roomId, seq: seq, at: at, author: author, text: text, mentions: mentions,
+                                      mentionsUser: mentionsUser, replyTo: replyTo)
+        edited.version = version
+        edited.sendNow = sendNow
+        edited.extra = extra
+        return edited
+    }
+
+    /// The same message, sent now (`sendNow`); everything else is kept (`HappierStore.reviseQueuedRoomMessage`).
+    func sendingNow() -> AgentRoomMessage {
+        var flagged = self
+        flagged.sendNow = true
+        return flagged
+    }
+
+    init(roomId: String, seq: Int, at: Double, author: Author, text: String, mentions: [String], mentionsUser: Bool = false,
+         replyTo: Int? = nil) {
+        self.roomId = roomId
+        self.seq = seq
+        self.at = at
+        self.author = author
+        self.text = text
+        self.mentions = mentions
+        self.mentionsUser = mentionsUser
+        self.replyTo = replyTo
+    }
+
+    init?(json: JSONValue) {
+        guard json["v"]?.intValue == 1, let roomId = json["roomId"]?.stringValue, !roomId.isEmpty,
+              let seq = json["seq"]?.intValue, seq >= 1, let author = Author(json: json["author"]),
+              let text = json["text"]?.stringValue, !text.isEmpty else { return nil }
+        self.init(roomId: roomId, seq: seq, at: json["at"]?.doubleValue ?? 0, author: author, text: text,
+                  mentions: json["mentions"]?.arrayValue?.compactMap(\.stringValue) ?? [],
+                  mentionsUser: json["mentionsUser"]?.boolValue == true, replyTo: json["replyTo"]?["seq"]?.intValue)
+        sendNow = json["sendNow"]?.boolValue == true
+        let known: Set<String> = ["v", "roomId", "seq", "at", "author", "text", "mentions", "mentionsUser", "replyTo", "sendNow"]
+        extra = (json.objectValue ?? [:]).filter { !known.contains($0.key) }
+    }
+
+    var json: JSONValue {
+        var object = extra
+        object["v"] = 1
+        object["roomId"] = .string(roomId)
+        object["seq"] = .number(Double(seq))
+        object["at"] = .number(at)
+        object["author"] = author.json
+        object["text"] = .string(text)
+        object["mentions"] = .array(mentions.map(JSONValue.string))
+        if mentionsUser { object["mentionsUser"] = true }
+        if let replyTo { object["replyTo"] = ["seq": .number(Double(replyTo))] }
+        if sendNow { object["sendNow"] = true }
+        return .object(object)
+    }
+
+    public static let kvPrefix = "roommsg/"
+
+    /// Zero-padded, so a key's order is its message's order.
+    public static func kvKey(roomId: String, seq: Int) -> String {
+        "\(kvPrefix)\(roomId)/\(String(format: "%010d", seq))"
+    }
+
+    func sealed(machineKey: Data) throws -> String {
+        try AccountScopedBlob.seal(json, kind: .agentRoom, machineKey: machineKey)
+    }
+
+    static func open(_ base64: String, machineKey: Data) -> AgentRoomMessage? {
+        AccountScopedBlob.open(base64, kind: .agentRoom, machineKey: machineKey).flatMap(AgentRoomMessage.init(json:))
+    }
+}
+
+/// A member's thread in a room and its read marker (`roomseat/<roomId>/<agentId>`), written by the
+/// daemon of its machine. The app never changes it: it only writes it back exactly as it read it
+/// (`sealed`, at `version`) as the guard of a change to a message the member doesn't have yet
+/// (`HappierStore.reviseQueuedRoomMessage`). It is never rebuilt from this model, which leaves out
+/// fields the daemon needs (the delivery's `localId` and `sent`, and the delivery it was sent past,
+/// `steers`).
+public struct AgentRoomSeat: Identifiable, Sendable, Equatable {
+    public struct InFlight: Sendable, Equatable {
+        public let throughSeq: Int
+        public let at: Double
+        /// Its daemon sends a message the user sends now into this turn; an older one stamps nothing
+        /// and holds it to the turn's end (`AgentRoom.Queue.sendNowSupported`).
+        public var sendNowSupported = false
+    }
+
+    public let roomId: String
+    public let agentId: String
+    public var sessionId: String?
+    public var readThroughSeq: Int
+    /// The turn its thread is working for the room.
+    public var inFlight: InFlight?
+    /// The UserKVStore version this copy was read at (-1 for one not read from the store).
+    public internal(set) var version = -1
+    /// The stored value exactly as it was read, the only thing ever written back.
+    var sealed: String?
+
+    public var id: String { agentId }
+
+    /// Every message up to this seq is the member's: read, or in the turn its thread is working.
+    public var deliveredThroughSeq: Int { max(readThroughSeq, inFlight?.throughSeq ?? 0) }
+
+    public init(roomId: String, agentId: String, sessionId: String? = nil, readThroughSeq: Int, inFlight: InFlight? = nil) {
+        self.roomId = roomId
+        self.agentId = agentId
+        self.sessionId = sessionId
+        self.readThroughSeq = readThroughSeq
+        self.inFlight = inFlight
+    }
+
+    init?(json: JSONValue) {
+        guard json["v"]?.intValue == 1, let roomId = json["roomId"]?.stringValue, !roomId.isEmpty,
+              let agentId = json["agentId"]?.stringValue, !agentId.isEmpty else { return nil }
+        let inFlight = json["inFlight"].flatMap { value -> InFlight? in
+            guard let through = value["throughSeq"]?.intValue else { return nil }
+            return InFlight(throughSeq: through, at: value["at"]?.doubleValue ?? 0,
+                            sendNowSupported: value["sendNowSupported"]?.boolValue == true)
+        }
+        self.init(roomId: roomId, agentId: agentId, sessionId: json["sessionId"]?.stringValue,
+                  readThroughSeq: json["readThroughSeq"]?.intValue ?? 0, inFlight: inFlight)
+    }
+
+    public static let kvPrefix = "roomseat/"
+
+    public static func kvPrefix(roomId: String) -> String { "\(kvPrefix)\(roomId)/" }
+
+    public static func kvKey(roomId: String, agentId: String) -> String { kvPrefix(roomId: roomId) + agentId }
+
+    static func open(_ base64: String, machineKey: Data) -> AgentRoomSeat? {
+        var seat = AccountScopedBlob.open(base64, kind: .agentRoom, machineKey: machineKey).flatMap(AgentRoomSeat.init(json:))
+        seat?.sealed = base64
+        return seat
+    }
+}

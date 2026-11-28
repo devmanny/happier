@@ -57,6 +57,12 @@ import {
 } from './connectedServices/refresh/bridgeRefreshFailureContract';
 import { TrackedSession } from './types';
 import {
+  MessageSearchSetRequestV1Schema,
+  MessageSearchStatusV1Schema,
+  type MessageSearchSetRequestV1,
+  type MessageSearchStatusV1,
+} from '@happier-dev/protocol';
+import {
   StopSessionResultSchema,
   type StopSessionResult,
 } from './sessions/stopSessionContract';
@@ -337,6 +343,11 @@ function resolveDaemonControlBodyLimitBytes(): number {
   return Math.max(1024 * 1024, Math.min(parsed, 64 * 1024 * 1024));
 }
 
+export type DaemonMessageSearchControl = Readonly<{
+  status: () => Promise<MessageSearchStatusV1 | null>;
+  set: (request: MessageSearchSetRequestV1) => Promise<MessageSearchStatusV1 | null>;
+}>;
+
 export function createDaemonControlApp({
   getChildren,
   machineId,
@@ -369,6 +380,7 @@ export function createDaemonControlApp({
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
+  messageSearch,
 }: {
   getChildren: () => TrackedSession[];
   machineId: string;
@@ -469,6 +481,8 @@ export function createDaemonControlApp({
     failingAccessTokenFingerprint?: string | null;
   }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
   requestSelfRestart?: (request?: DaemonSelfRestartRequest) => Promise<unknown>;
+  /** Conversation search on this machine for `happier search`; null while the memory worker isn't up. */
+  messageSearch?: DaemonMessageSearchControl;
 }): FastifyInstance {
   void machineId;
   const normalizedRuntimeId = runtimeId.trim();
@@ -738,6 +752,34 @@ export function createDaemonControlApp({
       };
     }
     return await handleSessionRunnerStatusGet(request.body);
+  });
+
+  const messageSearchUnavailable = z.object({ ok: z.literal(false), errorCode: z.literal('message_search_unavailable') });
+  typed.post('/memory/message-search/status', {
+    schema: { response: { 200: MessageSearchStatusV1Schema, 401: authSchema401, 503: messageSearchUnavailable } },
+    preHandler: requireAuth,
+  }, async (_request, reply) => {
+    const status = await messageSearch?.status() ?? null;
+    if (!status) {
+      reply.code(503);
+      return { ok: false as const, errorCode: 'message_search_unavailable' as const };
+    }
+    return status;
+  });
+
+  typed.post('/memory/message-search/set', {
+    schema: {
+      body: MessageSearchSetRequestV1Schema,
+      response: { 200: MessageSearchStatusV1Schema, 401: authSchema401, 503: messageSearchUnavailable },
+    },
+    preHandler: requireAuth,
+  }, async (request, reply) => {
+    const status = await messageSearch?.set(request.body) ?? null;
+    if (!status) {
+      reply.code(503);
+      return { ok: false as const, errorCode: 'message_search_unavailable' as const };
+    }
+    return status;
   });
 
   // Session reports itself after creation
@@ -2230,6 +2272,7 @@ export function startDaemonControlServer({
   runtimeAuthRecoveryScheduler,
   isShuttingDown,
   requestSelfRestart,
+  messageSearch,
 }: {
   getChildren: () => TrackedSession[];
   machineId: string;
@@ -2322,6 +2365,8 @@ export function startDaemonControlServer({
     failingAccessTokenFingerprint?: string | null;
   }>) => Promise<ClaudeSubscriptionAuthTokensRefreshResponse>;
   requestSelfRestart?: (request?: DaemonSelfRestartRequest) => Promise<unknown>;
+  /** Conversation search on this machine for `happier search`; null while the memory worker isn't up. */
+  messageSearch?: DaemonMessageSearchControl;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = createDaemonControlApp({
@@ -2354,6 +2399,7 @@ export function startDaemonControlServer({
       runtimeAuthRecoveryScheduler,
       isShuttingDown,
       requestSelfRestart,
+      messageSearch,
     });
 
     app.listen({ port: 0, host: '127.0.0.1' }, (err, address) => {

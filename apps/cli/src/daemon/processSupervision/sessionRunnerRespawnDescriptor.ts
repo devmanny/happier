@@ -6,6 +6,8 @@ import { HAPPIER_SESSION_CONNECTED_SERVICE_MATERIALIZATION_IDENTITY_ENV_KEY } fr
 import { CODEX_APP_SERVER_TRANSPORT_ENV_KEY } from '@/backends/codex/appServer/daemon/codexAppServerDaemonTransport';
 import {
   AgentRuntimeDescriptorV1Schema,
+  parseAgentIdentityV1,
+  type AgentIdentityV1,
   BackendTargetRefSchema,
   ConnectedServiceMaterializationIdentityV1Schema,
   openAccountScopedBlobCiphertext,
@@ -49,6 +51,49 @@ const SealedRespawnEnvironmentVariablesSchema = z.object({
   format: z.literal('account_scoped_v1'),
   ciphertext: z.string().min(1).max(MAX_SEALED_RESPAWN_ENVIRONMENT_CIPHERTEXT_CHARS),
 }).strict();
+
+/**
+ * The user-defined agent the runner works as. Its name and description are user content, so it is
+ * persisted only sealed, exactly like the environment; descriptors written before it simply lack it.
+ */
+const SealedRespawnAgentIdentitySchema = SealedRespawnEnvironmentVariablesSchema;
+
+function sealRespawnAgentIdentity(params: Readonly<{
+  agentIdentity: AgentIdentityV1 | undefined;
+  encryptionMaterial?: RespawnDescriptorEncryptionMaterial;
+  randomBytes?: (length: number) => Uint8Array;
+}>): z.infer<typeof SealedRespawnAgentIdentitySchema> | undefined {
+  const agentIdentity = params.agentIdentity ? parseAgentIdentityV1(params.agentIdentity) : null;
+  if (!agentIdentity || !params.encryptionMaterial) return undefined;
+  return {
+    format: 'account_scoped_v1',
+    ciphertext: sealAccountScopedBlobCiphertext({
+      kind: 'session_respawn_environment',
+      material: resolveAccountScopedCryptoMaterial(params.encryptionMaterial),
+      payload: agentIdentity,
+      randomBytes: params.randomBytes ?? ((length) => new Uint8Array(nodeRandomBytes(length))),
+    }),
+  };
+}
+
+function openRespawnAgentIdentity(params: Readonly<{
+  sealedAgentIdentity: z.infer<typeof SealedRespawnAgentIdentitySchema>;
+  encryptionMaterial?: RespawnDescriptorEncryptionMaterial;
+}>): AgentIdentityV1 {
+  if (!params.encryptionMaterial) {
+    throw new Error('Encrypted respawn agent identity requires daemon credentials');
+  }
+  const opened = openAccountScopedBlobCiphertext({
+    kind: 'session_respawn_environment',
+    material: resolveAccountScopedCryptoMaterial(params.encryptionMaterial),
+    ciphertext: params.sealedAgentIdentity.ciphertext,
+  });
+  const agentIdentity = parseAgentIdentityV1(opened?.value);
+  if (!agentIdentity) {
+    throw new Error('Failed to decrypt respawn agent identity');
+  }
+  return agentIdentity;
+}
 
 function resolveAccountScopedCryptoMaterial(
   material: RespawnDescriptorEncryptionMaterial,
@@ -189,6 +234,7 @@ export const SessionRunnerRespawnDescriptorV1Schema = z
     sessionConfigOptionOverrides: z.unknown().optional(),
     environmentVariables: z.record(z.string(), z.string()).optional(),
     sealedEnvironmentVariables: SealedRespawnEnvironmentVariablesSchema.optional(),
+    sealedAgentIdentity: SealedRespawnAgentIdentitySchema.optional(),
     connectedServices: z.unknown().optional(),
     connectedServicesUpdatedAt: z.number().int().optional(),
     connectedServiceMaterializationIdentityV1: ConnectedServiceMaterializationIdentityV1Schema.optional(),
@@ -238,6 +284,11 @@ export function buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
     encryptionMaterial: options?.encryptionMaterial,
     randomBytes: options?.randomBytes,
   });
+  const sealedAgentIdentity = sealRespawnAgentIdentity({
+    agentIdentity: spawnOptions.agentIdentity,
+    encryptionMaterial: options?.encryptionMaterial,
+    randomBytes: options?.randomBytes,
+  });
 
   const descriptor: SessionRunnerRespawnDescriptorV1 = {
     version: 1,
@@ -262,6 +313,7 @@ export function buildSessionRunnerRespawnDescriptorV1FromSpawnOptions(
     ...(spawnOptions.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: spawnOptions.sessionConfigOptionOverrides } : {}),
     ...(safeEnvironmentVariables ? { environmentVariables: safeEnvironmentVariables } : {}),
     ...(sealedEnvironmentVariables ? { sealedEnvironmentVariables } : {}),
+    ...(sealedAgentIdentity ? { sealedAgentIdentity } : {}),
     ...(spawnOptions.connectedServices ? { connectedServices: spawnOptions.connectedServices } : {}),
     ...(typeof spawnOptions.connectedServicesUpdatedAt === 'number'
       ? { connectedServicesUpdatedAt: spawnOptions.connectedServicesUpdatedAt }
@@ -294,6 +346,12 @@ export function buildSpawnSessionOptionsFromRespawnDescriptorV1(
       encryptionMaterial: options?.encryptionMaterial,
     })
     : descriptor.environmentVariables;
+  const agentIdentity = descriptor.sealedAgentIdentity
+    ? openRespawnAgentIdentity({
+      sealedAgentIdentity: descriptor.sealedAgentIdentity,
+      encryptionMaterial: options?.encryptionMaterial,
+    })
+    : undefined;
 
   return {
     directory: descriptor.directory,
@@ -315,6 +373,7 @@ export function buildSpawnSessionOptionsFromRespawnDescriptorV1(
     ...(typeof descriptor.modelUpdatedAt === 'number' ? { modelUpdatedAt: descriptor.modelUpdatedAt } : {}),
     ...(descriptor.sessionConfigOptionOverrides ? { sessionConfigOptionOverrides: descriptor.sessionConfigOptionOverrides as any } : {}),
     ...(environmentVariables ? { environmentVariables } : {}),
+    ...(agentIdentity ? { agentIdentity } : {}),
     ...(descriptor.connectedServices ? { connectedServices: descriptor.connectedServices } : {}),
     ...(typeof descriptor.connectedServicesUpdatedAt === 'number'
       ? { connectedServicesUpdatedAt: descriptor.connectedServicesUpdatedAt }

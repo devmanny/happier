@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { mergeSessionMetadataForStartup } from './mergeSessionMetadataForStartup';
+import { mergeSessionMetadataForStartup, SessionAttachRuntimeIdentityConflictError } from './mergeSessionMetadataForStartup';
 
 describe('mergeSessionMetadataForStartup', () => {
     it('clears the MCP restart marker after startup applies the desired selection', () => {
@@ -103,6 +103,39 @@ describe('mergeSessionMetadataForStartup', () => {
         expect(merged.happyHomeDir).toBe('/Users/target/.happier');
         expect(merged.machineId).toBe('machine-target');
         expect(merged.hostPid).toBe(2);
+    });
+
+    it('refuses to attach a runtime for an Agent the Session no longer names', () => {
+        // Incident 2026-11-17: a Claude runner launched before a switch to Codex attached and served
+        // the Codex Session. The attach reads the Session's current view (a CAS retry re-reads it).
+        const attach = () => mergeSessionMetadataForStartup({
+            current: { path: '/workspace', flavor: 'codex', claudeSessionId: 'claude-1' } as any,
+            next: { path: '/workspace', flavor: 'claude', hostPid: 2 } as any,
+            nowMs: 1,
+            mode: 'attach',
+        });
+
+        expect(attach).toThrow(SessionAttachRuntimeIdentityConflictError);
+        expect(attach).toThrow(expect.objectContaining({ retryable: false }));
+    });
+
+    it('attaches a runtime for the Agent the Session names, and any Agent under an identity replacement', () => {
+        const sameAgent = mergeSessionMetadataForStartup({
+            current: { flavor: 'codex' } as any,
+            next: { flavor: 'codex', hostPid: 2 } as any,
+            nowMs: 1,
+            mode: 'attach',
+        });
+        const handoff = mergeSessionMetadataForStartup({
+            current: { flavor: 'codex' } as any,
+            next: { flavor: 'claude', hostPid: 2 } as any,
+            nowMs: 1,
+            mode: 'attach',
+            attachMetadataIdentityPolicy: 'replace_with_runtime_identity',
+        });
+
+        expect(sameAgent.flavor).toBe('codex');
+        expect(handoff.flavor).toBe('claude');
     });
 
     it('drops workspace identity fields from metadata when attaching', () => {

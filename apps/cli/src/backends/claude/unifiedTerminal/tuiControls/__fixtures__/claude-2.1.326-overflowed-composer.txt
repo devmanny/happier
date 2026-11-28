@@ -1,0 +1,16 @@
+  The other side only still owes the reminder email, which goes out after the
+  conference once they confirm the date.
+
+✻ Baked for 1m 33s · done 5:19 PM
+
+─── ↑ 2 more ───────────────────────────────────────────────────────────────────
+  rules: read the owner's own outgoing messages in that chat first; voice notes:
+  download and transcribe with the local model; images: download and look at
+  them; if the partner asks for something, investigate or prepare it read-only
+  or as a draft and propose the reply; NEVER write or react to the partner, and
+  never email members, without the owner's explicit OK. Data: [{"timestamp":
+  1794957151, "body": "Did we already send them?", "type": "text",
+  "waMessageId": "false_100000000000001@lid_3A0000000000000000AA"}]
+────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

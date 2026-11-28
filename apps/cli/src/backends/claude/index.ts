@@ -107,6 +107,8 @@ export const agent = {
       targetStrict: input.targetStrict === true,
     }),
   getDirectSessionProviderOps: async () => (await import('@/backends/claude/directSessions/providerOps')).claudeDirectSessionProviderOps,
+  getSessionFileRestoreHandler: async () => (await import('@/backends/claude/fileRestore/restoreClaudeSessionFiles')).restoreClaudeSessionFiles,
+  getProviderNativeForkHandler: async () => (await import('@/backends/claude/fork/claudeProviderNativeForkHandler')).claudeProviderNativeForkHandler,
   onTerminalAttachmentRetired: async ({ happyHomeDir, sessionId, attachmentInfo }) => {
     const result = await (await import('./endpointRecovery/claudeEndpointArtifacts'))
       .retireClaudeEndpointArtifactsForTerminalAttachment({

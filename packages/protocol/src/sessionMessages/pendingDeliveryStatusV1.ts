@@ -131,6 +131,15 @@ export function isPendingDeliveryProviderEffectPossibleV1(status: PendingDeliver
     || status.reason === 'unknown';
 }
 
+/**
+ * Automatic delivery is FIFO, but a blocked row the agent may already have stops holding the rows
+ * behind it: they would otherwise wait on a decision only provider evidence or the row's owner can
+ * make. Every other queued row keeps its place ahead of later automatic deliveries.
+ */
+export function doesPendingDeliveryHoldLaterRowsV1(status: PendingDeliveryStatusV1): boolean {
+  return !(status.status === 'blocked' && isPendingDeliveryProviderEffectPossibleV1(status));
+}
+
 export function shouldExposePendingDeliveryInDiscardedHistoryV1(status: PendingDeliveryStatusV1): boolean {
   return status.status === 'discarded'
     && !pendingDeliveryHiddenDiscardedReasonsV1.has(status.reason ?? '');

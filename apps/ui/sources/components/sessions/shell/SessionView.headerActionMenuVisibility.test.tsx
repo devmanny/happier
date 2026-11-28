@@ -338,7 +338,7 @@ installSessionShellCommonModuleMocks({
     const getStorageStateForTest = () => ({
       sessions: { s1: sessionState.session },
       settings: {},
-      sessionListViewDataByServerId: {},
+      sessionListRenderables: {}, sessionListViewDataByServerId: {},
     });
     return createStorageModuleStub({
       storage: Object.assign(

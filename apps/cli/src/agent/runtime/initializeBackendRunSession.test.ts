@@ -4,6 +4,7 @@ import {
   createBackendRunRuntimeActivityLifecycle,
   initializeBackendRunSession,
 } from '@/agent/runtime/initializeBackendRunSession'
+import { SessionAttachRuntimeIdentityConflictError } from '@/agent/runtime/mergeSessionMetadataForStartup'
 import type { ApiSessionClient } from '@/api/session/sessionClient'
 import type { AgentState, Metadata, Session } from '@/api/types'
 import { createSessionRuntimeActivity } from '@/session/runtimeActivity/createSessionRuntimeActivity'
@@ -295,6 +296,71 @@ describe('initializeBackendRunSession', () => {
     expect(attachSnapshotMissing).toHaveLength(1)
   })
 
+  it('binds every client the runner serves its Session through to the runner\'s own Agent', async () => {
+    // The lifetime guard (`ApiSessionClient.bindRuntimeBackendTarget`) must never be off: not for an
+    // attach that could not read the Session's snapshot, not for a fresh Session, and not for a
+    // client an offline reconnection swaps in.
+    const metadata = { path: '/workspace', flavor: 'codex', hostPid: 2 } as unknown as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const codex = { kind: 'builtInAgent', agentId: 'codex' }
+    const sideEffects = {
+      primeAgentStateForUiFn: () => {},
+      reportSessionToDaemonIfRunningFn: async () => {},
+      persistTerminalAttachmentInfoIfNeededFn: async () => {},
+      sendTerminalFallbackMessageIfNeededFn: () => {},
+    }
+
+    const unreadAttach = createSessionStub({
+      ensureMetadataSnapshot: async () => {
+        throw new Error('unavailable')
+      },
+      bindRuntimeBackendTarget: vi.fn(),
+    })
+    await initializeBackendRunSession(
+      {
+        api: { getOrCreateSession: async () => null, sessionSyncClient: () => unreadAttach },
+        sessionTag: 'tag-unread-attach',
+        metadata,
+        state,
+        existingSessionId: 'session-unread',
+        uiLogPrefix: '[Codex]',
+        startupMetadataOverrides: { permissionModeOverride: null },
+      },
+      {
+        ...sideEffects,
+        createBaseSessionForAttachFn: async () => createSessionResponse('session-unread', metadata, state),
+      },
+    )
+    expect(unreadAttach.bindRuntimeBackendTarget).toHaveBeenCalledWith(codex)
+
+    const fresh = createSessionStub({ sessionId: 'fresh-session', bindRuntimeBackendTarget: vi.fn() })
+    const swapped = createSessionStub({ sessionId: 'swapped-session', bindRuntimeBackendTarget: vi.fn() })
+    let swapIn: ((next: ApiSessionClient) => Promise<void> | void) | undefined
+    await initializeBackendRunSession(
+      {
+        api: {
+          getOrCreateSession: async () => createSessionResponse('fresh-session', metadata, state),
+          sessionSyncClient: () => fresh,
+        },
+        sessionTag: 'tag-fresh',
+        metadata,
+        state,
+        uiLogPrefix: '[Codex]',
+        startupMetadataOverrides: { permissionModeOverride: null },
+      },
+      {
+        ...sideEffects,
+        setupOfflineReconnectionFn: (opts) => {
+          swapIn = opts.onSessionSwap
+          return { session: fresh, reconnectionHandle: null, isOffline: false }
+        },
+      },
+    )
+    expect(fresh.bindRuntimeBackendTarget).toHaveBeenCalledWith(codex)
+    await swapIn?.(swapped)
+    expect(swapped.bindRuntimeBackendTarget).toHaveBeenCalledWith(codex)
+  })
+
   it('reports merged authoritative attach metadata to the daemon for existing-session attaches', async () => {
     const metadata = {
       path: '/tmp/local-workspace',
@@ -360,6 +426,54 @@ describe('initializeBackendRunSession', () => {
     expect((reportedMetadata as Record<string, unknown> | null)?.workspaceLocationId).toBeUndefined()
     expect((reportedMetadata as Record<string, unknown> | null)?.workspaceCheckoutId).toBeUndefined()
     expect((reportedMetadata as any)?.acpSessionModesV1).toBeUndefined()
+  })
+
+  it('exits an attach for an Agent the Session no longer names before reporting it or taking its input', async () => {
+    vi.stubEnv('HAPPIER_DAEMON_PENDING_FIRST_INPUT', JSON.stringify({
+      text: 'Do not deliver me to the wrong Agent.',
+      localId: 'spawn-first:wrong-agent',
+    }))
+    const metadata = { path: '/workspace', flavor: 'claude', hostPid: 2 } as unknown as Metadata
+    const state = { controlledByUser: false } as AgentState
+    const enqueueSessionUserMessage = vi.fn(async () => {})
+    const reportSessionToDaemonIfRunningFn = vi.fn(async () => {})
+    const updateMetadata = vi.fn(async () => {})
+    const session = createSessionStub({
+      ensureMetadataSnapshot: async () => ({ path: '/workspace', flavor: 'codex' } as unknown as Metadata),
+      enqueueSessionUserMessage,
+      updateMetadata,
+    })
+
+    try {
+      await expect(initializeBackendRunSession(
+        {
+          api: {
+            getOrCreateSession: async () => null,
+            sessionSyncClient: () => session,
+          },
+          sessionTag: 'tag-attach-wrong-agent',
+          metadata,
+          state,
+          existingSessionId: 'session-switched-to-codex',
+          uiLogPrefix: '[Claude]',
+          startupMetadataOverrides: { permissionModeOverride: null },
+        },
+        {
+          createBaseSessionForAttachFn: async () =>
+            createSessionResponse('session-switched-to-codex', metadata, state),
+          primeAgentStateForUiFn: () => {},
+          reportSessionToDaemonIfRunningFn,
+          persistTerminalAttachmentInfoIfNeededFn: async () => {},
+          sendTerminalFallbackMessageIfNeededFn: () => {},
+        },
+      )).rejects.toBeInstanceOf(SessionAttachRuntimeIdentityConflictError)
+
+      expect(updateMetadata).not.toHaveBeenCalled()
+      expect(enqueueSessionUserMessage).not.toHaveBeenCalled()
+      expect(reportSessionToDaemonIfRunningFn).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('reports runtime machine identity to the daemon for handoff attaches', async () => {

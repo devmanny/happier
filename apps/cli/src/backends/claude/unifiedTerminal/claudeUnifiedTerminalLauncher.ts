@@ -2,7 +2,11 @@ import { createClaudeReadyHandler } from '../ready/createClaudeReadyHandler';
 import { createClaudePendingAwareInputConsumer } from '../createClaudePendingAwareInputConsumer';
 import { PendingQueueMaterializationAuthError } from '@/agent/runtime/sessionInput/SessionProviderInputConsumer';
 import type { EnhancedMode } from '../loop';
+import { basename } from 'node:path';
+
 import type { Session } from '../session';
+import { resolveClaudeSessionTranscriptPath } from '../utils/claudeCheckSession';
+import { recoverClaudeUnifiedInheritedPendingDeliveries } from './inheritedPendingDeliveryRecovery';
 import type { LauncherResult } from '../claudeLocalLauncher';
 import { createClaudeSessionTranscriptProjector } from '../localControl/createClaudeSessionTranscriptProjector';
 import { createClaudeWorkflowActivitySourceForSession } from '../workflows/createClaudeWorkflowActivitySourceForSession';
@@ -12,6 +16,7 @@ import type { NormalizedProviderUsageLimitDetailsV1 } from '../connectedServices
 import { adoptClaudePermissionModeFromMetadata } from '../utils/syncPermissionModeFromMetadata';
 import {
   isClaudeRuntimeAuthRecoveryContinuing,
+  recordClaudeRateLimitQuotaEvidence,
   surfaceClaudeRuntimeAuthFailure,
   surfaceClaudeRateLimitRuntimeIssue,
 } from '../connectedServices/surfaceClaudeRuntimeIssues';
@@ -221,6 +226,14 @@ function asStandaloneUnifiedMode(mode: EnhancedMode): EnhancedMode {
     ...mode,
     claudeUnifiedTerminalEnabled: true,
   };
+}
+
+/** The transcript of the Claude session this launch resumes: the one its predecessor wrote. */
+function resolveInheritedDeliveryTranscriptPath(session: Session, resumeSessionId: string | null): string | null {
+  if (!resumeSessionId) return null;
+  const reported = session.client.getMetadataSnapshot?.()?.claudeTranscriptPath;
+  const reportedForSession = typeof reported === 'string' && basename(reported) === `${resumeSessionId}.jsonl` ? reported : null;
+  return resolveClaudeSessionTranscriptPath(resumeSessionId, session.path, reportedForSession);
 }
 
 function readActiveUnifiedTerminalHost(session: Session): 'tmux' | 'zellij' | 'herdr' | null {
@@ -741,7 +754,7 @@ export async function claudeUnifiedTerminalLauncher(
   const noteStartupBatchLocalIds = (localIds: readonly string[] | null | undefined): void => {
     lastStartupBatchUserMessageLocalIds = normalizePendingDeliveryLocalIds(localIds);
   };
-  const pauseExhaustedRelaunchBatchRows = async (): Promise<boolean> => {
+  const pauseExhaustedRelaunchBatchRows = async (): Promise<Readonly<{ paused: boolean; localIdCount: number }>> => {
     // The failing batch lives in exactly one of three places at exhaustion time: parked (pulled
     // but not yet handed to a run), in-flight (handed to the failing run, not provider-accepted),
     // or already returned to its durable rows (tracked local ids from the last startup batch).
@@ -753,16 +766,27 @@ export async function claudeUnifiedTerminalLauncher(
           : lastStartupBatchUserMessageLocalIds,
     );
     const blockPendingMessageDelivery = session.client.blockPendingMessageDelivery?.bind(session.client);
-    if (localIds.length === 0 || !blockPendingMessageDelivery) return false;
+    if (localIds.length === 0 || !blockPendingMessageDelivery) return { paused: false, localIdCount: localIds.length };
     const blocked = await blockPendingMessageDelivery({ localIds, reason: 'terminal_host_unreachable' })
       .catch((error) => {
         logger.debug('[unified]: failed to pause poisoned pending rows after relaunch budget exhaustion (non-fatal)', error);
         return false;
       });
-    return blocked === true;
+    return { paused: blocked === true, localIdCount: localIds.length };
   };
   const parkAfterRelaunchBudgetExhausted = async (reason: string): Promise<boolean> => {
-    const paused = await pauseExhaustedRelaunchBatchRows();
+    const attempts = consecutiveParkRelaunches;
+    const { paused, localIdCount } = await pauseExhaustedRelaunchBatchRows();
+    // Always-on: this is the point where the runner stops retrying on its own, and before this
+    // entry it left no trace at the default session log level (live incident 2026-11-13).
+    logger.warnFile('[unified]: Claude unified terminal relaunch budget exhausted; not retrying automatically', {
+      reason,
+      attempts,
+      relaunchBudget: MAX_CONSECUTIVE_PARK_RELAUNCHES,
+      pendingRowsPaused: paused,
+      localIdCount,
+      outcome: paused ? 'parked_for_new_input' : 'runner_exit',
+    });
     if (!paused) {
       session.client.sendSessionEvent({
         type: 'message',
@@ -776,7 +800,11 @@ export async function claudeUnifiedTerminalLauncher(
     lastStartupBatchUserMessageLocalIds = [];
     session.client.sendSessionEvent({
       type: 'message',
-      message: `Claude unified terminal failed ${MAX_CONSECUTIVE_PARK_RELAUNCHES + 1} times in a row. Your queued message is paused (not lost) — send a new message or retry the paused one to relaunch the terminal.`,
+      // A readiness timeout keeps the same live terminal, so retrying the message re-adopts the
+      // terminal that never became ready; only a fresh terminal gets past it.
+      message: reason === 'readiness_timeout'
+        ? `Claude's terminal did not become ready after ${MAX_CONSECUTIVE_PARK_RELAUNCHES + 1} attempts. Your queued message is paused (not lost) — stop this session and resume it, then retry the paused message.`
+        : `Claude unified terminal failed ${MAX_CONSECUTIVE_PARK_RELAUNCHES + 1} times in a row. Your queued message is paused (not lost) — send a new message or retry the paused one to relaunch the terminal.`,
     });
     await flushUnifiedStartupFailureSurface(session, `${reason}_relaunch_budget_exhausted`);
     const batch = reason === 'host_dead'
@@ -793,7 +821,7 @@ export async function claudeUnifiedTerminalLauncher(
    * count.
    */
   const parkAfterProviderRefusedStart = async (refusal: ClaudeStartupRefusal): Promise<boolean> => {
-    const paused = await pauseExhaustedRelaunchBatchRows();
+    const { paused } = await pauseExhaustedRelaunchBatchRows();
     if (paused) {
       consecutiveParkRelaunches = 0;
       parkedMessage = null;
@@ -987,6 +1015,17 @@ export async function claudeUnifiedTerminalLauncher(
       statuslineForwarder: session.claudeStatuslineForwarder ?? undefined,
       happierMcpConfigJson: mcpConfigJson,
       systemPromptText: session.defaultSystemPromptText,
+      recoverInheritedPendingDeliveries: (input) => {
+        void recoverClaudeUnifiedInheritedPendingDeliveries({
+          client: session.client,
+          transcriptPath: resolveInheritedDeliveryTranscriptPath(session, resumeSessionId),
+          ...input,
+        }).catch((error: unknown) => {
+          logger.infoFile('[unified]: inherited uncertain delivery recovery failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      },
       // A parked message (post-runtime-issue relaunch) must drive the relaunch mode itself,
       // so initialMode stays undefined and the parked batch becomes the first message.
       initialMode: initialPromptPending || parkedMessage || !opts.initialMode
@@ -1067,6 +1106,9 @@ export async function claudeUnifiedTerminalLauncher(
         if (!providerInputOutcomes.observeAccepted({ userMessageLocalIds, appliedModelId })) {
           logger.debug('[unified]: ignored provider acceptance without one exact Queue localId outcome binding');
         }
+      },
+      onPromptSubmittedToProvider: ({ userMessageLocalIds }) => {
+        providerInputOutcomes.observeCustody({ userMessageLocalIds });
       },
       onPromptTerminallyRejectedBeforeProvider: ({ userMessageLocalIds, reason }) => {
         consecutiveParkRelaunches = 0;
@@ -1234,10 +1276,14 @@ export async function claudeUnifiedTerminalLauncher(
       onSessionFound: (sessionId, data) => {
         session.onSessionFound(sessionId, data);
       },
+      onTrustedMainTranscriptRow: (sessionId) => {
+        session.retryPendingSessionIdentityPublication(sessionId);
+      },
       onThinkingChange: (thinking) => {
         session.onThinkingChange(thinking);
       },
       onUsageLimitDetails: surfaceRateLimit,
+      onQuotaEvidence: (windows) => recordClaudeRateLimitQuotaEvidence(session, windows, '[unified-terminal]'),
       onRuntimeAuthFailureEvent: async (error) => {
         try {
           const surfaced = await surfaceClaudeRuntimeAuthFailure(session, error, '[unified]');
@@ -1371,10 +1417,27 @@ export async function claudeUnifiedTerminalLauncher(
           // be alive and progressing while screen capture is unavailable (incidents cmrhn5/cmrraa).
           // Preserve the exact attachment and retry adoption in this SAME wrapper; exiting here would
           // publish session death while leaving Claude alive in an orphan terminal host.
-          restoreInFlightStartupMessageAfterHostStartupFailure();
+          const relaunchBudget = consumeParkRelaunchBudget();
+          // Always-on, and free of screen or message text: the reason is a blocker name only.
+          logger.warnFile('[unified]: Claude unified terminal startup readiness timed out', {
+            attempt: consecutiveParkRelaunches,
+            relaunchBudget: MAX_CONSECUTIVE_PARK_RELAUNCHES,
+            willRelaunch: relaunchBudget === 'within_budget',
+            hostKind: error.handle.kind,
+            timeoutMs: error.timeoutMs,
+            elapsedMs: error.diagnostics?.elapsedMs ?? null,
+            hostAlive: error.diagnostics?.hostAlive ?? null,
+            sessionStartObserved: error.diagnostics?.sessionStartObserved ?? null,
+            lastLivenessPaneAlive: error.diagnostics?.lastLivenessPaneAlive ?? null,
+            notReadyReason: error.diagnostics?.notReadyReason ?? null,
+          });
+          // Same custody order as the injection-failure branch below: on exhaustion the batch is
+          // paused as its durable row, never also re-queued locally where the park wait would
+          // immediately re-feed it (RC-RESUMEFLAP).
+          if (relaunchBudget === 'within_budget') restoreInFlightStartupMessageAfterHostStartupFailure();
           await surfaceTerminalRuntimeIssue(error);
           await flushUnifiedStartupFailureSurface(session, 'readiness_timeout');
-          if (consumeParkRelaunchBudget() === 'within_budget') continue;
+          if (relaunchBudget === 'within_budget') continue;
           if (await parkAfterRelaunchBudgetExhausted('readiness_timeout')) continue;
           return { type: 'exit', code: 1 };
         }

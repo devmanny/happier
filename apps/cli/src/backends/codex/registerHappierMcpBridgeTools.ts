@@ -1,4 +1,7 @@
+import { getEquivalentActionIdForBuiltInTool } from '@/agent/tools/happierTools/actionToolCatalog';
+import { projectContextualActionToolInputSchema } from '@/agent/tools/happierTools/contextualActionToolInput';
 import { listBuiltInHappierTools } from '@/agent/tools/happierTools/listBuiltInHappierTools';
+import { DEVICE_BROWSER_MCP_TOOLS } from '@/mcp/deviceBrowser/registerDeviceBrowserMcpTools';
 
 type ToolRegistrar = Readonly<{
   registerTool: (name: string, definition: any, handler: (args: any, extra?: unknown) => Promise<any>) => void;
@@ -27,10 +30,21 @@ export function registerHappierMcpBridgeTools(
     const meta = {
       description: tool.description,
       title: tool.title,
-      inputSchema: tool.inputSchema,
+      // The session server fills current-session fields, so they must not be required here.
+      inputSchema: projectContextualActionToolInputSchema({
+        actionId: getEquivalentActionIdForBuiltInTool(tool.name),
+        inputSchema: tool.inputSchema,
+        context: { boundDownstream: true },
+      }),
       ...(tool.annotations === undefined ? {} : { annotations: tool.annotations }),
     };
 
     server.registerTool(tool.name, meta, forward(tool.name));
+  }
+
+  // The integrated browser tools run in the session MCP server; results (screenshots included)
+  // pass through unchanged. Without a machine or credentials that server reports the tool missing.
+  for (const tool of DEVICE_BROWSER_MCP_TOOLS) {
+    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema }, forward(tool.name));
   }
 }

@@ -11,6 +11,7 @@ import { buildTerminalControlCapture } from '../terminalHost/controlCapture';
 import { resolveTmuxSendKeysChunkSize } from './env';
 import type { TmuxCommandResult } from './types';
 import { parseTmuxCursorPosition } from './cursorPosition';
+import { auditTmuxEscapeKeySent } from './escapeKeyAudit';
 
 export type TmuxControlCommandExecutor = (
   args: readonly string[],
@@ -102,6 +103,7 @@ export function createTmuxTerminalControlPort(params: Readonly<{
       if (named === undefined) {
         return { status: 'unsupported', reason: 'special_key_unsupported' };
       }
+      if (key === 'Escape') auditTmuxEscapeKeySent('special_key');
       return outcomeToSendResult(await exec(['send-keys', '-t', target, named]));
     },
     async captureScreen(): Promise<TerminalControlCaptureResult> {

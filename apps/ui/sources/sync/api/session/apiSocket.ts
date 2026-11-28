@@ -475,7 +475,10 @@ class ApiSocket {
     // HTTP Requests
     //
 
-    async request(path: string, options?: RequestInit): Promise<Response> {
+    request(path: string, options?: RequestInit): Promise<Response>;
+    /** Consume the response body while HTTP cancellation and the initiating Home scope remain enforced. */
+    request<T>(path: string, options: RequestInit | undefined, consumeResponse: (response: Response) => Promise<T>): Promise<T>;
+    async request<T>(path: string, options?: RequestInit, consumeResponse?: (response: Response) => Promise<T>): Promise<Response | T> {
         if (!this.config) {
             throw new Error('SyncSocket not initialized');
         }
@@ -501,6 +504,34 @@ class ApiSocket {
         const hasSignal = Boolean(options?.signal);
         const headers = new Headers(options?.headers);
         headers.set('Authorization', `Bearer ${credentials.token}`);
+
+        const validateResponseScope = () => {
+            const current = getActiveServerSnapshot();
+            if (current.generation !== snapshot.generation || current.serverId !== snapshot.serverId) {
+                throw new StaleServerGenerationError();
+            }
+        };
+        const observeResponse = (response: Response) => {
+            validateResponseScope();
+            // Best-effort server time calibration using the HTTP Date header.
+            try {
+                const dateHeader = response.headers.get('date');
+                const serverNow = dateHeader ? Date.parse(dateHeader) : Number.NaN;
+                if (!Number.isNaN(serverNow)) observeServerTimestamp(serverNow);
+            } catch {
+                // Best-effort only
+            }
+        };
+
+        if (consumeResponse) {
+            // Body consumers own their complete read; they cannot share an in-flight Response.
+            return await serverFetch(url, { ...options, headers }, { includeAuth: false }, async (response) => {
+                observeResponse(response);
+                const result = await consumeResponse(response);
+                validateResponseScope();
+                return result;
+            });
+        }
 
         const canDedupe =
             (method === 'GET' || method === 'HEAD')
@@ -548,24 +579,7 @@ class ApiSocket {
             );
         }
 
-        const current = getActiveServerSnapshot();
-        if (current.generation !== snapshot.generation || current.serverId !== snapshot.serverId) {
-            throw new StaleServerGenerationError();
-        }
-
-        // Best-effort server time calibration using the HTTP Date header ("server now").
-        // This avoids deriving "now" from potentially stale resource timestamps (e.g. session.updatedAt).
-        try {
-            const dateHeader = response.headers.get('date');
-            if (dateHeader) {
-                const serverNow = Date.parse(dateHeader);
-                if (!Number.isNaN(serverNow)) {
-                    observeServerTimestamp(serverNow);
-                }
-            }
-        } catch {
-            // Best-effort only
-        }
+        observeResponse(response);
 
         return response;
     }

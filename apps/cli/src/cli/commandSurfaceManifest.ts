@@ -131,6 +131,10 @@ const COMMAND_SURFACE_MANIFEST: readonly CliCommandSurfaceEntry[] = [
     allowTmux: false,
   },
   {
+    command: 'diagnostics',
+    allowTmux: false,
+  },
+  {
     command: 'session',
     allowTmux: false,
     rootHelpLabel: 'happier session',
@@ -142,6 +146,13 @@ const COMMAND_SURFACE_MANIFEST: readonly CliCommandSurfaceEntry[] = [
     allowTmux: true,
     rootHelpLabel: RESUME_COMMAND_USAGE,
     rootHelpDescription: 'Resume an inactive session',
+  },
+  {
+    command: 'search',
+    rootHelpLabel: 'happier search',
+    rootHelpDescription: 'Turn conversation search on this machine on or off',
+    rootHelpDetail: 'enable | disable [--delete-index] | status',
+    allowTmux: false,
   },
   {
     // Compatibility alias: intentionally accepted but omitted from root help.

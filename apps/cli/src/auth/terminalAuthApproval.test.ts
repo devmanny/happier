@@ -5,6 +5,7 @@ import { deriveAccountMachineKeyFromRecoverySecret } from '@happier-dev/protocol
 
 import { reloadConfiguration } from '@/configuration';
 import { writeCredentialsDataKey, writeCredentialsLegacy, writeCredentialsTokenOnly } from '@/persistence';
+import { createAccountProfileFixture, createAccountTokenFixture } from '@/testkit/backends/accountFixtures';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir } from '@/testkit/fs/tempDir';
 import { installAxiosFastifyAdapter } from '@/testkit/http/axiosAdapter';
@@ -15,28 +16,10 @@ import { openTerminalProvisioningResponse } from './terminalProvisioningResponse
 const origin = 'http://happier-approval.test';
 const accountId = 'account-retained-credentials';
 const envScope = createEnvKeyScope(['HAPPIER_HOME_DIR', 'HAPPIER_SERVER_URL', 'HAPPIER_PUBLIC_SERVER_URL']);
-const tokenForAccount = (revision: number) =>
-  `header.${Buffer.from(JSON.stringify({ sub: accountId, revision })).toString('base64url')}.sig`;
+const tokenForAccount = (revision: number) => createAccountTokenFixture(accountId, { revision });
 const currentSecret = new Uint8Array(32).fill(12);
 const currentMachineKey = deriveAccountMachineKeyFromRecoverySecret(currentSecret);
-const currentContentPublicKey = tweetnacl.box.keyPair.fromSecretKey(currentMachineKey).publicKey;
-const signing = tweetnacl.sign.keyPair.fromSeed(currentSecret);
-const signedContentKey = Buffer.concat([
-  Buffer.from('Happy content key v1\u0000', 'utf8'),
-  Buffer.from(currentContentPublicKey),
-]);
-const profile = {
-  id: accountId,
-  firstName: 'Terminal',
-  lastName: null,
-  avatar: null,
-  username: 'terminal-approval',
-  bio: null,
-  status: 'none',
-  publicKey: Buffer.from(signing.publicKey).toString('hex'),
-  contentPublicKey: Buffer.from(currentContentPublicKey).toString('base64'),
-  contentPublicKeySig: Buffer.from(tweetnacl.sign.detached(signedContentKey, signing.secretKey)).toString('base64'),
-};
+const profile = createAccountProfileFixture({ accountId, signingSeed: currentSecret });
 
 afterEach(() => {
   envScope.restore();

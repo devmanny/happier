@@ -1,4 +1,5 @@
 import React, { useCallback } from 'react';
+import { useSessionArchivePending } from '@/hooks/session/useSessionArchivePending';
 import { View } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Typography } from '@/constants/Typography';
@@ -870,6 +871,7 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
         handleExitAfterSessionMutation();
     }, [handleExitAfterSessionMutation, hideInactiveSessions, sessionActionTarget]);
     const [archivingSession, performArchive] = useHappyAction(handleArchive);
+    const archivePending = useSessionArchivePending(session.id, scopedMutationServerId);
 
     // A launcher only, exactly like the Session header: strategy is chosen
     // before any fork effect is issued, from every UI entry point.
@@ -1220,13 +1222,14 @@ function SessionInfoContent({ session, sessionServerId, sourceMachineIdForHandof
                             {...stopInfoItemProps}
                             onPress={handleStopSession}
                             loading={stoppingSession}
+                            disabled={archivePending}
                         />
                     )}
                     {canArchiveSession && archiveInfoItemProps && (
                         <Item
                             {...archiveInfoItemProps}
                             onPress={handleArchiveSession}
-                            loading={archivingSession}
+                            loading={archivingSession || archivePending}
                         />
                     )}
                     {canDeleteSession && deleteInfoItemProps && (

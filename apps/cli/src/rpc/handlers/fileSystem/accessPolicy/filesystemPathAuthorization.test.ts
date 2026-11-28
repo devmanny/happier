@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -20,6 +20,84 @@ afterEach(() => {
     rmSync(path, { recursive: true, force: true });
   }
   createdPaths.clear();
+});
+
+describe.each(['sync', 'async'] as const)('filesystem symlink authorization (%s)', (mode) => {
+  it.each([false, true])('resolves parent segments after intermediate symlinks (target exists=%s)', async (targetExists) => {
+    const allowed = createTempRoot('happier-fs-policy-link-parent');
+    const outside = createTempRoot('happier-fs-policy-link-parent-external');
+    mkdirSync(join(outside, 'nested'));
+    if (targetExists) {
+      writeFileSync(join(outside, 'missing.md'), 'outside', 'utf8');
+      writeFileSync(join(allowed, 'missing.md'), 'inside decoy', 'utf8');
+    }
+    symlinkSync(join(outside, 'nested'), join(allowed, 'jump'), 'dir');
+    const link = join(allowed, 'entry.md');
+    symlinkSync('jump/../missing.md', link, 'file');
+    const input = {
+      targetPath: link,
+      defaultDirectory: allowed,
+      accessPolicy: { kind: 'restrictedRoots', roots: [allowed] } as const,
+    };
+    const result = mode === 'sync'
+      ? authorizeFilesystemPath(input)
+      : await (await prepareFilesystemPathAuthorizer(input))(link);
+    expect(result.valid).toBe(false);
+  });
+
+  it('allows a dangling relative link with a parent segment whose destination remains inside', async () => {
+    const allowed = createTempRoot('happier-fs-policy-link-inside');
+    mkdirSync(join(allowed, 'nested'));
+    const link = join(allowed, 'nested', 'entry.md');
+    symlinkSync('../missing.md', link, 'file');
+    const input = {
+      targetPath: link,
+      defaultDirectory: allowed,
+      accessPolicy: { kind: 'restrictedRoots', roots: [allowed] } as const,
+    };
+    const result = mode === 'sync'
+      ? authorizeFilesystemPath(input)
+      : await (await prepareFilesystemPathAuthorizer(input))(link);
+    expect(result.valid).toBe(true);
+  });
+
+  it.each([
+    { kind: 'file', outside: true },
+    { kind: 'file', outside: false },
+    { kind: 'dir', outside: true },
+    { kind: 'dir', outside: false },
+  ] as const)('resolves dangling $kind symlinks before authorizing (outside=$outside)', async ({ kind, outside }) => {
+    const allowed = createTempRoot('happier-fs-policy-dangling');
+    const external = createTempRoot('happier-fs-policy-external');
+    const link = join(allowed, 'link');
+    symlinkSync(join(outside ? external : allowed, 'missing'), link, kind);
+    const input = {
+      targetPath: kind === 'dir' ? join(link, 'nested', 'created.txt') : link,
+      defaultDirectory: allowed,
+      accessPolicy: { kind: 'restrictedRoots', roots: [allowed] } as const,
+    };
+    const result = mode === 'sync'
+      ? authorizeFilesystemPath(input)
+      : await (await prepareFilesystemPathAuthorizer(input))(input.targetPath);
+    expect(result.valid).toBe(!outside);
+  });
+
+  it('rejects symlink cycles', async () => {
+    const allowed = createTempRoot('happier-fs-policy-cycle');
+    const first = join(allowed, 'first');
+    const second = join(allowed, 'second');
+    symlinkSync(second, first, 'file');
+    symlinkSync(first, second, 'file');
+    const input = {
+      targetPath: first,
+      defaultDirectory: allowed,
+      accessPolicy: { kind: 'restrictedRoots', roots: [allowed] } as const,
+    };
+    const result = mode === 'sync'
+      ? authorizeFilesystemPath(input)
+      : await (await prepareFilesystemPathAuthorizer(input))(input.targetPath);
+    expect(result.valid).toBe(false);
+  });
 });
 
 describe('authorizeFilesystemPath', () => {

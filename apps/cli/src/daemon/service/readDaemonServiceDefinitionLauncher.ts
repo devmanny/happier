@@ -1,19 +1,22 @@
+import { splitDarwinDaemonLauncher } from './darwinDaemonLauncher';
 import type { DaemonServicePlatform } from './plan';
 
 /**
  * The program a service definition launches: every argument before the `daemon` subcommand, so the
  * shim form `[shim, daemon, start-sync]` and the node form `[node, entry.mjs, daemon, start-sync]`
- * each name the CLI they run. Parsed from the three templates this CLI renders
+ * each name the CLI they run. On darwin the stable launcher in front only execs that command, so it
+ * is not part of the CLI the service runs. Parsed from the three templates this CLI renders
  * (`@happier-dev/cli-common/service`); `null` when the definition is not one of them.
  */
 export function readDaemonServiceDefinitionLauncher(params: Readonly<{
   platform: DaemonServicePlatform;
   contents: string;
 }>): readonly string[] | null {
-  const args = readProgramArguments(params.platform, params.contents);
-  if (!args) {
+  const definitionArgs = readProgramArguments(params.platform, params.contents);
+  if (!definitionArgs) {
     return null;
   }
+  const args = params.platform === 'darwin' ? splitDarwinDaemonLauncher(definitionArgs).command : definitionArgs;
   const daemonIndex = args.indexOf('daemon');
   const launcher = daemonIndex >= 0 ? args.slice(0, daemonIndex) : args;
   return launcher.length > 0 ? launcher : null;

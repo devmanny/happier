@@ -137,6 +137,16 @@ describe('createSpawnedSession — Replay-seeded creation', () => {
     expect(archiveSessionByIdBestEffort).not.toHaveBeenCalled();
   });
 
+  it('records the session that asked for the replay-seeded child at creation', async () => {
+    getOrCreateSessionByTag.mockResolvedValue({ session: rawSession(CANONICAL_METADATA) });
+    spawnDaemonSession.mockResolvedValue({ success: true, sessionId: 'sess_child' });
+
+    await createSpawnedSession(replaySeededParams({ parentSessionId: 'sess_caller' }));
+
+    const creation = getOrCreateSessionByTag.mock.calls[0]![0] as { metadata: Record<string, unknown> };
+    expect(creation.metadata.spawnedBySessionV1).toEqual({ v: 1, parentSessionId: 'sess_caller', createdAtMs: expect.any(Number) });
+  });
+
   it('does not compose a media-continuity envelope this tree has no contract for', async () => {
     getOrCreateSessionByTag.mockResolvedValue({ session: rawSession(CANONICAL_METADATA) });
     spawnDaemonSession.mockResolvedValue({ success: true, sessionId: 'sess_child' });

@@ -6,6 +6,8 @@ import {
   type SessionContinuationInspectionV1,
   buildBackendTargetKey,
   SessionAgentTransitionSelectionV1Schema,
+  AGENT_IDENTITY_METADATA_KEY,
+  parseAgentIdentityV1,
   type BackendTargetRefV1,
 } from '@happier-dev/protocol';
 import {
@@ -15,6 +17,7 @@ import {
 } from '@happier-dev/agents';
 
 import { isAuthenticationError } from '@/api/client/httpStatusError';
+import { readSessionNativeEnvironment } from '@/agent/runtime/sessionNativeEnvironment';
 import { CATALOG_AGENT_IDS } from '@/backends/types';
 import { resolveConfiguredAcpBackendFromAccountSettings } from '@/agent/acp/catalog/configured/resolveConfiguredAcpBackendFromAccountSettings';
 import { materializeConfiguredAcpEnvironment } from '@/agent/acp/catalog/configured/materializeConfiguredAcpEnvironment';
@@ -123,6 +126,44 @@ export function resolveSessionContinuationTargetAgent(
   return { type: 'resolved', targetAgentId, backendTarget: { kind: 'builtInAgent', agentId: targetAgentId } };
 }
 
+/** Whether the selection names who the Session works as, not only which provider runs it. */
+export function selectionCarriesAgentIdentity(selection: SessionAgentTransitionSelectionV1): boolean {
+  return selection.agentIdentityV1 !== undefined || selection.environmentVariables !== undefined;
+}
+
+/**
+ * The selection's resulting provider environment: exactly what it carries, or
+ * nothing. Used for the cutover projection and the same-target comparison alike.
+ */
+export function readSelectionNativeEnvironment(
+  selection: SessionAgentTransitionSelectionV1,
+): Record<string, string> | undefined {
+  return readSessionNativeEnvironment(selection.environmentVariables);
+}
+
+/**
+ * Whether an identity-carrying selection leaves the Session the same agent: same
+ * user-defined agent (or none) and the same allowlisted provider environment as
+ * the committed metadata. A released-shape selection names only a provider, so
+ * it always keeps the identity. The backend target comparison stays separate.
+ */
+export function selectionKeepsSessionAgentIdentity(
+  selection: SessionAgentTransitionSelectionV1,
+  metadata: Readonly<Record<string, unknown>>,
+): boolean {
+  if (!selectionCarriesAgentIdentity(selection)) return true;
+  const currentIdentityId = parseAgentIdentityV1(metadata[AGENT_IDENTITY_METADATA_KEY])?.id ?? null;
+  const requestedIdentityId = selection.agentIdentityV1?.id ?? null;
+  if (currentIdentityId !== requestedIdentityId) return false;
+  const current = readSessionNativeEnvironment(metadata.nativeAgentEnvironmentV1) ?? {};
+  const requested = readSelectionNativeEnvironment(selection) ?? {};
+  const keys = new Set([...Object.keys(current), ...Object.keys(requested)]);
+  for (const key of keys) {
+    if ((current as Record<string, string | undefined>)[key] !== requested[key]) return false;
+  }
+  return true;
+}
+
 /**
  * The single decision about whether a portable selection can become this
  * machine's runtime target. Both the inspection RPC and the transition mutation
@@ -133,6 +174,8 @@ export function evaluateSessionContinuationTargetSupport(params: Readonly<{
   selection: SessionAgentTransitionSelectionV1;
   sourceAgentId: string;
   sourceBackendTarget?: BackendTargetRefV1;
+  /** The source's committed metadata; without it only the backend target is compared. */
+  sourceMetadata?: Readonly<Record<string, unknown>>;
   accountSettings?: Readonly<Record<string, unknown>> | null;
 }>): SessionContinuationTargetSupport {
   const resolved = resolveSessionContinuationTargetAgent(params.selection, params.accountSettings);
@@ -140,7 +183,10 @@ export function evaluateSessionContinuationTargetSupport(params: Readonly<{
     return { type: 'unsupported', code: 'target_unavailable' };
   }
   const sourceBackendTarget = params.sourceBackendTarget ?? { kind: 'builtInAgent', agentId: params.sourceAgentId };
-  if (buildBackendTargetKey(resolved.backendTarget) === buildBackendTargetKey(sourceBackendTarget)) {
+  if (
+    buildBackendTargetKey(resolved.backendTarget) === buildBackendTargetKey(sourceBackendTarget)
+    && selectionKeepsSessionAgentIdentity(params.selection, params.sourceMetadata ?? {})
+  ) {
     return { type: 'unsupported', code: 'same_target' };
   }
   return { type: 'supported', targetAgentId: resolved.targetAgentId };
@@ -162,7 +208,12 @@ export async function inspectSessionContinuation(params: Readonly<{
 }
 
 type SessionContinuationSource =
-  | Readonly<{ type: 'available'; sourceAgentId: string; sourceBackendTarget: BackendTargetRefV1 }>
+  | Readonly<{
+    type: 'available';
+    sourceAgentId: string;
+    sourceBackendTarget: BackendTargetRefV1;
+    sourceMetadata: Readonly<Record<string, unknown>>;
+  }>
   | Readonly<{ type: 'unavailable'; reason: 'unsupported_session' }>;
 
 async function loadSessionContinuationSource(params: Readonly<{
@@ -202,7 +253,7 @@ async function loadSessionContinuationSource(params: Readonly<{
     return { type: 'unavailable', reason: 'unsupported_session' };
   }
 
-  return { type: 'available', sourceAgentId, sourceBackendTarget: sourceIdentity.backendTarget };
+  return { type: 'available', sourceAgentId, sourceBackendTarget: sourceIdentity.backendTarget, sourceMetadata: record };
 }
 
 function inspectSessionContinuationSelection(params: Readonly<{
@@ -215,6 +266,7 @@ function inspectSessionContinuationSelection(params: Readonly<{
     selection: params.selection,
     sourceAgentId: params.source.sourceAgentId,
     sourceBackendTarget: params.source.sourceBackendTarget,
+    sourceMetadata: params.source.sourceMetadata,
   });
   if (support.type === 'unsupported' && support.code === 'target_unavailable') {
     return { type: 'unavailable', reason: 'target_unavailable' };

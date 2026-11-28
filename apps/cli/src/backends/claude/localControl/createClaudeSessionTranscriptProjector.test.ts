@@ -313,6 +313,26 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
     expect(fixture.getSessionEventCalls()).toEqual([]);
   });
 
+  it('does not project history Claude copied from another conversation when it forked this one', async () => {
+    const fixture = createSessionFixture();
+    const projector = createClaudeSessionTranscriptProjector({
+      session: fixture.session,
+      logPrefix: '[test]',
+    });
+    const timestamp = '2026-08-04T10:11:12.345Z';
+    const copied = {
+      ...buildAssistantRow({ uuid: 'copied-assistant', timestamp }),
+      forkedFrom: { sessionId: '7b1f0c2e-1111-4222-8333-944445555666', messageUuid: 'original-assistant' },
+    } as RawJSONLines;
+    const ownRow = buildAssistantRow({ uuid: 'own-assistant', timestamp });
+
+    await projector.observeCommitted(copied);
+    await projector.observeCommitted(ownRow);
+
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledTimes(1);
+    expect(fixture.session.client.sendClaudeSessionMessageCommitted).toHaveBeenCalledWith(ownRow, expect.anything());
+  });
+
   it('does not fabricate source chronology for historical rows without a provider timestamp', async () => {
     const fixture = createSessionFixture();
     const projector = createClaudeSessionTranscriptProjector({
@@ -426,7 +446,7 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
     });
     expect(fixture.getSessionEventCalls()).toEqual([
       {
-        event: { type: 'message', message: 'Model changed to claude-opus-4-8' },
+        event: { type: 'runtime-config-outcome', provider: 'claude', runtime: 'claude', status: 'applied', timing: 'current_window', message: 'Model changed to claude-opus-4-8', changes: [{ key: 'model', previous: 'claude-fable-5', effective: 'claude-opus-4-8' }] },
         id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
       },
     ]);
@@ -450,7 +470,7 @@ describe('createClaudeSessionTranscriptProjector model adoption', () => {
 
     expect(fixture.getSessionEventCalls()).toEqual([
       {
-        event: { type: 'message', message: 'Model changed to Opus 4.8' },
+        event: { type: 'runtime-config-outcome', provider: 'claude', runtime: 'claude', status: 'applied', timing: 'current_window', message: 'Model changed to Opus 4.8', changes: [{ key: 'model', previous: 'claude-fable-5', effective: 'claude-opus-4-8' }] },
         id: 'claude:model-changed:claude-fable-5:claude-opus-4-8',
       },
     ]);

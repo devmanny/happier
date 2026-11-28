@@ -11,6 +11,7 @@ import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { withTempDir } from '@/testkit/fs/tempDir';
 import { captureStderr, captureStdout, captureStdoutJsonOutput } from '@/testkit/logger/captureOutput';
 import type { DaemonLocallyPersistedState } from '@/persistence';
+import { resolveDaemonServiceDarwinLauncher } from './darwinDaemonLauncher';
 import { planDaemonServiceInstall, planDaemonServiceLifecycle } from './plan';
 const stopDaemonMock = vi.fn(async () => ({ status: 'stopped' as const, method: 'graceful' as const }));
 const restartDaemonAndWaitMock = vi.fn(async () => true);
@@ -1612,6 +1613,7 @@ describe('runDaemonServiceCliCommand', () => {
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       // The same service for the same relay, installed by the user's own npm `happier`.
       const userInstalledUnit = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'user',
         channel: runtime.channel,
@@ -1702,6 +1704,7 @@ describe('runDaemonServiceCliCommand', () => {
       expectedServiceLabel = paths.label;
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const expectedPlan = planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         mode: 'user',
         channel: runtime.channel,
@@ -1796,6 +1799,7 @@ describe('runDaemonServiceCliCommand', () => {
       expectedServiceLabel = paths.label;
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const expectedPlan = planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         mode: 'user',
         channel: runtime.channel,
@@ -1890,6 +1894,7 @@ describe('runDaemonServiceCliCommand', () => {
       expectedServiceLabel = paths.label;
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const expectedInstallPlan = planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         channel: runtime.channel,
         targetMode: runtime.targetMode,
@@ -2552,6 +2557,7 @@ describe('runDaemonServiceCliCommand', () => {
       });
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       writeFileSync(paths.installedPath, planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         channel: runtime.channel,
         targetMode: runtime.targetMode,
@@ -2633,6 +2639,7 @@ describe('runDaemonServiceCliCommand', () => {
       });
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const expectedInstallPlan = planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         channel: runtime.channel,
         targetMode: runtime.targetMode,
@@ -2929,6 +2936,7 @@ describe('runDaemonServiceCliCommand', () => {
       });
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const expectedInstallPlan = planDaemonServiceInstall({
+        darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
         platform: runtime.platform,
         channel: runtime.channel,
         targetMode: runtime.targetMode,
@@ -3162,6 +3170,7 @@ describe('runDaemonServiceCliCommand', () => {
       writeFileSync(
         paths.installedPath,
         planDaemonServiceInstall({
+          darwinLauncher: resolveDaemonServiceDarwinLauncher({ platform: runtime.platform, happierHomeDir: runtime.happierHomeDir }),
           platform: runtime.platform,
           mode: 'user',
           channel: runtime.channel,
@@ -3290,6 +3299,7 @@ describe('runDaemonServiceCliCommand', () => {
       const paths = resolveDaemonServicePaths(runtime);
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const userInstalledPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'user',
         channel: runtime.channel,
@@ -3356,6 +3366,7 @@ describe('runDaemonServiceCliCommand', () => {
       const paths = resolveDaemonServicePaths(runtime);
       mkdirSync(dirname(paths.installedPath), { recursive: true });
       const managedInstalledPlan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux',
         mode: 'user',
         channel: runtime.channel,

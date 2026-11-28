@@ -28,6 +28,7 @@ describe('service manager availability before mutation', () => {
     } }, async ({ homeDir }) => {
       await writeDaemonSettingsFixture(homeDir);
       const plan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux', uid: 123, userHomeDir: homeDir, happierHomeDir: homeDir,
         channel: 'stable', targetMode: 'default-following', instanceId: 'default',
         serverUrl: 'https://api.happier.dev', webappUrl: 'https://app.happier.dev', publicServerUrl: 'https://api.happier.dev',
@@ -79,6 +80,7 @@ describe('service manager availability before mutation', () => {
     } }, async ({ homeDir }) => {
       await writeDaemonSettingsFixture(homeDir);
       const plan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: 'linux', uid: 123, userHomeDir: homeDir, happierHomeDir: homeDir,
         channel: 'stable', targetMode: 'default-following', instanceId: 'default',
         serverUrl: 'https://api.happier.dev', webappUrl: 'https://app.happier.dev', publicServerUrl: 'https://api.happier.dev',
@@ -180,7 +182,7 @@ describe('service manager availability before mutation', () => {
         serverUrl: 'https://api.happier.dev', webappUrl: 'https://app.happier.dev', publicServerUrl: 'https://api.happier.dev',
         nodePath: process.execPath, entryPath: process.argv[1],
       } as const;
-      const existingPlan = planDaemonServiceInstall(options);
+      const existingPlan = planDaemonServiceInstall({ ...options, darwinLauncher: null });
       const definition = existingPlan.files[0]!;
       mkdirSync(dirname(definition.path), { recursive: true });
       writeFileSync(definition.path, definition.content, 'utf8');

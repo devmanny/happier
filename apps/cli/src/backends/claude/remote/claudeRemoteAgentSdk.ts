@@ -52,6 +52,7 @@ import { killProcessTree } from '@/agent/runtime/process/killProcessTree';
 import { createEventShapeLoggerForLog } from '@/diagnostics/eventShapeForLog';
 import { readTailTextFile } from '@/utils/fs/readTailTextFile';
 import { buildClaudeAgentSdkHooks } from './agentSdk/buildClaudeAgentSdkHooks';
+import { getSessionPresence, reportPresenceFailure } from '@/session/presence/startSessionPresence';
 import {
     normalizeClaudeProviderTaskEvent,
     readClaudeSessionHookProviderTaskActivity,
@@ -69,10 +70,11 @@ import {
 import { repairClaudeTranscriptAfterInterrupt } from './agentSdk/repairClaudeTranscriptAfterInterrupt';
 import { readNonBlankOpaqueIdentifier } from '@/utils/opaqueIdentifiers';
 import { parseCheckpointsCommand, parseRewindCommand } from './agentSdk/claudeAgentSdkSlashCommands';
+import { rewindClaudeFilesVerified } from '@/backends/claude/fileRestore/claudeRewindFiles';
 import {
     mapClaudeRateLimitEventToQuotaEvidence,
     readClaudeRateLimitEventWindows,
-    mapClaudeRateLimitEventToUsageDetails,
+    mapClaudeProviderFailureToUsageDetails,
     type NormalizedProviderUsageLimitDetailsV1,
 } from '../connectedServices/mapClaudeRateLimitEventToUsageDetails';
 import { classifyClaudeConnectedServiceRuntimeAuthFailure } from '../connectedServices/classifyClaudeConnectedServiceRuntimeAuthFailure';
@@ -130,6 +132,28 @@ function argsContainMcpConfigFlag(args?: string[] | null): boolean {
         if (typeof arg === 'string' && arg.startsWith('--mcp-config=')) return true;
     }
     return false;
+}
+
+/**
+ * How long a turn interrupt may wait for Claude to acknowledge it. Claude answers the interrupt
+ * control request on its own event loop over local stdio, normally within milliseconds; no answer
+ * in this time means that loop is blocked (observed: Claude Code 2.1.302 stuck in a synchronous
+ * file open for hours), and only ending the process stops the turn. The conversation is kept: the
+ * next message starts Claude again from its own transcript.
+ */
+const CLAUDE_INTERRUPT_ACK_TIMEOUT_MS = 10_000;
+
+/** Whether `operation` settled within `timeoutMs` (a rejection still propagates). */
+async function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation.then(() => true as const), timedOut]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 export async function claudeRemoteAgentSdk(opts: {
@@ -219,6 +243,7 @@ export async function claudeRemoteAgentSdk(opts: {
 
     // Test seam
     createQuery?: AgentSdkQueryFactory;
+    interruptAckTimeoutMs?: number;
     spawnClaudeCodeProcess?: ((options: AgentSdkSpawnOptions) => AgentSdkSpawnedProcess) | null;
 }): Promise<void> {
     const recordTraceMarker = (params: { kind: string; payload: Record<string, unknown> }) => {
@@ -513,12 +538,7 @@ export async function claudeRemoteAgentSdk(opts: {
 
     const resolveDesiredRuntimeSettingsSnapshot = (resolvedMode: EnhancedMode): RuntimeSettingsSnapshot => {
         const permissionMode = resolveClaudeSdkPermissionModeFromEnhancedMode(resolvedMode);
-        const model =
-            typeof argOverrides.model === 'string'
-                ? argOverrides.model
-                : typeof resolvedMode.model === 'string'
-                    ? resolvedMode.model
-                    : null;
+        const model = typeof resolvedMode.model === 'string' ? resolvedMode.model : null;
 
         const maxThinkingTokens =
             typeof resolvedMode.claudeRemoteMaxThinkingTokens === 'number' || resolvedMode.claudeRemoteMaxThinkingTokens === null
@@ -611,6 +631,9 @@ export async function claudeRemoteAgentSdk(opts: {
 	                activity,
 	            });
 	        },
+	        beforeFileEdit: async (filePath) =>
+	            await getSessionPresence(opts.happySessionId)?.beforeFileEdit(filePath)
+	                .catch((error: unknown) => { reportPresenceFailure('pre-edit check')(error); return null; }) ?? null,
 	        canCallTool: (toolName, input, resolvedMode, options) =>
 	            canCallToolWithModeTransitions(toolName, input, resolvedMode, {
 	                signal: options.signal,
@@ -627,7 +650,7 @@ export async function claudeRemoteAgentSdk(opts: {
     const createSyntheticUuid = () => `happier_synth_${process.pid}_${++syntheticUuidCounter}`;
 
     const resolvePreferredModelId = (): string | null => {
-        const candidate = argOverrides.model ?? mode.model;
+        const candidate = mode.model;
         return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null;
     };
 
@@ -693,7 +716,7 @@ export async function claudeRemoteAgentSdk(opts: {
             typeof opts.resumeSessionAt === 'string' && opts.resumeSessionAt.trim().length > 0
                 ? opts.resumeSessionAt.trim()
                 : null;
-        const effortModelId = argOverrides.model ?? mode.model;
+        const effortModelId = mode.model;
         const effortSupportedLevels = resolveModeEffortLevelsForModel(mode, effortModelId);
         const resolvedEffort = resolveClaudeEffortForModel({
             modelId: effortModelId,
@@ -710,7 +733,7 @@ export async function claudeRemoteAgentSdk(opts: {
         });
         const extraArgs = (() => {
             const out: Record<string, string | null> = Object.create(null);
-            if (enableFileCheckpointing) out['replay-user-messages'] = null;
+            out['replay-user-messages'] = null;
             if (debugEnabled) out.debug = debugCategories.length > 0 ? debugCategories.join(',') : null;
             if (verboseEnabled) out.verbose = null;
             if (resolvedUltracode) out.settings = buildClaudeUltracodeSettingsJson();
@@ -747,7 +770,7 @@ export async function claudeRemoteAgentSdk(opts: {
             permissionMode: mappedPermissionMode === 'default' ? null : mappedPermissionMode,
             allowDangerouslySkipPermissions: true,
             ...(resolvedEffort ? { effort: resolvedEffort } : {}),
-            model: argOverrides.model ?? mode.model,
+            model: mode.model,
             fallbackModel: argOverrides.fallbackModel ?? mode.fallbackModel,
             maxTurns: argOverrides.maxTurns,
             systemPrompt: buildSystemPrompt(),
@@ -1030,6 +1053,7 @@ export async function claudeRemoteAgentSdk(opts: {
         opts.setUserMessageSender?.((message: SDKUserMessage) => messages.push(message));
         messages.push({
             type: 'user',
+            uuid: promptSettlements.submit(initial),
             session_id: '',
             parent_tool_use_id: null,
             message: {
@@ -1037,12 +1061,22 @@ export async function claudeRemoteAgentSdk(opts: {
                 content: [{ type: 'text', text: initial.message }],
             },
         });
-        promptSettlements.accept(initial);
 
         let foregroundTaskInterruptId: string | null = null;
         let detachedTaskInterruptId: string | null = null;
         let foregroundTurnInterruptActive = true;
         let deferredInterruptedReason: string | null = null;
+
+        const interruptAckTimeoutMs = opts.interruptAckTimeoutMs ?? CLAUDE_INTERRUPT_ACK_TIMEOUT_MS;
+        /** Ends a Claude process that no longer answers (SIGTERM, then SIGKILL: `Query.close()`). */
+        const closeUnresponsiveClaude = (request: string): void => {
+            logger.warn(`[claudeRemoteAgentSdk] Claude did not acknowledge ${request} within ${interruptAckTimeoutMs}ms; closing the Claude process`);
+            try {
+                (response as any)?.close?.();
+            } catch {
+                // ignore: the process may already be gone
+            }
+        };
 
 	        const interruptTurn = async (): Promise<void> => {
                 let stopTaskSucceeded = false;
@@ -1056,8 +1090,11 @@ export async function claudeRemoteAgentSdk(opts: {
                             deferredInterruptedReason = deferredInterruptedReason ?? 'turn-interrupt';
                             awaitingRequestedTurnInterruptResult = true;
                             try {
-                                await stopTask.call(response, taskId);
-                                stopTaskSucceeded = true;
+                                if (await settlesWithin(stopTask.call(response, taskId), interruptAckTimeoutMs)) {
+                                    stopTaskSucceeded = true;
+                                } else {
+                                    closeUnresponsiveClaude('stopTask');
+                                }
                                 return;
                             } catch {
                                 awaitingRequestedTurnInterruptResult = false;
@@ -1071,7 +1108,9 @@ export async function claudeRemoteAgentSdk(opts: {
 	                    didRequestTurnInterrupt = true;
                         deferredInterruptedReason = deferredInterruptedReason ?? 'turn-interrupt';
 	                    awaitingRequestedTurnInterruptResult = true;
-	                    await interrupt.call(response);
+	                    if (!(await settlesWithin(interrupt.call(response), interruptAckTimeoutMs))) {
+                            closeUnresponsiveClaude('interrupt');
+                        }
 	                }
 	            } catch {
 	                awaitingRequestedTurnInterruptResult = false;
@@ -1539,10 +1578,9 @@ export async function claudeRemoteAgentSdk(opts: {
                             }
 
                             promptSettlements.accept(next);
-                            const result = await (response as any).rewindFiles?.(checkpointId, undefined);
-                            if (result && typeof result === 'object' && (result as any).canRewind === false) {
-                                const error = typeof (result as any).error === 'string' ? (result as any).error : 'Rewind failed';
-                                opts.onCompletionEvent?.(error);
+                            const rewind = await rewindClaudeFilesVerified(response, checkpointId);
+                            if (rewind.status !== 'ok') {
+                                opts.onCompletionEvent?.(rewind.reason);
                                 continue;
                             }
 
@@ -1598,7 +1636,11 @@ export async function claudeRemoteAgentSdk(opts: {
                                 didRequestTurnInterrupt = true;
                                 deferredInterruptedReason = deferredInterruptedReason ?? 'pending-interrupt-and-send';
                                 awaitingRequestedTurnInterruptResult = true;
-                                await interrupt.call(response);
+                                if (!(await settlesWithin(interrupt.call(response), interruptAckTimeoutMs))) {
+                                    // The prompt stays undelivered and queued for the next Claude.
+                                    closeUnresponsiveClaude('interrupt-and-send');
+                                    throw new Error('Claude did not acknowledge the interrupt');
+                                }
                                 cleanupBufferedAssistantMessages?.(null);
                                 await flushStreamedTranscriptWriter('abort', 'pending-interrupt-and-send');
                             } catch {
@@ -1615,6 +1657,7 @@ export async function claudeRemoteAgentSdk(opts: {
                         foregroundTurnInterruptActive = true;
                         messages.push({
                             type: 'user',
+                            uuid: promptSettlements.submit(next),
                             session_id: '',
                             parent_tool_use_id: null,
                             message: {
@@ -1622,7 +1665,6 @@ export async function claudeRemoteAgentSdk(opts: {
                                 content: [{ type: 'text', text: next.message }],
                             },
                         });
-                        promptSettlements.accept(next);
 
                         updateThinking(true);
                         opts.onInFlightSteerAvailabilityChange?.(true);
@@ -1765,6 +1807,7 @@ export async function claudeRemoteAgentSdk(opts: {
         }
 
         for await (const message of response as any) {
+            const isAcceptedPromptEcho = promptSettlements.observeProviderMessage(message);
             const inboundType = (() => {
                 if (!message || typeof message !== 'object') return 'unknown';
                 const raw = (message as any).type;
@@ -1800,7 +1843,7 @@ export async function claudeRemoteAgentSdk(opts: {
                 if (quotaEvidence.length > 0) {
                     await opts.onQuotaEvidence?.(quotaEvidence);
                 }
-                const rateLimitDetails = mapClaudeRateLimitEventToUsageDetails(message);
+                const rateLimitDetails = mapClaudeProviderFailureToUsageDetails(message);
                 if (rateLimitDetails) {
                     await opts.onRateLimitEvent?.(rateLimitDetails, readClaudeRateLimitEventWindows(message));
                 }
@@ -2108,7 +2151,9 @@ export async function claudeRemoteAgentSdk(opts: {
                     );
                 }
 
-                emitMessage(messageToEmit);
+                // Pending owns the visible user message; the native acknowledgment can
+                // contain provider-only replay context and must not become another message.
+                if (!isAcceptedPromptEcho) emitMessage(messageToEmit);
                 recordSeenToolBlocks(messageToEmit, seen);
 
                 if (

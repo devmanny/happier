@@ -9,6 +9,59 @@ import { AcpBackend } from '@/agent/acp/AcpBackend';
 import { getExecutionRunBackendFactory } from '@/agent/executionRuns/registry/executionRunBackendRegistry';
 
 describe.skipIf(process.platform === 'win32')('Kimi ACP backend', () => {
+  it('delivers a negotiated background result through the actual provider factory without another prompt', async () => {
+    await withTempDir('happier-kimi-autonomous-factory-', async dir => {
+      const command = writeKimiFixture(dir, 'current', { autonomousTurns: true });
+      const backend = createKimiBackend({ cwd: dir, env: { HAPPIER_KIMI_PATH: command } });
+      const events: AgentMessage[] = [];
+      backend.onMessage(event => events.push(event));
+      try {
+        await backend.startSession();
+        events.length = 0;
+        if (!(backend instanceof AcpBackend)) throw new Error('Expected shared ACP backend');
+        await backend.requestExtension('_test/autonomous-turn');
+        await expect.poll(() => events.some(event => event.type === 'status' && event.status === 'idle' && event.turnFinished)).toBe(true);
+        expect(events.filter(event => event.type === 'model-output')).toEqual([
+          expect.objectContaining({ textDelta: 'factory background result' }),
+        ]);
+      } finally { await backend.dispose(); }
+    });
+  });
+
+  it('carries Happier reasoning effort as Kimi thinking in both directions', async () => {
+    await withTempDir('happier-kimi-effort-', async (dir) => {
+      const command = writeKimiFixture(dir, 'current', { thinkingEfforts: true });
+      const backend = createKimiBackend({ cwd: dir, env: { HAPPIER_KIMI_PATH: command } });
+      const events: AgentMessage[] = [];
+      backend.onMessage((event) => events.push(event));
+      const advertisedEffort = () => events
+        .flatMap((event) => event.type === 'event'
+          && (event.name === 'config_options_state' || event.name === 'config_options_update')
+          ? [(event.payload as { configOptions: Array<{ id: string; currentValue: unknown }> }).configOptions]
+          : [])
+        .at(-1)
+        ?.find((option) => option.id === 'reasoning_effort');
+      try {
+        const { sessionId } = await backend.startSession();
+        expect(advertisedEffort()).toMatchObject({
+          currentValue: 'high',
+          options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        });
+        if (!(backend instanceof AcpBackend)) throw new Error('Expected shared ACP backend');
+        await backend.setSessionConfigOption(sessionId, 'reasoning_effort', 'max');
+        expect(advertisedEffort()).toMatchObject({ currentValue: 'max' });
+        // A client that already writes Kimi's own id keeps working.
+        await backend.setSessionConfigOption(sessionId, 'thinking', 'low');
+        expect(advertisedEffort()).toMatchObject({ currentValue: 'low' });
+      } finally { await backend.dispose(); }
+      const requests = readFileSync(join(dir, 'requests.ndjson'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(requests.filter((request) => request.method === 'session/set_config_option')).toEqual([
+        expect.objectContaining({ params: expect.objectContaining({ configId: 'thinking', value: 'max' }) }),
+        expect.objectContaining({ params: expect.objectContaining({ configId: 'thinking', value: 'low' }) }),
+      ]);
+    });
+  });
+
   it('classifies the executable then creates and resumes with plain acp and MCP', async () => {
     await withTempDir('happier-kimi-backend-', async (dir) => {
       const physicalDir = realpathSync(dir);

@@ -12,8 +12,9 @@ import {
 } from '@/sync/ops';
 import { sessionSetAttentionStandingWithServerScope } from '@/sync/ops/sessionOrganization';
 import {
-    clearSessionVisibleWhenInactive,
+    archiveSessionWithPendingState,
     isSessionActiveArchiveResult,
+    isSessionArchivePending,
     stopSessionAndMaybeArchive,
 } from '@/components/sessions/sessionStopArchiveFlow';
 
@@ -42,6 +43,7 @@ import type {
     SessionActionTarget,
 } from './sessionActionTypes';
 import { resolveSessionArchiveActionPolicy } from './sessionActionMetadata';
+import { resolveSessionArchiveServerId } from '@/sync/domains/session/listing/sessionArchiveState';
 
 function resolveStopArchiveFlow(context: SessionActionExecutionContext | undefined) {
     return context?.operations?.stopArchiveFlow ?? stopSessionAndMaybeArchive;
@@ -91,10 +93,6 @@ function resolveMoveToFolder(context: SessionActionExecutionContext | undefined)
     return context?.operations?.moveToFolder;
 }
 
-function resolveClearSessionVisibleWhenInactive(context: SessionActionExecutionContext | undefined) {
-    return context?.operations?.clearSessionVisibleWhenInactive ?? clearSessionVisibleWhenInactive;
-}
-
 function throwIfFailed(result: SessionActionOperationResult | void, fallbackMessage: string): void {
     if (!result || result.success) return;
     throw new HappyError(result.message || fallbackMessage, false);
@@ -108,17 +106,18 @@ async function runStopArchiveFlow(params: Readonly<{
     target: SessionActionTarget;
     context?: SessionActionExecutionContext;
     archiveAfterStop: 'always' | 'never';
-}>): Promise<void> {
+}>): Promise<void | false> {
     const stopArchiveFlow = resolveStopArchiveFlow(params.context);
     const stopSession = resolveStopSession(params.context);
     const archiveSession = resolveArchiveSession(params.context);
-    await stopArchiveFlow({
+    return await stopArchiveFlow({
         sessionId: params.target.sessionId,
+        serverId: params.target.serverId,
         hideInactiveSessions: params.context?.hideInactiveSessions === true,
         isPinned: params.target.isPinned,
         archiveAfterStop: params.archiveAfterStop,
         stopSession: async () => await stopSession(params.target.sessionId, { serverId: params.target.serverId }),
-        archiveSession: async () => await archiveSession(params.target.sessionId, { serverId: params.target.serverId }),
+        archiveSession: async (options) => await archiveSession(params.target.sessionId, { serverId: params.target.serverId, ...options }),
         stopErrorMessage: t('sessionInfo.failedToStopSession'),
         archiveErrorMessage: t('sessionInfo.failedToArchiveSession'),
     });
@@ -134,25 +133,29 @@ export async function confirmSessionStop(): Promise<boolean> {
 
 async function executeArchiveAction(target: SessionActionTarget, context?: SessionActionExecutionContext): Promise<void | false> {
     const archiveSession = resolveArchiveSession(context);
+    // An archive of this session is already in flight; a second one would race its lifecycle.
+    if (isSessionArchivePending(target.sessionId, target.serverId)) return false;
 
     if (target.isActive || target.hasStoppableTerminalHost) {
         if (!await confirmSessionStop()) return false;
-        await runStopArchiveFlow({ target, context, archiveAfterStop: 'always' });
-        return;
+        return await runStopArchiveFlow({ target, context, archiveAfterStop: 'always' });
     }
 
-    const result = await archiveSession(target.sessionId, { serverId: target.serverId });
+    const result = await archiveSessionWithPendingState(
+        target.sessionId,
+        async () => await archiveSession(target.sessionId, { serverId: target.serverId }),
+        target.serverId,
+    );
+    if (result === false) return false;
     if (!result.success) {
         if (isSessionActiveArchiveResult(result)) {
             // The server may know the session is active before this client does.
             // Waiving reversible archive confirmation never waives stopping it.
             if (!await confirmSessionStop()) return false;
-            await runStopArchiveFlow({ target, context, archiveAfterStop: 'always' });
-            return;
+            return await runStopArchiveFlow({ target, context, archiveAfterStop: 'always' });
         }
         throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
     }
-    resolveClearSessionVisibleWhenInactive(context)(target.sessionId);
 }
 
 export async function executeSessionAction(params: Readonly<{
@@ -161,6 +164,8 @@ export async function executeSessionAction(params: Readonly<{
     input?: SessionActionExecutionInput;
     context?: SessionActionExecutionContext;
 }>): Promise<void | false> {
+    const target = { ...params.target, serverId: resolveSessionArchiveServerId(params.target.serverId) };
+    params = { ...params, target };
     if (params.actionId === SESSION_ACTION_ARCHIVE_ID || params.actionId === SESSION_ACTION_UNARCHIVE_ID) {
         const policy = resolveSessionArchiveActionPolicy({
             actionId: params.actionId,

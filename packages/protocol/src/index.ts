@@ -42,6 +42,14 @@ export {
 } from './sessionMessages/pendingLocalId.js';
 
 export {
+  NOT_RECEIVED_PENDING_DELIVERY_EVENT_V1,
+  NotReceivedPendingDeliveryRequestV1Schema,
+  NotReceivedPendingDeliveryResponseV1Schema,
+  type NotReceivedPendingDeliveryRequestV1,
+  type NotReceivedPendingDeliveryResponseV1,
+} from './sessionMessages/notReceivedPendingDeliveryV1.js';
+
+export {
   ACCEPTED_PENDING_SETTLEMENT_EVENT_V1,
   AcceptedPendingSettlementRequestV1Schema,
   AcceptedPendingSettlementResponseV1Schema,
@@ -571,6 +579,7 @@ export {
   openProviderAccountUsageSnapshotCiphertext,
   projectProviderAccountUsageSnapshotToConnectedServiceQuotaSnapshotV1,
   projectProviderAccountUsageToConnectedServiceQuotaSnapshot,
+  isProviderAccountUsageOrganizationContextMatch,
   sealProviderAccountUsageSnapshotCiphertext,
   splitProviderAccountUsageSubscription,
   splitProviderAccountUsageSupplementalFacets,
@@ -582,6 +591,7 @@ export {
   type ProviderAccountUsageQuotaScopeV1,
   type ProviderAccountUsageRecordId,
   type ProviderAccountUsageRecordKeyV1,
+  type ProviderAccountUsageOrganizationContext,
   type ProviderAccountUsageSnapshotV1,
   type ProviderAccountUsageSourceV1,
   type ProviderAccountUsageStateV1,
@@ -750,6 +760,10 @@ export {
 
 export {
   buildConnectedServiceCredentialRecord,
+  buildConnectedServiceCredentialMetadata,
+  connectedServiceUsageRequiresOrganizationId,
+  readConnectedServiceCredentialOrganizationId,
+  type ConnectedServiceCredentialMetadata,
   normalizeConnectedServiceOauthCredentialRawMetadata,
   type ConnectedServiceOauthCredentialRawMetadata,
 } from './connect/buildConnectedServiceCredentialRecord.js';
@@ -820,6 +834,15 @@ export {
 } from './push/readyNotificationContent.js';
 
 export {
+  buildAssistantMessagePreview,
+  stripMarkdown,
+  truncatePlainTextAtWordBoundary,
+  type AssistantMessagePreview,
+} from './text/plainTextPreview.js';
+
+export { hasIncompleteOptions, parseOptionsFromText } from './text/agentResponseOptions.js';
+
+export {
   CODEX_BACKEND_MODES,
   normalizeCodexBackendMode,
   type CodexBackendMode,
@@ -877,6 +900,11 @@ export {
   normalizeClaudeTaskToolRecordsToWorkStateItems,
   normalizeClaudeTaskToolUseToWorkStateItem,
   normalizeClaudeSdkInitSkills,
+  normalizeClaudeOauthProfileEntitlement,
+  readClaudeOauthCredentialMetadata,
+  readClaudeOauthCredentialOrganizationId,
+  type ClaudeOauthCredentialMetadata,
+  type ClaudeOauthEntitlementMetadata,
   normalizeClaudeTaskEventToWorkStateItem,
   normalizeClaudeTodoWriteTodosToWorkStateItems,
   readClaudeAgentSdkProviderTaskStatus,
@@ -942,6 +970,7 @@ export {
   type PendingDeliveryBlockedReason,
 } from './sessionMessages/pendingDeliveryBlockedReason.js';
 export {
+  doesPendingDeliveryHoldLaterRowsV1,
   isPendingDeliveryProviderEffectPossibleV1,
   isPendingDeliveryStatusTransitionAllowedV1,
   PENDING_DELIVERY_HIDDEN_DISCARDED_REASONS_V1,
@@ -1432,6 +1461,17 @@ export {
   type SessionForkStrategy,
 } from './sessionFork.js';
 export {
+  SESSION_RESTORE_FILES_ERROR_CODES,
+  SessionRestoreFilesNotRestorableReasonCodeSchema,
+  SessionRestoreFilesRpcParamsSchema,
+  SessionRestoreFilesRpcResultSchema,
+  SessionRestoreFilesTargetSchema,
+  type SessionRestoreFilesNotRestorableReasonCode,
+  type SessionRestoreFilesRpcParams,
+  type SessionRestoreFilesRpcResult,
+  type SessionRestoreFilesTarget,
+} from './sessionRestoreFiles.js';
+export {
   SESSION_AGENT_TRANSITION_DIVIDER_LOCAL_ID_PREFIX,
   SESSION_AGENT_TRANSITION_DIVIDER_MESSAGE,
   SESSION_AGENT_TRANSITION_DIVIDER_SIDECAR_KEY,
@@ -1461,6 +1501,9 @@ export {
   SessionAgentTransitionRequestV1Schema,
   SessionAgentTransitionResultV1Schema,
   SessionAgentTransitionSelectionV1Schema,
+  SessionAgentTransitionEnvironmentVariablesV1Schema,
+  SESSION_AGENT_TRANSITION_ENV_VALUE_MAX_LENGTH,
+  type SessionAgentTransitionEnvironmentVariablesV1,
   SessionAgentTransitionPartialCodeV1Schema,
   SessionAgentTransitionSourceStoppedCodeV1Schema,
   SessionContinuationInspectionRequestV1Schema,
@@ -1784,6 +1827,9 @@ export {
   type SessionUsageLimitRecoveryOperationResultOkStatusV1,
   type SessionUsageLimitRecoveryOperationResultV1,
   type SessionUsageLimitRecoveryV1,
+  buildUsageLimitIssueFingerprint,
+  isSessionUsageLimitRecoveryForIssue,
+  readSessionUsageLimitRecoveryForIssue,
   type TurnTerminalStatusV1,
   type V2SessionByIdNotFound,
   type V2SessionByIdResponse,
@@ -2926,6 +2972,8 @@ export {
   type SessionSummaryShardV1,
 } from './structuredMessages/sessionSummaryShardV1.js';
 
+export { SessionMessageV1Schema, parseSessionMessageV1, type SessionMessageV1 } from './structuredMessages/sessionMessageV1.js';
+
 export {
   ParticipantRecipientV1Schema,
   ParticipantMessageV1Schema,
@@ -2965,6 +3013,14 @@ export {
   MemorySearchQueryV1Schema,
   MemorySearchResultV1Schema,
   MemorySearchScopeSchema,
+  MEMORY_SEARCH_V2_DEFAULT_LIMIT,
+  MEMORY_SEARCH_V2_MAX_LIMIT,
+  MemorySearchCoverageV2Schema,
+  MemorySearchHitV2Schema,
+  MemorySearchOrderV2Schema,
+  MemorySearchQueryV2Schema,
+  MemorySearchResultV2Schema,
+  MemorySearchSnippetSegmentV2Schema,
   type MemoryCitationV1,
   type MemorySearchErrorCode,
   type MemorySearchHitV1,
@@ -2972,7 +3028,23 @@ export {
   type MemorySearchQueryV1,
   type MemorySearchResultV1,
   type MemorySearchScope,
+  type MemorySearchCoverageV2,
+  type MemorySearchHitV2,
+  type MemorySearchOrderV2,
+  type MemorySearchQueryV2,
+  type MemorySearchResultV2,
+  type MemorySearchSnippetSegmentV2,
 } from './memory/memorySearch.js';
+
+export {
+  applyMessageSearchSwitch,
+  isMessageSearchEnabled,
+  MessageSearchSetRequestV1Schema,
+  MessageSearchStatusV1Schema,
+  messageSearchProgress,
+  type MessageSearchSetRequestV1,
+  type MessageSearchStatusV1,
+} from './memory/messageSearchSwitch.js';
 
 export {
   MemorySnippetV1Schema,
@@ -3659,7 +3731,6 @@ export {
   supportsConnectedServiceOperation,
   withConnectedServiceReaderSupport,
 } from './connect/connectedServiceReaderSupport.js';
-
 export {
   MACHINE_PLAIN_DATA_KEY_MARKER,
   encodePlainMachineStoredContent,
@@ -3679,3 +3750,193 @@ export {
 } from './machines/machineContentKeyTransitionV1.js';
 
 export { assertAccountKeyProvisioningAllowed, AccountKeyProvisioningUnavailableError, verifyAccountContentPublicKeyBinding, createAccountContentPublicKeyBindingMessage } from './auth/accountKeyProvisioning.js';
+
+export {
+  DEVICE_BROWSER_ERROR_CODES,
+  DEVICE_BROWSER_MAX_WAIT_MS,
+  DEVICE_BROWSER_RPC_SLOTS,
+  DeviceBrowserDeviceSchema,
+  DeviceBrowserFailureSchema,
+  DeviceBrowserRequestSchema,
+  DeviceBrowserResponseSchema,
+  DeviceBrowserSuccessSchema,
+  DeviceBrowserTabSchema,
+  deviceBrowserRpcMethod,
+  type DeviceBrowserDevice,
+  type DeviceBrowserErrorCode,
+  type DeviceBrowserFailure,
+  type DeviceBrowserOperation,
+  type DeviceBrowserRequest,
+  type DeviceBrowserResponse,
+  type DeviceBrowserRpcSlot,
+  type DeviceBrowserSuccess,
+  type DeviceBrowserTab,
+} from './deviceBrowser/deviceBrowserRpc.js';
+export {
+  AGENT_IDENTITY_ENV_KEY,
+  AGENT_IDENTITY_METADATA_KEY,
+  buildAgentIdentityMetadataV1,
+  AGENT_PROFILE_KV_PREFIX,
+  AgentIdentityV1Schema,
+  agentProfileKvKey,
+  buildAgentIdentityPromptTextV1,
+  legacyAgentProfileKvKey,
+  AgentProfileV1Schema,
+  agentIdentityFromProfile,
+  parseAgentProfileV1,
+  type AgentProfileV1,
+  parseAgentIdentityV1,
+  type AgentIdentityV1,
+} from './agentProfiles/agentIdentity.js';
+export {
+  AGENT_PHOTO_KV_PREFIX,
+  AgentPhotoV1Schema,
+  agentPhotoKvKey,
+  parseAgentPhotoV1,
+  type AgentPhotoV1,
+} from './agentProfiles/agentPhoto.js';
+export {
+  AGENT_PRESENCE_HEARTBEAT_MS,
+  AGENT_PRESENCE_KV_PREFIX,
+  AGENT_PRESENCE_STALE_AFTER_MS,
+  AgentPresenceV1Schema,
+  agentPresenceKvKey,
+  describePresenceConflict,
+  describePresenceHolder,
+  findPresenceConflicts,
+  isAgentPresenceLive,
+  parseAgentPresenceV1,
+  type AgentPresenceV1,
+  type PresenceConflict,
+} from './agentProfiles/agentPresence.js';
+export {
+  SESSION_NOTIFICATIONS_MUTED_METADATA_KEY,
+  isSessionNotificationsMuted,
+} from './sessionMetadata/sessionNotificationsMutedV1.js';
+export {
+  SESSION_REST_METADATA_KEY,
+  SessionRestReasonSchema,
+  SessionRestV1Schema,
+  type SessionRestReason,
+  type SessionRestV1,
+} from './sessionMetadata/sessionRestV1.js';
+export {
+  AgentJournalEntryV1Schema,
+  AgentNoteV1Schema,
+  AgentNowV1Schema,
+  agentJournalKvKey,
+  agentMemoryKvPrefix,
+  agentNoteKvKey,
+  agentNowKvKey,
+  buildOtherThreadsSummary,
+  describeAgo,
+  extractNoteLinks,
+  parseAgentMemoryKvKey,
+  parseAgentMemoryRecord,
+  searchAgentMemory,
+  type AgentJournalEntryV1,
+  type AgentMemoryKvKey,
+  type AgentMemoryRecord,
+  type AgentNoteV1,
+  type AgentNowV1,
+} from './agentProfiles/agentMemory.js';
+export {
+  AGENT_TASK_DUE_SOON_WINDOW_MS,
+  AGENT_TASK_KV_PREFIX,
+  AGENT_TASK_STATUSES,
+  AgentTaskV1Schema,
+  agentTaskKvKey,
+  agentTaskStatusLabel,
+  applyAgentTaskUpdate,
+  buildAgentTaskBoard,
+  describeTaskDue,
+  isAgentTaskOpen,
+  isAgentTaskWorkedBy,
+  parseAgentTaskV1,
+  taskDueNotices,
+  taskPermissionIntent,
+  taskSessionPermissionMode,
+  type AgentTaskActor,
+  type AgentTaskPermissionIntent,
+  type AgentTaskAssignee,
+  type AgentTaskDueNotice,
+  type AgentTaskSource,
+  type AgentTaskStatus,
+  type AgentTaskUpdate,
+  type AgentTaskV1,
+  type AgentTaskWorker,
+} from './tasks/agentTask.js';
+export {
+  TASK_OCCURRENCE_STATUSES,
+  TaskOccurrenceSchema,
+  TaskRecurrenceRuleSchema,
+  TaskRecurrenceV1Schema,
+  TaskScheduledStartV1Schema,
+  buildTaskOccurrencePrompt,
+  buildTaskStartPrompt,
+  decideScheduledStart,
+  decideTaskOccurrence,
+  scheduledStartCron,
+  type ScheduledStartDecision,
+  type TaskScheduledStartV1,
+  isRecurrenceOccurrenceDay,
+  recurrenceRuleCron,
+  type TaskOccurrence,
+  type TaskOccurrenceDecision,
+  type TaskRecurrenceRule,
+  type TaskRecurrenceV1,
+} from './tasks/agentTaskRecurrence.js';
+export {
+  AGENT_ROOM_KV_PREFIX,
+  AGENT_ROOM_MAX_SEQ,
+  AGENT_ROOM_MESSAGE_KV_PREFIX,
+  AGENT_ROOM_SEAT_KV_PREFIX,
+  AgentRoomMessageV1Schema,
+  AgentRoomSeatV1Schema,
+  AgentRoomV1Schema,
+  agentRoomKvKey,
+  agentRoomMessageKvKey,
+  agentRoomSeatKvKey,
+  agentRoomSeatsKvPrefix,
+  agentRoomUnreadRange,
+  appendRoomMessage,
+  formatRoomMessages,
+  parseAgentRoomKvKey,
+  parseAgentRoomMessageV1,
+  parseAgentRoomSeatV1,
+  parseAgentRoomV1,
+  resolveRoomMentions,
+  roomMessageAuthorLabel,
+  roomUserLabel,
+  type AgentRoomAuthor,
+  type AgentRoomMember,
+  type AgentRoomMessageDraft,
+  type AgentRoomMessageV1,
+  type AgentRoomSeatV1,
+  type AgentRoomV1,
+} from './rooms/agentRoom.js';
+export {
+  AGENT_ROOM_MAX_AGENT_TURNS,
+  ROOM_DELIVERY_FULL_MESSAGES,
+  ROOM_DELIVERY_LINE_CHARS,
+  ROOM_DELIVERY_LINE_MESSAGES,
+  buildRoomDeliveryPrompt,
+  decideRoomDelivery,
+  parseRoomDeliveryLocalId,
+  resolveRoomReply,
+  roomAgentStreak,
+  roomContinuationFromSeq,
+  roomDeliveryLocalId,
+  roomDeliveryQuotedSeqs,
+  roomMemberPermissionMode,
+  roomReplyNotices,
+  type RoomDeliveryContinuation,
+  type RoomDeliveryDecision,
+  type RoomReplyNotice,
+} from './rooms/agentRoomDelivery.js';
+export {
+  DEVICE_DIAGNOSTICS_KV_PREFIX,
+  DeviceDiagnosticV1Schema,
+  parseDeviceDiagnosticV1,
+  type DeviceDiagnosticV1,
+} from './diagnostics/deviceDiagnostics.js';

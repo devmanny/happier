@@ -33,7 +33,8 @@ import { openSessionForkStrategyFlow } from './openSessionForkStrategyFlow';
 const SESSION_ID = 'session-1';
 
 const FORK_SOURCE = {
-    metadata: { flavor: 'claude', machineId: 'machine-1', path: '/repo' },
+    // An Agent without a native fork, so Replay and Configure are the only routes.
+    metadata: { flavor: 'gemini', machineId: 'machine-1', path: '/repo' },
     metadataLayoutVersion: 1,
     ownerMetadataView: null,
     serverId: 'server-1',
@@ -93,7 +94,7 @@ describe('openSessionForkStrategyFlow source-context gate', () => {
         }));
     });
 
-    it('still opens for a Claude Session with Replay off, carrying the reason Native is closed', () => {
+    it('still opens with Replay off for an Agent without native fork, carrying the reason Native is closed', () => {
         // The shipped narrowing returned null here, so the header item, the info
         // row and the message button all deleted themselves and the user could
         // not reach any fork surface at all.

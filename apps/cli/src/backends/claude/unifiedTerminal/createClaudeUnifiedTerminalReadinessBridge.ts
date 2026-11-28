@@ -13,7 +13,7 @@ import type {
   ClaudeUnifiedTerminalScreenObservation,
 } from './_types';
 import {
-  isClaudeScreenReadyForInput,
+  resolveClaudeScreenInputReadinessBlocker,
   parseClaudeScreenState,
   type ClaudeScreenState,
 } from './tuiControls/screenState';
@@ -36,6 +36,11 @@ export type ClaudeUnifiedReadinessTimeoutDiagnostics = Readonly<{
   sessionStartObserved: boolean;
   lastLivenessPaneAlive: boolean | null;
   lastScreenTail: string | null;
+  /**
+   * What the last poll saw that kept readiness from passing: a probe outcome or the screen
+   * blocker's name. Never screen text, so it is safe on always-on log channels.
+   */
+  notReadyReason?: string | null;
 }>;
 
 export class ClaudeUnifiedTerminalReadinessTimeoutError extends Error {
@@ -108,8 +113,15 @@ function isInputStateReady(
   state: Readonly<{ stable: boolean }>,
   screen: ClaudeScreenState,
 ): boolean {
-  if (!state.stable) return false;
-  return isClaudeScreenReadyForInput(screen);
+  return resolveInputStateNotReadyReason(state, screen) === null;
+}
+
+function resolveInputStateNotReadyReason(
+  state: Readonly<{ stable: boolean }>,
+  screen: ClaudeScreenState,
+): string | null {
+  if (!state.stable) return 'screen_unstable';
+  return resolveClaudeScreenInputReadinessBlocker(screen);
 }
 
 export type ClaudeUnifiedStartupDialogResolution =
@@ -199,6 +211,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
     const startedAtMs = nowMs();
     let lastLivenessPaneAlive: boolean | null = null;
     let lastScreenText: string | null = null;
+    let lastNotReadyReason: string | null = null;
     let lastProgressAtMs = startedAtMs;
     let readinessPausedAtMs: number | null = null;
     let readinessPausedDurationMs = 0;
@@ -257,6 +270,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
           sessionStartObserved: hasHostAliveEvidence(),
           lastLivenessPaneAlive,
           lastScreenTail: sanitizeScreenTail(lastScreenText),
+          notReadyReason: lastNotReadyReason,
         },
       });
 
@@ -317,6 +331,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
       } catch (error: unknown) {
         // An unavailable observation does not resolve an outstanding human choice.
         if (isClaudeUnifiedTerminalReadinessTimeoutError(error)) throw error;
+        lastNotReadyReason = 'liveness_probe_failed';
         if (!(await continueAfterDelay())) return;
         continue;
       }
@@ -324,6 +339,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
       if (disposed || abortSignal.aborted) return;
       lastLivenessPaneAlive = liveness.paneAlive;
       if (!liveness.paneAlive) {
+        lastNotReadyReason = liveness.probeInconclusive ? 'liveness_probe_inconclusive' : 'pane_not_alive';
         if (!liveness.probeInconclusive) endHumanDialogWait();
         if (!(await continueAfterDelay())) return;
         continue;
@@ -336,6 +352,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
         } catch (error: unknown) {
           // Keep a confirmed human wait until a readable screen or definitive host death.
           if (isClaudeUnifiedTerminalReadinessTimeoutError(error)) throw error;
+          lastNotReadyReason = 'screen_capture_failed';
           if (!(await continueAfterDelay())) return;
           continue;
         }
@@ -348,6 +365,8 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
         const screenState = parseClaudeScreenState(inputState.currentInput, { cursor: inputState.cursor });
         opts.onScreenObserved?.({ screenState });
         recordScreenProgress(screenState.text);
+        lastNotReadyReason = resolveInputStateNotReadyReason(inputState, screenState)
+          ?? 'startup_ready_report_deferred';
         // A refusal is the provider's final answer for these launch arguments, printed before any
         // session exists. Readiness can never arrive, so fail now with the classified cause rather
         // than waiting out the window and reporting a timeout the launcher would then retry.
@@ -395,6 +414,7 @@ export function createClaudeUnifiedTerminalReadinessBridge(opts: Readonly<{
           if (readyResult === stopped) return;
           return;
         }
+        lastNotReadyReason = 'startup_ready_report_deferred';
         if (!(await continueAfterDelay())) return;
         continue;
       }

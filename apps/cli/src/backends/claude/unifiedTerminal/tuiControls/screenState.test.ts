@@ -8,6 +8,7 @@ import {
   isSafeWindowForSlashControl,
   parseClaudeScreenState,
   resolveClaudeScreenInFlightSteerVeto,
+  resolveClaudeScreenInputReadinessBlocker,
 } from './screenState';
 
 const CLAUDE_2_1_228_USAGE_LIMIT_DIALOG = [
@@ -301,6 +302,27 @@ describe('parseClaudeScreenState — generation and queued banners', () => {
     const state = parseClaudeScreenState(liveCapture);
     expect(state.generating).toBe(true);
     expect(isSafeWindowForSlashControl(state)).toBe(false);
+  });
+
+  // Claude Code 2.1.322 animates the spinner through `·✢✳✶✻✽` (`*` replaces `✳` off macOS) and the
+  // line carries no "esc to interrupt". Live session cmwd9winf25v7qh016b8qv8pi (13 Nov): two 50 ms
+  // apart captures both landed on the `✢` frame during a 2-minute Bash call, so the turn-stall probe
+  // read an idle prompt and settled a turn Claude was still running.
+  it.each(['·', '✢', '✳', '✶', '✻', '✽', '*'])('detects generation on the %s spinner frame', (frame) => {
+    const liveCapture = [
+      '⏺ Bash(find / -path "*c2f1dc80*" 2>/dev/null | head)',
+      '  ⎿  Running…',
+      '',
+      `${frame} Billowing… (1m 2s · ↓ 24.8k tokens)`,
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  Opus 5.5',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const state = parseClaudeScreenState(liveCapture);
+    expect(state.generating).toBe(true);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
   });
 
   it('does not mistake a completion line (no parens) for generation', () => {
@@ -1221,7 +1243,7 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
     ].join('\n')).unrecognizedConfirmationDialogVisible).toBe(false);
   });
 
-  it('lets direct cursor ownership of an empty composer override a selection-shaped transcript artifact', () => {
+  it('reads a selection-shaped transcript row above a rule-boxed composer as history, with or without cursor', () => {
     const screen = [
       'Assistant response:',
       '❯ 2. Payment: cash only',
@@ -1239,6 +1261,26 @@ describe('parseClaudeScreenState — unrecognized confirmation dialogs (P-B fail
 
     const cursorElsewhere = parseClaudeScreenState(screen, { cursor: { x: 2, y: 1 } });
     expect(cursorElsewhere.composerCursorRelation).toBeNull();
+    expect(cursorElsewhere.unrecognizedConfirmationDialogVisible).toBe(false);
+
+    const cursorUnavailable = parseClaudeScreenState(screen);
+    expect(cursorUnavailable.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(cursorUnavailable)).toBeNull();
+  });
+
+  it('still needs direct cursor ownership when the composer below the selection-shaped row is not rule-boxed', () => {
+    const screen = [
+      'Assistant response:',
+      '❯ 2. Payment: cash only',
+      '',
+      '❯',
+    ].join('\n');
+
+    const cursorOwned = parseClaudeScreenState(screen, { cursor: { x: 2, y: 3 } });
+    expect(cursorOwned.composerCursorRelation).toBe('at_content_start');
+    expect(cursorOwned.unrecognizedConfirmationDialogVisible).toBe(false);
+
+    const cursorElsewhere = parseClaudeScreenState(screen, { cursor: { x: 2, y: 1 } });
     expect(cursorElsewhere.unrecognizedConfirmationDialogVisible).toBe(true);
 
     const cursorUnavailable = parseClaudeScreenState(screen);
@@ -1358,6 +1400,23 @@ describe('parseClaudeScreenState — soft-wrapped composer draft (C11)', () => {
     ].join('\n'));
   });
 
+  it('reads a scrolled composer whose first visible row is a blank paragraph row as a draft', () => {
+    // Claude Code 2.1.322 in an 80x24 tmux pane scrolls a long expanded paste so the row next to
+    // `❯` is the blank line between paragraphs (incident cmwcg4h31). The text below it is still
+    // composer content: treating it as an empty composer hides a real draft.
+    const state = parseClaudeScreenState([
+      '────────────────────────────────────────────────',
+      '❯ ',
+      '  last paragraph of a long pasted prompt that',
+      '  wraps onto a second row',
+      '────────────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('\nlast paragraph of a long pasted prompt that\nwraps onto a second row');
+    expect(state.userDraftPresent).toBe(true);
+  });
+
   it('keeps blank paragraph rows inside a box-bordered composer', () => {
     const state = parseClaudeScreenState([
       '╭──────────────────────────────╮',
@@ -1384,6 +1443,153 @@ describe('parseClaudeScreenState — soft-wrapped composer draft (C11)', () => {
       '  ⏵⏵ bypass permissions on',
     ].join('\n'));
     expect(empty.composerContent).toBe('');
+  });
+});
+
+// Live capture 2026-11-13 (Claude Code under the unified terminal, tmux): a delivered message that
+// starts with `<digit>. ` sits in the composer as `❯ 1. …`. Reading that row as a numbered
+// selection option left the message typed but never submitted, behind an "unrecognized dialog"
+// notice. The composer is told apart by its rule box: a border directly above the `❯` row (no
+// heading/question in between) and a closing border below the draft.
+describe('parseClaudeScreenState — numbered draft in the rule-boxed composer', () => {
+  const RULE = '────────────────────────────────────────────────────────────────────────────────';
+  const LIVE_NUMBERED_DRAFT = [
+    '✻ Crunched for 13s · done 11:13 AM',
+    '',
+    RULE,
+    '❯ 1. Paso uno listo y me dijo que soy “manny” en minúsculas',
+    RULE,
+    '  Fable 5.2',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+
+  it.each([
+    ['without cursor evidence', undefined],
+    ['with the cursor after the draft', { cursor: { x: 60, y: 3 } }],
+  ])('reads the live numbered draft as the composer, not a dialog (%s)', (_label, context) => {
+    const state = parseClaudeScreenState(LIVE_NUMBERED_DRAFT, context);
+    expect(state.composerContent).toBe('1. Paso uno listo y me dijo que soy “manny” en minúsculas');
+    expect(state.userDraftPresent).toBe(true);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.unrecognizedConfirmationDialog).toBeNull();
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(state.inputBoxInteractive).toBe(true);
+    expect(state.modeMarker).toBe('bypassPermissions');
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
+  });
+
+  it('reads a multi-line numbered draft with its continuation rows', () => {
+    const state = parseClaudeScreenState([
+      '⏺ Done.',
+      '',
+      RULE,
+      '❯ 1. foo',
+      '  2. bar',
+      RULE,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    expect(state.composerContent).toBe('1. foo\n2. bar');
+    expect(state.userDraftPresent).toBe(true);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+  });
+
+  it('reads a numbered draft inside a box-bordered composer', () => {
+    const state = parseClaudeScreenState([
+      '╭──────────────────────────────╮',
+      '│ > 1. foo                     │',
+      '│   2. bar                     │',
+      '╰──────────────────────────────╯',
+      '  ? for shortcuts',
+    ].join('\n'));
+    expect(state.composerContent).toBe('1. foo\n2. bar');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+  });
+
+  it('still surfaces a numbered dialog rendered beneath a rule-boxed composer', () => {
+    const state = parseClaudeScreenState([
+      RULE,
+      '❯ 1. foo',
+      RULE,
+      '',
+      'Archive this conversation?',
+      '',
+      '❯ 1. Yes, archive',
+      '  2. No, go back',
+    ].join('\n'));
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
+  });
+
+  it.each([
+    ['a heading sits between the rule and the options', [RULE, '  What do you want to do?', '❯ 1. Stop and wait', '  2. Upgrade your plan', RULE]],
+    ['a blank row separates the rule from the options', [RULE, '', '❯ 1. Stop and wait', '  2. Upgrade your plan', RULE]],
+    ['no closing rule follows the options', ['Question', RULE, '❯ 1. Stop and wait', '  2. Upgrade your plan']],
+    ['a footer hint precedes the closing rule', [RULE, '❯ 1. Stop and wait', '  2. Upgrade your plan', 'Enter to confirm · Esc to cancel', RULE]],
+    ['the focused option is indented under the rule', [RULE, '  ❯ 1. Stop and wait', '    2. Upgrade your plan', RULE]],
+  ])('keeps a numbered selection failing closed when %s', (_label, lines) => {
+    const state = parseClaudeScreenState(lines.join('\n'));
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(true);
+    expect(state.composerContent).toBeNull();
+    expect(state.inputBoxInteractive).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(false);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('unrecognized_confirmation_dialog');
+  });
+});
+
+// Live capture 2026-11-13: once a message starting with `<digit>. ` is submitted, its transcript
+// echo (`❯ 1. …`) stays above the composer and kept reading as an unrecognized numbered dialog.
+// Claude dialogs REPLACE the composer (every real capture ends on the dialog), so numbered glyph
+// rows above a proven rule-boxed composer that is the bottom-most prompt glyph are history.
+describe('parseClaudeScreenState — numbered transcript echo above the rule-boxed composer', () => {
+  const RULE = '────────────────────────────────────────────────────────────────────────────────';
+  const FOOTER = ['  Fable 5.2', '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+  const screenWith = (echo: readonly string[], composer: readonly string[]) => [
+    ...echo,
+    '',
+    '⏺ (assistant output …)',
+    '',
+    '✻ Brewed for 2m 49s · done 3:24 PM',
+    '',
+    RULE,
+    ...composer,
+    RULE,
+    ...FOOTER,
+  ].join('\n');
+  const SINGLE_ECHO = ['❯ 1. Paso uno listo y me dijo que soy “manny” en minúsculas'];
+  const LIST_ECHO = ['❯ 1. foo', '  2. bar', '  3. baz'];
+
+  it.each([
+    ['no cursor evidence', undefined],
+    ['the cursor on the composer', { cursor: { x: 2, y: 7 } }],
+    ['the cursor on the echo row', { cursor: { x: 2, y: 0 } }],
+  ])('keeps the live echo screen ready for input with %s', (_label, context) => {
+    const state = parseClaudeScreenState(screenWith(SINGLE_ECHO, ['❯ ']), context);
+    expect(state.composerContent).toBe('');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.unrecognizedConfirmationDialog).toBeNull();
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBeNull();
+  });
+
+  it.each([
+    ['an empty composer', ['❯'], ''],
+    ['a single-line draft', ['❯ next message'], 'next message'],
+    ['a multi-line draft', ['❯ next message', '  second row'], 'next message\nsecond row'],
+    ['a numbered draft', ['❯ 1. uno', '  2. dos'], '1. uno\n2. dos'],
+  ])('reads a multi-row numbered echo as history above %s', (_label, composer, content) => {
+    const state = parseClaudeScreenState(screenWith(LIST_ECHO, composer));
+    expect(state.composerContent).toBe(content);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleNumberedDialog).toBeNull();
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(state.inputBoxInteractive).toBe(true);
   });
 });
 
@@ -1525,6 +1731,18 @@ describe('parseClaudeScreenState — bash mode prompt (2.1.301)', () => {
     expect(state.shellComposerContent).toBe('git status');
   });
 
+  it('keeps a bash-mode prompt scrolled past its "!" row a shell prompt (2.1.326)', () => {
+    const state = parseClaudeScreenState([
+      `─── ↑ 2 more ${'─'.repeat(35)}`,
+      '  tail of a long shell command',
+      RULE,
+      FOOTER,
+    ].join('\n'));
+    expect(state.shellComposerContent).toBe('tail of a long shell command');
+    expect(state.composerContent).toBeNull();
+    expect(state.inputBoxInteractive).toBe(false);
+  });
+
   it('is not a message composer: no readiness, control window or steering on a bash-mode prompt', () => {
     for (const screen of [STAGED, EMPTY]) {
       for (const context of [undefined, { cursor: { x: 2, y: 2 } }]) {
@@ -1559,5 +1777,322 @@ describe('parseClaudeScreenState — bash mode prompt (2.1.301)', () => {
     expect(isSafeWindowForSlashControl(state)).toBe(false);
     expect(isSafeWindowForModeCycle(state)).toBe(false);
     expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('no_interactive_composer');
+  });
+});
+
+// Claude Code 2.1.322 shows a "feedback draft" card above the composer after the model calls its
+// SendFeedback tool. Keystrokes still go to the composer, so the card never blocks input; it is
+// reported separately because a composer holding only `0`/`1`/`2` for ~400ms is consumed as a card
+// hotkey (2 = arm send, 2 again = send) and Escape on an empty composer dismisses it.
+const INCIDENT_2026_11_13_FEEDBACK_DRAFT_CARD = [
+  '✻ Cogitated for 3m 53s · done 7:55 PM',
+  '╭──────────────────────────────────────────────────────────────────────────────╮',
+  '│ ✻ Bug report drafted: Model edited marketing copy on its own judgment after… │',
+  '│ │ - **What happened:** While coordinating a site redesign, the model         │',
+  '│ │ proposed re-cutting a demo and relabeling it. The user declined ("this is  │',
+  '│ │ an idea... to bring…                                                       │',
+  '│ 1 to review · 2 to send · 0 to dismiss                                       │',
+  '╰──────────────────────────────────────────────────────────────────────────────╯',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '❯',
+].join('\n');
+
+function readFeedbackFixture(name: string): string {
+  return readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), 'utf8');
+}
+
+describe('Claude feedback draft card (2.1.322 SendFeedback)', () => {
+  it('reports the incident card as visible on a clean, ready composer — never a draft or dialog', () => {
+    const state = parseClaudeScreenState(INCIDENT_2026_11_13_FEEDBACK_DRAFT_CARD);
+
+    expect(state.feedbackDraftCardVisible).toBe(true);
+    expect(state.composerContent).toBe('');
+    expect(state.userDraftPresent).toBe(false);
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.selectionListVisible).toBe(false);
+    expect(isClaudeScreenReadyForInput(state)).toBe(true);
+  });
+
+  it('reports the live 2.1.322 card capture and its turn-off follow-up as visible', () => {
+    for (const fixture of [
+      'claude-2.1.322-feedback-draft-card.ansi',
+      'claude-2.1.322-feedback-draft-turnoff-prompt.ansi',
+    ]) {
+      const state = parseClaudeScreenState(readFeedbackFixture(fixture), { cursor: { x: 2, y: 21 } });
+      expect(state.feedbackDraftCardVisible, fixture).toBe(true);
+      expect(state.composerContent, fixture).toBe('');
+      expect(isClaudeScreenReadyForInput(state), fixture).toBe(true);
+    }
+  });
+
+  it('does not read the collapsed "· N feedback draft" footer as a card or a draft', () => {
+    const collapsed = parseClaudeScreenState(readFeedbackFixture('claude-2.1.322-feedback-draft-collapsed.ansi'), {
+      cursor: { x: 2, y: 21 },
+    });
+    expect(collapsed.feedbackDraftCardVisible).toBe(false);
+    expect(collapsed.composerContent).toBe('');
+    expect(collapsed.modeMarker).toBe('auto');
+    expect(isClaudeScreenReadyForInput(collapsed)).toBe(true);
+
+    // Incident pane after the card collapsed (bypass mode, background shell running).
+    const bypass = parseClaudeScreenState([
+      '✻ Churned for 2m 29s · done 9:38 PM · 1 shell still running',
+      '',
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  Fable 5.2',
+      '  ⏵⏵ bypass permissions on · 1 shell · 1 feedback draft',
+    ].join('\n'));
+    expect(bypass.feedbackDraftCardVisible).toBe(false);
+    expect(bypass.composerContent).toBe('');
+    expect(bypass.userDraftPresent).toBe(false);
+    expect(bypass.modeMarker).toBe('bypassPermissions');
+    expect(isClaudeScreenReadyForInput(bypass)).toBe(true);
+  });
+
+  it('ignores the card text when it only appears in transcript history above the composer', () => {
+    const state = parseClaudeScreenState([
+      '╭──────────────────────────────────────────╮',
+      '│ ✻ Bug report drafted: Old draft          │',
+      '│ 1 to review · 2 to send · 0 to dismiss   │',
+      '╰──────────────────────────────────────────╯',
+      '',
+      '⏺ The card above was dismissed earlier; continuing with the task.',
+      '',
+      '✻ Baked for 4s',
+      '',
+      '────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · 1 feedback draft',
+    ].join('\n'));
+    expect(state.feedbackDraftCardVisible).toBe(false);
+  });
+});
+
+describe('Claude "Esc again to clear" hint (2.1.322)', () => {
+  // Claude Code 2.1.322 binary: the first Escape on a non-empty prompt only arms a notification
+  // `{ key: "escape-again-to-clear", text: "Esc again to clear" }`; a second press within its
+  // 800 ms double-press window clears the prompt. On an empty prompt that same pair opens Rewind.
+  it('reports the footer hint while the draft stays in the composer', () => {
+    const state = parseClaudeScreenState([
+      '────────────────────────────────────────',
+      '❯ leftover prompt text',
+      '────────────────────────────────────────',
+      '  Esc again to clear',
+    ].join('\n'));
+
+    expect(state.escapeAgainToClearHintVisible).toBe(true);
+    expect(state.composerContent).toBe('leftover prompt text');
+  });
+
+  it('ignores the phrase in transcript history above the composer', () => {
+    const state = parseClaudeScreenState([
+      '⏺ Press Esc again to clear the prompt if you change your mind.',
+      '',
+      '────────────────────────────────────────',
+      '❯ leftover prompt text',
+      '────────────────────────────────────────',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.escapeAgainToClearHintVisible).toBe(false);
+  });
+});
+
+// Claude Code 2.1.326, tmux 80x24 (incidents cmw9mfl85 and cmw2rrigh, 17 nov 2026): a prompt taller
+// than the composer window scrolls, and the box rules carry the hidden-row counts: `─── ↑ N more ───`
+// on top, `─── ↓ N more ───` below when the cursor is above the end. The first row, the one with
+// `❯`, is out of the window. Reading that box as "no composer" left a delivered prompt typed but
+// never submitted, and blocked every later delivery and startup readiness behind it.
+describe('parseClaudeScreenState — composer scrolled past its prompt row (2.1.326)', () => {
+  const RULE = '─'.repeat(80);
+  const LIVE_OVERFLOWED_COMPOSER = readFileSync(
+    new URL('./__fixtures__/claude-2.1.326-overflowed-composer.txt', import.meta.url),
+    'utf8',
+  );
+  const VISIBLE_DRAFT = [
+    "rules: read the owner's own outgoing messages in that chat first; voice notes:",
+    'download and transcribe with the local model; images: download and look at',
+    'them; if the partner asks for something, investigate or prepare it read-only',
+    'or as a draft and propose the reply; NEVER write or react to the partner, and',
+    "never email members, without the owner's explicit OK. Data: [{\"timestamp\":",
+    '1794957151, "body": "Did we already send them?", "type": "text",',
+    '"waMessageId": "false_100000000000001@lid_3A0000000000000000AA"}]',
+  ].join('\n');
+
+  it('reads the visible rows of the live overflowed composer as its draft', () => {
+    const state = parseClaudeScreenState(LIVE_OVERFLOWED_COMPOSER);
+
+    expect(state.composerContent).toBe(VISIBLE_DRAFT);
+    expect(state.userDraftPresent).toBe(true);
+    expect(state.inputBoxInteractive).toBe(true);
+    expect(state.modeMarker).toBe('bypassPermissions');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.selectionListVisible).toBe(false);
+    expect(resolveClaudeScreenInputReadinessBlocker(state)).toBe('user_draft');
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe('user_draft');
+  });
+
+  it('reads a composer scrolled from both ends, and a history label before the count', () => {
+    const state = parseClaudeScreenState([
+      '✻ Baked for 4s · done 5:19 PM',
+      '',
+      `─── History 3/12 · ↑ 2 more ${'─'.repeat(52)}`,
+      '  middle row of a recalled prompt',
+      '  another middle row',
+      `─── ↓ 1 more ${'─'.repeat(67)}`,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('middle row of a recalled prompt\nanother middle row');
+    expect(state.userDraftPresent).toBe(true);
+    expect(resolveClaudeScreenInputReadinessBlocker(state)).toBe('user_draft');
+  });
+
+  it('proves the rule box when only the bottom rule counts hidden rows', () => {
+    // Cursor on the first row of a long draft: `❯` is visible and the rows below the window are
+    // counted in the bottom rule. A numbered first row is still the draft, not a dialog option.
+    const state = parseClaudeScreenState([
+      RULE,
+      '❯ 1. first step of the plan',
+      '  2. second step of the plan',
+      `─── ↓ 4 more ${'─'.repeat(67)}`,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('1. first step of the plan\n2. second step of the plan');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.inputBoxInteractive).toBe(true);
+  });
+
+  it('reads the overflowed box, not an older transcript echo above it', () => {
+    const state = parseClaudeScreenState([
+      '❯ an earlier prompt, already submitted',
+      '',
+      '⏺ Done.',
+      '',
+      `─── ↑ 5 more ${'─'.repeat(67)}`,
+      '  tail of the prompt that is still in the composer',
+      RULE,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('tail of the prompt that is still in the composer');
+  });
+
+  it('keeps numbered rows of the overflowed draft out of dialog detection', () => {
+    const state = parseClaudeScreenState([
+      `─── ↑ 1 more ${'─'.repeat(67)}`,
+      '  > 1. quoted first option',
+      '    2. quoted second option',
+      RULE,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(state.composerContent).toBe('> 1. quoted first option\n2. quoted second option');
+    expect(state.unrecognizedConfirmationDialogVisible).toBe(false);
+    expect(state.visibleDialogSelection).toBeNull();
+    expect(state.inputBoxInteractive).toBe(true);
+  });
+
+  it('stays fail-closed for scroll counts that are not a closed composer box', () => {
+    // A box cut off by the capture: no closing rule, so nothing proves the composer.
+    const cropped = parseClaudeScreenState([
+      '⏺ Done.',
+      `─── ↑ 3 more ${'─'.repeat(67)}`,
+      '  rows of a prompt whose box is cut off',
+    ].join('\n'));
+    expect(cropped.composerContent).toBeNull();
+    expect(resolveClaudeScreenInputReadinessBlocker(cropped)).toBe('no_interactive_composer');
+
+    // A live prompt row below the counted box owns input: the counted box is an older render.
+    const stale = parseClaudeScreenState([
+      `─── ↑ 3 more ${'─'.repeat(67)}`,
+      '  rows of an older render',
+      RULE,
+      '',
+      RULE,
+      '❯ the live draft',
+      RULE,
+    ].join('\n'));
+    expect(stale.composerContent).toBe('the live draft');
+
+    // A chooser's scroll hints are not composer rules.
+    const chooser = parseClaudeScreenState([
+      '   Select model',
+      '   ↑ 2 more',
+      '   ❯ Opus 5.5',
+      '     Fable 5.2',
+      '   ↓ 1 more',
+      '',
+      '   Enter to confirm · Esc to cancel',
+    ].join('\n'));
+    expect(chooser.composerContent).toBeNull();
+    expect(chooser.inputBoxInteractive).toBe(false);
+  });
+
+  it('leaves dialogs that replace the composer blocking', () => {
+    const state = parseClaudeScreenState([
+      `─── ↑ 3 more ${'─'.repeat(67)}`,
+      '  rows of a long prompt',
+      RULE,
+      '',
+      ' Bash command',
+      '   rm -rf build',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+    ].join('\n'));
+
+    expect(state.permissionPromptVisible).toBe(true);
+    expect(state.inputBoxInteractive).toBe(false);
+    expect(state.composerContent).toBeNull();
+    expect(resolveClaudeScreenInputReadinessBlocker(state)).toBe('permission_prompt');
+  });
+
+  // Debugging sessions quote pane captures with exactly these rules. Assistant text and user echoes
+  // are indented two columns; Claude renders the live composer's rules from column 0.
+  const QUOTED_COUNTED_BOX = [
+    '⏺ The pane looked like this:',
+    '',
+    `  ─── ↑ 3 more ${'─'.repeat(63)}`,
+    '    download and transcribe with the local model; images:',
+    '    download and look at them; if the partner asks for something',
+    `  ${'─'.repeat(78)}`,
+    '',
+  ];
+  const TRANSCRIPT_VIEW_FOOTER = '  Showing detailed transcript · ctrl+o to toggle';
+  const SHELL_PROMPT = 'manny@mini ~ % ';
+
+  function expectNoComposer(lines: readonly string[], blocker = 'no_interactive_composer'): void {
+    const state = parseClaudeScreenState(lines.join('\n'));
+    expect(state.composerContent).toBeNull();
+    expect(state.userDraftPresent).toBe(false);
+    expect(state.inputBoxInteractive).toBe(false);
+    expect(resolveClaudeScreenInputReadinessBlocker(state)).toBe(blocker);
+    expect(resolveClaudeScreenInFlightSteerVeto(state)).toBe(blocker);
+  }
+
+  it('never reads a counted box quoted in the transcript as the live composer', () => {
+    expectNoComposer(QUOTED_COUNTED_BOX);
+    expectNoComposer([...QUOTED_COUNTED_BOX, TRANSCRIPT_VIEW_FOOTER]);
+    expectNoComposer([...QUOTED_COUNTED_BOX, SHELL_PROMPT]);
+  });
+
+  it('never reads a column-0 counted box as the live composer when no composer footer follows it', () => {
+    const box = [
+      `─── ↑ 3 more ${'─'.repeat(67)}`,
+      '  download and transcribe with the local model; images:',
+      RULE,
+    ];
+    // Transcript view (ctrl+o) and a shell after Claude exited both replace the composer.
+    expectNoComposer([...box, '', TRANSCRIPT_VIEW_FOOTER]);
+    expectNoComposer([...box, SHELL_PROMPT]);
+    // A selection row below the box is a chooser, not composer footer: it stays a blocking dialog.
+    expectNoComposer([...box, '', '  ❯ cmw9 watcher', '    cmw2 other'], 'unrecognized_confirmation_dialog');
+    // The live composer's closing rule starts at column 0 like its top rule.
+    expectNoComposer([box[0]!, box[1]!, `  ${'─'.repeat(78)}`, '  ? for shortcuts']);
   });
 });

@@ -95,13 +95,21 @@ export function isClaudeUnifiedTerminalProviderAcceptanceTimeoutError(
     && (error as { recoverable?: unknown }).recoverable === true;
 }
 
+/**
+ * Enter was pressed but the submit could not be confirmed, and nothing else owns the uncertainty:
+ * surfaced as a failed turn. A lost host stays here regardless of rows. An unverified screen with
+ * rows still in Pending custody is left to the ambiguous path instead, which marks those rows
+ * "not sure it reached the agent" (Pending blocked incident, 2026-11-16: the prompt may have
+ * reached Claude, yet a failed turn was allocated).
+ */
 export function isClaudeUnifiedTerminalUnconfirmedSubmitFailureError(
   error: unknown,
 ): error is ClaudeUnifiedTerminalInjectionFailureError {
+  const reason = (error as { reason?: unknown } | null)?.reason;
   return isClaudeUnifiedTerminalInjectionFailureError(error)
     && (error as { failureState?: unknown }).failureState === 'failed_ambiguous'
-    && ((error as { reason?: unknown }).reason === 'host_unreachable'
-      || (error as { reason?: unknown }).reason === 'verification_failed')
+    && (reason === 'host_unreachable'
+      || (reason === 'verification_failed' && !hasUserMessageLocalIds(error)))
     && (error as { phase?: unknown }).phase === 'after_enter_unknown';
 }
 

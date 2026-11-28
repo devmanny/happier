@@ -1,8 +1,11 @@
 import { randomUUID } from '@/platform/randomUUID';
 import { resolveKokoroNativeModelPackId } from '@/voice/kokoro/assets/kokoroAssetSets';
 import { resolveKokoroSherpaSidForVoiceIdWithSpeakerCount } from '@/voice/kokoro/voices/kokoroSherpaVoiceMapping';
+import { resolveKokoroNativeVoice } from '@/voice/kokoro/voices/resolveKokoroVoice';
+import { resolveStreamingTtsChunkChars, splitSpeechSentences } from '@/voice/output/TtsChunker';
 import { ensureModelPackInstalled } from '@/voice/modelPacks/installer.native';
 import { resolveModelPackManifestUrl } from '@/voice/modelPacks/manifests';
+import { fileUriToNativePath } from '@/voice/modelPacks/nativePath';
 
 type KokoroNativeModuleLike = {
   initialize(params: { assetsDir: string }): Promise<void>;
@@ -48,10 +51,6 @@ function createTimeoutPromise(timeoutMs: number): Promise<never> {
   });
 }
 
-function uriToFilePath(uri: string): string {
-  if (uri.startsWith('file://')) return uri.slice('file://'.length);
-  return uri;
-}
 
 function filePathToUri(pathOrUri: string): string {
   if (pathOrUri.startsWith('file://')) return pathOrUri;
@@ -119,83 +118,111 @@ async function deleteFileBestEffort(fs: NonNullable<NativeOverrides['fs']>, uri:
   }
 }
 
-export async function synthesizeKokoroWav(
-  opts: {
-    text: string;
-    assetSetId?: string | null;
-    voiceId: string;
-    speed: number;
-    timeoutMs: number;
-    signal: AbortSignal;
-  },
-  overrides: NativeOverrides = {},
-): Promise<ArrayBuffer> {
+type KokoroSynthesisOpts = {
+  assetSetId?: string | null;
+  /** Requested voice; null or an id missing from the installed pack uses the pack default voice. */
+  voiceId: string | null;
+  speed: number;
+  timeoutMs: number;
+  signal: AbortSignal;
+};
+
+type PreparedNativeSynthesis = Readonly<{
+  native: KokoroNativeModuleLike;
+  fs: NonNullable<NativeOverrides['fs']>;
+  assetsDirPath: string;
+  voiceId: string | null;
+  sid: number | null;
+}>;
+
+/** Ensures the pack is installed and initialized, and resolves the voice against its catalog. */
+async function prepareNativeSynthesis(opts: KokoroSynthesisOpts, overrides: NativeOverrides): Promise<PreparedNativeSynthesis> {
   const native = overrides.kokoroNativeModule ?? getOptionalNativeModuleFromWorkspace();
   if (!native) {
     throw new Error('kokoro_native_module_unavailable');
   }
 
-  const jobId = randomUUID();
+  const fs = await getFs(overrides);
+  const assetSetId = resolveKokoroNativeModelPackId(opts.assetSetId);
+  const manifestUrl = overrides.resolveManifestUrl
+    ? overrides.resolveManifestUrl(assetSetId)
+    : resolveModelPackManifestUrl({ packId: assetSetId });
+  const ensureInstalled = overrides.ensureInstalled ?? ensureModelPackInstalled;
+  const installed = await ensureInstalled(
+    {
+      packId: assetSetId,
+      mode: 'require_installed',
+      manifestUrl,
+      timeoutMs: opts.timeoutMs,
+      signal: opts.signal,
+    },
+    { fs: fs as any },
+  );
+  const assetsDirPath = fileUriToNativePath(installed.packDirUri);
 
-  const onAbort = () => {
+  await Promise.race([
+    native.initialize({ assetsDir: assetsDirPath }),
+    createAbortPromise(opts.signal),
+    createTimeoutPromise(opts.timeoutMs),
+  ]);
+
+  const catalogVoice = resolveKokoroNativeVoice(installed.manifest, opts.voiceId);
+  if (catalogVoice) {
+    return { native, fs, assetsDirPath, voiceId: catalogVoice.voiceId, sid: catalogVoice.sid };
+  }
+
+  // Legacy packs without a voice catalog: use the built-in sherpa speaker mapping.
+  const voiceId = typeof opts.voiceId === 'string' && opts.voiceId.trim() ? opts.voiceId.trim() : null;
+  if (!voiceId) {
+    return { native, fs, assetsDirPath, voiceId: null, sid: null };
+  }
+  const speakerCount = await getSpeakerCountForAssetsDir({
+    native,
+    assetsDirPath,
+    timeoutMs: opts.timeoutMs,
+    signal: opts.signal,
+  });
+  const sid = resolveKokoroSherpaSidForVoiceIdWithSpeakerCount(voiceId, speakerCount) ?? null;
+  return { native, fs, assetsDirPath, voiceId, sid };
+}
+
+async function synthesizePreparedWav(
+  prepared: PreparedNativeSynthesis,
+  text: string,
+  opts: Pick<KokoroSynthesisOpts, 'speed' | 'timeoutMs' | 'signal'>,
+  overrides: NativeOverrides,
+): Promise<ArrayBuffer> {
+  const { native, fs } = prepared;
+  const jobId = randomUUID();
+  const cancelJob = () => {
     void native.cancel({ jobId }).catch(() => {});
   };
-  opts.signal.addEventListener('abort', onAbort);
-
-  const fs = await getFs(overrides);
+  opts.signal.addEventListener('abort', cancelJob);
   const outWavUri = resolveOutWavPathUri(jobId, fs, overrides);
+
+  // A timed-out job is cancelled too, so it does not keep the native synthesis queue busy.
+  let jobTimer: ReturnType<typeof setTimeout> | null = null;
+  const jobTimeout = new Promise<never>((_, reject) => {
+    jobTimer = setTimeout(() => {
+      cancelJob();
+      reject(new Error('timeout'));
+    }, opts.timeoutMs);
+  });
 
   let wavUriToDelete: string | null = null;
   try {
-    const assetSetId = resolveKokoroNativeModelPackId(opts.assetSetId);
-    const manifestUrl = overrides.resolveManifestUrl
-      ? overrides.resolveManifestUrl(assetSetId)
-      : resolveModelPackManifestUrl({ packId: assetSetId });
-    const ensureInstalled = overrides.ensureInstalled ?? ensureModelPackInstalled;
-    const installed = await ensureInstalled(
-      {
-        packId: assetSetId,
-        mode: 'require_installed',
-        manifestUrl,
-        timeoutMs: opts.timeoutMs,
-        signal: opts.signal,
-      },
-      { fs: fs as any },
-    );
-    const installedAssetsDirUri = installed.packDirUri;
-
-    await Promise.race([
-      native.initialize({ assetsDir: uriToFilePath(installedAssetsDirUri) }),
-      createAbortPromise(opts.signal),
-      createTimeoutPromise(opts.timeoutMs),
-    ]);
-
-    const manifestVoiceSid =
-      (installed.manifest as any)?.voices?.find?.((v: any) => v?.id === opts.voiceId && typeof v?.sid === 'number')?.sid
-      ?? null;
-    const speakerCount =
-      manifestVoiceSid != null
-        ? null
-        : await getSpeakerCountForAssetsDir({
-            native,
-            assetsDirPath: uriToFilePath(installedAssetsDirUri),
-            timeoutMs: opts.timeoutMs,
-            signal: opts.signal,
-          });
-    const sid = manifestVoiceSid ?? resolveKokoroSherpaSidForVoiceIdWithSpeakerCount(opts.voiceId, speakerCount) ?? null;
-
     const res = await Promise.race([
       native.synthesizeToWavFile({
         jobId,
-        assetsDir: uriToFilePath(installedAssetsDirUri),
-        text: opts.text,
-        voiceId: opts.voiceId,
-        sid,
+        assetsDir: prepared.assetsDirPath,
+        text,
+        voiceId: prepared.voiceId,
+        sid: prepared.sid,
         speed: opts.speed,
-        outWavPath: uriToFilePath(outWavUri),
+        outWavPath: fileUriToNativePath(outWavUri),
       }),
       createAbortPromise(opts.signal),
-      createTimeoutPromise(opts.timeoutMs),
+      jobTimeout,
     ]);
 
     const wavUri = filePathToUri(res.wavPath);
@@ -207,11 +234,20 @@ export async function synthesizeKokoroWav(
     wavUriToDelete = null;
     return bytes;
   } finally {
-    opts.signal.removeEventListener('abort', onAbort);
+    if (jobTimer) clearTimeout(jobTimer);
+    opts.signal.removeEventListener('abort', cancelJob);
     if (wavUriToDelete) {
       await deleteFileBestEffort(fs, wavUriToDelete);
     }
   }
+}
+
+export async function synthesizeKokoroWav(
+  opts: KokoroSynthesisOpts & { text: string },
+  overrides: NativeOverrides = {},
+): Promise<ArrayBuffer> {
+  const prepared = await prepareNativeSynthesis(opts, overrides);
+  return await synthesizePreparedWav(prepared, opts.text, opts, overrides);
 }
 
 export async function prepareKokoroTts(
@@ -246,24 +282,31 @@ export async function prepareKokoroTts(
     { fs: fs as any },
   );
   await Promise.race([
-    native.initialize({ assetsDir: uriToFilePath(installed.packDirUri) }),
+    native.initialize({ assetsDir: fileUriToNativePath(installed.packDirUri) }),
     createAbortPromise(opts.signal),
     createTimeoutPromise(opts.timeoutMs),
   ]);
 }
 
-export function streamKokoroWavSentences(opts: {
-  text: string;
-  assetSetId?: string | null;
-  voiceId: string;
-  speed: number;
-  timeoutMs: number;
-  signal: AbortSignal;
-}): AsyncIterable<{ wavBytes: ArrayBuffer; sentenceText: string }> {
-  const single = synthesizeKokoroWav(opts);
+/**
+ * Splits text into sentences and synthesizes them one at a time, so the first sentence plays while
+ * the rest is still pending. Each native call keeps the existing per-operation timeout; an abort
+ * cancels the in-flight sentence and skips the remaining ones.
+ */
+export function streamKokoroWavSentences(
+  opts: KokoroSynthesisOpts & { text: string },
+  overrides: NativeOverrides = {},
+): AsyncIterable<{ wavBytes: ArrayBuffer; sentenceText: string }> {
   return {
     async *[Symbol.asyncIterator]() {
-      yield { wavBytes: await single, sentenceText: opts.text };
+      const sentences = splitSpeechSentences(opts.text, resolveStreamingTtsChunkChars(undefined));
+      if (sentences.length === 0) return;
+      const prepared = await prepareNativeSynthesis(opts, overrides);
+      for (const sentenceText of sentences) {
+        if (opts.signal.aborted) throw new Error('aborted');
+        const wavBytes = await synthesizePreparedWav(prepared, sentenceText, opts, overrides);
+        yield { wavBytes, sentenceText };
+      }
     },
   };
 }

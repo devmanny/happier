@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ACPMessageData, ACPProvider } from '@/api/session/sessionMessageTypes';
-import type { SessionTurnLifecycle } from '@/agent/runtime/session/turn/types';
+import type { FailTurnInput, SessionTurnLifecycle } from '@/agent/runtime/session/turn/types';
 import type {
   PrimaryTurnStatusV1,
   SessionRuntimeIssueV1,
 } from '@happier-dev/protocol';
+
+import { notifyParentSessionInBackground } from '@/session/lineage/notifyParentSession';
 
 import {
   classifyPrimarySessionRuntimeIssue,
@@ -22,7 +24,28 @@ type PrimarySessionRuntimeIssueRecord = Readonly<{
 type RuntimeIssueSession = Readonly<{
   sendAgentMessage?: (provider: ACPProvider, body: ACPMessageData) => void;
   sessionTurnLifecycle?: SessionTurnLifecycle;
+  /** Present on the real session client; lets a spawned child report the failed turn to its parent. */
+  sessionId?: string;
+  getMetadataSnapshot?: (() => unknown) | null;
 }>;
+
+function hasSessionIdentity(
+  session: RuntimeIssueSession | null | undefined,
+): session is RuntimeIssueSession & { sessionId: string } {
+  return typeof session?.sessionId === 'string' && session.sessionId.length > 0;
+}
+
+function notifyParentOfFailedTurn(session: RuntimeIssueSession | null | undefined, issue: SessionRuntimeIssueV1): void {
+  if (!hasSessionIdentity(session)) return;
+  notifyParentSessionInBackground({
+    session,
+    event: {
+      kind: 'turn_failed',
+      message: issue.sanitizedPreview ?? null,
+      turnKey: issue.providerTurnId ?? null,
+    },
+  });
+}
 
 export type SurfacePrimarySessionRuntimeIssueInput = Omit<ClassifyPrimarySessionRuntimeIssueInput, 'cause'> & Readonly<{
   cause?: ClassifyPrimarySessionRuntimeIssueInput['cause'] | 'cancelled' | null;
@@ -34,6 +57,8 @@ export type SurfacePrimarySessionRuntimeIssueInput = Omit<ClassifyPrimarySession
    * issue is surfaced instead of becoming a silent no-op.
    */
   allocateTurnWhenIdle?: boolean;
+  suppressUntrustedDuplicate?: FailTurnInput['suppressUntrustedDuplicate'];
+  onFailureTurn?: FailTurnInput['onFailureTurn'];
 }>;
 
 function normalizeProviderFact(value: string | null | undefined): string | undefined {
@@ -85,7 +110,7 @@ export async function surfacePrimarySessionRuntimeIssue(
     return null;
   }
 
-  const issue = classifyPrimarySessionRuntimeIssue(input as ClassifyPrimarySessionRuntimeIssueInput);
+  let issue = classifyPrimarySessionRuntimeIssue(input as ClassifyPrimarySessionRuntimeIssueInput);
   const record = {
     ...buildProviderRuntimeFacts({
       provider: issue.provider ?? input.provider,
@@ -94,14 +119,20 @@ export async function surfacePrimarySessionRuntimeIssue(
     latestTurnStatus: 'failed',
     lastRuntimeIssue: issue,
   } satisfies PrimarySessionRuntimeIssueRecord;
+  notifyParentOfFailedTurn(input.session, issue);
   if (input.session?.sessionTurnLifecycle) {
     await input.session.sessionTurnLifecycle.failTurn({
       provider: record.provider,
       providerTurnId: record.providerTurnId,
       issue,
       ...(input.allocateTurnWhenIdle ? { allocateWhenIdle: true } : {}),
+      ...(input.suppressUntrustedDuplicate ? { suppressUntrustedDuplicate: true } : {}),
+      ...(input.onFailureTurn ? { onFailureTurn: (failure) => {
+        issue = failure.issue;
+        input.onFailureTurn?.(failure);
+      } } : {}),
     });
-    await input.recordIssue?.(record);
+    await input.recordIssue?.({ ...record, lastRuntimeIssue: issue });
     return issue;
   }
   sendTurnLifecycleMessage(input.session, input.provider, 'turn_failed', issue.providerTurnId ?? input.providerTurnId, issue);

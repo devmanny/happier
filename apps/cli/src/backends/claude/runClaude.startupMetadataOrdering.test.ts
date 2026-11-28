@@ -8,7 +8,6 @@ import axios from 'axios';
 import type { Credentials } from '@/persistence';
 import type { initializeRuntimeOverridesSynchronizer as initializeRuntimeOverridesSynchronizerFn } from '@/agent/runtime/runtimeOverridesSynchronizer';
 import { reportSessionToDaemonIfRunning } from '@/agent/runtime/startupSideEffects';
-import { createPermissionHandlerSessionStub } from '@/backends/claude/utils/permissionHandler.testkit';
 
 const agentStateUpdateSnapshots = vi.hoisted(() => [] as Array<{
     reason: string;
@@ -99,6 +98,8 @@ const runStartupCoordinatorMock = vi.fn(() => {
 });
 const claudeLocalMock = vi.fn(async () => undefined);
 let sessionClientConstructionError: Error | null = null;
+let metadataSnapshotError: Error | null = null;
+const bindRuntimeBackendTargetMock = vi.fn();
 let lastResolveRunnerMcpServersParams: any = null;
 const probeClaudeInstalledRuntimeCapabilitiesMock = vi.fn(async () => ({
     supportsEffort: true,
@@ -134,9 +135,14 @@ vi.mock('@/agent/runtime/initializeBackendApiContext', () => ({
                 };
                 return {
                 sessionId: 'session-start',
+                keepAlive: vi.fn(),
                 rpcHandlerManager: { registerHandler: vi.fn(), invokeLocal: vi.fn() },
-                ensureMetadataSnapshot: vi.fn(async () => ({ path: '/srv/project' })),
+                ensureMetadataSnapshot: vi.fn(async () => {
+                    if (metadataSnapshotError) throw metadataSnapshotError;
+                    return { path: '/srv/project' };
+                }),
                 getMetadataSnapshot: vi.fn(() => ({ path: '/srv/project' })),
+                bindRuntimeBackendTarget: bindRuntimeBackendTargetMock,
                 onUserMessage: lastSessionClient.onUserMessage,
                 sendSessionEvent: lastSessionClient.sendSessionEvent,
                 enqueueSessionUserMessage: lastSessionClient.enqueueSessionUserMessage,
@@ -304,6 +310,7 @@ describe('runClaude startup metadata ordering', () => {
         });
         claudeLocalMock.mockResolvedValue(undefined);
         sessionClientConstructionError = null;
+        metadataSnapshotError = null;
         lastSessionClient = null;
         lastRuntimeOverridesSynchronizerParams = null;
         lastResolveRunnerMcpServersParams = null;
@@ -566,6 +573,76 @@ describe('runClaude startup metadata ordering', () => {
         expect(reportMock.mock.calls.length).toBeGreaterThan(0);
         expect(reportMock.mock.calls[0]?.[0]?.sessionId).toBe('session-attach');
         expect(reportMock.mock.calls.some(([call]) => call?.sessionId === 'PID-12345')).toBe(false);
+    });
+
+    it('reports a terminal-started attach to the daemon only after its attach metadata write admits it', async () => {
+        // The attach write refuses a runtime for an Agent the Session no longer names. A report
+        // before it would register that runner with the daemon as the Session's runtime.
+        currentMetadataVersion = -1;
+        const { runClaude } = await import('./runClaude');
+        const reportMock = vi.mocked(reportSessionToDaemonIfRunning);
+
+        const runPromise = runClaude(testCredentials, {
+            startedBy: 'terminal',
+            startingMode: 'remote',
+            existingSessionId: 'session-attach',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        expect(reportMock.mock.calls.some(([call]) => call?.sessionId === 'session-attach')).toBe(false);
+
+        metadataUpdateDeferred.resolve();
+        await expect(runPromise).resolves.toBe(stopAfterSeed);
+        expect(reportMock.mock.calls.some(([call]) => call?.sessionId === 'session-attach')).toBe(true);
+    });
+
+    it('reports a terminal-started fresh session to the daemon early, without waiting for its startup write', async () => {
+        // A fresh Session has no other Agent to contradict; only an attach waits for its admission.
+        currentMetadataVersion = 1;
+        const { runClaude } = await import('./runClaude');
+        const reportMock = vi.mocked(reportSessionToDaemonIfRunning);
+
+        const runPromise = runClaude(testCredentials, {
+            startedBy: 'terminal',
+            startingMode: 'remote',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+
+        await waitFor(() => applyStartupMetadataUpdateToSessionMock.mock.calls.length === 1);
+        expect(reportMock.mock.calls.some(([call]) => call?.sessionId === 'session-start')).toBe(true);
+
+        metadataUpdateDeferred.resolve();
+        await expect(runPromise).resolves.toBe(stopAfterSeed);
+    });
+
+    it('binds an attach that cannot read the Session\'s snapshot to its own Agent', async () => {
+        // Without a snapshot there is no startup write, but the runner still serves the Session: its
+        // lifetime guard must still stop it once the Session names another Agent.
+        currentMetadataVersion = -1;
+        metadataSnapshotError = new Error('snapshot unavailable');
+        createSessionMetadataMock.mockReturnValueOnce({
+            state: { controlledByUser: false },
+            metadata: { path: '/tmp/project', terminal: null, flavor: 'claude' } as any,
+        });
+        const { runClaude } = await import('./runClaude');
+
+        const runPromise = runClaude(testCredentials, {
+            startedBy: 'daemon',
+            startingMode: 'remote',
+            existingSessionId: 'session-attach',
+        }).then(
+            () => 'resolved',
+            (error) => error,
+        );
+
+        await expect(runPromise).resolves.toBe(stopAfterSeed);
+        expect(applyStartupMetadataUpdateToSessionMock).not.toHaveBeenCalled();
+        expect(bindRuntimeBackendTargetMock).toHaveBeenCalledWith({ kind: 'builtInAgent', agentId: 'claude' });
     });
 
     it('uses the requested directory seed instead of a canonicalized cwd during remote startup', async () => {
@@ -863,7 +940,16 @@ describe('runClaude startup metadata ordering', () => {
             initialMode = params.initialClaudeUnifiedTerminalMode;
             const onSessionReady = params.onSessionReady;
             if (!onSessionReady) throw new Error('Expected Claude session readiness callback');
-            await onSessionReady(createPermissionHandlerSessionStub('session-start').session);
+            const { Session } = await import('./session');
+            await onSessionReady(new Session({
+                client: params.session,
+                path: params.path,
+                logPath: '',
+                sessionId: null,
+                messageQueue: params.messageQueue,
+                onModeChange: params.onModeChange,
+                hookSettingsPath: params.hookSettingsPath,
+            }));
             return 0;
         });
         const { runClaude } = await import('./runClaude');

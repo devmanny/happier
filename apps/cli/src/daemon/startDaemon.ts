@@ -1,3 +1,4 @@
+import { matchesCurrentQuotaObservationCredential } from './connectedServices/quotas/proof/quotaProbeFreshProof';
 import fs from 'fs/promises';
 import os from 'os';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -8,12 +9,13 @@ import {
   AGENT_IDS,
   resolveAgentIdFromSessionMetadata,
   resolveAgentNativeSpawnDefinitiveRejection,
+  resolveProviderSessionIdForBackendTarget,
 } from '@happier-dev/agents';
 
 import { ApiClient, isMachineContentPublicKeyMismatchError } from '@/api/api';
 import { serializeAxiosErrorForLog } from '@/api/client/serializeAxiosErrorForLog';
 import { ensureMachineRegistered } from '@/api/machine/ensureMachineRegistered';
-import { ensureSessionMachineAccessKeyBinding } from '@/api/session/ensureSessionMachineAccessKeyBinding';
+import { reconcileRecoveredSessionMachineControl } from './sessions/reconcileRecoveredSessionMachineControl';
 import { isRpcMethodNotAvailableError } from '@happier-dev/protocol/rpcErrors';
 import { callSessionRpc } from '@/session/transport/rpc/sessionRpc';
 import { resolveSessionTransportContext } from '@/session/services/resolveSessionTransportContext';
@@ -82,6 +84,7 @@ import {
   clearDaemonState,
   readCredentials,
   readSettings,
+  resolveAccountScopedCryptoMaterial,
 } from '@/persistence';
 import type { Credentials } from '@/persistence';
 import { abandonSpawnedSessionUntilCompleted } from '@/session/services/awaitSpawnedSessionId';
@@ -118,6 +121,12 @@ import {
 } from './sessions/pendingSessionActivationRecovery';
 import { resolveExistingRunnerAcceptance } from './spawn/resolveRunnerAcceptance';
 import {
+  buildExistingSessionPlacementSpawnError,
+  buildSessionRuntimeBackendConflictSpawnError,
+  resolveExistingSessionLaunchOptions,
+  resolveSessionRuntimeBackendConflict,
+} from './spawn/existingSessionBackendTargetAdmission';
+import {
   createDirectPeerTransferRegistry,
   requestDirectPeerTransferToFile,
   startDirectPeerTransferServer,
@@ -136,6 +145,7 @@ import { adoptReportedHappySessionId, adoptReportedSessionRunnerIdentity, correl
 import { applyTrackedSessionTurnLifecycle } from './sessions/applyTrackedSessionTurnLifecycle';
 import { connectedServiceTurnLifecycleContinue } from './connectedServices/connectedServiceTurnLifecycleContract';
 import { resolveSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveSessionRuntimeSnapshot';
+import { resolveSessionPersistedRuntimeIdentity } from './sessions/runtimeSnapshot/buildInactiveSessionResumeSpawnOptions';
 import { resolveRespawnSessionRuntimeSnapshot } from './sessions/runtimeSnapshot/resolveRespawnSessionRuntimeSnapshot';
 import { buildInactiveUsageLimitResumeSpawnOptions } from './sessions/runtimeSnapshot/buildInactiveUsageLimitResumeSpawnOptions';
 import { buildHandoffSessionMetadataFromTrackedSession } from './sessions/buildHandoffSessionMetadataFromTrackedSession';
@@ -444,7 +454,7 @@ import { startConnectedServiceQuotasLoop, type ConnectedServiceQuotasLoopHandle 
 import { readConnectedServiceRuntimeIdentityForQuotaFanout } from './connectedServices/quotas/identity/readConnectedServiceRuntimeIdentityForQuotaFanout';
 import type { RuntimeAccountIdentitySelectionInput } from './connectedServices/quotas/identity/runtimeAccountIdentityTypes';
 import { decodeJwtPayload } from '@/cloud/decodeJwtPayload';
-import { parseBooleanEnv, resolveConnectedServicesProviderStateSharingPolicyV1, type AccountSettings, type BackendTargetRefV1, type ConnectedServiceId } from '@happier-dev/protocol';
+import { buildBackendTargetKey, parseBooleanEnv, resolveConnectedServicesProviderStateSharingPolicyV1, type AccountSettings, type BackendTargetRefV1, type ConnectedServiceId } from '@happier-dev/protocol';
 import type { CatalogAgentId, ConnectedServiceSwitchEffectiveBinding } from '@/backends/types';
 import {
   createTerminalAttachmentId,
@@ -462,6 +472,11 @@ import { normalizeAccountSettingsVersionHint } from '@/settings/accountSettings/
 import { refreshAccountSettingsForMinimumVersion } from '@/settings/accountSettings/refreshAccountSettingsForMinimumVersion';
 import { warmActiveAccountSettingsSnapshotBestEffort } from '@/settings/accountSettings/warmActiveAccountSettingsSnapshot';
 import { getActiveAccountSettingsSnapshot } from '@/settings/accountSettings/activeAccountSettingsSnapshot';
+import { startTaskDueNotifier } from '@/daemon/agentTasks/taskDueNotifier';
+import { createTaskOccurrenceRunner } from '@/daemon/agentTasks/taskOccurrenceRunner';
+import { startAgentRoomWorker, type AgentRoomWorkerHandle } from '@/daemon/agentRooms/agentRoomWorker';
+import { AgentTaskStore } from '@/session/agentTasks/agentTaskStore';
+import { createAccountKvHttpTransport } from '@/api/kv/accountKvHttpTransport';
 import { isBackendEnabledByAccountSettings } from '@/settings/backendEnabled';
 import { resolveConfiguredAcpBackendFromAccountSettings } from '@/agent/acp/catalog/configured/resolveConfiguredAcpBackendFromAccountSettings';
 import { fetchSessionByIdCompat, type RawSessionRecord } from '@/session/transport/http/sessionsHttp';
@@ -1336,27 +1351,38 @@ function resolveCliSubcommandFromBackendTarget(target: BackendTargetRefV1 | unde
   return resolveAgentCliSubcommand(readBuiltInCatalogAgentIdFromBackendTarget(target));
 }
 
+async function resolveTrackedSessionAttachContext(params: Readonly<{
+  sessionId: string;
+  backendTarget: BackendTargetRefV1 | undefined;
+  credentials: Credentials;
+}>): ReturnType<typeof resolveExistingSessionAttachContext> {
+  const storedCredentials = await readCredentials().catch(() => null);
+  const effectiveCredentials = storedCredentials ?? params.credentials;
+  return await resolveExistingSessionAttachContext({
+    token: effectiveCredentials?.token ?? '',
+    sessionId: params.sessionId,
+    backendTarget: params.backendTarget ?? { kind: 'builtInAgent', agentId: resolveCatalogAgentId(null) },
+    credentials: effectiveCredentials,
+  });
+}
+
 async function refreshTrackedSessionsRuntimeSnapshot(params: Readonly<{
   sessionId: string;
   incomingOptions: SpawnSessionOptions;
   trackedSessions: ReadonlyArray<TrackedSession>;
   credentials: Credentials;
+  /** The Session read the caller already made for this decision, reused instead of a second fetch. */
+  attachContext?: Awaited<ReturnType<typeof resolveExistingSessionAttachContext>>;
 }>): Promise<void> {
   const trackedSessions = params.trackedSessions
     .filter((tracked) => tracked.happySessionId === params.sessionId);
 
   if (trackedSessions.length < 1) return;
 
-  const storedCredentials = await readCredentials().catch(() => null);
-  const effectiveCredentials = storedCredentials ?? params.credentials;
-  const tokenForFetch = effectiveCredentials?.token ?? '';
-
-  const attachContext = await resolveExistingSessionAttachContext({
-    token: tokenForFetch,
+  const attachContext = params.attachContext ?? await resolveTrackedSessionAttachContext({
     sessionId: params.sessionId,
-    backendTarget: params.incomingOptions.backendTarget
-      ?? { kind: 'builtInAgent', agentId: resolveCatalogAgentId(null) },
-    credentials: effectiveCredentials,
+    backendTarget: params.incomingOptions.backendTarget,
+    credentials: params.credentials,
   });
 
   if (!attachContext.ok) {
@@ -1367,11 +1393,41 @@ async function refreshTrackedSessionsRuntimeSnapshot(params: Readonly<{
     return;
   }
 
+  // A stale request (a view from before an Agent switch) contributes the Session's own Agent and
+  // controls, retargeted like a launch; never its own Agent, which would contradict the Session.
+  const launch = resolveExistingSessionLaunchOptions({
+    sessionId: params.sessionId,
+    options: params.incomingOptions,
+    sessionMetadata: attachContext.metadata,
+  });
+  // The attach context resolved the vendor resume id for the request's Agent.
+  const persistedVendorResumeId = launch.type === 'launch' && launch.options !== params.incomingOptions
+    && launch.options.backendTarget
+    ? resolveProviderSessionIdForBackendTarget(launch.options.backendTarget, attachContext.metadata ?? null)
+    : attachContext.vendorResumeId;
+  if (launch.type !== 'launch') return;
+  const incomingOptions = launch.options;
+  const sessionNamesAgent = Boolean(attachContext.metadata && resolveSessionPersistedRuntimeIdentity(attachContext.metadata));
   for (const trackedSession of trackedSessions) {
+    // A live runner's Agent is a fact of its process. A runner of another Agent than the Session
+    // names (the one rule) keeps its own controls.
+    const runnerBackendTarget = trackedSession.spawnOptions?.backendTarget;
+    if (resolveSessionRuntimeBackendConflict({
+      sessionMetadata: attachContext.metadata,
+      backendTarget: runnerBackendTarget,
+    })) {
+      continue;
+    }
+    // A Session that names no Agent was not retargeted: the unverified request may not record its
+    // own Agent on a runner of another.
+    if (!sessionNamesAgent && runnerBackendTarget && incomingOptions.backendTarget
+      && buildBackendTargetKey(runnerBackendTarget) !== buildBackendTargetKey(incomingOptions.backendTarget)) {
+      continue;
+    }
     const runtimeSnapshot = resolveSessionRuntimeSnapshot({
-      incomingOptions: params.incomingOptions,
+      incomingOptions,
       persistedMetadata: attachContext.metadata,
-      persistedVendorResumeId: attachContext.vendorResumeId,
+      persistedVendorResumeId,
       trackedSpawnOptions: trackedSession.spawnOptions ?? null,
       trackedVendorResumeId: trackedSession.vendorResumeId ?? null,
     });
@@ -1759,15 +1815,13 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           });
           return group?.members ?? null;
         },
-        resolveProviderAccountId: async (profileId) => {
+        resolveProviderAccountIdentity: async (profileId) => {
           const resolved = await resolveConnectedServiceCredentialsWithRevisions({
             credentials,
             api,
             bindings: [{ serviceId: serviceId.data, profileId }],
           }).then((byServiceId) => byServiceId.get(serviceId.data) ?? null);
-          return resolved
-            ? readCredentialAccountIdentity(resolved.record)?.providerAccountId ?? null
-            : null;
+          return resolved ? readCredentialAccountIdentity(resolved.record) : null;
         },
       });
     };
@@ -2063,6 +2117,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       });
       let apiMachineForSessions: ApiMachineClient | null = null;
       let automationWorker: AutomationWorkerHandle | null = null;
+      let agentRoomWorker: AgentRoomWorkerHandle | null = null;
       let memoryWorker: MemoryWorkerHandle | null = null;
       let cliUpdateMetadataPublisher: CliUpdateMetadataPublisher | null = null;
       let apiMachine: ApiMachineClient | null = null;
@@ -2071,6 +2126,17 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         warn: (message, data) => logger.warn(message, data),
       });
       eventLoopStallMonitor.start();
+      // The user's tasks that became due soon or overdue reach their devices once (any machine).
+      const taskDueNotifier = credentials.encryption
+        ? startTaskDueNotifier({
+            store: new AgentTaskStore({
+              transport: createAccountKvHttpTransport({ token: credentials.token }),
+              material: resolveAccountScopedCryptoMaterial(credentials),
+            }),
+            push: api.push(),
+            pushEnabled: () => getActiveAccountSettingsSnapshot()?.settings?.notificationsSettingsV1?.pushEnabled !== false,
+          })
+        : null;
 	      let machineConnectionStateCleanup: (() => void) | null = null;
 	      let shutdownInitiated = false;
 	      let connectedServiceQuotaProducersQuiesced = false;
@@ -2097,13 +2163,46 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           const matchesSession = (tracked: TrackedSession): boolean =>
             tracked.happySessionId?.trim() === sessionId
             || tracked.spawnOptions?.existingSessionId?.trim() === sessionId;
-          const resolveTrackedStartup = async (): Promise<SpawnSessionResult | null> => {
+          // Read only when a pending child for this Session exists; `null` is an unknown identity.
+          const readSessionMetadata = async (): Promise<Record<string, unknown> | null> => {
+            const attachContext = await resolveExistingSessionAttachContext({
+              token: credentials.token,
+              credentials,
+              sessionId,
+              backendTarget,
+            });
+            return attachContext.ok ? attachContext.metadata ?? null : null;
+          };
+          const resolveTrackedStartup = async (
+            knownSessionMetadata?: Record<string, unknown> | null,
+          ): Promise<SpawnSessionResult | null> => {
+            let sessionMetadata = knownSessionMetadata;
             for (const tracked of pidToTrackedSession.values()) {
               if (!isPendingDaemonChild(tracked) || !matchesSession(tracked) || tracked.stopRequestedAtMs !== undefined) continue;
               const presence = await classifyTrackedSessionRunnerPresence({ tracked });
               // OS reads can overlap webhook completion, retirement or wrapper promotion.
               if (presence !== 'present' || !isPendingDaemonChild(tracked) || !matchesSession(tracked)
                 || tracked.stopRequestedAtMs !== undefined) continue;
+              // The pending launch must be the Agent the Session NOW names, whatever the request
+              // says (incident 2026-11-17: a Codex switch rejoined a stale Claude launch).
+              const launchBackendTarget = tracked.spawnOptions?.backendTarget;
+              if (sessionMetadata === undefined) sessionMetadata = await readSessionMetadata();
+              const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+                sessionMetadata,
+                backendTarget: launchBackendTarget,
+              });
+              if (sessionBackendTarget && launchBackendTarget) {
+                logger.warn('[DAEMON RUN] Refusing to rejoin an existing-session launch for an Agent the session no longer names', {
+                  sessionId,
+                  pid: tracked.pid,
+                  launchBackendTarget,
+                  sessionBackendTarget,
+                });
+                return buildSessionRuntimeBackendConflictSpawnError({
+                  sessionBackendTarget,
+                  backendTarget: launchBackendTarget,
+                });
+              }
               return {
                 type: 'success',
                 sessionId,
@@ -2170,7 +2269,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           // Identity is learned here; readiness, marker promotion and acceptance completion
           // still belong to the webhook. Unknown/stopped owners go through normal fencing.
           adoptReportedHappySessionId(tracked, sessionId);
-          return await resolveTrackedStartup();
+          return await resolveTrackedStartup(metadata);
         };
 
         const spawnRecentSuccessTtlMs = resolvePositiveIntEnv(
@@ -2670,22 +2769,23 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           }
 
           sessionMachineAccessBindingReconcileInFlight = (async () => {
-            const liveSessionIds = new Set(
-              getCurrentChildren()
-                .map((tracked) => tracked.happySessionId?.trim())
-                .filter((sessionId): sessionId is string => Boolean(sessionId)),
-            );
+            const liveSessionsById = new Map<string, TrackedSession>();
+            for (const tracked of getCurrentChildren()) {
+              const sessionId = tracked.happySessionId?.trim();
+              if (sessionId) liveSessionsById.set(sessionId, tracked);
+            }
             for (const sessionId of pendingSessionMachineAccessBindingIds) {
-              if (!liveSessionIds.has(sessionId)) {
+              const tracked = liveSessionsById.get(sessionId);
+              if (!tracked) {
                 pendingSessionMachineAccessBindingIds.delete(sessionId);
                 continue;
               }
               try {
-                await ensureSessionMachineAccessKeyBinding({
-                  serverUrl: configuration.apiServerUrl,
-                  token: credentials.token,
+                await reconcileRecoveredSessionMachineControl({
+                  credentials,
                   sessionId,
                   machineId,
+                  runnerPid: tracked.sessionRunnerPid ?? tracked.pid,
                 });
                 pendingSessionMachineAccessBindingIds.delete(sessionId);
               } catch (error) {
@@ -3216,6 +3316,33 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   };
                 }
                 if (resumeDecisionAfterWait.action === 'adopt') {
+                  // The live runner must be the Agent the Session NOW names. A stale request for
+                  // another Agent still reaches the right runner; a runner the Session no longer
+                  // names is never reported as this Session's runtime.
+                  const adoptAttachContext = await resolveTrackedSessionAttachContext({
+                    sessionId: normalizedExistingSessionId,
+                    backendTarget: normalizedOptions.backendTarget,
+                    credentials,
+                  });
+                  for (const tracked of pidToTrackedSession.values()) {
+                    if (tracked.happySessionId !== normalizedExistingSessionId || tracked.stopRequestedAtMs !== undefined) continue;
+                    const runnerBackendTarget = tracked.spawnOptions?.backendTarget;
+                    const sessionBackendTarget = resolveSessionRuntimeBackendConflict({
+                      sessionMetadata: adoptAttachContext.ok ? adoptAttachContext.metadata : null,
+                      backendTarget: runnerBackendTarget,
+                    });
+                    if (!sessionBackendTarget || !runnerBackendTarget) continue;
+                    logger.warn('[DAEMON RUN] Refusing to adopt a live runner for an Agent the session no longer names', {
+                      sessionId: normalizedExistingSessionId,
+                      pid: tracked.pid,
+                      runnerBackendTarget,
+                      sessionBackendTarget,
+                    });
+                    return buildSessionRuntimeBackendConflictSpawnError({
+                      sessionBackendTarget,
+                      backendTarget: runnerBackendTarget,
+                    });
+                  }
                   const runnerAcceptance = resolveExistingRunnerAcceptance({
                     requestedSpawnNonce: normalizedOptions.spawnNonce,
                     trackedSpawnNonces: Array.from(pidToTrackedSession.values())
@@ -3228,6 +3355,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     incomingOptions: normalizedOptions,
                     trackedSessions: Array.from(pidToTrackedSession.values()),
                     credentials,
+                    attachContext: adoptAttachContext,
                   });
                   pendingSessionMachineAccessBindingIds.add(normalizedExistingSessionId);
                   await reconcileSessionMachineAccessBindings();
@@ -3288,7 +3416,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             }
 
             return await spawnConcurrencyGate.run(async () => {
-              const resolvedDirectory = normalizedOptions.directory;
+              // Reassigned only by the existing-session retarget below, which runs the Session where it lives.
+              let resolvedDirectory = normalizedOptions.directory;
               let {
                 directory,
                 sessionId,
@@ -3313,7 +3442,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
               } = normalizedOptions;
               const normalizedResume = typeof resume === 'string' ? resume.trim() : '';
               const normalizedExistingSessionId = typeof existingSessionId === 'string' ? existingSessionId.trim() : '';
-              const canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
+              let canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
                 codexBackendMode,
                 experimentalCodexAcp,
                 agentRuntimeDescriptorV1,
@@ -3321,7 +3450,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
               // NOTE: existing-session idempotency is handled before entering the spawn concurrency gate.
               let effectiveResume = normalizedResume;
-              const catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
+              let catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
 
               let sessionAttachPayload: import('@/agent/runtime/sessionAttachPayload').SessionAttachFilePayload | null = null;
               let existingSessionPersistedMetadata: Record<string, unknown> | null = null;
@@ -3344,10 +3473,53 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                     return mapExistingSessionAttachFailureToSpawnError(attachContext.reason);
                   }
 
+                  // A caller's view can predate an Agent switch that has since committed (incident
+                  // 2026-11-17: a `session send` resume launched Claude after the Session moved to
+                  // Codex; automations store the Agent they were authored for). The launch runs the
+                  // Agent the Session names; a stale request is retargeted to it.
+                  let attachVendorResumeId = attachContext.vendorResumeId;
+                  const attachBackendTarget: BackendTargetRefV1 = backendTarget ?? { kind: 'builtInAgent', agentId: catalogAgentId };
+                  const launch = resolveExistingSessionLaunchOptions({
+                    sessionId: normalizedExistingSessionId,
+                    options: normalizedOptions,
+                    sessionMetadata: attachContext.metadata,
+                  });
+                  if (launch.type === 'placement_mismatch') {
+                    logger.warn('[DAEMON RUN] Refusing a stale resume that runs where the session does not live', {
+                      sessionId: normalizedExistingSessionId,
+                      backendTarget: launch.backendTarget,
+                      sessionBackendTarget: launch.sessionBackendTarget,
+                    });
+                    return buildExistingSessionPlacementSpawnError({ sessionBackendTarget: launch.sessionBackendTarget });
+                  }
+                  if (launch.options !== normalizedOptions) {
+                    if (launch.retargetedFrom) {
+                      logger.warn('[DAEMON RUN] Retargeting a stale resume to the Agent the session names', {
+                        sessionId: normalizedExistingSessionId,
+                        requestedBackendTarget: launch.retargetedFrom,
+                        sessionBackendTarget: launch.options.backendTarget,
+                      });
+                      effectiveResume = typeof launch.options.resume === 'string' ? launch.options.resume.trim() : '';
+                      resolvedDirectory = launch.options.directory;
+                      directory = launch.options.directory;
+                    }
+                    normalizedOptions = launch.options;
+                    ({ backendTarget, agentRuntimeDescriptorV1, codexBackendMode, experimentalCodexAcp } = normalizedOptions);
+                    catalogAgentId = resolveCatalogAgentIdFromBackendTarget(backendTarget);
+                    canonicalCodexBackendMode = resolveCanonicalCodexBackendMode({
+                      codexBackendMode,
+                      experimentalCodexAcp,
+                      agentRuntimeDescriptorV1,
+                    });
+                    if (backendTarget && buildBackendTargetKey(backendTarget) !== buildBackendTargetKey(attachBackendTarget)) {
+                      attachVendorResumeId = resolveProviderSessionIdForBackendTarget(backendTarget, attachContext.metadata ?? null);
+                    }
+                  }
+
                   sessionAttachPayload = attachContext.attachPayload;
                   existingSessionPersistedMetadata = attachContext.metadata;
                   if (!effectiveResume) {
-                    const derivedResume = typeof attachContext.vendorResumeId === 'string' ? attachContext.vendorResumeId.trim() : '';
+                    const derivedResume = typeof attachVendorResumeId === 'string' ? attachVendorResumeId.trim() : '';
                     if (derivedResume) {
                       effectiveResume = derivedResume;
                     }
@@ -5111,6 +5283,18 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
         ): SessionRunnerRestartDisabledReason | null => resolveSessionRunnerActivityDisabledReasonFromReaders(sessionId, {
           isTurnInProgress: (id) => connectedServiceTurnDeferralQueue.isTurnInFlight(id),
         });
+        const readSessionRunnerServerRuntimeActivity = async (sessionId: string) => {
+          try {
+            const effectiveCredentials = (await readCredentials().catch(() => null)) ?? credentials;
+            return await fetchSessionByIdCompat({ token: effectiveCredentials.token, sessionId });
+          } catch (error) {
+            logger.warn('[DAEMON RUN] Session runner restart skipped: server runtime activity unreadable', {
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
+        };
         const isDaemonShuttingDown = (): boolean => shutdownInitiated || connectedServiceQuotaProducersQuiesced;
 
         const normalizeSwitchTarget = (input: Readonly<{
@@ -6831,6 +7015,11 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
 
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
+      // `happier search`: the memory worker starts after the control server, so it is read late.
+      messageSearch: {
+        status: async () => await memoryWorker?.getMessageSearchStatus() ?? null,
+        set: async (request) => await memoryWorker?.setMessageSearch(request) ?? null,
+      },
       getChildren: getCurrentChildren,
       machineId,
       runtimeId,
@@ -6876,6 +7065,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             requestRestart: requestVersionRuntimeRefreshWithDeferral,
             resolveActivityDisabledReason: resolveSessionRunnerActivityDisabledReason,
             refreshTrackedSessionRuntimeSnapshot: refreshTrackedSessionRuntimeSnapshotForPlannedRestart,
+            readServerRuntimeActivity: readSessionRunnerServerRuntimeActivity,
           });
         return RestartSessionRunnerResultV1Schema.parse(result);
       },
@@ -6889,6 +7079,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           requestRestart: requestVersionRuntimeRefreshWithDeferral,
           resolveActivityDisabledReason: resolveSessionRunnerActivityDisabledReason,
           refreshTrackedSessionRuntimeSnapshot: refreshTrackedSessionRuntimeSnapshotForPlannedRestart,
+          readServerRuntimeActivity: readSessionRunnerServerRuntimeActivity,
         });
         return RestartAllSessionRunnersResultV1Schema.parse(result);
       },
@@ -7280,16 +7471,15 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
           if (!group) return null;
           const profileId = await resolveConnectedServiceGroupMemberByProviderAccountId({
             providerAccountId: candidate.providerAccountId,
+            providerOrganizationId: candidate.providerOrganizationId,
             members: group.members,
-            resolveProviderAccountId: async (memberProfileId) => {
+            resolveProviderAccountIdentity: async (memberProfileId) => {
               const resolved = await resolveConnectedServiceCredentialsWithRevisions({
                 credentials,
                 api,
                 bindings: [{ serviceId: candidate.serviceId, profileId: memberProfileId }],
               }).then((byServiceId) => byServiceId.get(candidate.serviceId) ?? null);
-              return resolved
-                ? readCredentialAccountIdentity(resolved.record)?.providerAccountId ?? null
-                : null;
+              return resolved ? readCredentialAccountIdentity(resolved.record) : null;
             },
           });
           return profileId ? { profileId, groupGeneration: group.generation } : null;
@@ -7300,9 +7490,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
             api,
             bindings: [{ serviceId: candidate.serviceId, profileId: candidate.profileId }],
           }).then((byServiceId) => byServiceId.get(candidate.serviceId) ?? null);
-          return record?.kind === 'oauth'
-            && record.oauth.providerAccountId === candidate.providerAccountId
-            && computeConnectedServiceAccessTokenFingerprint(record.oauth.accessToken) === candidate.credentialFingerprint;
+          return matchesCurrentQuotaObservationCredential({ record, ...candidate });
         },
         resolveCurrentGroupGenerationForProfile: async (candidate) => {
           const currentBinding = connectedServiceRuntimeRegistry
@@ -7821,6 +8009,14 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                   credentials,
                   store: providerAccountUsageStore,
                   nowMs: Date.now(),
+                  resolveCurrentProviderAccountIdentityForSource: async (source) => {
+                    const record = await resolveConnectedServiceCredentials({
+                      credentials,
+                      api,
+                      bindings: [{ serviceId: source.serviceId, profileId: source.profileId }],
+                    }).then((records) => records.get(source.serviceId) ?? null);
+                    return record ? readCredentialAccountIdentity(record) : null;
+                  },
                 })
               ).hydration,
               createCoordinator: () => new ConnectedServiceQuotasCoordinator({
@@ -8120,16 +8316,8 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 if (!consumer) throw new Error('durable_generation_consumer_unavailable');
                 return await consumer.consume(input);
               },
-              refreshConnectedServiceCredentialForQuota: async (input: Readonly<{
-                serviceId: ConnectedServiceId;
-                profileId: string;
-                force: boolean;
-              }>) =>
-                connectedServiceRefreshCoordinator?.refreshConnectedServiceCredentialForQuota({
-                  serviceId: input.serviceId,
-                  profileId: input.profileId,
-                  force: input.force,
-                }) ?? null,
+              refreshConnectedServiceCredentialForQuota: async (input) =>
+                connectedServiceRefreshCoordinator?.refreshConnectedServiceCredentialForQuota(input) ?? null,
               now: () => Date.now(),
               randomBytes: (length) => randomBytes(length),
               }),
@@ -8504,8 +8692,23 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 machineId,
                 encryption: credentials.encryption ?? undefined,
                 spawnSession,
+                // Recurring tasks ride on this worker: a task rule's run works that task's occurrence.
+                runAgentTaskOccurrence: createTaskOccurrenceRunner({
+                  credentials,
+                  spawnSession,
+                  resolveSpawnSessionByNonce: resolveDaemonSpawnSessionByNonce,
+                }) ?? undefined,
               });
             }
+
+            // Rooms (salas): this machine's members get their mentions with the app closed.
+            agentRoomWorker = startAgentRoomWorker({
+              credentials,
+              machineId,
+              spawnSession,
+              resolveSpawnSessionByNonce: resolveDaemonSpawnSessionByNonce,
+              push: api.push(),
+            });
 
             memoryWorker = await (async () => {
               try {
@@ -9032,6 +9235,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
                 const cleanupAndShutdown = async (source: 'happier-app' | 'happier-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
           shutdownInitiated = true;
           eventLoopStallMonitor.stop();
+          taskDueNotifier?.stop();
           connectedServiceTurnDeferralQueue.cancelAll('daemon_shutdown');
           // Lane F: stop exposing turn-in-flight state once the queue is torn down so a tearing-down
           // daemon never reports a stale in-flight turn to the managed-server release path.
@@ -9124,6 +9328,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       if (automationWorker) {
         automationWorker.stop();
       }
+      agentRoomWorker?.stop();
       cliUpdateMetadataPublisher?.stop();
       if (memoryWorker) {
         memoryWorker.stop();
@@ -9169,6 +9374,7 @@ export async function startDaemon(options: Readonly<{ takeover?: boolean }> = {}
       requestRestart: requestVersionRuntimeRefreshWithDeferral,
       resolveActivityDisabledReason: resolveSessionRunnerActivityDisabledReason,
       refreshTrackedSessionRuntimeSnapshot: refreshTrackedSessionRuntimeSnapshotForPlannedRestart,
+      readServerRuntimeActivity: readSessionRunnerServerRuntimeActivity,
       logDebug: (message, payload) => logger.debug(message, payload),
       logWarn: (message, payload) => logger.warn(message, payload),
     });

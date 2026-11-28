@@ -195,7 +195,7 @@ describe('OpenCode attach target authentication', () => {
           const forkResult = openCodeProviderNativeForkHandler({
             credentials: { token: 'fixture', encryption: { type: 'legacy', secret: new Uint8Array(32) } },
             agentId: 'opencode', parentSessionId: 'parent-fixture', parentRawSession: { encryptionMode: 'plain' },
-            parentMetadata: metadata, directory: root, forkPoint: { type: 'latest' }, targetSeqInclusive: 0,
+            parentMetadata: metadata, directory: root, forkPoint: { type: 'latest' }, targetSeqInclusive: 0, cutoffSeqInclusive: 0,
           });
           if (targetState === 'missing') {
             await expect(forkResult).rejects.toMatchObject({ name: 'ProviderNativeForkFailedBeforeDispatchError' });

@@ -13,7 +13,7 @@ Session forking lets you branch a session without losing the original conversati
 - **Ancestor context without duplication**: the child renders read-only ancestor messages inline; scrolling pages parent segments automatically.
 - **Branch-and-edit**: when you fork on a user message, the child composer is prefilled with that message so you can revise and resend.
 - **Recognizable child titles**: when the parent has a session title, the child keeps it with `(fork 1)` appended. Forking that child increments the number instead of stacking another suffix.
-- **Provider-native when available**: Codex app-server supports native fork-at-latest plus rollback-to-point, and ACP can support fork-at-latest. OpenCode's legacy V1 server has a native fork route, but pure V2 does not; current server-mode admission therefore uses replay instead of making a dialect-ambiguous native claim.
+- **Provider-native when available**: Claude forks natively from any message or the latest state, so the child keeps the whole conversation. Codex app-server supports native fork-at-latest plus rollback-to-point, and ACP can support fork-at-latest. OpenCode's legacy V1 server has a native fork route, but pure V2 does not; current server-mode admission therefore uses replay instead of making a dialect-ambiguous native claim.
 
 ## How fork selection works
 
@@ -52,6 +52,12 @@ You can adjust the replay seed budget in Settings (`max seed characters`) to tra
 
 - Forking on a **user message** forks **before** that message (exclusive cutoff) and restores that exact text into the child composer as an editable draft.
 - Forking on assistant/tool messages forks **after** that message (inclusive cutoff) and does not prefill a draft.
+
+## Claude behavior
+
+- **Native fork, from a message or the latest state**: Happier copies the Claude conversation into a new Claude session with Claude's own fork, cut at the last Claude message the child's transcript keeps, and the child resumes it. Claude remembers everything before the fork point, not a summary.
+- **The copy stays out of the child transcript**: the child shows the parent's messages through the fork, so the copied rows are not shown a second time.
+- **When Happier replays instead**: a fork point from before the session's current Claude conversation (for example before a `/clear`), a session using a connected service, or a conversation file this machine cannot read falls back to replay under the default choice; an explicit Native choice reports that it is unavailable.
 
 ## Codex app-server behavior
 

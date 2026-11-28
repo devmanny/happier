@@ -19,7 +19,16 @@ vi.mock('../../configuration', () => ({
   },
 }));
 
+const { notifyParentSessionBestEffort } = vi.hoisted(() => ({
+  notifyParentSessionBestEffort: vi.fn(async () => undefined),
+}));
+
+vi.mock('@/session/lineage/notifyParentSession', () => ({
+  notifyParentSessionBestEffort,
+}));
+
 import { registerRunnerTerminationHandlers } from './runnerTerminationHandlers';
+import { requestRunnerTermination } from './runnerTerminationRequest';
 
 function createFakeProcess() {
   return new EventEmitter();
@@ -166,6 +175,105 @@ describe('registerRunnerTerminationHandlers', () => {
       fakeProcess.emit('SIGTERM');
       await handlers.whenTerminated;
       expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      handlers.dispose();
+    }
+  });
+
+  it('tells the parent session the child stopped, before the process exits, for clean and crashed terminations', async () => {
+    notifyParentSessionBestEffort.mockClear();
+    const fakeProcess = createFakeProcess();
+    const exit = vi.fn();
+    const session = { sessionId: 'child-1', getMetadataSnapshot: () => ({}) };
+    const handlers = registerRunnerTerminationHandlers({
+      process: fakeProcess,
+      exit,
+      onTerminate: async () => undefined,
+      parentNoticeSession: session,
+    });
+
+    try {
+      handlers.requestTermination({ kind: 'uncaughtException', error: new Error('boom') });
+      await handlers.whenTerminated;
+
+      expect(notifyParentSessionBestEffort).toHaveBeenCalledWith({
+        session,
+        event: { kind: 'stopped', reason: 'Uncaught exception', crashed: true },
+      });
+      expect(notifyParentSessionBestEffort.mock.invocationCallOrder[0]).toBeLessThan(exit.mock.invocationCallOrder[0]!);
+    } finally {
+      handlers.dispose();
+    }
+
+    notifyParentSessionBestEffort.mockClear();
+    const cleanProcess = createFakeProcess();
+    const cleanHandlers = registerRunnerTerminationHandlers({
+      process: cleanProcess,
+      exit: () => undefined,
+      onTerminate: async () => undefined,
+      parentNoticeSession: session,
+    });
+    try {
+      cleanHandlers.requestTermination({ kind: 'killSession' });
+      await cleanHandlers.whenTerminated;
+      expect(notifyParentSessionBestEffort).toHaveBeenCalledWith({
+        session,
+        event: { kind: 'stopped', reason: 'Killed by user', crashed: false },
+      });
+    } finally {
+      cleanHandlers.dispose();
+    }
+  });
+
+  it('honors a termination requested before the runner registered its handlers, through the runner\'s own path', async () => {
+    // A terminal-started Claude runner already has a foreign SIGTERM listener (caffeinate) while its
+    // own handlers are not registered yet; a raw SIGTERM in that window is swallowed. The request
+    // waits for the registration instead.
+    requestRunnerTermination({ kind: 'sessionAgentConflict' });
+    const fakeProcess = createFakeProcess();
+    const exit = vi.fn();
+    const events: string[] = [];
+    const handlers = registerRunnerTerminationHandlers({
+      process: fakeProcess,
+      exit,
+      onTerminationRequested: () => {
+        events.push('admission-closed');
+      },
+      onTerminate: async (event) => {
+        events.push(`cleanup:${event.kind}`);
+      },
+    });
+
+    try {
+      await expect(handlers.whenTerminated).resolves.toMatchObject({
+        event: { kind: 'sessionAgentConflict' },
+        outcome: { exitCode: 0 },
+      });
+      expect(events).toEqual(['admission-closed', 'cleanup:sessionAgentConflict']);
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      handlers.dispose();
+    }
+  });
+
+  it('routes a later termination request to the registered runner, and never tells the parent its child stopped for an Agent switch', async () => {
+    notifyParentSessionBestEffort.mockClear();
+    const session = { sessionId: 'child-switched' };
+    const fakeProcess = createFakeProcess();
+    const exit = vi.fn();
+    const handlers = registerRunnerTerminationHandlers({
+      process: fakeProcess,
+      exit,
+      onTerminate: async () => undefined,
+      parentNoticeSession: session,
+    });
+
+    try {
+      requestRunnerTermination({ kind: 'sessionAgentConflict' });
+      await handlers.whenTerminated;
+      expect(exit).toHaveBeenCalledWith(0);
+      // The Session now runs another Agent; the parent's next message reaches it.
+      expect(notifyParentSessionBestEffort).not.toHaveBeenCalled();
     } finally {
       handlers.dispose();
     }

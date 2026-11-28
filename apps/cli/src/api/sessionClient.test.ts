@@ -15,6 +15,8 @@ import {
 import { createMockSession, createSessionRecordFixture } from '@/testkit/backends/sessionFixtures';
 import { createEnvKeyScope } from '@/testkit/env/envScope';
 import { HttpStatusError } from './client/httpStatusError';
+import { EventEmitter } from 'node:events';
+import { registerRunnerTerminationHandlers } from '@/agent/runtime/runnerTerminationHandlers';
 
 const HISTORICAL_CATCH_UP_AGE_MS = 60_000;
 
@@ -2651,6 +2653,84 @@ describe('ApiSessionClient connection handling', () => {
 
         await expect(waitPromise).resolves.toBe(true);
         expect(client.getMetadataSnapshot()?.path).toBe('/tmp/from-user-socket');
+    });
+
+    describe('a runtime whose Session switches to another Agent', () => {
+        // Incident 2026-11-17 race: a Claude runner whose attach landed before an Agent switch's
+        // cutover must not consume the input queued for Codex after it. It stops through the
+        // runner's own termination path (input fence, provider cleanup, session death), never a raw
+        // OS signal: a terminal-started Claude's caffeinate listener swallows SIGTERM, and a daemon-
+        // started runner without its handlers would die without cleanup.
+        const switchSessionToCodex = async (client: ApiSessionClient, session: ReturnType<typeof createMockSession>) => {
+            const updated = startMetadataWait(client);
+            emitEncryptedSessionMetadataUpdate(mockSocket, {
+                session,
+                updateId: 'update-agent-switch',
+                seq: 2,
+                metadata: { ...session.metadata, flavor: 'codex' },
+                version: 2,
+            });
+            await expect(updated).resolves.toBe(true);
+        };
+
+        it('exits without taking Pending through the runner\'s registered termination path', async () => {
+            const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+            const runnerProcess = new EventEmitter();
+            const exit = vi.fn();
+            const onTerminate = vi.fn(async () => undefined);
+            const handlers = registerRunnerTerminationHandlers({ process: runnerProcess, exit, onTerminate });
+            try {
+                const session = createMockSession({ metadata: { ...mockSession.metadata, flavor: 'claude' } });
+                const client = createClient('fake-token', session);
+                client.bindRuntimeBackendTarget({ kind: 'builtInAgent', agentId: 'claude' });
+                expect(client.hasRuntimeTerminationStarted()).toBe(false);
+
+                await switchSessionToCodex(client, session);
+
+                expect(client.hasRuntimeTerminationStarted()).toBe(true);
+                await expect(handlers.whenTerminated).resolves.toMatchObject({
+                    event: { kind: 'sessionAgentConflict' },
+                    outcome: { exitCode: 0 },
+                });
+                expect(exit).toHaveBeenCalledWith(0);
+                expect(kill).not.toHaveBeenCalled();
+                await expect(client.materializeNextPendingMessageSafely()).resolves.not.toMatchObject({ type: 'materialized' });
+            } finally {
+                handlers.dispose();
+                kill.mockRestore();
+            }
+        });
+
+        it('still stops gracefully when the cutover reaches it before the runner registered its termination handlers', async () => {
+            // Terminal-started Claude ordering: the attach binds the client and caffeinate installs its
+            // SIGTERM listener long before the runner registers its own handlers.
+            const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+            const runnerProcess = new EventEmitter();
+            const caffeinateCleanup = vi.fn();
+            runnerProcess.on('SIGTERM', caffeinateCleanup);
+            const exit = vi.fn();
+            const onTerminate = vi.fn(async () => undefined);
+            let handlers: ReturnType<typeof registerRunnerTerminationHandlers> | null = null;
+            try {
+                const session = createMockSession({ metadata: { ...mockSession.metadata, flavor: 'claude' } });
+                const client = createClient('fake-token', session);
+                client.bindRuntimeBackendTarget({ kind: 'builtInAgent', agentId: 'claude' });
+                await switchSessionToCodex(client, session);
+                expect(client.hasRuntimeTerminationStarted()).toBe(true);
+
+                handlers = registerRunnerTerminationHandlers({ process: runnerProcess, exit, onTerminate });
+
+                await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+                expect(onTerminate).toHaveBeenCalledWith(
+                    { kind: 'sessionAgentConflict' },
+                    expect.objectContaining({ exitCode: 0 }),
+                );
+                expect(kill).not.toHaveBeenCalled();
+            } finally {
+                handlers?.dispose();
+                kill.mockRestore();
+            }
+        });
     });
 
     it('waitForMetadataUpdate resolves when session metadata updates (server sends update-session with id)', async () => {

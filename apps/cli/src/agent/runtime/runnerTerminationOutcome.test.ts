@@ -23,6 +23,13 @@ describe('computeRunnerTerminationOutcome', () => {
     });
   });
 
+  it('reports a stop for an Agent switch as its own planned exit', () => {
+    expect(computeRunnerTerminationOutcome({ kind: 'sessionAgentConflict' })).toEqual({
+      exitCode: 0,
+      terminationReason: 'Session now runs another Agent',
+    });
+  });
+
   it('reports SIGTERM and SIGINT without directing an archive', () => {
     expect(computeRunnerTerminationOutcome({ kind: 'signal', signal: 'SIGTERM' })).toEqual({
       exitCode: 0,

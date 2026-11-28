@@ -59,6 +59,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     const durableCalls: Array<{ localId: string; body: ACPMessageData; meta?: Record<string, unknown> }> = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ localId: opts.localId, body, meta: opts.meta });
       },
     });
@@ -106,6 +107,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });
@@ -131,8 +133,8 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     backend.emit({ type: 'model-output', textDelta: 'Final answer.' } satisfies AgentMessage);
     backend.emit({ type: 'model-output', fullText: finalSnapshot, fullTextScope: snapshotScope } satisfies AgentMessage);
 
-    expect(tracker.getPreview()).toBe('Progress update.Final answer.');
-    await runtime.flushTurn();
+    await expect.poll(() => tracker.getPreview()).toBe('Progress update.Final answer.');
+    await expect(runtime.flushTurn()).resolves.toEqual({ assistantText: 'Progress update.Final answer.' });
 
     const completedAssistantMessages = durableCalls.flatMap((call) => {
       const streamMeta = call.meta?.happierStreamSegmentV1;
@@ -169,7 +171,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       fullTextScope: 'segment',
     } satisfies AgentMessage);
 
-    expect(tracker.getPreview()).toBe('Shared prefixShared prefix continued');
+    await expect.poll(() => tracker.getPreview()).toBe('Shared prefixShared prefix continued');
     await runtime.flushTurn();
   });
 
@@ -186,6 +188,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/tmp',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           persisted.set(opts.localId, body);
         },
       }),
@@ -210,7 +213,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       expect(draftId).toBeDefined();
     }
     backend.emit({ type: 'model-output', fullText: 'corrected', fullTextScope: 'segment' });
-    expect(tracker.getPreview()).toBe('retained artifactcorrected');
+    await expect.poll(() => tracker.getPreview()).toBe('retained artifactcorrected');
     await runtime.flushTurn();
 
     expect(messageBuffer.getMessages().filter((message) => message.type === 'assistant').map((message) => message.content))
@@ -227,6 +230,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     const durableCalls: Array<{ localId: string; body: ACPMessageData; meta?: Record<string, unknown> }> = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ localId: opts.localId, body, meta: opts.meta });
       },
     });
@@ -289,6 +293,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });
@@ -342,7 +347,8 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     let resolveInitialCommit: (() => void) | undefined;
     let durableCommitCount = 0;
     const session = createBasicSessionClientWithOverrides({
-      sendAgentMessageCommitted: async () => {
+      sendAgentMessageCommitted: async (_provider, body) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCommitCount += 1;
         if (durableCommitCount === 1) {
           await new Promise<void>((resolve) => {
@@ -407,6 +413,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     } as const;
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });
@@ -551,6 +558,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/workspace',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           durableCalls.push({ body, meta: opts.meta });
         },
       }),
@@ -625,6 +633,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/workspace',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           durableCalls.push({ body, meta: opts.meta });
         },
       }),
@@ -706,6 +715,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/workspace',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           durableCalls.push({ body, meta: opts.meta });
         },
       }),
@@ -797,6 +807,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/workspace',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           durableCalls.push({ body, meta: opts.meta });
         },
       }),
@@ -909,6 +920,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
       directory: '/workspace',
       session: createBasicSessionClientWithOverrides({
         sendAgentMessageCommitted: async (_provider, body, opts) => {
+          if (body.type === 'task_complete') return; // the turn's end, not a streamed row
           durableCalls.push({ body, meta: opts.meta });
         },
       }),
@@ -1001,6 +1013,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
         sent.push({ body, meta: opts?.meta });
       },
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });
@@ -1065,6 +1078,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
     const durableCalls: Array<{ body: ACPMessageData; meta?: Record<string, unknown> }> = [];
     const session = createBasicSessionClientWithOverrides({
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });
@@ -1137,6 +1151,7 @@ describe('createAcpRuntime (transcript streaming vNext)', () => {
         forwardedBodies.push(body);
       },
       sendAgentMessageCommitted: async (_provider, body, opts) => {
+        if (body.type === 'task_complete') return; // the turn's end, not a streamed row
         durableCalls.push({ body, meta: opts.meta });
       },
     });

@@ -30,6 +30,33 @@ describe('requestInactiveSessionResume', () => {
     vi.useRealTimers();
   });
 
+  it('hands the resumed runner its agent identity and the allowlisted provider environment', async () => {
+    callMachineRpc.mockResolvedValue({ type: 'success', sessionId: 'session-1' });
+    const agentIdentity = { v: 1 as const, id: 'julian', name: 'Julián', emoji: '🤖', description: 'Architect.' };
+
+    await expect(requestInactiveSessionResume({
+      credentials,
+      sessionId: 'session-1',
+      localId: 'local-1',
+      rawSession: rawSession(),
+      metadata: {
+        agentId: 'claude',
+        machineId: 'machine-session',
+        path: '/repo',
+        flavor: 'claude',
+        agentIdentityV1: { v: 1, id: 'julian', name: 'Julián', emoji: '🤖' },
+        nativeAgentEnvironmentV1: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+      },
+      agentIdentity,
+    })).resolves.toEqual({ ok: true });
+
+    expect(callMachineRpc.mock.calls[0]?.[0].request).toMatchObject({
+      type: 'resume-session',
+      agentIdentityV1: agentIdentity,
+      environmentVariables: { CLAUDE_CONFIG_DIR: '/Users/dev/.claude-a' },
+    });
+  });
+
   it('targets only the recorded session machine with one fresh user authorization', async () => {
     callMachineRpc.mockResolvedValue({ type: 'success', sessionId: 'session-1' });
 

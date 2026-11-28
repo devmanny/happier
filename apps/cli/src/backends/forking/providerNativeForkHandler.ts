@@ -47,5 +47,7 @@ export type ProviderNativeForkHandler = (params: Readonly<{
   directory: string;
   forkPoint: ProviderNativeForkPoint;
   targetSeqInclusive: number;
+  /** Last parent seq the child's lineage shows (before a user-message target, for branch-and-edit). */
+  cutoffSeqInclusive: number;
   signal?: AbortSignal;
 }>) => Promise<ProviderNativeForkDispatchResult | null>;

@@ -10,24 +10,30 @@ import {
     listPendingQueueV2LocalIdsFromServer,
     listPendingQueueV2DeliveryStatusesFromServer,
     listPendingQueueV2ProviderDeliveryLocalIdsFromServer,
+    listPendingQueueV2RowsFromServer,
     markPendingQueueV2DeliveryHandled,
+    requeueNotReceivedPendingQueueV2Delivery,
+    sendPendingQueueV2DeliveryAsNew,
     materializeNextPendingQueueV2Message,
     materializeNextPendingQueueV2MessageOnReleasedServer,
     materializeNextPendingQueueV2MessageViaHttp,
     PendingQueueMaterializationTransportAmbiguousError,
     readAcceptedPendingQueueV2DeliveryRetryDirective,
     resolveAcceptedPendingQueueV2Delivery,
+    updatePendingQueueV2RequestedAction,
 } from './pendingQueueV2Transport';
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
     mockGet: vi.fn(),
     mockPost: vi.fn(),
+    mockPatch: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
     default: {
         get: mockGet,
         post: mockPost,
+        patch: mockPatch,
         isAxiosError: (error: unknown) => Boolean(
             error && typeof error === 'object' && (error as { isAxiosError?: unknown }).isAxiosError === true,
         ),
@@ -38,6 +44,7 @@ describe('pendingQueueV2Transport', () => {
     beforeEach(() => {
         mockGet.mockReset();
         mockPost.mockReset();
+        mockPatch.mockReset();
     });
 
     it('accepts a terminal enqueue rejoin only with the exact committed-message localId', async () => {
@@ -171,6 +178,28 @@ describe('pendingQueueV2Transport', () => {
         expect(socket.emitWithAck).not.toHaveBeenCalled();
         expect(mockGet).not.toHaveBeenCalled();
         expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('retries a blocked row through the requested-action operation and reads the resulting queue state', async () => {
+        mockPatch.mockResolvedValueOnce({
+            data: { ok: true, didUpdate: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+        });
+
+        await expect(updatePendingQueueV2RequestedAction({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: 'blocked/row',
+            requestedAction: { v: 1, kind: 'steer_if_active' },
+        })).resolves.toEqual({
+            didUpdate: true,
+            pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 8 },
+        });
+
+        expect(mockPatch).toHaveBeenCalledWith(
+            expect.stringMatching(/\/v2\/sessions\/session-1\/pending\/blocked%2Frow\/action$/),
+            { requestedAction: { v: 1, kind: 'steer_if_active' } },
+            expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer token' }) }),
+        );
     });
 
     it('degrades a new conditional-steer settlement to a strict block on an older server', async () => {
@@ -1741,5 +1770,89 @@ describe('pendingQueueV2Transport', () => {
                 headers: expect.objectContaining({ Authorization: 'Bearer token' }),
             }),
         );
+    });
+
+    it('lists queued rows in server order with their stored content and creation time', async () => {
+        mockGet.mockResolvedValueOnce({
+            data: {
+                pending: [
+                    {
+                        localId: 'inherited-1',
+                        messageRole: 'user',
+                        content: { t: 'encrypted', c: 'Y2lwaGVy' },
+                        requestedAction: { v: 1, kind: 'steer_if_active' },
+                        status: 'queued',
+                        deliveryState: 'blocked',
+                        deliveryBlockedReason: 'delivery_outcome_uncertain',
+                        deliveryStatus: { status: 'blocked', reason: 'delivery_outcome_uncertain' },
+                        position: 1,
+                        createdAt: 1_794_328_591_459,
+                    },
+                    // A row whose content or timestamps this reader cannot use stays listed for ordering.
+                    { localId: 'later-1', status: 'queued', deliveryStatus: { status: 'queued' }, content: { t: 'unknown' } },
+                ],
+            },
+        });
+
+        await expect(listPendingQueueV2RowsFromServer({ token: 'token', sessionId: 'session-1' })).resolves.toEqual([
+            {
+                localId: 'inherited-1',
+                messageRole: 'user',
+                requestedAction: { v: 1, kind: 'steer_if_active' },
+                deliveryStatus: { status: 'blocked', reason: 'delivery_outcome_uncertain' },
+                content: { t: 'encrypted', c: 'Y2lwaGVy' },
+                createdAt: 1_794_328_591_459,
+            },
+            {
+                localId: 'later-1',
+                messageRole: null,
+                requestedAction: null,
+                deliveryStatus: { status: 'queued' },
+                content: null,
+                createdAt: null,
+            },
+        ]);
+    });
+
+    it('posts send-as-new to the dedicated delivery route with an empty body', async () => {
+        mockPost.mockResolvedValueOnce({
+            data: { ok: true, didWrite: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 7 },
+        });
+
+        await expect(sendPendingQueueV2DeliveryAsNew({
+            token: 'token',
+            sessionId: 'session-1',
+            localId: 'inherited-1',
+        })).resolves.toEqual({
+            pendingQueueState: { known: true, pendingCount: 1, pendingBlockedCount: 0, pendingVersion: 7 },
+        });
+
+        expect(mockPost).toHaveBeenCalledWith(
+            expect.stringContaining('/v2/sessions/session-1/pending/inherited-1/delivery/send-as-new'),
+            {},
+            expect.objectContaining({
+                headers: expect.objectContaining({ Authorization: 'Bearer token' }),
+            }),
+        );
+    });
+
+    it('returns a provider-proven undelivered row to its place through the current runner socket', async () => {
+        const socket = {
+            connected: true,
+            emitWithAck: vi.fn()
+                .mockResolvedValueOnce({ ok: true, didRequeue: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 })
+                .mockResolvedValueOnce({ ok: false, error: 'forbidden' }),
+            timeout: vi.fn().mockReturnThis(),
+        };
+
+        await expect(requeueNotReceivedPendingQueueV2Delivery({ socket: socket as any, sessionId: 'session-1', localId: 'inherited-1' }))
+            .resolves.toEqual({
+                didRequeue: true,
+                pendingQueueState: { known: true, pendingCount: 2, pendingBlockedCount: 0, pendingVersion: 9 },
+            });
+        expect(socket.emitWithAck).toHaveBeenCalledWith('pending-delivery-not-received-v1', { v: 1, sessionId: 'session-1', localId: 'inherited-1' });
+        // A runner that lost publisher authority learns it rather than assuming the row moved.
+        await expect(requeueNotReceivedPendingQueueV2Delivery({ socket: socket as any, sessionId: 'session-1', localId: 'inherited-1' }))
+            .rejects.toThrow('forbidden');
     });
 });

@@ -426,4 +426,88 @@ describe('claudeRemoteAgentSdk checkpoints and rewind', () => {
         }
     });
 
+    // Claude Code answers a failed real rewind with an error response, which the SDK surfaces as a
+    // rejected rewindFiles(); a query without rewindFiles cannot rewind at all. Neither may be
+    // reported as a successful rewind, and the prompt pump must keep serving the session.
+    it.each([
+        {
+            name: 'Claude rejects the real rewind',
+            rewindFiles: vi.fn(async () => {
+                throw new Error('Claude Code returned an error result: Failed to rewind: No files were restored');
+            }) as ((...args: unknown[]) => Promise<unknown>) | undefined,
+            expectedReport: /Failed to rewind: No files were restored/,
+        },
+        {
+            name: 'the query has no rewindFiles',
+            rewindFiles: undefined,
+            expectedReport: /cannot rewind files/i,
+        },
+        {
+            // Claude's real rewind succeeds once any file is restored; the verifying dry run names the rest.
+            name: 'Claude restores only some files',
+            rewindFiles: vi.fn(async (_id: unknown, options?: { dryRun?: boolean }) => (
+                options?.dryRun
+                    ? { canRewind: true, filesChanged: ['/tmp/src/lexer.ts'], insertions: 0, deletions: 3 }
+                    : { canRewind: true, skippedLinks: 0 }
+            )) as ((...args: any[]) => Promise<unknown>) | undefined,
+            expectedReport: /\/tmp\/src\/lexer\.ts/,
+        },
+    ])('reports a failed /rewind --confirm without claiming success when $name', async ({ rewindFiles, expectedReport }) => {
+        const onMessage = vi.fn();
+        const onCompletionEvent = vi.fn();
+        const close = vi.fn();
+
+        const createQuery = vi.fn((_params: any) => {
+            return {
+                async *[Symbol.asyncIterator]() {
+                    yield {
+                        type: 'user',
+                        uuid: 'cp_1',
+                        session_id: 'sess_1',
+                        parent_tool_use_id: null,
+                        message: { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+                    } as any;
+                    yield { type: 'result' } as any;
+                    yield { type: 'result' } as any;
+                },
+                close,
+                setPermissionMode: vi.fn(),
+                setModel: vi.fn(),
+                setMaxThinkingTokens: vi.fn(),
+                supportedCommands: vi.fn(async () => []),
+                supportedModels: vi.fn(async () => []),
+                ...(rewindFiles ? { rewindFiles } : {}),
+            } as any;
+        });
+
+        const messages = [
+            { message: 'hello', mode: makeMode({ claudeRemoteEnableFileCheckpointing: true }) },
+            { message: '/rewind --confirm', mode: makeMode({ claudeRemoteEnableFileCheckpointing: true }) },
+            { message: '/checkpoints', mode: makeMode({ claudeRemoteEnableFileCheckpointing: true }) },
+        ];
+
+        await claudeRemoteAgentSdk({
+            sessionId: null,
+            transcriptPath: null,
+            path: '/tmp',
+            claudeExecutablePath: '/tmp/claude',
+            canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+            isAborted: () => false,
+            nextMessage: async () => messages.shift() ?? null,
+            onReady: () => {},
+            onSessionFound: () => {},
+            onMessage,
+            onCompletionEvent,
+            createQuery,
+        } as any);
+
+        const reports = onCompletionEvent.mock.calls.map((call) => String(call[0]));
+        expect(reports).toContainEqual(expect.stringMatching(expectedReport));
+        expect(reports.some((report) => report.includes('Rewound files'))).toBe(false);
+        expect(onMessage).not.toHaveBeenCalledWith(expect.objectContaining({ happierTraceMarker: 'checkpoint-rewind' }));
+        // The pump kept serving prompts after the failed rewind.
+        expect(reports.some((report) => report.includes('Available checkpoints'))).toBe(true);
+        expect(messages).toHaveLength(0);
+    });
+
 });

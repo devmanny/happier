@@ -39,6 +39,7 @@ function buildForeignPinnedServiceFile(params: Readonly<{
 }>): string {
     const mode: DaemonServiceMode = 'user';
     const plan = planDaemonServiceInstall({
+        darwinLauncher: null,
         platform: process.platform === 'linux' ? 'linux' : 'darwin',
         mode,
         channel: 'stable',

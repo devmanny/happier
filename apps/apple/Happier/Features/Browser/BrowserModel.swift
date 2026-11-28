@@ -1,0 +1,517 @@
+import HappierKit
+import Observation
+import OSLog
+import SwiftUI
+import WebKit
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
+
+/// One browser tab: a WKWebView sharing the app's persistent website data (cookies, logins).
+@MainActor @Observable
+final class BrowserTab: Identifiable {
+    let id: String
+    /// The user (opened by hand) or the session whose agent drives it.
+    let owner: DeviceBrowserTabOwner
+    let webView: WKWebView
+    /// Until when the ✨ shows on this tab: an agent used it in the last seconds.
+    private(set) var agentActiveUntil: Date?
+    private(set) var title = ""
+    private(set) var url: URL?
+    private(set) var isLoading = false
+    private(set) var canGoBack = false
+    private(set) var canGoForward = false
+    private(set) var estimatedProgress = 0.0
+    @ObservationIgnored private var observations: [NSKeyValueObservation] = []
+
+    init(id: String, owner: DeviceBrowserTabOwner, configuration: WKWebViewConfiguration) {
+        self.id = id
+        self.owner = owner
+        webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 900), configuration: configuration)
+        webView.allowsBackForwardNavigationGestures = true
+        #if os(iOS)
+        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        // Find on Page from the menu, and ⌘F with a keyboard.
+        webView.isFindInteractionEnabled = true
+        // Pull down to reload, as in Safari; the spinner ends when loading does.
+        let refresh = UIRefreshControl()
+        refresh.addAction(UIAction { [weak webView, weak refresh] _ in
+            guard let webView, webView.url != nil else { refresh?.endRefreshing(); return }
+            webView.reload()
+        }, for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
+        #endif
+        // Inspectable from Safari's Develop menu, which helps when a site misbehaves.
+        webView.isInspectable = true
+        observations = [
+            webView.observe(\.title) { [weak self] view, _ in MainActor.assumeIsolated { self?.title = view.title ?? "" } },
+            webView.observe(\.url) { [weak self] view, _ in MainActor.assumeIsolated { self?.url = view.url } },
+            webView.observe(\.isLoading) { [weak self] view, _ in
+                MainActor.assumeIsolated {
+                    self?.isLoading = view.isLoading
+                    #if os(iOS)
+                    if !view.isLoading { view.scrollView.refreshControl?.endRefreshing() }
+                    #endif
+                }
+            },
+            webView.observe(\.canGoBack) { [weak self] view, _ in MainActor.assumeIsolated { self?.canGoBack = view.canGoBack } },
+            webView.observe(\.canGoForward) { [weak self] view, _ in MainActor.assumeIsolated { self?.canGoForward = view.canGoForward } },
+            webView.observe(\.estimatedProgress) { [weak self] view, _ in
+                MainActor.assumeIsolated { self?.estimatedProgress = view.estimatedProgress }
+            },
+        ]
+    }
+
+    var pageTitle: String {
+        if !title.isEmpty { return title }
+        return url?.host() ?? "New Tab"
+    }
+
+    var sessionId: String? {
+        if case .session(let id) = owner { return id }
+        return nil
+    }
+
+    func noteAgentActivity() {
+        agentActiveUntil = Date().addingTimeInterval(4)
+    }
+}
+
+/// The app-wide integrated browser: tabs the user browses in its own window (Mac, iPad) or sheet
+/// (iPhone), and that session agents drive over the relay (`DeviceBrowserHost`).
+///
+/// Tabs outlive the UI. A tab the UI is not showing is parked in an off-screen host view so the
+/// agent can keep loading, reading and capturing it in the background.
+@MainActor @Observable
+final class BrowserModel: NSObject {
+    static let agentAccessKey = "browser.agentAccess"
+    private static let log = Logger(subsystem: "dev.happier.apple", category: "browser")
+    /// Build role only, not a claim that passkeys work on this device. WebKit owns WebAuthn
+    /// availability, credential selection and user verification using the signed entitlements.
+    static var isBrowserRole: Bool { Bundle.main.object(forInfoDictionaryKey: "HappierBrowserRole") as? Bool == true }
+
+    /// Every tab, user's and sessions', in opening order; each has its own web view.
+    private(set) var tabs: [BrowserTab] = []
+    /// The tab the browser UI shows. Only the user changes it; agents never do.
+    var selectedTabId: String?
+    /// Open browser windows or sheets on this device.
+    private(set) var openViews = 0
+    /// Tabs some browser view is showing right now (kept when their session ends). Written while
+    /// views update, so not observed.
+    @ObservationIgnored private(set) var displayedTabIds: Set<String> = []
+    @ObservationIgnored private var watchingSessions = false
+
+    @ObservationIgnored weak var store: HappierStore?
+    @ObservationIgnored var registry = DeviceBrowserTabRegistry()
+    /// One call at a time per tab; different tabs (sessions) run alongside.
+    @ObservationIgnored let operations = KeyedSerialQueue()
+    @ObservationIgnored private var sessionWatch = DeviceBrowserSessionWatch()
+    @ObservationIgnored private var focusClaimed = false
+    @ObservationIgnored let configuration: WKWebViewConfiguration
+    @ObservationIgnored private let parking = BrowserParking()
+    @ObservationIgnored var navigationWaiters: [ObjectIdentifier: [CheckedContinuation<Error?, Never>]] = [:]
+    /// Pages the user visited in their own tabs (not agents'), for address suggestions.
+    private(set) var history = BrowserHistory()
+    @ObservationIgnored private let historyFile = URL.applicationSupportDirectory
+        .appending(path: "Browser/History.json", directoryHint: .notDirectory)
+
+    override init() {
+        let configuration = WKWebViewConfiguration()
+        // Persistent: cookies and logins survive relaunches, shared by every tab (and the agent).
+        configuration.websiteDataStore = .default()
+        #if os(iOS)
+        configuration.allowsInlineMediaPlayback = true
+        #endif
+        self.configuration = configuration
+        super.init()
+        loadHistory()
+    }
+
+    var selectedTab: BrowserTab? { tabs.first { $0.id == selectedTabId } ?? tabs.first { $0.owner == .user } }
+
+    func tab(_ id: String) -> BrowserTab? { tabs.first { $0.id == id } }
+
+    /// Any agent active in the last seconds, for the toolbar's ✨.
+    var agentActive: Bool { tabs.contains { ($0.agentActiveUntil ?? .distantPast) > Date() } }
+
+    var agentAccessEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.agentAccessKey) as? Bool ?? true
+    }
+
+    /// Only confirmation in the import review writes Safari cookies to our store.
+    func importSafariCookies(_ id: UUID) async throws -> (origin: URL, imported: Int, total: Int) {
+        guard let inbox = SafariCookieInbox.shared else { throw SafariCookieImport.Failure.unavailable }
+        let transfer = try inbox.load(id)
+        let cookies = try transfer.httpCookies()
+        try inbox.remove(id)
+        let cookieStore = configuration.websiteDataStore.httpCookieStore
+        for cookie in cookies { await cookieStore.setCookie(cookie) }
+        let stored = await cookieStore.allCookies()
+        let imported = cookies.filter { expected in
+            stored.contains { actual in
+                actual.name == expected.name && actual.value == expected.value && actual.domain == expected.domain &&
+                actual.path == expected.path && actual.isSecure == expected.isSecure &&
+                actual.isHTTPOnly == expected.isHTTPOnly && actual.sameSitePolicy == expected.sameSitePolicy &&
+                actual.isSessionOnly == expected.isSessionOnly && actual.expiresDate == expected.expiresDate
+            }
+        }.count
+        return (transfer.origin, imported, cookies.count)
+    }
+
+    // MARK: - Tabs
+
+    /// A tab the user opens; it becomes the one the browser shows.
+    @discardableResult
+    func newTab(url: URL? = nil) -> BrowserTab {
+        let tab = addTab(id: registry.open(for: .user), owner: .user, url: url)
+        selectedTabId = tab.id
+        return tab
+    }
+
+    /// Creates the web view for a tab the registry already assigned.
+    @discardableResult
+    func addTab(id: String, owner: DeviceBrowserTabOwner, url: URL? = nil) -> BrowserTab {
+        let tab = BrowserTab(id: id, owner: owner, configuration: configuration)
+        tab.webView.navigationDelegate = self
+        tab.webView.uiDelegate = self
+        parking.park(tab.webView)
+        tabs.append(tab)
+        if let url { tab.webView.load(URLRequest(url: url)) }
+        return tab
+    }
+
+    /// Opening the browser from a session shows that session's current tab, opening it first
+    /// when the agent hasn't used the browser yet (the agent then keeps working in it).
+    func showTab(for sessionId: String) {
+        guard let resolved = try? registry.tab(for: sessionId, tabId: nil, create: true) else { return }
+        selectedTabId = (tab(resolved.id) ?? addTab(id: resolved.id, owner: .session(sessionId))).id
+    }
+
+    /// Whether the session has a tab open, for the browser button in its toolbar.
+    func hasTabs(for sessionId: String) -> Bool { tabs.contains { $0.sessionId == sessionId } }
+
+    func closeTab(_ id: String) {
+        registry.close(id)
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let tab = tabs.remove(at: index)
+        tab.webView.stopLoading()
+        tab.webView.removeFromSuperview()
+        finishWaiting(tab.webView)
+        if selectedTabId == id { selectedTabId = tabs.first { $0.owner == .user }?.id }
+    }
+
+    /// Opens a link the user chose to see here: in a new tab of the session it came from (so that
+    /// session's agent can work with it), or in a tab of the user's own; that tab is shown.
+    func show(_ url: URL, forSession sessionId: String?) {
+        if let sessionId {
+            let tab = addTab(id: registry.open(for: .session(sessionId)), owner: .session(sessionId), url: url)
+            selectedTabId = tab.id
+        } else {
+            newTab(url: url)
+        }
+    }
+
+    /// Shows the browser: its own window on the Mac and iPad, the caller's sheet on the iPhone.
+    static func present(openWindow: OpenWindowAction, multipleWindows: Bool, sheet: Binding<Bool>) {
+        if multipleWindows {
+            openWindow(id: BrowserWindow.id, value: BrowserWindow.value)
+        } else {
+            sheet.wrappedValue = true
+        }
+    }
+
+    static func openInDefaultBrowser(_ url: URL) {
+        #if os(macOS)
+        NSWorkspace.shared.open(url)
+        #else
+        UIApplication.shared.open(url)
+        #endif
+    }
+
+    /// A session's tab is named after the session; the user's tabs after their page.
+    func tabTitle(_ tab: BrowserTab) -> String {
+        tab.sessionId.map(sessionTitle) ?? tab.pageTitle
+    }
+
+    func tabDisplayed(_ id: String, _ shown: Bool) {
+        if shown { displayedTabIds.insert(id) } else { displayedTabIds.remove(id) }
+    }
+
+    /// The session's name and folder color for its tabs.
+    func sessionTitle(_ sessionId: String) -> String {
+        store?.sessions[sessionId]?.title ?? "Session \(sessionId.prefix(6))"
+    }
+
+    func sessionColor(_ sessionId: String) -> Color? {
+        store?.folderColor(of: store?.sessions[sessionId])?.color
+    }
+
+    // MARK: - Ended sessions
+
+    /// Watches the session list and closes tabs of sessions that stopped or were archived,
+    /// unless a browser view is showing them.
+    func startWatchingSessions() {
+        guard !watchingSessions else { return }
+        watchingSessions = true
+        watchSessions()
+    }
+
+    private func watchSessions() {
+        guard let store else { return }
+        withObservationTracking {
+            reconcileSessionTabs(store)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.watchSessions() }
+        }
+    }
+
+    private func reconcileSessionTabs(_ store: HappierStore) {
+        let owners = Set(tabs.compactMap(\.sessionId))
+        var ended: Set<String> = []
+        for sessionId in owners {
+            let session = store.sessions[sessionId]
+            let state = session.map { DeviceBrowserSessionWatch.State(active: $0.active, archived: $0.archivedAt != nil) }
+            if sessionWatch.observe(sessionId, state) { ended.insert(sessionId) }
+        }
+        guard !ended.isEmpty else { return }
+        let live = owners.subtracting(ended)
+        for id in registry.tabsToClose(liveSessionIds: live, visibleTabIds: displayedTabIds) { closeTab(id) }
+    }
+
+    /// Returns a view the UI shows a tab's web view in; the tab goes back to the off-screen host when hidden.
+    func park(_ tab: BrowserTab) { parking.park(tab.webView) }
+
+    // MARK: - Address bar
+
+    /// Typed text to a URL: a URL as is, a bare domain over https, anything else a web search.
+    static func url(fromTyped text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
+           ["http", "https", "about", "file", "data"].contains(scheme) { return url }
+        if !trimmed.contains(" "), trimmed.contains(".") || trimmed.hasPrefix("localhost"),
+           let url = URL(string: "https://\(trimmed)") { return url }
+        var search = URLComponents(string: "https://duckduckgo.com/")!
+        search.queryItems = [URLQueryItem(name: "q", value: trimmed)]
+        return search.url
+    }
+
+    func open(typed text: String, in tab: BrowserTab? = nil) {
+        guard let url = Self.url(fromTyped: text) else { return }
+        if let tab = tab ?? selectedTab { tab.webView.load(URLRequest(url: url)) } else { newTab(url: url) }
+    }
+
+    // MARK: - Relay slots
+
+    /// The browser UI opened: this device becomes the most recent one serving `focused`.
+    func viewAppeared() {
+        openViews += 1
+        if selectedTab == nil { newTab() }
+        focusClaimed = true
+        updateSlots(reclaim: true)
+    }
+
+    func viewDisappeared() {
+        openViews = max(0, openViews - 1)
+        #if os(macOS)
+        // On the Mac the window is the claim; the host slot keeps serving in the background.
+        if openViews == 0 { focusClaimed = false }
+        #endif
+        updateSlots()
+    }
+
+    /// iOS closes the relay connection in the background, and the claim goes with it.
+    func appEnteredBackground() {
+        #if os(iOS)
+        focusClaimed = false
+        updateSlots()
+        #endif
+    }
+
+    /// Back in the foreground, this device is the focused one again: an iPhone or iPad serves
+    /// agents while you use it, so a page an agent opens shows up where you are.
+    func appBecameActive() {
+        #if os(iOS)
+        updateSlots(reclaim: true)
+        #endif
+    }
+
+    func updateSlots(reclaim: Bool = false) {
+        guard let store else { return }
+        var slots: Set<DeviceBrowserSlot> = []
+        if agentAccessEnabled {
+            #if os(macOS)
+            slots.insert(.host)
+            if focusClaimed { slots.insert(.focused) }
+            #else
+            // Any time Happier is on screen, not only once the browser was opened here.
+            if focusClaimed || UIApplication.shared.applicationState == .active { slots.insert(.focused) }
+            #endif
+        }
+        store.setDeviceBrowserSlots(slots, reclaim: reclaim)
+    }
+
+    func clearWebsiteData() async {
+        let store = WKWebsiteDataStore.default()
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        history = BrowserHistory()
+        saveHistory()
+    }
+
+    // MARK: - History
+
+    private func loadHistory() {
+        guard let data = try? Data(contentsOf: historyFile) else { return }
+        do {
+            history = try JSONDecoder().decode(BrowserHistory.self, from: data)
+            history.removeExpired(now: Date())
+        } catch {
+            Self.log.error("Browser history unreadable; starting a new one: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func saveHistory() {
+        do {
+            try FileManager.default.createDirectory(at: historyFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(history).write(to: historyFile, options: [.atomic, .completeFileProtection])
+        } catch {
+            Self.log.error("Browser history not saved: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// A page finished loading in one of the user's own tabs. Agents' browsing stays out of the
+    /// user's suggestions.
+    private func recordVisit(_ webView: WKWebView) {
+        guard let url = webView.url, tabs.first(where: { $0.webView === webView })?.owner == .user else { return }
+        history.recordVisit(url: url, title: webView.title ?? "", at: Date())
+        saveHistory()
+    }
+
+    static var device: DeviceBrowserDevice {
+        #if os(macOS)
+        return .init(name: Host.current().localizedName ?? "Mac", platform: .macos)
+        #else
+        return .init(name: UIDevice.current.name, platform: UIDevice.current.userInterfaceIdiom == .pad ? .ipados : .ios)
+        #endif
+    }
+}
+
+// MARK: - Navigation
+
+extension BrowserModel: WKNavigationDelegate, WKUIDelegate {
+    /// Waits for the web view's current navigation to finish; nil on success.
+    func waitForNavigation(of webView: WKWebView) async -> Error? {
+        await withCheckedContinuation { continuation in
+            navigationWaiters[ObjectIdentifier(webView), default: []].append(continuation)
+        }
+    }
+
+    func finishWaiting(_ webView: WKWebView) { finishNavigation(webView, error: nil) }
+
+    private func finishNavigation(_ webView: WKWebView, error: Error?) {
+        let waiters = navigationWaiters.removeValue(forKey: ObjectIdentifier(webView)) ?? []
+        for waiter in waiters { waiter.resume(returning: error) }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        MainActor.assumeIsolated {
+            recordVisit(webView)
+            finishNavigation(webView, error: nil)
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        MainActor.assumeIsolated { finishNavigation(webView, error: Self.isCancellation(error) ? nil : error) }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        MainActor.assumeIsolated { finishNavigation(webView, error: Self.isCancellation(error) ? nil : error) }
+    }
+
+    /// The native landing page can return to a session even when iOS ignores this browser's
+    /// Universal Links. Only our own scheme is handed to the app's existing URL receiver.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        guard let url = navigationAction.request.url, url.scheme?.lowercased() == "happier-native" else { return .allow }
+        finishWaiting(webView)
+        Self.openInDefaultBrowser(url)
+        return .cancel
+    }
+
+    /// A newer navigation replacing this one is not a failure of the page.
+    nonisolated private static func isCancellation(_ error: Error) -> Bool {
+        (error as NSError).domain == NSURLErrorDomain && (error as NSError).code == NSURLErrorCancelled
+    }
+
+    /// `target=_blank` links and `window.open` open in a new tab of this browser.
+    nonisolated func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                             for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        MainActor.assumeIsolated {
+            guard let url = navigationAction.request.url else { return nil }
+            switch tabs.first(where: { $0.webView === webView })?.owner {
+            case .session(let sessionId):
+                // A session's popup stays that session's, and does not take over the user's view.
+                addTab(id: registry.open(for: .session(sessionId)), owner: .session(sessionId), url: url)
+            default:
+                newTab(url: url)
+            }
+            return nil
+        }
+    }
+}
+
+/// Keeps web views that no window shows attached to an off-screen view, so they keep rendering
+/// (screenshots, layout) while the agent uses them in the background.
+@MainActor
+final class BrowserParking {
+    #if os(macOS)
+    private lazy var window: NSWindow = {
+        let window = NSWindow(contentRect: NSRect(x: -30_000, y: -30_000, width: 1280, height: 900),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.stationary, .ignoresCycle, .transient]
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 900))
+        window.orderBack(nil)
+        return window
+    }()
+
+    func park(_ webView: WKWebView) {
+        guard let container = window.contentView, webView.superview !== container else { return }
+        webView.removeFromSuperview()
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+    }
+    #else
+    private let container: UIView = {
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        view.isUserInteractionEnabled = false
+        view.clipsToBounds = true
+        return view
+    }()
+
+    func park(_ webView: WKWebView) {
+        attachContainer()
+        guard webView.superview !== container else { return }
+        webView.removeFromSuperview()
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(webView)
+    }
+
+    /// Behind the app's own views in its window: WebKit keeps rendering a view that is in a window.
+    private func attachContainer() {
+        guard container.window == nil else { return }
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow } ?? UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first
+        guard let window else { return }
+        container.frame = window.bounds
+        window.insertSubview(container, at: 0)
+    }
+    #endif
+}

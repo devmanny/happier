@@ -114,4 +114,25 @@ describe("kvMutate (AccountChange integration)", () => {
             }),
         );
     });
+    it("records each key family in its own change row, so readers can tell tasks from presence", async () => {
+        txFindUnique.mockResolvedValue(null);
+        txCreate.mockImplementation(async (args: any) => ({ key: args.data.key, version: 0 }));
+        const { kvMutate } = await import("./kvMutate");
+        const result = await kvMutate({ uid: "u1" }, [
+            { key: "presence/s1", value: "dmFs", version: -1 },
+            { key: "task/t1", value: "dmFs", version: -1 },
+            { key: "agent/a1/now/s1", value: "dmFs", version: -1 },
+            { key: "todo.list", value: "dmFs", version: -1 },
+        ]);
+        expect(result.success).toBe(true);
+        const rows = markAccountChanged.mock.calls.map((call: any[]) => [call[1].entityId, call[1].hint]);
+        expect(rows).toEqual([
+            ["presence", { keys: ["presence/s1"] }],
+            ["task", { keys: ["task/t1"] }],
+            ["agent", { keys: ["agent/a1/now/s1"] }],
+            ["self", { keys: ["todo.list"] }],
+        ]);
+        // One bundled socket update, with the last cursor.
+        expect(emitUpdate).toHaveBeenCalledTimes(1);
+    });
 });

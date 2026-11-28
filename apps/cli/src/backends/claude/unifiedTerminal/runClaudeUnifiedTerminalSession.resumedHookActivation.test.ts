@@ -218,6 +218,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
     let compactPromptSubmitted = false;
     const onPromptAcceptedByProvider = vi.fn();
     const onTerminalPromptInjected = vi.fn();
+    const onPromptSubmittedToProvider = vi.fn();
     const handle: TerminalHostHandle = {
       kind: 'tmux',
       sessionName: 'happier-claude-resume-summary-compaction-test',
@@ -314,6 +315,7 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       },
       onPromptAcceptedByProvider,
       onTerminalPromptInjected,
+      onPromptSubmittedToProvider,
       resolveHostAdapter: async () => ({ status: 'resolved', adapter, reason: 'test' }),
       buildSpawn: async () => ({ spawnArgv: ['/bin/claude'], spawnEnv: {} }),
       createSessionName: () => 'happier-claude-resume-summary-compaction-test',
@@ -369,6 +371,11 @@ describe('runClaudeUnifiedTerminalSession resumed hook activation', () => {
       await waitUntil(() => injectUserPrompt.mock.calls.length === 1);
       await waitUntil(() => onTerminalPromptInjected.mock.calls.length === 1);
       expect(onPromptAcceptedByProvider).not.toHaveBeenCalled();
+      // Written and submitted: the provider holds it before acceptance settles (incident
+      // cmwyimjvw4buyqh01nx3pp1oh), so a close in this window must not call it undelivered.
+      expect(onPromptSubmittedToProvider).toHaveBeenCalledWith({
+        userMessageLocalIds: ['resume-summary-pending-local-id'],
+      });
       await appendFile(transcriptPath, `${JSON.stringify({
         type: 'user',
         uuid: 'resume-summary-pending-accepted-row',

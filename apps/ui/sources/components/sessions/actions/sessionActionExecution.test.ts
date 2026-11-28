@@ -26,9 +26,12 @@ import {
     SESSION_ACTION_UNARCHIVE_ID,
 } from './sessionActionIds';
 import { executeSessionAction } from './sessionActionExecution';
+import { executeSessionBulkAction, SESSION_BULK_ACTION_IDS } from './sessionBulkActionExecution';
+import { isSessionArchivePending, stopSessionAndMaybeArchive } from '../sessionStopArchiveFlow';
+import { createDeferred } from '@/dev/testkit';
 
-function createTarget(overrides: Partial<SessionListRenderableSession> = {}) {
-    const session: SessionListRenderableSession = {
+function createSession(overrides: Partial<SessionListRenderableSession> = {}): SessionListRenderableSession {
+    return {
         id: 'session_1',
         active: false,
         archivedAt: null,
@@ -48,6 +51,10 @@ function createTarget(overrides: Partial<SessionListRenderableSession> = {}) {
         presence: 1,
         ...overrides,
     };
+}
+
+function createTarget(overrides: Partial<SessionListRenderableSession> = {}) {
+    const session = createSession(overrides);
     return createSessionActionTarget({
         session,
         serverId: 'server_1',
@@ -76,7 +83,7 @@ describe('executeSessionAction', () => {
         await executeSessionAction({
             actionId,
             target: createTarget({ archivedAt: actionId === SESSION_ACTION_UNARCHIVE_ID ? 1 : null }),
-            context: { operations: { [operation]: mutate, clearSessionVisibleWhenInactive: () => {} } },
+            context: { operations: { [operation]: mutate } },
         });
         expect(Modal.confirm).toHaveBeenCalled();
         expect(vi.mocked(Modal.confirm).mock.calls[0]?.[2]?.destructive).toBe(false);
@@ -88,7 +95,7 @@ describe('executeSessionAction', () => {
         await executeSessionAction({
             actionId,
             target: createTarget({ archivedAt: actionId === SESSION_ACTION_UNARCHIVE_ID ? 1 : null }),
-            context: { operations: { archiveSession: mutate, unarchiveSession: mutate, clearSessionVisibleWhenInactive: () => {} } },
+            context: { operations: { archiveSession: mutate, unarchiveSession: mutate } },
         });
         expect(Modal.confirm).not.toHaveBeenCalled();
         expect(mutate).toHaveBeenCalledWith('session_1', { serverId: 'server_1' });
@@ -137,7 +144,6 @@ describe('executeSessionAction', () => {
                     stopArchiveFlow,
                     stopSession: vi.fn(async () => ({ success: true as const })),
                     archiveSession,
-                    clearSessionVisibleWhenInactive: vi.fn(),
                 },
             },
         });
@@ -202,7 +208,6 @@ describe('executeSessionAction', () => {
                     stopArchiveFlow,
                     stopSession: vi.fn(async () => ({ success: true as const })),
                     archiveSession,
-                    clearSessionVisibleWhenInactive: vi.fn(),
                 },
             },
         });
@@ -363,5 +368,189 @@ describe('executeSessionAction', () => {
             actionId: SESSION_ACTION_PIN_ID,
             target: createTarget(),
         })).rejects.toBeInstanceOf(HappyError);
+    });
+
+    describe('archive pending state', () => {
+        const sessionId = 'session_archive_pending';
+        const readArchiving = () => isSessionArchivePending(sessionId, 'server_1');
+
+        beforeEach(() => {
+            storage.setState({ sessionArchiveOperations: {} });
+            storage.getState().mergeSessionListRenderables([createSession({ id: sessionId })]);
+        });
+
+        it('does not duplicate a bulk archive that starts while stop confirmation is open', async () => {
+            const confirmation = createDeferred<boolean>();
+            const stopped = createDeferred<{ success: boolean }>();
+            vi.mocked(Modal.confirm).mockReturnValueOnce(confirmation.promise);
+            const stopSession = vi.fn(() => stopped.promise);
+            const archiveSession = vi.fn(async () => ({ success: true }));
+            const single = executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId, active: true }),
+                context: { operations: { stopSession, archiveSession } },
+            });
+            const bulk = executeSessionBulkAction({
+                action: { id: SESSION_BULK_ACTION_IDS.archive },
+                targets: [{
+                    key: `server_1:${sessionId}`, sessionId, serverId: 'server_1', active: true,
+                    archived: false, hasAdminAccess: true, canStop: true, canArchive: true,
+                    pinned: false, tags: [],
+                }],
+                context: { stopSession, archiveSession, stopSessionAndMaybeArchive: (params) => stopSessionAndMaybeArchive({ ...params, serverId: params.target.serverId }) },
+            });
+            await vi.waitFor(() => expect(stopSession).toHaveBeenCalledTimes(1));
+            confirmation.resolve(true);
+            try {
+                await Promise.resolve();
+                await Promise.resolve();
+                expect(stopSession).toHaveBeenCalledTimes(1);
+                expect(readArchiving()).toBe(true);
+            } finally {
+                stopped.resolve({ success: true });
+                await Promise.all([single, bulk]);
+            }
+            expect(archiveSession).toHaveBeenCalledTimes(1);
+            expect(readArchiving()).toBe(false);
+        });
+
+        it('marks an inactive session archiving while the archive request is in flight and clears it on success', async () => {
+            const observed: boolean[] = [];
+            const archiveSession = vi.fn(async () => {
+                observed.push(readArchiving());
+                return { success: true };
+            });
+
+            await executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId }),
+                context: { operations: { archiveSession } },
+            });
+
+            expect(observed).toEqual([true]);
+            expect(readArchiving()).toBe(false);
+        });
+
+        it('allows the same session id on two servers to archive independently', async () => {
+            const request = createDeferred<{ success: boolean }>();
+            const archiveSession = vi.fn(() => request.promise);
+            const run = (serverId: string) => executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: { ...createTarget({ id: sessionId }), serverId },
+                context: { operations: { archiveSession } },
+            });
+            const first = run('server_1');
+            await vi.waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
+            const second = run('server_2');
+            try {
+                await vi.waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(2));
+            } finally {
+                request.resolve({ success: true });
+                await Promise.all([first, second]);
+            }
+        });
+
+        it('prevents duplicate archives even when the remote session has no active-store renderable', async () => {
+            const remoteId = 'uncached_remote_session';
+            const request = createDeferred<{ success: boolean }>();
+            const archiveSession = vi.fn(() => request.promise);
+            const run = () => executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: { ...createTarget({ id: remoteId }), serverId: 'server_2' },
+                context: { operations: { archiveSession } },
+            });
+            const first = run();
+            await vi.waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
+            const second = run();
+            try {
+                await Promise.resolve();
+                await Promise.resolve();
+                expect(archiveSession).toHaveBeenCalledTimes(1);
+            } finally {
+                request.resolve({ success: true });
+                await Promise.all([first, second]);
+            }
+        });
+
+        it('retains admission when the active-server renderables are replaced during a request', async () => {
+            const request = createDeferred<{ success: boolean }>();
+            const archiveSession = vi.fn(() => request.promise);
+            const run = () => executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId }),
+                context: { operations: { archiveSession } },
+            });
+            const first = run();
+            await vi.waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
+            storage.setState({ sessionListRenderables: { [sessionId]: createSession({ id: sessionId }) } });
+            const second = run();
+            try {
+                await Promise.resolve();
+                await Promise.resolve();
+                expect(archiveSession).toHaveBeenCalledTimes(1);
+            } finally {
+                request.resolve({ success: true });
+                await Promise.all([first, second]);
+            }
+        });
+
+        it('does not start a second archive while one is already in flight for the session', async () => {
+            let release: () => void = () => {};
+            const gate = new Promise<{ success: boolean }>((resolve) => {
+                release = () => resolve({ success: true });
+            });
+            const archiveSession = vi.fn(() => gate);
+            const run = () => executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId }),
+                context: { operations: { archiveSession } },
+            });
+
+            const first = run();
+            await vi.waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
+            const second = run();
+            release();
+
+            await expect(second).resolves.toBe(false);
+            await first;
+            expect(archiveSession).toHaveBeenCalledTimes(1);
+            expect(readArchiving()).toBe(false);
+        });
+
+        it('reverts the archiving state when the archive fails', async () => {
+            const observed: boolean[] = [];
+            const archiveSession = vi.fn(async () => {
+                observed.push(readArchiving());
+                return { success: false, message: 'archive boom' };
+            });
+
+            await expect(executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId }),
+                context: { operations: { archiveSession } },
+            })).rejects.toMatchObject({ message: 'archive boom' });
+
+            expect(observed).toEqual([true]);
+            expect(readArchiving()).toBe(false);
+        });
+
+        it('keeps a running session archiving from stop through archive and reverts when stop fails', async () => {
+            const observedDuringStop: boolean[] = [];
+            const stopSession = vi.fn(async () => {
+                observedDuringStop.push(readArchiving());
+                return { success: false, message: 'stop boom', code: 'session_stop_failed' };
+            });
+            const archiveSession = vi.fn(async () => ({ success: true }));
+
+            await expect(executeSessionAction({
+                actionId: SESSION_ACTION_ARCHIVE_ID,
+                target: createTarget({ id: sessionId, active: true }),
+                context: { operations: { stopSession, archiveSession } },
+            })).rejects.toMatchObject({ message: 'stop boom' });
+
+            expect(observedDuringStop).toEqual([true]);
+            expect(archiveSession).not.toHaveBeenCalled();
+            expect(readArchiving()).toBe(false);
+        });
     });
 });

@@ -5,6 +5,7 @@ import {
   CLIENT_UPGRADE_REQUIRED_HTTP_STATUS,
   PENDING_INPUT_PROTOCOL_VERSION_V1,
   PENDING_INPUT_PROTOCOL_VERSION_V2,
+  PENDING_INPUT_PROTOCOL_VERSION_V3,
   SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY,
   ClientVersionCheckRequestV1Schema,
   ClientVersionCheckResponseV1Schema,
@@ -17,7 +18,9 @@ describe('client compatibility protocol contracts', () => {
     expect(SESSION_SYNC_PROTOCOL_VERSION_RUNTIME_ACTIVITY).toBe(2);
     expect(PENDING_INPUT_PROTOCOL_VERSION_V1).toBe(1);
     expect(PENDING_INPUT_PROTOCOL_VERSION_V2).toBe(2);
-    expect(CURRENT_PENDING_INPUT_PROTOCOL_VERSION).toBe(PENDING_INPUT_PROTOCOL_VERSION_V2);
+    // v3: the current runner can return a provider-proven undelivered row to its place in line.
+    expect(PENDING_INPUT_PROTOCOL_VERSION_V3).toBe(3);
+    expect(CURRENT_PENDING_INPUT_PROTOCOL_VERSION).toBe(PENDING_INPUT_PROTOCOL_VERSION_V3);
   });
 
   it('owns the strict app-version endpoint independently from session capabilities', () => {

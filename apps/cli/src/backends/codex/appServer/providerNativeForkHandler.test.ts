@@ -44,6 +44,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     });
 
     expect(forkCodexAppServerConversationNative).toHaveBeenCalledWith({
@@ -121,6 +122,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'seq', upToSeqInclusive: 10 },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     });
 
     expect(result).toBeNull();
@@ -158,6 +160,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     })).rejects.toMatchObject({
       name: 'ProviderNativeForkFailedBeforeDispatchError',
       cause: failure,
@@ -192,6 +195,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     })).rejects.toMatchObject({ name: 'ProviderNativeForkIndeterminateError' });
 
     expect(logger.debug).toHaveBeenCalledWith(
@@ -223,6 +227,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
       signal: controller.signal,
     })).rejects.toBe(abortError);
 
@@ -259,6 +264,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     })).rejects.toMatchObject({ name: 'ProviderNativeForkIndeterminateError' });
     const serializedDiagnostics = JSON.stringify(vi.mocked(logger.debug).mock.calls);
     expect(serializedDiagnostics).not.toContain(parentVendorSessionId);
@@ -299,6 +305,7 @@ describe('codexAppServerProviderNativeForkHandler', () => {
       directory: '/repo',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 10,
+      cutoffSeqInclusive: 10,
     })).resolves.toBeNull();
 
     expect(JSON.stringify(vi.mocked(logger.debug).mock.calls)).not.toContain('raw-parent-provider-thread-id');

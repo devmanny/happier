@@ -1,5 +1,6 @@
 import {
   SPAWN_SESSION_ERROR_CODES,
+  type SpawnSessionErrorCode,
 } from '@happier-dev/protocol';
 import { RPC_METHODS } from '@happier-dev/protocol/rpc';
 import { isRpcMethodNotAvailableError, isRpcMethodNotFoundError } from '@happier-dev/protocol/rpcErrors';
@@ -25,6 +26,8 @@ export type InactiveSessionResumeResult =
       ok: false;
       code: 'session_archived' | 'unsupported' | 'resume_failed' | 'timeout';
       message: string;
+      /** The machine's typed spawn error, when it answered with one. */
+      spawnErrorCode?: SpawnSessionErrorCode;
     }>;
 
 function readNonEmptyString(value: unknown): string | null {
@@ -43,6 +46,12 @@ function buildMachineResumeRequest(
     ...(spawnNonce ? { spawnNonce } : {}),
     ...(options.resume ? { resume: options.resume } : {}),
     ...(options.agentRuntimeDescriptorV1 ? { agentRuntimeDescriptorV1: options.agentRuntimeDescriptorV1 } : {}),
+    // The spawn RPC's own carriers: the identity becomes the runner's identity env,
+    // and the environment is the snapshot's allowlisted provider dirs.
+    ...(options.agentIdentity ? { agentIdentityV1: options.agentIdentity } : {}),
+    ...(options.environmentVariables && Object.keys(options.environmentVariables).length > 0
+      ? { environmentVariables: options.environmentVariables }
+      : {}),
     ...(options.connectedServices ? { connectedServices: options.connectedServices } : {}),
     ...(typeof options.connectedServicesUpdatedAt === 'number'
       ? { connectedServicesUpdatedAt: options.connectedServicesUpdatedAt }
@@ -85,6 +94,8 @@ export type EnsureSessionRuntimeForPendingInputParams = Readonly<{
   metadata: Record<string, unknown>;
   timeoutMs?: number;
   waitForReady?: boolean;
+  /** The full agent identity for the resumed runner; see the resume builder. */
+  agentIdentity?: import('@happier-dev/protocol').AgentIdentityV1;
 }>;
 
 /** Canonical full-runtime ensure for an existing Session and its persisted provider thread. */
@@ -134,6 +145,7 @@ export async function ensureSessionRuntimeForPendingInput(
       requestId: params.localId,
     },
     ...(typeof params.rawSession.seq === 'number' ? { initialTranscriptAfterSeq: params.rawSession.seq } : {}),
+    ...(params.agentIdentity ? { agentIdentity: params.agentIdentity } : {}),
   });
   if (!options || options.machineId !== machineId || !options.backendTarget) {
     return {
@@ -176,7 +188,12 @@ export async function ensureSessionRuntimeForPendingInput(
       const message = response && typeof response === 'object' && typeof (response as { errorMessage?: unknown }).errorMessage === 'string'
         ? (response as { errorMessage: string }).errorMessage
         : 'Inactive session resume was rejected; pending custody was retained';
-      return { ok: false, code: 'resume_failed', message };
+      const rawErrorCode = response && typeof response === 'object' ? (response as { errorCode?: unknown }).errorCode : undefined;
+      const spawnErrorCode = typeof rawErrorCode === 'string'
+        && (Object.values(SPAWN_SESSION_ERROR_CODES) as string[]).includes(rawErrorCode)
+        ? rawErrorCode as SpawnSessionErrorCode
+        : undefined;
+      return { ok: false, code: 'resume_failed', message, ...(spawnErrorCode ? { spawnErrorCode } : {}) };
     }
     if (responseSessionId !== params.sessionId) {
       return {
@@ -239,7 +256,12 @@ export async function ensureSessionRuntimeForPendingInput(
   }
 }
 
-/** Explicit CLI-user-action seam for callers that have already proven the Session inactive. */
+/**
+ * Explicit CLI-user-action seam that asks the Session's machine to ensure its runtime. Callers
+ * normally prove the Session inactive first; on an active Session the machine's spawn owner adopts
+ * a running runtime of the Agent the Session names without a new launch and refuses one for another
+ * Agent with `SESSION_RUNTIME_AGENT_CONFLICT`, which the Agent-switch reconcile relies on.
+ */
 export async function requestInactiveSessionResume(
   params: EnsureSessionRuntimeForPendingInputParams,
 ): Promise<InactiveSessionResumeResult> {

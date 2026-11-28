@@ -38,6 +38,7 @@ import { resolveReleaseRingScopedBasename } from '@/cli/runtime/publicReleaseCha
 import { writeJsonAtomicSync } from '@/utils/fs/writeJsonAtomicSync';
 import { buildEncodedPowerShellCommand } from '@/utils/powerShellCommand';
 import { resolveClaudePermissionHookTimeoutSeconds } from './permissionHookTimeout';
+import { DEVICE_BROWSER_MCP_TOOL_NAMES } from '@/mcp/deviceBrowser/deviceBrowserToolNames';
 
 export { DEFAULT_PERMISSION_HOOK_TIMEOUT_SECONDS } from './permissionHookTimeout';
 
@@ -331,6 +332,7 @@ export function generateHookSettingsFile(_port: number, _options: GenerateHookSe
             allow: [
                 'mcp__happier__change_title',
                 'mcp__happier__session_title_set',
+                ...DEVICE_BROWSER_MCP_TOOL_NAMES.map((name) => `mcp__happier__${name}`),
             ],
         },
     };

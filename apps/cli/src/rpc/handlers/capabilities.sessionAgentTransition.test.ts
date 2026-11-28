@@ -35,7 +35,7 @@ describe('Agent transition input permission capability', () => {
     const beforeRegistration = await call<CapabilitiesDetectResponse, CapabilitiesDetectRequest>(RPC_METHODS.CAPABILITIES_DETECT, request);
     expect(beforeRegistration.results['tool.sessionAgentTransition']).toMatchObject({
       ok: true,
-      data: { supportsInputPermissionIntent: false },
+      data: { supportsInputPermissionIntent: false, supportsAgentIdentity: false },
     });
 
     // Registration is the RPC transport boundary under test; this handler is
@@ -45,7 +45,8 @@ describe('Agent transition input permission capability', () => {
     const afterRegistration = await call<CapabilitiesDetectResponse, CapabilitiesDetectRequest>(RPC_METHODS.CAPABILITIES_DETECT, request);
     expect(afterRegistration.results['tool.sessionAgentTransition']).toMatchObject({
       ok: true,
-      data: { supportsInputPermissionIntent: true },
+      // Clients check this before sending a selection's agent identity and environment.
+      data: { supportsInputPermissionIntent: true, supportsAgentIdentity: true },
     });
   });
 });

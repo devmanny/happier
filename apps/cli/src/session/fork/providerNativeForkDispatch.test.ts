@@ -39,6 +39,7 @@ describe('dispatchProviderNativeFork', () => {
       directory: '/tmp/project',
       forkPoint: { type: 'latest' },
       targetSeqInclusive: 17,
+      cutoffSeqInclusive: 17,
     });
 
     expect(forkCodexAppServerConversationNativeMock).toHaveBeenCalledWith({
@@ -105,6 +106,7 @@ describe('dispatchProviderNativeFork', () => {
         directory: '/tmp/project',
         forkPoint: { type: 'latest' },
         targetSeqInclusive: 17,
+        cutoffSeqInclusive: 17,
       }),
     ).toBeNull();
 
@@ -121,6 +123,7 @@ describe('dispatchProviderNativeFork', () => {
         directory: '/tmp/project',
         forkPoint: { type: 'seq', upToSeqInclusive: 17 },
         targetSeqInclusive: 17,
+        cutoffSeqInclusive: 17,
       }),
     ).toBeNull();
   });
@@ -153,6 +156,7 @@ describe('dispatchProviderNativeFork', () => {
       directory: '/tmp/project',
       forkPoint: { type: 'seq', upToSeqInclusive: 42 },
       targetSeqInclusive: 42,
+      cutoffSeqInclusive: 42,
     });
 
     expect(forkOpenCodeSessionNativeMock).toHaveBeenCalledWith({
@@ -208,6 +212,7 @@ describe('dispatchProviderNativeFork', () => {
         directory: '/tmp/project',
         forkPoint: { type: 'latest' },
         targetSeqInclusive: 17,
+        cutoffSeqInclusive: 17,
       }),
     ).rejects.toMatchObject({
       name: 'HttpStatusError',

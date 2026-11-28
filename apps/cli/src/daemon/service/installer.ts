@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 import { configuration } from '@/configuration';
+import { logger } from '@/ui/logger';
 
 import {
   applyDaemonServiceInstallPlan,
@@ -37,6 +38,7 @@ import {
   resolveManagedCliReleaseChannel,
 } from '@happier-dev/cli-common/firstPartyRuntime';
 import { doesInstalledDaemonServiceDefinitionMatchExpected } from './doesInstalledDaemonServiceDefinitionMatchExpected';
+import { DARWIN_DAEMON_LAUNCHER_NAME, resolveDaemonServiceDarwinLauncher, type DarwinDaemonLauncherInstall } from './darwinDaemonLauncher';
 import { describeDaemonServiceRuntimeReplacement } from './readDaemonServiceDefinitionLauncher';
 import { happierHomeDirsMatch } from '@/daemon/ownership/happierHomeDirComparableKey';
 import { getActiveServerProfile } from '@/server/serverProfiles';
@@ -130,6 +132,8 @@ export type DaemonServiceInstallPreview = Readonly<{
    * a caller acting for the user must ask first; `null` when the launcher would not change.
    */
   exactTargetRuntimeReplacement: Readonly<{ current: string; replacement: string }> | null;
+  /** darwin: the launcher the definition starts; `null` when neither installed nor shipped by this CLI. */
+  darwinLauncher: DarwinDaemonLauncherInstall | null;
 }>;
 
 /** Definition-owned settings to retain across a rewrite or a repair's remove/reinstall. */
@@ -256,6 +260,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
   const autostart: DaemonServiceAutostartMode = options.autostart ?? installedAutostart ?? 'at-login';
   const managedBy = options.managedBy ?? preservedOptions.managedBy ?? null;
   const bundleId = options.bundleId ?? preservedOptions.bundleId ?? null;
+  const darwinLauncher = resolveDaemonServiceDarwinLauncher({ platform, happierHomeDir });
   const buildPlan = (
     planAutostart: DaemonServiceAutostartMode,
     autostartTriggerChangeOnly = false,
@@ -281,6 +286,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
     publicServerUrl,
     nodePath: runtimeTarget.nodePath,
     entryPath: runtimeTarget.entryPath,
+    darwinLauncher,
   });
   // "Otherwise unchanged" is proved, not assumed: render this same install with the mode the
   // service already declares and compare it against what is on disk. If they match, the mode is
@@ -339,6 +345,7 @@ export async function previewDaemonServiceInstall(options: Readonly<{
     autostart,
     plan,
     exactTargetRuntimeReplacement,
+    darwinLauncher,
   };
 }
 
@@ -458,6 +465,9 @@ export async function installDaemonService(options: Readonly<{
   if (preview.exactTargetIsConverged && preview.exactTargetMatchesExpectedDefinition
     && !preview.exactTargetRuntimeReplacement && options.restartRunningDaemon !== true) {
     return;
+  }
+  if (platform === 'darwin' && !preview.darwinLauncher) {
+    logger.warn(`[service] This CLI ships no ${DARWIN_DAEMON_LAUNCHER_NAME}; the background service runs the CLI directly, so macOS asks for its privacy permissions again after CLI updates.`);
   }
   await options.beforeApply?.();
   await applyDaemonServiceInstallPlan(preview.plan, {

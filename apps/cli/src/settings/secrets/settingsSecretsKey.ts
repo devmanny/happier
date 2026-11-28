@@ -1,21 +1,11 @@
-import {
-  deriveSettingsSecretsKeySetV1,
-  type AccountScopedCryptoMaterial,
-} from '@happier-dev/protocol';
+import { deriveSettingsSecretsKeySetV1 } from '@happier-dev/protocol';
 
-import { requireEncryptionCredentials, type Credentials } from '@/persistence';
-
-function resolveSettingsSecretsMaterial(credentials: Credentials): AccountScopedCryptoMaterial {
-  requireEncryptionCredentials(credentials);
-  return credentials.encryption.type === 'legacy'
-    ? { type: 'legacy', secret: credentials.encryption.secret }
-    : { type: 'dataKey', machineKey: credentials.encryption.machineKey };
-}
+import { resolveAccountScopedCryptoMaterial, type Credentials } from '@/persistence';
 
 export function deriveSettingsSecretsKeyForCredentials(credentials: Credentials): Uint8Array {
-  return deriveSettingsSecretsKeySetV1(resolveSettingsSecretsMaterial(credentials)).writeKey;
+  return deriveSettingsSecretsKeySetV1(resolveAccountScopedCryptoMaterial(credentials)).writeKey;
 }
 
 export function deriveSettingsSecretsReadKeysForCredentials(credentials: Credentials): readonly Uint8Array[] {
-  return deriveSettingsSecretsKeySetV1(resolveSettingsSecretsMaterial(credentials)).readKeys;
+  return deriveSettingsSecretsKeySetV1(resolveAccountScopedCryptoMaterial(credentials)).readKeys;
 }

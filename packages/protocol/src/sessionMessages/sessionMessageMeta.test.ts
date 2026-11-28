@@ -25,6 +25,17 @@ describe('sessionMessages meta', () => {
     expect(protocol.HappierMetaEnvelopeSchema.parse({ ...marker, payload: null })).toEqual({ ...marker, payload: null });
   });
 
+  it('preserves inter-session provenance in the existing forward-compatible metadata envelope', () => {
+    // This envelope/parser is unchanged from released CLI v0.2.17 (a2c45c86804b).
+    const payload = { senderSessionId: 'session-source', targetSessionId: 'session-target' };
+    const meta = { source: 'ui', sentFrom: 'cli', happier: { kind: 'session_message.v1', payload } };
+    expect(protocol.SessionMessageMetaSchema.parse(meta)).toEqual(meta);
+    expect(protocol.parseSessionMessageV1(payload)).toEqual(payload);
+    expect(protocol.parseSessionMessageV1({ senderSessionId: 'source' })).toBeNull();
+    expect(protocol.parseSessionMessageV1({ senderSessionId: ' ', targetSessionId: 'target' })).toBeNull();
+    expect(protocol.parseSessionMessageV1({ senderSessionId: 'source', targetSessionId: '' })).toBeNull();
+  });
+
   it('reads and writes the user-message delivery intent metadata', () => {
     const meta = protocol.withSessionUserMessageDeliveryIntentMeta(
       { source: 'ui', happierDeliveryIntentV1: 'caller-spoof' },

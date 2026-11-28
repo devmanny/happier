@@ -6,7 +6,7 @@ import { connect as netConnect } from "node:net";
 import { Server } from "socket.io";
 
 import { eventRouter } from "./eventRouter";
-import { getSocketRooms } from "@/app/api/socketRooms";
+import { getSocketRooms, readsLeanUpdates, registerOpenSessionsEvent, UPDATES_LEAN_V1_CAPABILITY } from "@/app/api/socketRooms";
 import { ConnectedServiceIdSchema } from "@happier-dev/protocol";
 
 const require = createRequire(import.meta.url);
@@ -38,7 +38,8 @@ async function startTestIoServer() {
         const sessionId = socket.handshake.auth.sessionId as string | undefined;
         const machineId = socket.handshake.auth.machineId as string | undefined;
 
-        socket.join(getSocketRooms({ userId, clientType, sessionId, machineId, connectedServiceIds: socket.handshake.auth.connectedServiceIds }));
+        socket.join(getSocketRooms({ userId, clientType, sessionId, machineId, connectedServiceIds: socket.handshake.auth.connectedServiceIds, capabilities: socket.handshake.auth.capabilities }));
+        registerOpenSessionsEvent(socket, userId, clientType === "user-scoped" && readsLeanUpdates(socket.handshake.auth.capabilities));
     });
 
     await new Promise<void>((resolve) => {
@@ -81,6 +82,7 @@ function connectClient(params: {
     sessionId?: string;
     machineId?: string;
     connectedServiceIds?: readonly string[];
+    capabilities?: readonly string[];
 }) {
     const socket = ioClient(params.url, {
         path: "/v1/updates",
@@ -90,6 +92,7 @@ function connectClient(params: {
             ...(params.sessionId ? { sessionId: params.sessionId } : {}),
             ...(params.machineId ? { machineId: params.machineId } : {}),
             ...(params.connectedServiceIds ? { connectedServiceIds: params.connectedServiceIds } : {}),
+            ...(params.capabilities ? { capabilities: params.capabilities } : {}),
         },
         reconnection: false,
         autoConnect: true,
@@ -303,6 +306,56 @@ describe("eventRouter session room isolation (integration)", () => {
         } finally {
             userScoped.disconnect();
             machineScoped.disconnect();
+            await server.close();
+        }
+    });
+    it("sends lean readers state changes and full messages only for the sessions they have open; released readers get everything", async () => {
+        const server = await startTestIoServer();
+        eventRouter.setIo(server.io as any);
+        const released = connectClient({ url: server.url, userId: "u1", clientType: "user-scoped" });
+        const lean = connectClient({ url: server.url, userId: "u1", clientType: "user-scoped", capabilities: [UPDATES_LEAN_V1_CAPABILITY] });
+        try {
+            await Promise.all([waitForConnect(released), waitForConnect(lean)]);
+            const got = { released: [] as any[], lean: [] as any[] };
+            released.onAny((event: string, payload: any) => got.released.push({ event, payload }));
+            lean.onAny((event: string, payload: any) => got.lean.push({ event, payload }));
+            await lean.emitWithAck("client-open-sessions", { sessionIds: ["s-open"] });
+
+            const message = (sid: string, seq: number) => ({ id: `m${seq}`, seq: 100 + seq, createdAt: 1,
+                body: { t: "new-message", sid, id: sid, message: { id: `msg${seq}`, seq, localId: null, content: { t: "encrypted", c: "SECRET" }, createdAt: 1, updatedAt: 1 } } });
+            const interested = (sessionId: string) => ({ type: "all-interested-in-session" as const, sessionId });
+            // A heartbeat (only active/activeAt) and a real state change.
+            eventRouter.emitUpdate({ userId: "u1", leanReaders: "skip", payload: { id: "h", seq: 1, createdAt: 1, body: { t: "update-session", id: "s-closed", sid: "s-closed", active: true, activeAt: 5 } } as any, recipientFilter: interested("s-closed") });
+            eventRouter.emitUpdate({ userId: "u1", payload: { id: "st", seq: 2, createdAt: 1, body: { t: "update-session", id: "s-closed", sid: "s-closed", latestTurnStatus: "running" } } as any, recipientFilter: interested("s-closed") });
+            eventRouter.emitUpdate({ userId: "u1", payload: message("s-closed", 1) as any, recipientFilter: interested("s-closed") });
+            eventRouter.emitUpdate({ userId: "u1", payload: message("s-open", 2) as any, recipientFilter: interested("s-open") });
+            eventRouter.emitEphemeral({ userId: "u1", payload: { type: "transcript-stream-segment-delta", sessionId: "s-closed", delta: "x" } as any, recipientFilter: interested("s-closed") });
+            eventRouter.emitEphemeral({ userId: "u1", payload: { type: "transcript-stream-segment-delta", sessionId: "s-open", delta: "y" } as any, recipientFilter: interested("s-open") });
+
+            await vi.waitFor(() => {
+                expect(got.released).toHaveLength(6);
+                expect(got.lean).toHaveLength(4);
+            });
+            // Released readers: exactly as before.
+            expect(got.released.map((e) => e.payload.body?.t ?? e.payload.type)).toEqual([
+                "update-session", "update-session", "new-message", "new-message", "transcript-stream-segment-delta", "transcript-stream-segment-delta"]);
+            expect(got.released[2].payload.body.message.content).toEqual({ t: "encrypted", c: "SECRET" });
+            // Lean: no heartbeat; the state change; a light notice for the closed session; the open one in full, with its stream.
+            expect(got.lean[0].payload.body).toMatchObject({ t: "update-session", latestTurnStatus: "running" });
+            expect(got.lean[1].payload.body).toMatchObject({ t: "new-message", sid: "s-closed", message: { id: "msg1", seq: 1, contentOmitted: true } });
+            expect(got.lean[1].payload.body.message).not.toHaveProperty("content");
+            expect(got.lean[1].payload.seq).toBe(101);
+            expect(got.lean[2].payload.body.message.content).toEqual({ t: "encrypted", c: "SECRET" });
+            expect(got.lean[3].payload).toMatchObject({ type: "transcript-stream-segment-delta", sessionId: "s-open" });
+
+            // Closing it (an empty list) turns that session back to light notices.
+            await lean.emitWithAck("client-open-sessions", { sessionIds: [] });
+            eventRouter.emitEphemeral({ userId: "u1", payload: { type: "transcript-stream-segment-delta", sessionId: "s-open", delta: "z" } as any, recipientFilter: interested("s-open") });
+            eventRouter.emitUpdate({ userId: "u1", payload: message("s-open", 3) as any, recipientFilter: interested("s-open") });
+            await vi.waitFor(() => expect(got.lean).toHaveLength(5));
+            expect(got.lean[4].payload.body.message).toMatchObject({ seq: 3, contentOmitted: true });
+        } finally {
+            released.disconnect(); lean.disconnect();
             await server.close();
         }
     });

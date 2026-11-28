@@ -72,6 +72,8 @@ const IGNORED_UNTRANSLATED_KEYS_BY_LOCALE: Readonly<Record<string, ReadonlySet<s
     it: new Set([
         // "Offline" is the standard Italian status word for a disconnected machine.
         'updates.offline',
+        // "Feedback" is an established Italian loanword used for user feedback.
+        'settingsAppearance.feedback',
         // "File" is the standard Italian computing noun, not an untranslated fallback.
         'notifications.activity.requestLabels.file',
         'settingsSession.sessionList.headerIdentityDisplayAvatarTitle',

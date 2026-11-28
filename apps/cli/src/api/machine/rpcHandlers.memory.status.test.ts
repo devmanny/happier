@@ -46,6 +46,7 @@ describe('rpcHandlers.memory (status)', () => {
         }),
         getTier1DbPath: () => tier1Path,
         getDeepDbPath: () => deepPath,
+        getDeepIndex: () => null,
       };
 
       registerMachineMemoryRpcHandlers({
@@ -120,17 +121,11 @@ describe('rpcHandlers.memory (status)', () => {
       });
       tier1.close();
 
-      const deep = openDeepIndexDb({ dbPath: deepPath });
-      deep.init();
-      deep.insertChunk({
+      const deep = openDeepIndexDb({ dbPath: deepPath, accountId: 'acct-1' });
+      deep.upsertMessages({
         sessionId: 'sess-1',
-        seqFrom: 1,
-        seqTo: 2,
-        createdAtFromMs: 1000,
-        createdAtToMs: 2000,
-        text: 'OpenClaw deep memory content',
+        messages: [{ seq: 2, createdAtMs: 2000, role: 'assistant', kind: 'assistant_message', text: 'OpenClaw deep memory content' }],
       });
-      deep.close();
 
       const handlers = new Map<string, (raw: unknown) => Promise<unknown>>();
       const rpcHandlerManager = {
@@ -159,6 +154,7 @@ describe('rpcHandlers.memory (status)', () => {
         }),
         getTier1DbPath: () => tier1Path,
         getDeepDbPath: () => deepPath,
+        getDeepIndex: () => deep,
         getWorkerStatus: () => ({
           state: 'idle',
           lastTickAtMs: 4_000,
@@ -186,6 +182,7 @@ describe('rpcHandlers.memory (status)', () => {
         latestIndexedMessageAtMs: 2000,
       });
       expect(out.queue).toMatchObject({ indexedSessionCount: 1 });
+      deep.close();
       expect(out.worker).toMatchObject({ lastTickAtMs: 4_000 });
       expect(out.lastRun).toEqual(expect.objectContaining({
         startedAtMs: 2500,

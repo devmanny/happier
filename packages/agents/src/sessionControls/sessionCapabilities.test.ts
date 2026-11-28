@@ -13,8 +13,8 @@ describe('sessionCapabilities', () => {
     expect(AGENTS_CORE.claude.sessionCapabilities).toEqual({
       sessionListing: 'supported',
       sessionFork: {
-        conversation: 'unsupported',
-        fromMessage: 'unsupported',
+        conversation: 'supported',
+        fromMessage: 'supported',
       },
       sessionRollback: {
         conversation: 'unsupported',
