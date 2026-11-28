@@ -287,6 +287,15 @@ export type ClaudeUnifiedTerminalSessionOptions<Mode extends EnhancedMode = Enha
     appliedModelId?: string;
   }>) => void) | undefined;
   /**
+   * Fired when a batch was written and submitted to Claude and now waits for acceptance evidence
+   * (a new turn or a steer in Claude's native queue). From here a provider effect is possible, so
+   * a runtime that closes before acceptance must not report the row as never delivered
+   * (incident cmwyimjvw4buyqh01nx3pp1oh: the successor requeued a consumed steer and ran it twice).
+   */
+  onPromptSubmittedToProvider?: ((input: Readonly<{
+    userMessageLocalIds: readonly string[];
+  }>) => void) | undefined;
+  /**
    * Deterministic pre-provider rejections consume the local batch but can never reach provider
    * custody. Launchers must terminalize the attributed pending seq so restart replay cannot
    * rematerialize the same invalid prompt.
@@ -2217,6 +2226,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
                   clearKeys: composerClearKeys,
                   outcomeLog: composerDraftGuardOutcomeLog,
                   ownComposerTexts: ownComposerTextLog,
+                  isProviderTurnActive: opts.isCanonicalTurnActive,
                 });
                 // An idle recognized dialog has no real composer. Route its parsed screen through
                 // the single owner-first dialog evaluator; that evaluator either observes the
@@ -2270,6 +2280,7 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
               clearKeys: composerClearKeys,
             }
           : {}),
+        isProviderTurnActive: opts.isCanonicalTurnActive,
         onUserDraftStarvation: opts.onInFlightSteerUserDraftStarvation,
         ...(bridgeForInFlightModeApply
           ? {
@@ -2329,6 +2340,14 @@ export async function runClaudeUnifiedTerminalSession<Mode extends EnhancedMode 
         },
         onProviderAcceptancePending: (batch, _acceptance, observedAtMs) => {
           recordPromptAcceptanceCorrelation(batch, observedAtMs);
+          const userMessageLocalIds = batch.userMessageLocalIds ?? [];
+          if (userMessageLocalIds.length > 0) {
+            try {
+              opts.onPromptSubmittedToProvider?.({ userMessageLocalIds });
+            } catch (error) {
+              logger.debug('[unified]: failed to record provider custody of a submitted prompt (non-fatal)', error);
+            }
+          }
         },
         onPromptInjected: async (batch, acceptance) => {
           steerWiring.observeInjectedPrompt(batch, acceptance);

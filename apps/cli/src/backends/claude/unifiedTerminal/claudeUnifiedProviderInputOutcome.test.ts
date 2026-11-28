@@ -23,6 +23,10 @@ describe('createClaudeUnifiedProviderInputOutcomeBridge', () => {
       userMessageLocalIds: ['rejected-local-id'],
       reason: 'provider_rejected_before_acceptance',
     })).toBe(true);
+    expect(bridge.observeCustody({
+      userMessageLocalIds: ['submitted-local-id'],
+    })).toBe(true);
+    expect(bridge.observeCustody({ userMessageLocalIds: ['a', 'b'] })).toBe(false);
 
     expect(bindProviderInputOutcomeProducer).toHaveBeenCalledWith(expect.objectContaining({
       providerId: 'claude',
@@ -50,6 +54,7 @@ describe('createClaudeUnifiedProviderInputOutcomeBridge', () => {
         localId: 'rejected-local-id',
         reason: 'provider_rejected_before_acceptance',
       }],
+      [{ kind: 'custody_observed', localId: 'submitted-local-id' }],
     ]);
   });
 

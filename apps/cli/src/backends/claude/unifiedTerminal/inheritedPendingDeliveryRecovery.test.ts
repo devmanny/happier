@@ -56,6 +56,32 @@ describe('classifyClaudeInheritedPendingDelivery', () => {
     ])).toBe('received');
   });
 
+  it('is received for a consumed steer whose consumption row is stamped before its enqueue (incident cmwyimjvw4buyqh01nx3pp1oh)', () => {
+    // Claude 2.1.326 stamps the queued_command attachment with the submit time, ~60 ms before the
+    // enqueue row, and writes it after the remove row. A successor must settle it, never resend it.
+    const steerAt = CREATED + 60_000;
+    expect(classify([
+      nativeQueue('enqueue', PROMPT, steerAt + 64),
+      userPrompt('[tool result]', steerAt + 8_733),
+      nativeQueue('remove', PROMPT, steerAt + 8_751),
+      queuedCommand(PROMPT, steerAt),
+      assistant(steerAt + 9_000),
+    ])).toBe('received');
+  });
+
+  it('settles, never resends, a WhatsApp prompt Claude recorded without its bidi isolates (incident cmwyimjvw4buyqh01nx3pp1oh)', () => {
+    // The verdict was not_received and the row ran a fifth time: the stored text carries U+2068/U+2069
+    // around each @mention and Claude records the prompt without them, so nothing matched at all.
+    const stored = 'lo de ED   @\u2068Rosy\u2069 @\u2068Daniel\u00a0Durand\u00a0TrimRx\u2069 me pasan los precios finales?';
+    const recorded = 'lo de ED   @Rosy @Daniel\u00a0Durand\u00a0TrimRx me pasan los precios finales?';
+    expect(classify([assistant(CREATED - 5_000), userPrompt(recorded, CREATED + 60_000)], { promptText: stored })).toBe('received');
+    expect(classify([
+      nativeQueue('enqueue', recorded, CREATED + 60_064),
+      nativeQueue('remove', recorded, CREATED + 68_751),
+      queuedCommand(recorded, CREATED + 60_000),
+    ], { promptText: stored })).toBe('received');
+  });
+
   it('recognizes the prompt with the provider-only context Happier appends, and nothing else', () => {
     const board = '[Happier · your open tasks (update them with tarea_actualizar and their id).]\n- t1 Publicar build';
     expect(classify([userPrompt(`${PROMPT}\n\n${board}`, CREATED + 1_000)])).toBe('received');

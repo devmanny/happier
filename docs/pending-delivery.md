@@ -167,6 +167,13 @@ clear-key ledger, so their Escapes stay within what Claude absorbs without
 opening Rewind. A draft that changes mid-clear, earlier Escapes the screen has
 not shown yet, a usage-limit wait, or no input box report `not_safe`; a draft
 Claude did not visibly take reports `clear_failed`.
+The idle own-leftover guard and the in-flight steer evaluator also never press a
+clear key while the session's canonical provider turn is active. Right after
+Enter, Claude 2.1.326 still draws the submitted prompt in the composer before its
+spinner appears, and an Escape on that frame cancels the new turn before any
+response while Claude silently puts the prompt back into the composer. The guard
+reports `blocked_non_input_state` (`provider_turn_active`) and the steer
+evaluator keeps its `user_draft` veto until the turn ends.
 
 If the session socket stays connected after a transient server-feature probe
 failure, a later pending materialization attempt reuses the session client's
@@ -280,6 +287,14 @@ shows, consumes, or records the prompt (incidents `cmwcg4h31` and `cmw9m36zc`,
   queue until its row was dismissed. Confusable spellings of the marker, which Claude
   also escapes, are not undone. A row whose text evidence never correlates is released
   once its canonical Pending row is dismissed (`delivery/dismiss`).
+- Identity also reads every Unicode format character (Cf, such as the bidi isolates
+  U+2068/U+2069 WhatsApp puts around an @mention, zero-width spaces, BOM) as absent,
+  U+2028/U+2029 as line breaks, and NBSP and other space separators as spaces. Happier
+  types the prompt without format characters, except the emoji joiner U+200D. Claude Code
+  2.1.326 paints them as U+FFFD while the prompt is staged and records the prompt without
+  them. Before this, staging never recognized such a prompt (no Enter), and neither
+  acceptance nor a successor's inherited recovery matched it: one row reached Claude five
+  times (incident `cmwyimjvw4buyqh01nx3pp1oh`, 27 Nov 2026).
 
 ## Inherited uncertain deliveries (development)
 
@@ -313,6 +328,16 @@ megabytes). Only rows between the row's creation and this runtime's start count:
 - identical prompts, the prompt inside a larger one, a native-queue release
   without its consumption, an unreadable transcript, or a predecessor host that may
   still be alive leave the row blocked for its owner.
+
+A runner that closes before acceptance settles blocks each row it still holds. A row
+Claude unified already wrote and submitted (a new turn, or a steer in Claude's native
+queue) is reported as provider custody (`custody_observed`) at that moment, so closing
+blocks it `delivery_outcome_uncertain` and the successor decides it from the transcript
+as above. Only a row that was never written is blocked
+`runtime_disposed_before_delivery`, the one block a successor requeues on its own.
+Before this, a steer Claude had consumed was blocked as never delivered, and the next
+two runners requeued and ran it again (incident `cmwyimjvw4buyqh01nx3pp1oh`, 27 Nov
+2026).
 
 Sending a row again uses Pending Input v3 when the server advertises it
 (`capabilities.session.pendingInput.protocolVersion >= 3`): the current runner emits

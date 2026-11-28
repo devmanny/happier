@@ -16,6 +16,7 @@ import { logger } from '@/ui/logger';
 import { TerminalHostCreationError } from '@/integrations/terminalHost/errors';
 
 import { createTmuxTerminalControlPort } from './control';
+import { auditTmuxEscapeKeySent } from './escapeKeyAudit';
 import { resolveTmuxPromptSubmitDelayMs } from './env';
 import { evaluateTmuxPaneLiveness } from './paneLiveness';
 import { TmuxUtilities } from './TmuxUtilities';
@@ -284,6 +285,7 @@ export function createTmuxTerminalHostAdapter(params?: Readonly<{
       return { status: 'injected', at: Date.now(), bytesWritten: Buffer.byteLength(input.text) };
     },
     async interruptTurn(handle: TerminalHostHandle): Promise<void> {
+      auditTmuxEscapeKeySent('interrupt_turn');
       const success = await tmuxForHandle(handle).sendKeys('Escape', targetFromHandle(handle));
       if (!success) {
         throw new Error('Failed to interrupt tmux terminal host');

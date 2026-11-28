@@ -116,6 +116,24 @@ describe('createClaudeUnifiedPromptInjector', () => {
     });
   });
 
+  it('types a WhatsApp prompt without the bidi isolates Claude paints as U+FFFD (incident cmwyimjvw4buyqh01nx3pp1oh)', async () => {
+    const injectUserPrompt = vi.fn().mockResolvedValue({ status: 'injected', at: 123, bytesWritten: 17 });
+    const injector = createClaudeUnifiedPromptInjector({
+      inputInjection: { hostKind: 'tmux', injectUserPrompt },
+      createNonce: () => 'nonce-1',
+    });
+
+    await expect(injector.injectPrompt({
+      message: 'lo de ED   @\u2068Rosy\u2069 @\u2068Daniel\u00a0Durand\u00a0TrimRx\u2069 me pasan',
+      origin: { kind: 'ui_pending', clientId: 'client-1' },
+    })).resolves.toMatchObject({ status: 'injected' });
+
+    expect(injectUserPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      text: 'lo de ED   @Rosy @Daniel\u00a0Durand\u00a0TrimRx me pasan',
+      multiline: false,
+    }));
+  });
+
   it('scales the terminal write timeout for large prompts', async () => {
     const injectUserPrompt = vi.fn().mockResolvedValue({
       status: 'injected',

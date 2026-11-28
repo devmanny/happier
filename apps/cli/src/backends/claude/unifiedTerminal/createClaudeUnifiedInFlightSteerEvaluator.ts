@@ -119,6 +119,15 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    * outstanding-key bound holds only within one evaluation.
    */
   clearKeys?: ClaudeComposerClearKeyLedger | undefined;
+  /**
+   * The session's canonical turn state. Escape is Claude's interrupt key whenever a turn is live,
+   * and the screen alone cannot prove it is not: right after Enter Claude still draws the
+   * submitted prompt in the composer with no spinner yet (2.1.326 frame
+   * `claude-2.1.326-submit-transient.ansi`). An Escape on that frame cancels the turn before any
+   * response and Claude silently restores the prompt into the composer (incident
+   * cmwyimjvw4buyqh01nx3pp1oh). While this reports true, own leftovers are never cleared.
+   */
+  isProviderTurnActive?: (() => boolean) | undefined;
   draftClearSettleMs?: number | undefined;
   /** Consecutive `user_draft` vetoes before the single starvation escalation (default 4). */
   userDraftEscalationThreshold?: number | undefined;
@@ -162,6 +171,15 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
   // Starvation episode tracking (lane X): consecutive `user_draft` vetoes across evaluations.
   let consecutiveUserDraftVetoes = 0;
   let userDraftEscalated = false;
+
+  function readProviderTurnActive(): boolean {
+    if (!opts.isProviderTurnActive) return false;
+    try {
+      return opts.isProviderTurnActive();
+    } catch {
+      return true;
+    }
+  }
 
   function resetUserDraftStarvation(): void {
     consecutiveUserDraftVetoes = 0;
@@ -284,8 +302,8 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
    * - An OWN leftover (exact match against texts we wrote) on a NON-generating screen is cleared
    *   with at most two Escapes, the second only on the shared composer-clear evidence rule
    *   (tuiControls/composerClearKeys.ts) and every one through the pane's clear-key ledger; a
-   *   genuine user draft is NEVER touched, and nothing is cleared while generating (Escape would
-   *   interrupt the running turn).
+   *   genuine user draft is NEVER touched, and nothing is cleared while generating or while the
+   *   canonical provider turn is active (Escape would interrupt the running turn).
    * - A persisting draft escalates ONCE per episode after the bounded veto threshold: the honest
    *   `user_terminal_draft` reason is teed to the capability publisher (UI pending honesty) and
    *   the one-shot starvation callback fires (single user-visible notification, never a loop).
@@ -323,7 +341,13 @@ export function createClaudeUnifiedInFlightSteerEvaluator<Mode extends EnhancedM
       return { steer: false, reason: 'capture_style_unavailable' };
     }
 
-    if (ownLeftover && opts.clearOwnLeftoverDraft && captureInputState && !current.generating) {
+    if (
+      ownLeftover
+      && opts.clearOwnLeftoverDraft
+      && captureInputState
+      && !current.generating
+      && !readProviderTurnActive()
+    ) {
       const clearKeys = opts.clearKeys
         ?? createClaudeComposerClearKeyLedger({ stallBudgetMs: Number.POSITIVE_INFINITY });
       clearKeys.observe(current.text);

@@ -7,6 +7,7 @@ import type {
 import { hasMultilinePayload } from '@/agent/runtime/terminal/injection/bracketedPaste';
 import { resolveTerminalPromptWriteBudget } from '@/agent/runtime/terminal/injection/promptWriteTimeout';
 import { prepareTerminalPromptTextForInjection } from '@/agent/runtime/terminal/injection/promptTextSafety';
+import { prepareClaudeUnifiedPromptTextForTerminal } from './promptIdentity';
 import {
   TERMINAL_INPUT_QUIET_PERIOD_MS,
 } from '@/agent/runtime/terminal/injection/arbiter';
@@ -223,7 +224,10 @@ export function createClaudeUnifiedPromptInjector<Mode = unknown>(opts: Readonly
       batch: ClaudeUnifiedPromptBatch<Mode>,
       options?: ClaudeUnifiedPromptInjectionOptions | undefined,
     ) {
-      const preparedPrompt = prepareTerminalPromptTextForInjection(batch.message);
+      // Typed without the format characters Claude paints as U+FFFD; identity reads both forms alike.
+      const preparedPrompt = prepareTerminalPromptTextForInjection(
+        prepareClaudeUnifiedPromptTextForTerminal(batch.message),
+      );
       const multiline = preparedPrompt.ok ? preparedPrompt.multiline : hasMultilinePayload(batch.message);
       const inFlightSteer = options?.inFlightSteer === true;
 

@@ -154,6 +154,13 @@ type OwnComposerDraftGuardOptions = Readonly<{
    */
   clearKeys?: ClaudeComposerClearKeyLedger | undefined;
   ownComposerTexts: Readonly<{ matches: (draft: string) => boolean }>;
+  /**
+   * The session's canonical turn state. While a turn is live Escape interrupts it, and right after
+   * Enter Claude still draws the submitted prompt in the composer with no spinner (2.1.326), so
+   * the screen alone cannot rule that out (incident cmwyimjvw4buyqh01nx3pp1oh). While this reports
+   * true no clear key is sent and the pass reports `provider_turn_active`.
+   */
+  isProviderTurnActive?: (() => boolean) | undefined;
   settleMs?: number | undefined;
   wait?: ((ms: number) => Promise<void>) | undefined;
   /** Telemetry tap: fired after each clear attempt with the recaptured screen. */
@@ -200,6 +207,19 @@ async function runOwnComposerDraftGuard(
     });
     return evidence.classification;
   }
+
+  function providerTurnActive(): boolean {
+    if (!opts.isProviderTurnActive) return false;
+    try {
+      return opts.isProviderTurnActive();
+    } catch {
+      return true;
+    }
+  }
+
+  const turnActiveResult = (current: ClaudeScreenState): OwnComposerDraftGuardResult => (
+    { status: 'blocked_non_input_state', screen: current, blockedReason: 'provider_turn_active' }
+  );
 
   /** Presses one clear key onto `screen`; false when the ledger withholds it (nothing was sent). */
   async function pressClearKey(screen: ClaudeScreenState): Promise<boolean> {
@@ -275,6 +295,7 @@ async function runOwnComposerDraftGuard(
     let current = screen;
     for (let dismissal = 0; current.feedbackDraftCardVisible; dismissal += 1) {
       if (dismissal >= MAX_FEEDBACK_DRAFT_CARD_DISMISS_ATTEMPTS) return cardBlocked(current);
+      if (providerTurnActive()) return turnActiveResult(current);
       try {
         if (!(await pressClearKey(current))) return cardBlocked(current);
       } catch {
@@ -303,6 +324,7 @@ async function runOwnComposerDraftGuard(
   const initialResult = settledResult(initial, screen);
   if (initialResult) return initialResult;
   if (initial === 'empty') return settleEmptyComposer(screen, 0);
+  if (providerTurnActive()) return turnActiveResult(screen);
 
   for (let attempt = 1; ; attempt += 1) {
     const pressedOn = screen;

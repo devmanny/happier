@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { TerminalHostHandle, TerminalInputState } from '@/integrations/terminalHost/_types';
@@ -507,6 +509,7 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
     onClear?: (() => void) | undefined;
     escalationThreshold?: number | undefined;
     clearKeys?: ClaudeComposerClearKeyLedger | undefined;
+    providerTurnActive?: boolean | undefined;
   }>) {
     const telemetry = { emit: vi.fn() };
     let screen = opts.initialScreen;
@@ -534,6 +537,9 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
       ownComposerTexts: { matches: (draft: string) => ownTexts.has(draft.trim()) },
       clearOwnLeftoverDraft,
       ...(opts.clearKeys ? { clearKeys: opts.clearKeys } : {}),
+      ...(opts.providerTurnActive !== undefined
+        ? { isProviderTurnActive: () => opts.providerTurnActive === true }
+        : {}),
       draftClearSettleMs: 0,
       userDraftEscalationThreshold: opts.escalationThreshold ?? 3,
       onUserDraftStarvation: (info) => starvations.push({ ...info }),
@@ -638,6 +644,42 @@ describe('createClaudeUnifiedInFlightSteerEvaluator — user_draft starvation (l
 
     expect(harness.clearOwnLeftoverDraft).not.toHaveBeenCalled();
     expect(decision).toMatchObject({ steer: false, reason: 'user_draft' });
+  });
+
+  it('NEVER clears our just-submitted prompt while the provider turn is active (incident cmwyimjvw4buyqh01nx3pp1oh)', async () => {
+    // Real Claude 2.1.326 frame captured right after Enter: the composer still shows the submitted
+    // prompt and neither the spinner nor "esc to interrupt" is drawn yet. The turn has already
+    // started, so Escape here cancels it before any response and Claude silently puts the prompt
+    // back into the composer (live repro 2026-11-27: the session then sat idle until a manual Enter).
+    const submitTransient = readFileSync(
+      new URL('./tuiControls/__fixtures__/claude-2.1.326-submit-transient.ansi', import.meta.url),
+      'utf8',
+    );
+    const submittedPrompt = 'Reply with just the word ok';
+    const harness = starvationHarness({
+      initialScreen: submitTransient,
+      ownTexts: [submittedPrompt],
+      providerTurnActive: true,
+    });
+
+    const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('the next queued message'));
+
+    expect(harness.clearOwnLeftoverDraft).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ steer: false, reason: 'user_draft' });
+  });
+
+  it('still clears an own leftover once the provider turn has ended', async () => {
+    const harness = starvationHarness({
+      initialScreen: idleScreenWithDraft(ownLeftoverText),
+      ownTexts: [ownLeftoverText],
+      providerTurnActive: false,
+      onClear: () => harness.setScreen(idleInteractiveScreen),
+    });
+
+    const decision = await harness.wiring.evaluateInFlightSteer(pendingBatch('steer me'));
+
+    expect(harness.clearOwnLeftoverDraft).toHaveBeenCalledTimes(1);
+    expect(decision).toEqual({ steer: true, turnLikelyEnded: true });
   });
 
   it('NEVER clears a genuine user draft', async () => {

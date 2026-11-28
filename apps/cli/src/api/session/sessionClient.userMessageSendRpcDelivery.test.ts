@@ -532,6 +532,39 @@ describe('ApiSessionClient session.userMessage.send delivery', () => {
     expect((client as any).canonicalPendingDeliveryByLocalId.has('uncertain-shutdown')).toBe(true);
   });
 
+  it('blocks a row the provider already holds as uncertain, never as undelivered, when the runtime closes (incident cmwyimjvw4buyqh01nx3pp1oh)', async () => {
+    // A Claude steer was written and submitted, and Claude consumed it from its native queue; the
+    // runner then closed before acceptance settled. Blocking it `runtime_disposed_before_delivery`
+    // told the successor it never reached Claude, so the successor requeued and delivered it again.
+    sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
+    const client = new ApiSessionClient('tok', createPlainClaudeSessionFixture('s1'));
+    (client as any).sessionConnectionSupervisor = null;
+    (client as any).canonicalPendingDeliveryByLocalId.set('submitted-steer', { mode: 'provider', unresolved: true });
+    (client as any).canonicalPendingDeliveryByLocalId.set('never-written', { mode: 'provider', unresolved: true });
+    const observe = client.bindProviderInputOutcomeProducer(createProviderInputOutcomeProducer());
+
+    observe({ kind: 'custody_observed', localId: 'submitted-steer' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalled();
+    await (client as any).blockUnresolvedCanonicalPendingDeliveriesBeforeClose();
+
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'submitted-steer',
+      reason: 'delivery_outcome_uncertain',
+    }));
+    expect(blockPendingQueueV2DeliveryMock).not.toHaveBeenCalledWith(expect.objectContaining({
+      localId: 'submitted-steer',
+      reason: 'runtime_disposed_before_delivery',
+    }));
+    expect(blockPendingQueueV2DeliveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's1',
+      localId: 'never-written',
+      reason: 'runtime_disposed_before_delivery',
+    }));
+  });
+
   it('keeps exact terminal outcomes monotonic, idempotent, and producer-generation fenced', async () => {
     sessionSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });
     userSocketStub = createApiSessionSocketStub({ connected: true, emitWithAckResult: { ok: true } });

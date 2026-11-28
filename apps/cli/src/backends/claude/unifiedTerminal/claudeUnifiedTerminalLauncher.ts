@@ -1107,6 +1107,9 @@ export async function claudeUnifiedTerminalLauncher(
           logger.debug('[unified]: ignored provider acceptance without one exact Queue localId outcome binding');
         }
       },
+      onPromptSubmittedToProvider: ({ userMessageLocalIds }) => {
+        providerInputOutcomes.observeCustody({ userMessageLocalIds });
+      },
       onPromptTerminallyRejectedBeforeProvider: ({ userMessageLocalIds, reason }) => {
         consecutiveParkRelaunches = 0;
         if (inFlightStartupMessage?.launchAttempt === launchAttempt) inFlightStartupMessage = null;

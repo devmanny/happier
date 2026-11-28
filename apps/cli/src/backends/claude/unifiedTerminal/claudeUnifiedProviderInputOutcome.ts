@@ -37,6 +37,8 @@ type ClaudeUnifiedProviderInputIdentity = Readonly<{
 export type ClaudeUnifiedProviderInputOutcomeBridge = Readonly<{
   observeAccepted: (input: ClaudeUnifiedProviderInputIdentity) => boolean;
   observeEffectMayHaveOccurred: (input: ClaudeUnifiedProviderInputIdentity) => boolean;
+  /** Written and submitted to Claude, acceptance not yet proven: a provider effect is possible. */
+  observeCustody: (input: ClaudeUnifiedProviderInputIdentity) => boolean;
   observeRejectedBeforeEffect: (
     input: ClaudeUnifiedProviderInputIdentity & Readonly<{ reason: SessionProviderInputRejectedBeforeEffectReason }>,
   ) => boolean;
@@ -79,6 +81,9 @@ export function createClaudeUnifiedProviderInputOutcomeBridge(
     }),
     observeEffectMayHaveOccurred: (input) => observeExact(input, (observer, identity) => {
       observer({ kind: 'effect_may_have_occurred', ...identity });
+    }),
+    observeCustody: (input) => observeExact(input, (observer, identity) => {
+      observer({ kind: 'custody_observed', ...identity });
     }),
     observeRejectedBeforeEffect: (input) => observeExact(input, (observer, identity) => {
       observer({ kind: 'rejected_before_effect', ...identity, reason: input.reason });

@@ -25,8 +25,41 @@ const CLAUDE_PASTED_CONTENT_MARKER_LINE = /^<\/?pasted_content id="[^"]*">$/;
  */
 const CLAUDE_PASTED_CONTENT_MARKER_ESCAPE = /<\\(?=\/?pasted_content)/g;
 
-export function normalizeClaudeUnifiedPromptIdentityText(value: string): string {
+/**
+ * Characters a prompt can carry that Claude does not record or paint as written (Claude Code
+ * 2.1.326, incident cmwyimjvw4buyqh01nx3pp1oh, 27 Nov 2026): text copied from WhatsApp wraps each
+ * @mention in bidi isolates (U+2068 … U+2069). Claude paints such format characters (Unicode Cf:
+ * U+200B–U+200F, U+202A–U+202E, U+2060–U+2069, U+FEFF, U+00AD, …) as U+FFFD while the prompt is
+ * staged and records the prompt without them; a captured screen may show NBSP and other space
+ * separators as plain spaces; U+2028/U+2029 break lines. Before this, staging never recognized the
+ * prompt (no Enter, "not sure it reached the agent"), and acceptance and the successor's inherited
+ * recovery never correlated it, so one row was delivered five times.
+ */
+const LINE_OR_PARAGRAPH_SEPARATOR = /[\u2028\u2029]/g;
+const FORMAT_CHARACTER = /\p{Cf}/gu;
+const SPACE_SEPARATOR = /\p{Zs}/gu;
+const ZERO_WIDTH_JOINER = '\u200d';
+
+/**
+ * The text Happier types for a prompt: without format characters Claude would paint as U+FFFD,
+ * keeping the zero-width joiner inside emoji sequences, NBSP, and every other character.
+ */
+export function prepareClaudeUnifiedPromptTextForTerminal(value: string): string {
   return value
+    .replace(LINE_OR_PARAGRAPH_SEPARATOR, '\n')
+    .replace(FORMAT_CHARACTER, (character) => (character === ZERO_WIDTH_JOINER ? character : ''));
+}
+
+/** One canonical character form for prompt identity: what Happier stored, typed, saw, or Claude recorded. */
+function canonicalizeClaudeUnifiedPromptCharacters(value: string): string {
+  return value
+    .replace(LINE_OR_PARAGRAPH_SEPARATOR, '\n')
+    .replace(FORMAT_CHARACTER, '')
+    .replace(SPACE_SEPARATOR, ' ');
+}
+
+export function normalizeClaudeUnifiedPromptIdentityText(value: string): string {
+  return canonicalizeClaudeUnifiedPromptCharacters(value)
     .replace(/\r\n?/g, '\n')
     .replace(CLAUDE_PASTED_CONTENT_MARKER_ESCAPE, '<')
     .split('\n')

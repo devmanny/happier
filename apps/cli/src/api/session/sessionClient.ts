@@ -668,6 +668,12 @@ export class ApiSessionClient extends EventEmitter {
     private providerInputOutcomeProducerGeneration = 0;
     private readonly providerInputTerminalOutcomeByLocalId = new Map<string, 'accepted' | 'rejected_before_effect'>();
     private readonly providerInputUncertainLocalIds = new Set<string>();
+    /**
+     * Rows the provider reported holding (`custody_observed`): written and submitted, so a provider
+     * effect is possible even though acceptance has not settled. Closing must never call them
+     * undelivered, or the successor requeues and delivers them again.
+     */
+    private readonly providerInputCustodyLocalIds = new Set<string>();
     private readonly acceptedCanonicalPendingDeliveryResolutionWrites = new Set<Promise<void>>();
     private readonly acceptedCanonicalPendingDeliveryResolutionLocalIdsInFlight = new Set<string>();
     private readonly acceptedCanonicalPendingDeliveryOperationAbortController = new AbortController();
@@ -1628,6 +1634,7 @@ export class ApiSessionClient extends EventEmitter {
         if (this.serverBlockedCanonicalPendingDeliveryLocalIds.delete(localId)) didClear = true;
         if (this.providerInputTerminalOutcomeByLocalId.delete(localId)) didClear = true;
         if (this.providerInputUncertainLocalIds.delete(localId)) didClear = true;
+        this.providerInputCustodyLocalIds.delete(localId);
         const hadMaterializedLocalId = this.hasMaterializedLocalId(localId);
         if (didClear || hadMaterializedLocalId) {
             this.deleteMaterializedLocalId(localId);
@@ -5561,6 +5568,11 @@ export class ApiSessionClient extends EventEmitter {
                 this.providerInputUncertainLocalIds.delete(trackedLocalId);
             }
         }
+        for (const trackedLocalId of this.providerInputCustodyLocalIds) {
+            if (!this.canonicalPendingDeliveryByLocalId.has(trackedLocalId)) {
+                this.providerInputCustodyLocalIds.delete(trackedLocalId);
+            }
+        }
 
         if (outcome.kind === 'custody_observed' || outcome.kind === 'effect_may_have_occurred') {
             logger.debug('[pendingQueue] observed nonterminal provider-input outcome', {
@@ -5570,6 +5582,12 @@ export class ApiSessionClient extends EventEmitter {
                 localId,
                 outcomeKind: outcome.kind,
             });
+            if (outcome.kind === 'custody_observed') {
+                if (this.canonicalPendingDeliveryByLocalId.has(localId)) {
+                    this.providerInputCustodyLocalIds.add(localId);
+                }
+                return;
+            }
             if (outcome.kind === 'effect_may_have_occurred') {
                 if (this.providerInputUncertainLocalIds.has(localId)) return;
                 this.providerInputUncertainLocalIds.add(localId);
@@ -5642,6 +5660,7 @@ export class ApiSessionClient extends EventEmitter {
 
         if (!this.canonicalPendingDeliveryByLocalId.has(localId)) return;
         this.providerInputUncertainLocalIds.delete(localId);
+        this.providerInputCustodyLocalIds.delete(localId);
         this.providerInputTerminalOutcomeByLocalId.set(localId, terminalOutcome);
 
         if (terminalOutcome === 'accepted') {
@@ -6216,6 +6235,7 @@ export class ApiSessionClient extends EventEmitter {
         this.acceptedProviderInputLocalIds.clear();
         this.providerInputTerminalOutcomeByLocalId.clear();
         this.providerInputUncertainLocalIds.clear();
+        this.providerInputCustodyLocalIds.clear();
         this.acceptedCanonicalPendingDeliveryResolutionWrites.clear();
         this.acceptedCanonicalPendingDeliveryResolutionLocalIdsInFlight.clear();
         this.queuedDisconnectedSessionMessages.clear();
@@ -6301,7 +6321,7 @@ export class ApiSessionClient extends EventEmitter {
     private async blockUnresolvedCanonicalPendingDeliveriesBeforeClose(): Promise<void> {
         const localIds = [...this.canonicalPendingDeliveryByLocalId.keys()];
         for (const localId of localIds) {
-            if (this.providerInputUncertainLocalIds.has(localId)) {
+            if (this.providerInputUncertainLocalIds.has(localId) || this.providerInputCustodyLocalIds.has(localId)) {
                 await this.blockPendingQueueDeliveryLocalId(localId, 'delivery_outcome_uncertain', {
                     canonicalOnly: true,
                 });
@@ -6348,7 +6368,7 @@ export class ApiSessionClient extends EventEmitter {
         }
 
         for (const localId of localIds) {
-            if (this.providerInputUncertainLocalIds.has(localId)) {
+            if (this.providerInputUncertainLocalIds.has(localId) || this.providerInputCustodyLocalIds.has(localId)) {
                 await this.blockPendingQueueDeliveryLocalId(localId, 'delivery_outcome_uncertain', {
                     canonicalOnly: false,
                 });

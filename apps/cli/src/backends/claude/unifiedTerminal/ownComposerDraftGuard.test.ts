@@ -384,6 +384,21 @@ describe('clearOwnLeftoverComposerDraft (C11: idle pre-injection own-leftover gu
     expect(result.status).toBe('generating');
   });
 
+  it('never sends the clear key over our just-submitted prompt while the provider turn is active (incident cmwyimjvw4buyqh01nx3pp1oh)', async () => {
+    // Real Claude 2.1.326 frame right after Enter: the submitted prompt is still drawn in the
+    // composer and no spinner is visible yet. Escape there cancels the new turn before any response.
+    const result = await clearOwnLeftoverComposerDraft({
+      captureInputState: async () => ({ currentInput: readFixture('claude-2.1.326-submit-transient.ansi') }),
+      sendClearKey: async () => {
+        throw new Error('must not press Escape while the provider turn is active');
+      },
+      ownComposerTexts: ownLog('Reply with just the word ok'),
+      isProviderTurnActive: () => true,
+      wait: async () => undefined,
+    });
+    expect(result).toMatchObject({ status: 'blocked_non_input_state', blockedReason: 'provider_turn_active' });
+  });
+
   it('reports provider_unavailable for the captured Claude usage-limit dialog instead of foreign_draft', async () => {
     const result = await clearOwnLeftoverComposerDraft({
       captureInputState: async () => ({ currentInput: readFixture('incident-89861-ratelimit-resume.ansi') }),
